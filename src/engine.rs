@@ -23,13 +23,15 @@ mod progress;
 mod report;
 mod run_loop;
 pub use crate::tools::Cancellation as RunCancellation;
+pub use ledger::Action;
+use ledger::GoalLedger;
 pub use lifecycle::{
     continue_session, create_session, fork_session, list_sessions, rename_session, resume_session,
     set_session_defaults,
 };
 use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
 pub use progress::{DisplayUpdate, RunPreview, RunProgress, RunUpdate};
-use progress::{ProgressPublisher, append_observed};
+use progress::{ProgressPublisher, RunScope, append_observed, append_scoped};
 use report::goal_report;
 use run_loop::{RunControls, RunIdentity, RunLoop};
 
@@ -46,6 +48,9 @@ pub fn validate_workspace_inputs(
 
 const CHILD_OUTPUT_TOKEN_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
 /// Store admission and commit time reserved after each action's own deadline.
+// GoalStarted or GoalResumed, GoalRunLinked, MessageAccepted, RunStarted and AgentSpawned.
+const RUN_START_EVENTS: usize = 5;
+
 const STORE_ACTION_OVERHEAD: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
@@ -232,7 +237,9 @@ struct PreparedTurn {
     tools: Option<crate::tools::ToolRuntime>,
     tool_context: Option<crate::tools::ToolContext>,
     inputs: WorkspaceInputs,
-    context: CompiledContext,
+    images: Vec<crate::provider::ProviderImage>,
+    history: Vec<crate::provider::HistoryTurn>,
+    summary: Option<String>,
     config: RunConfig,
     context_started: SystemTime,
     context_ended: SystemTime,
@@ -898,10 +905,16 @@ impl Engine {
     async fn append_goal_lifecycle(
         &mut self,
         session_id: SessionId,
-        progress: Option<&ProgressPublisher>,
+        scope: Option<RunScope<'_>>,
         event: Event,
     ) -> Result<u64, EngineError> {
-        match append_observed(&self.store, progress, None, session_id, event.clone()).await {
+        let appended = match scope {
+            Some(scope) => append_scoped(&self.store, scope, None, session_id, event.clone()).await,
+            None => append_observed(&self.store, None, session_id, event.clone())
+                .await
+                .map(|committed| committed.sequence),
+        };
+        match appended {
             Ok(sequence) => Ok(sequence),
             // The Session lock is held, so a commit that lost its acknowledgment is the last Event.
             Err(error) => match self.store.load_session(session_id).await {
@@ -1144,7 +1157,9 @@ impl Engine {
             tools,
             tool_context,
             inputs,
-            context,
+            images,
+            history,
+            summary,
             config,
             context_started,
             context_ended,
@@ -1181,7 +1196,12 @@ impl Engine {
             .load_open_view(session_id)
             .await?
             .ok_or(EngineError::InvalidHistory)?;
-        let publisher = ProgressPublisher::new(view, progress, goal.id, run_id);
+        let ledger = GoalLedger::new(view, goal.id);
+        let publisher = progress.map(|progress| ProgressPublisher::new(progress, run_id));
+        let scope = RunScope {
+            ledger: &ledger,
+            publisher: publisher.as_ref(),
+        };
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
@@ -1195,7 +1215,7 @@ impl Engine {
             let sequence = self
                 .append_goal_lifecycle(
                     session_id,
-                    Some(&publisher),
+                    Some(scope),
                     Event::GoalStarted {
                         goal_id: goal.id,
                         objective: objective.clone(),
@@ -1212,7 +1232,7 @@ impl Engine {
             let sequence = self
                 .append_goal_lifecycle(
                     session_id,
-                    Some(&publisher),
+                    Some(scope),
                     Event::GoalResumed { goal_id: goal.id },
                 )
                 .await?;
@@ -1225,7 +1245,7 @@ impl Engine {
         let linked_sequence = self
             .append_goal_lifecycle(
                 session_id,
-                Some(&publisher),
+                Some(scope),
                 Event::GoalRunLinked {
                     goal_id: goal.id,
                     run_id,
@@ -1240,9 +1260,9 @@ impl Engine {
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
-        let accepted_sequence = append_observed(
+        let accepted_sequence = append_scoped(
             &self.store,
-            Some(&publisher),
+            scope,
             None,
             session_id,
             Event::MessageAccepted {
@@ -1252,9 +1272,9 @@ impl Engine {
             },
         )
         .await?;
-        let started_sequence = append_observed(
+        let started_sequence = append_scoped(
             &self.store,
-            Some(&publisher),
+            scope,
             None,
             session_id,
             Event::RunStarted { run_id, config },
@@ -1275,9 +1295,9 @@ impl Engine {
             started_sequence,
             crate::telemetry::TraceEventKind::RunStarted,
         );
-        append_observed(
+        append_scoped(
             &self.store,
-            Some(&publisher),
+            scope,
             Some(&trace),
             session_id,
             Event::AgentSpawned {
@@ -1304,7 +1324,7 @@ impl Engine {
             model: identity.model.clone(),
             max_output_tokens: identity.limits.max_output_tokens,
             input: RunInput {
-                images: context.images,
+                images,
                 goal_budget: Some(budget),
                 goal_plan_contract: goal.plan_contract.clone(),
                 workspace_guidance: inputs.instructions.map(|(_, snapshot)| snapshot.content),
@@ -1313,8 +1333,8 @@ impl Engine {
                     .into_iter()
                     .map(|snapshot| snapshot.model_include())
                     .collect(),
-                history: context.history,
-                context_summary: context.summary,
+                history,
+                context_summary: summary,
                 tools: tool_context,
                 ..RunInput::new(role, objective)
             },
@@ -1322,30 +1342,33 @@ impl Engine {
         if let Some(steering) = &self.steering {
             steering.begin_run();
         }
-        RunLoop::new(
-            &self.store,
-            Arc::clone(&self.provider),
-            RunIdentity {
-                session_id,
-                run_id,
-                goal_id: goal.id,
-                primary_id: agent_run_id,
-            },
-            RunControls {
-                policy: request.policy,
-                concurrency: provider_concurrency,
-                goal_phase: goal.phase,
-                cancellation,
-                tools: tools.as_ref(),
-                approvals: self.tool_approvals.as_ref(),
-                steering: self.steering.clone(),
-            },
-            &publisher,
-            &trace,
+        // Boxed: the Run loop's future is large and would overflow a small caller stack.
+        Box::pin(
+            RunLoop::new(
+                &self.store,
+                Arc::clone(&self.provider),
+                RunIdentity {
+                    session_id,
+                    run_id,
+                    goal_id: goal.id,
+                    primary_id: agent_run_id,
+                },
+                RunControls {
+                    policy: request.policy,
+                    concurrency: provider_concurrency,
+                    goal_phase: goal.phase,
+                    cancellation,
+                    tools: tools.as_ref(),
+                    approvals: self.tool_approvals.as_ref(),
+                    steering: self.steering.clone(),
+                },
+                &ledger,
+                publisher.as_ref(),
+                &trace,
+            )
+            .execute(provider_request),
         )
-        .execute(provider_request)
         .await?;
-        drop(publisher);
         self.settle_turn(
             StartedRun {
                 session_id,
@@ -1415,12 +1438,13 @@ impl Engine {
             return Err(EngineError::GoalBudgetExhausted);
         }
         // Run start reserves the GoalStarted objective envelope, the MessageAccepted objective and image envelopes, the Goal lifecycle and the first action; each later action admits its own.
-        let event_slots =
-            13 + if previews {
-                crate::session::MAX_DISPLAY_CHUNKS
-            } else {
-                0
-            } + usize::from(request.session_id.is_none());
+        let first_action = Action::ProviderCall {
+            previews,
+            steering: self.steering.is_some(),
+        };
+        let event_slots = RUN_START_EVENTS
+            + first_action.max_events()
+            + usize::from(request.session_id.is_none());
         self.store.admit_run_start(session_id, event_slots).await?;
         let provisional_workspace_lock = if goal.phase == crate::session::GoalPhase::Implementation
             && self.tools.as_ref().is_some_and(|(config, _)| config.write)
@@ -1559,9 +1583,9 @@ impl Engine {
                 .iter()
                 .map(|snapshot| snapshot.digest)
                 .collect(),
-            history_run_ids: context.history_run_ids.clone(),
+            history_run_ids: context.history_run_ids,
             excluded_history_runs: context.excluded_history_runs,
-            context_usage: Some(context.context_usage.clone()),
+            context_usage: Some(context.context_usage),
             compaction_event_sequence: context.compaction_event_sequence,
             compaction_content_digest: context.compaction_content_digest,
             tool_policy: tools.as_ref().map(crate::tools::ToolRuntime::receipt),
@@ -1571,7 +1595,9 @@ impl Engine {
             tools,
             tool_context,
             inputs,
-            context,
+            images: context.images,
+            history: context.history,
+            summary: context.summary,
             config,
             context_started,
             context_ended,
@@ -1629,7 +1655,6 @@ impl Engine {
             let report = goal_report(&view, &run, goal_view);
             append_observed(
                 &self.store,
-                None,
                 Some(&trace),
                 session_id,
                 Event::GoalFinished {

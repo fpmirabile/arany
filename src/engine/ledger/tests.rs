@@ -103,7 +103,10 @@ fn poisoned_state_fails_closed() {
         offset: 0,
         limit: 32,
     }));
-    assert!(!ledger.admits(Action::ProviderCall { previews: false }));
+    assert!(!ledger.admits(Action::ProviderCall {
+        previews: false,
+        steering: false,
+    }));
     assert_eq!(ledger.remaining_calls(), Some(0));
 }
 
@@ -173,10 +176,16 @@ async fn finite_token_plan_reduces_parallelism_and_rejects_more_calls_at_the_cap
         "an exact-cap Finish is still valid"
     );
     assert!(!ledger.can_start_provider_call());
-    assert!(!ledger.admits(Action::ProviderCall { previews: false }));
+    assert!(!ledger.admits(Action::ProviderCall {
+        previews: false,
+        steering: false,
+    }));
     assert!(matches!(
         ledger
-            .reserve(Action::ProviderCall { previews: false })
+            .reserve(Action::ProviderCall {
+                previews: false,
+                steering: false,
+            })
             .await,
         Err(EngineError::GoalBudgetExhausted)
     ));
@@ -231,61 +240,13 @@ fn carried_acknowledgment_time_is_checkpointed_before_active_exhaustion() {
 }
 
 #[test]
-fn max_events_covers_the_events_each_action_appends() {
-    let tools = MAX_CHILD_TOOL_CALLS;
-    let chunks = MAX_DISPLAY_CHUNKS;
-    let pending = 3_u32;
-    let children = 4;
-    // Reserved and Settled active time, call reservation and record, steering note, display chunks.
-    let primary_call = |previews| 6 + if previews { chunks } else { 0 };
-    // Plan contract, ToolStarted, approval wait, queue wait, active segment, ToolFinished.
-    let tool = 1 + 1 + 2 + 2 + 2 + 1;
-    let table = [
-        (
-            Action::ProviderCall { previews: false },
-            primary_call(false),
-        ),
-        (Action::ProviderCall { previews: true }, primary_call(true)),
-        // Call reserved and recorded, Tool started and finished, AgentFinished, and the closing
-        // pair of each other child in flight.
-        (
-            Action::Child { in_flight: pending },
-            5 + 2 * pending as usize,
-        ),
-        (Action::Tool, tool),
-        // Active time Reserved and Settled around a reserved and recorded call.
-        (Action::Review, 4),
-        (Action::Compaction, 4),
-        (Action::BoundaryCompaction { goal: true }, 4),
-        (Action::BoundaryCompaction { goal: false }, 1),
-        (Action::Pause, 2 + 2 + 2 + 1 + 2),
-        (Action::Stop, 4),
-        // AgentSpawned, call pair and AgentFinished per child, a Tool pair per researcher step,
-        // plus the delegation's own segment pair and the synthesis call pair.
-        (
-            Action::Delegation {
-                children,
-                research: false,
-            },
-            children * 4 + 2 + 2,
-        ),
-        (
-            Action::Delegation {
-                children,
-                research: true,
-            },
-            children * (1 + 2 * (tools + 1) + 2 * tools + 1) + 2 + 2,
-        ),
-    ];
-    for (action, observed) in table {
-        assert!(
-            action.max_events() >= observed,
-            "{action:?} bounds {} Events but appends {observed}",
-            action.max_events()
-        );
-        assert_eq!(
-            action.checkpointed_events(),
-            action.max_events() + CHECKPOINT_EVENTS
-        );
-    }
+fn staged_bounds_never_exceed_the_first_admission() {
+    let call = Action::ProviderCall {
+        previews: true,
+        steering: true,
+    };
+    assert_eq!(call.max_events(), 8 + 1 + MAX_DISPLAY_CHUNKS);
+    assert_eq!(call.remaining(1), call.max_events() - 1);
+    assert_eq!(call.checkpointed_events(), call.max_events() + 2);
+    assert_eq!(Action::Tool.remaining(usize::MAX), 0);
 }

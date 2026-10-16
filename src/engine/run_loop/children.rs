@@ -621,8 +621,13 @@ impl RunLoop<'_> {
                     )
                 },
             };
-            self.reserve_provider_call(children[index].agent_run_id, self.primary_call())
-                .await?;
+            self.reserve_provider_call(
+                children[index].agent_run_id,
+                Action::Child {
+                    in_flight: self.ledger().in_flight_children(),
+                },
+            )
+            .await?;
             let provider_trace = children[index]
                 .trace
                 .as_ref()

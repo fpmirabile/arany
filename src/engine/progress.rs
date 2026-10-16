@@ -2,7 +2,7 @@ use super::EngineError;
 use super::ledger::GoalLedger;
 use crate::provider::PreviewText;
 use crate::session::{
-    AgentRunId, Event, EventEnvelope, GoalId, GoalView, RunId, RunView, SessionId, SessionView,
+    AgentRunId, Event, EventEnvelope, GoalView, RunId, RunView, SessionId, SessionView,
 };
 use crate::store::Store;
 use crate::telemetry::{RunTrace, TraceEventKind};
@@ -128,37 +128,40 @@ pub(super) struct PreviewContext {
     pub(super) limit_recorded: bool,
 }
 
+/// The Run's committed Events: the ledger reads them, the optional publisher projects them.
+#[derive(Clone, Copy)]
+pub(super) struct RunScope<'a> {
+    pub(super) ledger: &'a GoalLedger,
+    pub(super) publisher: Option<&'a ProgressPublisher>,
+}
+
 pub(super) struct ProgressPublisher {
-    ledger: GoalLedger,
-    progress: Option<RunProgress>,
+    progress: RunProgress,
     run_id: RunId,
 }
 
 impl ProgressPublisher {
-    pub(super) fn ledger(&self) -> &GoalLedger {
-        &self.ledger
+    pub(super) fn new(progress: RunProgress, run_id: RunId) -> Self {
+        Self { progress, run_id }
     }
 
     pub(super) fn previews_enabled(&self) -> bool {
-        self.progress
-            .as_ref()
-            .is_some_and(RunProgress::previews_enabled)
+        self.progress.previews_enabled()
     }
 
-    pub(super) fn tool_queue(&self) -> Option<watch::Sender<Option<uuid::Uuid>>> {
-        self.progress
-            .as_ref()
-            .map(|progress| progress.waiting_sender.clone())
+    pub(super) fn tool_queue(&self) -> watch::Sender<Option<uuid::Uuid>> {
+        self.progress.waiting_sender.clone()
     }
 
     pub(super) fn preview_context(
         &self,
+        ledger: &GoalLedger,
         primary: AgentRunId,
     ) -> Result<Option<PreviewContext>, EngineError> {
         if !self.previews_enabled() {
             return Ok(None);
         }
-        self.ledger.view(|view| {
+        ledger.view(|view| {
             let run = view
                 .runs
                 .last()
@@ -199,10 +202,7 @@ impl ProgressPublisher {
         call_index: u32,
         text: Option<Arc<PreviewText>>,
     ) {
-        let Some(progress) = &self.progress else {
-            return;
-        };
-        progress
+        self.progress
             .preview_sender
             .send_replace(text.map(|text| DisplayUpdate {
                 run_id: self.run_id,
@@ -212,50 +212,30 @@ impl ProgressPublisher {
             }));
     }
 
-    pub(super) fn new(
-        view: SessionView,
-        progress: Option<RunProgress>,
-        goal_id: GoalId,
-        run_id: RunId,
-    ) -> Self {
-        Self {
-            ledger: GoalLedger::new(view, goal_id),
-            progress,
-            run_id,
-        }
-    }
-
-    fn committed(&self, envelope: &EventEnvelope) -> Result<(), EngineError> {
-        let update = self.ledger.committed(envelope, |view| {
-            self.progress.as_ref()?;
-            view.runs
-                .last()
-                .filter(|run| run.id == self.run_id)
-                .cloned()
-                .map(|run| RunUpdate {
-                    sequence: envelope.sequence,
-                    goal: view
-                        .goals
-                        .iter()
-                        .find(|goal| goal.run_ids.contains(&self.run_id))
-                        .cloned(),
-                    run,
-                })
-        })?;
-        if let (Some(update), Some(progress)) = (update, &self.progress) {
-            progress.publish(update);
-        }
-        Ok(())
+    fn project(&self, view: &SessionView, sequence: u64) -> Option<RunUpdate> {
+        view.runs
+            .last()
+            .filter(|run| run.id == self.run_id)
+            .cloned()
+            .map(|run| RunUpdate {
+                sequence,
+                goal: view
+                    .goals
+                    .iter()
+                    .find(|goal| goal.run_ids.contains(&self.run_id))
+                    .cloned(),
+                run,
+            })
     }
 }
 
+/// Appends an Event the ledger does not track: lifecycle outside a Run and closing receipts.
 pub(super) async fn append_observed(
     store: &Store,
-    progress: Option<&ProgressPublisher>,
     trace: Option<&RunTrace>,
     session_id: SessionId,
     event: Event,
-) -> Result<u64, EngineError> {
+) -> Result<EventEnvelope, EngineError> {
     let kind = match &event {
         Event::GoalStarted { .. } => Some(TraceEventKind::GoalStarted),
         Event::GoalRunLinked { .. } => Some(TraceEventKind::GoalRunLinked),
@@ -291,8 +271,25 @@ pub(super) async fn append_observed(
     if let (Some(trace), Some(kind)) = (trace, kind) {
         trace.event_committed(committed.sequence, kind);
     }
-    if let Some(progress) = progress {
-        progress.committed(&committed)?;
+    Ok(committed)
+}
+
+/// Appends a Run's Event and feeds it to the ledger before any projection sees it.
+pub(super) async fn append_scoped(
+    store: &Store,
+    scope: RunScope<'_>,
+    trace: Option<&RunTrace>,
+    session_id: SessionId,
+    event: Event,
+) -> Result<u64, EngineError> {
+    let committed = append_observed(store, trace, session_id, event).await?;
+    let update = scope.ledger.committed(&committed, |view| {
+        scope
+            .publisher
+            .and_then(|publisher| publisher.project(view, committed.sequence))
+    })?;
+    if let (Some(update), Some(publisher)) = (update, scope.publisher) {
+        publisher.progress.publish(update);
     }
     Ok(committed.sequence)
 }

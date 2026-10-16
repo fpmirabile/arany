@@ -1,5 +1,5 @@
 use super::ledger::{Action, GoalLedger, duration_ms};
-use super::progress::{ProgressPublisher, append_observed};
+use super::progress::{ProgressPublisher, RunScope, append_scoped};
 use super::{EngineError, RunCancellation, RunSteering, STORE_ACTION_OVERHEAD};
 use crate::provider::{
     AgentPhase, CompactionItem, CompactionRequest, Finish, HistoryTurn, MAX_REPORTED_INPUT_TOKENS,
@@ -126,7 +126,8 @@ pub(super) struct RunLoop<'a> {
     goal_id: crate::session::GoalId,
     primary_id: AgentRunId,
     controls: RunControls<'a>,
-    progress: &'a ProgressPublisher,
+    ledger: &'a GoalLedger,
+    progress: Option<&'a ProgressPublisher>,
     trace: &'a RunTrace,
 }
 
@@ -153,7 +154,8 @@ impl<'a> RunLoop<'a> {
         provider: Arc<dyn Provider>,
         identity: RunIdentity,
         controls: RunControls<'a>,
-        progress: &'a ProgressPublisher,
+        ledger: &'a GoalLedger,
+        progress: Option<&'a ProgressPublisher>,
         trace: &'a RunTrace,
     ) -> Self {
         Self {
@@ -164,13 +166,21 @@ impl<'a> RunLoop<'a> {
             goal_id: identity.goal_id,
             primary_id: identity.primary_id,
             controls,
+            ledger,
             progress,
             trace,
         }
     }
 
     fn ledger(&self) -> &GoalLedger {
-        self.progress.ledger()
+        self.ledger
+    }
+
+    fn scope(&self) -> RunScope<'a> {
+        RunScope {
+            ledger: self.ledger,
+            publisher: self.progress,
+        }
     }
 
     fn settle_result(&self, result: &CallResult) {
@@ -179,9 +189,9 @@ impl<'a> RunLoop<'a> {
     }
 
     async fn append(&self, event: Event) -> Result<(), EngineError> {
-        let _ = append_observed(
+        let _ = append_scoped(
             self.store,
-            Some(self.progress),
+            self.scope(),
             Some(self.trace),
             self.session_id,
             event,
@@ -351,18 +361,11 @@ impl<'a> RunLoop<'a> {
     async fn reserve_provider_call(
         &self,
         agent_run_id: AgentRunId,
-        primary_action: Action,
+        action: Action,
     ) -> Result<(), EngineError> {
-        let action = if agent_run_id == self.primary_id {
-            primary_action
-        } else {
-            Action::Child {
-                in_flight: self.ledger().in_flight_children(),
-            }
-        };
         let reservation = self.ledger().reserve(action).await?;
         // A primary or review call follows its active-time reservation.
-        let appended = usize::from(agent_run_id == self.primary_id);
+        let appended = usize::from(!matches!(action, Action::Child { .. }));
         self.store
             .admit_operation(self.session_id, action.remaining(appended))
             .await?;
@@ -377,7 +380,10 @@ impl<'a> RunLoop<'a> {
 
     fn primary_call(&self) -> Action {
         Action::ProviderCall {
-            previews: self.progress.previews_enabled(),
+            previews: self
+                .progress
+                .is_some_and(ProgressPublisher::previews_enabled),
+            steering: self.controls.steering.is_some(),
         }
     }
 
@@ -440,7 +446,7 @@ impl<'a> RunLoop<'a> {
             return Ok(false);
         }
         self.store
-            .admit_operation(self.session_id, Action::Tool.max_events())
+            .admit_operation(self.session_id, Action::Tool.remaining(0))
             .await?;
         self.append(Event::GoalPlanContractRecorded {
             goal_id: self.goal_id,
@@ -637,7 +643,11 @@ impl<'a> RunLoop<'a> {
             None => root.input.goal_context_facts = Some(facts),
         }
         let request = root.clone();
-        let context = self.progress.preview_context(self.primary_id)?;
+        let context = self
+            .progress
+            .map(|progress| progress.preview_context(self.ledger, self.primary_id))
+            .transpose()?
+            .flatten();
         let Some(context) = context else {
             let result = invoke_bounded(
                 self.provider.as_ref(),
@@ -678,7 +688,7 @@ impl<'a> RunLoop<'a> {
                     if changed.is_err() { observing = false; continue; }
                     let text = checkpoint.filter(&receiver.borrow_and_update());
                     self.checkpoint(&text, &mut checkpoint, false).await?;
-                    self.progress.publish_preview(self.primary_id, call_index, Some(Arc::new(text)));
+                    self.progress.expect("preview owner").publish_preview(self.primary_id, call_index, Some(Arc::new(text)));
                 }
             }
         };
@@ -707,6 +717,7 @@ impl<'a> RunLoop<'a> {
             self.checkpoint(&text, &mut checkpoint, true).await?;
         }
         self.progress
+            .expect("preview owner")
             .publish_preview(self.primary_id, call_index, None);
         Ok((result, active_segment))
     }
@@ -1405,9 +1416,9 @@ impl<'a> RunLoop<'a> {
         self.store
             .admit_operation(self.session_id, Action::Compaction.remaining(2))
             .await?;
-        let sequence = append_observed(
+        let sequence = append_scoped(
             self.store,
-            Some(self.progress),
+            self.scope(),
             Some(self.trace),
             self.session_id,
             Event::GoalContextCompacted {
@@ -1480,7 +1491,7 @@ impl<'a> RunLoop<'a> {
             ));
         }
         self.store
-            .admit_operation(self.session_id, Action::Tool.max_events())
+            .admit_operation(self.session_id, Action::Tool.remaining(1))
             .await?;
         self.append(Event::ToolStarted {
             run_id: self.run_id,
@@ -1607,7 +1618,8 @@ impl<'a> RunLoop<'a> {
             )
         } else if approved {
             let mut queue_pause = Some(queue_pause.ok_or(EngineError::CoordinatorFailed)?);
-            let runtime = runtime.with_queue_progress(self.progress.tool_queue());
+            let runtime =
+                runtime.with_queue_progress(self.progress.map(ProgressPublisher::tool_queue));
             let (active_sender, mut active_receiver) =
                 tokio::sync::mpsc::channel::<crate::tools::ActiveActionRequest>(1);
             let runtime = runtime.with_active_action_gate(active_sender);
@@ -1713,8 +1725,8 @@ impl<'a> RunLoop<'a> {
                 None,
             )
         };
-        if let Some(queue) = self.progress.tool_queue() {
-            queue.send_replace(None);
+        if let Some(progress) = self.progress {
+            progress.tool_queue().send_replace(None);
         }
         self.append(Event::ToolFinished {
             run_id: self.run_id,

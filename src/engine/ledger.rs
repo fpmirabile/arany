@@ -15,8 +15,8 @@ mod tests;
 const CHECKPOINT_EVENTS: usize = 2;
 
 #[derive(Clone, Copy, Debug)]
-pub(super) enum Action {
-    ProviderCall { previews: bool },
+pub enum Action {
+    ProviderCall { previews: bool, steering: bool },
     Child { in_flight: u32 },
     Tool,
     Review,
@@ -29,9 +29,13 @@ pub(super) enum Action {
 
 impl Action {
     /// Upper bound of the Events the action may append after its first admission.
-    pub(super) fn max_events(self) -> usize {
+    pub fn max_events(self) -> usize {
         match self {
-            Self::ProviderCall { previews } => 8 + if previews { MAX_DISPLAY_CHUNKS } else { 0 },
+            // Both ends of a finishing call: its active-time pair, reservation, record, an optional
+            // steering note and display chunks, then the terminal Events through the Goal receipt.
+            Self::ProviderCall { previews, steering } => {
+                8 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
+            }
             Self::Child { in_flight } => 12_usize.saturating_add(
                 usize::try_from(in_flight)
                     .unwrap_or(usize::MAX)
