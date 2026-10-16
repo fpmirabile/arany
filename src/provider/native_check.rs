@@ -527,7 +527,11 @@ mod tests {
         fn identity(&self) -> &crate::provider::ProviderIdentity {
             static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
                 std::sync::LazyLock::new(|| {
-                    crate::provider::ProviderIdentity::native("openai", "synthetic-model")
+                    crate::provider::ProviderIdentity::new(
+                        "openai",
+                        "synthetic-model",
+                        crate::provider::Provenance::native(),
+                    )
                 });
             &IDENTITY
         }

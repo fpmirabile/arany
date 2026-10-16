@@ -10,7 +10,6 @@ use crate::store::{StateRoot, Store};
 
 pub struct CustomProvider {
     identity: ProviderIdentity,
-    effort: Option<Effort>,
     transport: CustomTransport,
 }
 
@@ -48,17 +47,18 @@ impl CustomProvider {
         let key = std::env::var(profile.credential_env())
             .map_err(|_| CustomProfileError::CredentialUnavailable)?;
         let transport = CustomTransport::new(&destination, key)?;
-        let mut identity =
-            ProviderIdentity::native(format!("custom:{}", profile.name()), profile.model());
+        let mut identity = ProviderIdentity::new(
+            format!("custom:{}", profile.name()),
+            profile.model(),
+            Provenance::Custom(CustomProfileProvenance {
+                endpoint: profile.endpoint().to_owned(),
+                evidence_digest: expected_digest,
+                capability_evidence_version: profile.capability_evidence_version(),
+            }),
+        );
         identity.effort = selected_effort;
-        identity.provenance = Provenance::Custom(CustomProfileProvenance {
-            endpoint: profile.endpoint().to_owned(),
-            evidence_digest: expected_digest,
-            capability_evidence_version: profile.capability_evidence_version(),
-        });
         Ok(Self {
             identity,
-            effort: selected_effort,
             transport,
         })
     }
@@ -80,7 +80,7 @@ impl Provider for CustomProvider {
             return Err(ProviderError::Rejected);
         }
         self.transport
-            .run(&request, self.effort)
+            .run(&request, self.identity.effort)
             .await
             .map_err(transport_error)
     }
@@ -99,7 +99,7 @@ impl Provider for CustomProvider {
             return Err(ProviderError::Rejected);
         }
         self.transport
-            .run_streamed(&request, self.effort, Some(preview))
+            .run_streamed(&request, self.identity.effort, Some(preview))
             .await
             .map_err(transport_error)
     }
@@ -113,7 +113,7 @@ impl Provider for CustomProvider {
             return Err(ProviderError::Rejected);
         }
         self.transport
-            .compact(&request, self.effort)
+            .compact(&request, self.identity.effort)
             .await
             .map_err(transport_error)
     }
@@ -146,15 +146,15 @@ mod tests {
         };
         let destination = profile.resolve_destination().await.unwrap();
         let provider = CustomProvider {
-            identity: ProviderIdentity {
-                provenance: Provenance::Custom(CustomProfileProvenance {
+            identity: ProviderIdentity::new(
+                "custom:local",
+                "model-1",
+                Provenance::Custom(CustomProfileProvenance {
                     endpoint: profile.endpoint().into(),
                     evidence_digest: fingerprint(&profile),
                     capability_evidence_version: 2,
                 }),
-                ..ProviderIdentity::native("custom:local", "model-1")
-            },
-            effort: None,
+            ),
             transport: CustomTransport::new(&destination, "synthetic-key".into()).unwrap(),
         };
         assert_eq!(

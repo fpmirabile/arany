@@ -164,7 +164,11 @@ impl Provider for Journey {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::native("scripted", "file-tool-model")
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "file-tool-model",
+                    arany::Provenance::native(),
+                )
             });
         &IDENTITY
     }
@@ -808,7 +812,11 @@ impl Provider for RuntimeJourney {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                arany::ProviderIdentity::native("scripted", "runtime-profile-model")
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "runtime-profile-model",
+                    arany::Provenance::native(),
+                )
             });
         &IDENTITY
     }
@@ -1978,7 +1986,9 @@ struct GitJourney {
 impl Provider for GitJourney {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-            std::sync::LazyLock::new(|| arany::ProviderIdentity::native("scripted", "tool-model"));
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "tool-model", arany::Provenance::native())
+            });
         &IDENTITY
     }
 

@@ -140,7 +140,8 @@ impl OpenAiProvider {
         } else {
             1
         };
-        let mut identity = ProviderIdentity::native("openai", model);
+        let mut identity =
+            ProviderIdentity::new("openai", model, crate::provider::Provenance::native());
         identity.effort = Some(effort);
         identity.limits = CallLimits {
             concurrency: max_concurrent_calls,

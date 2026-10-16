@@ -384,7 +384,7 @@ pub(super) fn decode_compaction(
 }
 
 /// The request body: Tools first, then system, then messages, so every earlier request is a prefix.
-pub(super) fn run_body(
+pub(crate) fn run_body(
     request: &ProviderRequest,
     conversation: &Conversation,
     effort: Effort,

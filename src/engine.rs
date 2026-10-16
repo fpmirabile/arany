@@ -1236,7 +1236,11 @@ mod goal_workspace_lease_tests {
         fn identity(&self) -> &crate::provider::ProviderIdentity {
             static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
                 std::sync::LazyLock::new(|| {
-                    crate::provider::ProviderIdentity::native("scripted", "lease-test")
+                    crate::provider::ProviderIdentity::new(
+                        "scripted",
+                        "lease-test",
+                        crate::provider::Provenance::native(),
+                    )
                 });
             &IDENTITY
         }

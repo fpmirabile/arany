@@ -67,7 +67,11 @@ impl Provider for WaitingTraceProvider {
     fn identity(&self) -> &crate::provider::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                crate::provider::ProviderIdentity::native("scripted", "test-model")
+                crate::provider::ProviderIdentity::new(
+                    "scripted",
+                    "test-model",
+                    crate::provider::Provenance::native(),
+                )
             });
         &IDENTITY
     }
@@ -84,8 +88,11 @@ impl Provider for GatedFailureProvider {
     fn identity(&self) -> &crate::provider::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<crate::provider::ProviderIdentity> =
             std::sync::LazyLock::new(|| {
-                let mut identity =
-                    crate::provider::ProviderIdentity::native("scripted", "test-model");
+                let mut identity = crate::provider::ProviderIdentity::new(
+                    "scripted",
+                    "test-model",
+                    crate::provider::Provenance::native(),
+                );
                 identity.limits = crate::provider::CallLimits {
                     concurrency: 2,
                     ..Default::default()

@@ -534,7 +534,9 @@ mod tests {
     impl Provider for Scripted {
         fn identity(&self) -> &arany::ProviderIdentity {
             static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-                std::sync::LazyLock::new(|| arany::ProviderIdentity::native("openai", "gpt-5.4"));
+                std::sync::LazyLock::new(|| {
+                    arany::ProviderIdentity::new("openai", "gpt-5.4", arany::Provenance::native())
+                });
             &IDENTITY
         }
 

@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::time::Duration;
 use uuid::Uuid;
 
-mod wire;
+pub(super) mod wire;
 
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const DEADLINE: Duration = Duration::from_secs(600);
@@ -175,7 +175,8 @@ impl AnthropicProvider {
             } else {
                 1
             };
-        let mut identity = ProviderIdentity::native("anthropic", model);
+        let mut identity =
+            ProviderIdentity::new("anthropic", model, crate::provider::Provenance::native());
         identity.effort = Some(effort);
         identity.limits = CallLimits {
             concurrency: max_concurrent_calls,

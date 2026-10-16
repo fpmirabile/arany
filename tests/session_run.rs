@@ -2532,7 +2532,9 @@ struct HeldProvider {
 impl arany::Provider for HeldProvider {
     fn identity(&self) -> &arany::ProviderIdentity {
         static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
-            std::sync::LazyLock::new(|| arany::ProviderIdentity::native("scripted", "held-model"));
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new("scripted", "held-model", arany::Provenance::native())
+            });
         &IDENTITY
     }
 
