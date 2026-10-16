@@ -68,11 +68,14 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
 
 ## Current facts
 
-- Children are direct, read-only, one-call reasoning tasks without Tools; only
-  the primary mutates files or runs commands
-  ([execution](../../docs/specs/execution.md), decision
+- Children are direct and read-only. In a Tool-enabled Run each child is a
+  researcher that may List/Read/Search, read admitted Skills and list MCP
+  catalogs, at most 16 Tool calls, before its bounded report; without Tools a
+  child makes one reasoning call. Only the primary mutates files or runs
+  commands ([execution](../../docs/specs/execution.md#researcher-children),
+  decision
   [D-03](../../docs/research/next-step-decision-register.md#d-03--generic-bounded-agent-protocol)).
-  This is a fan-out of advisors, not a coding team.
+  This is a research fan-out, not a coding team.
 - Commands return bounded changesets from a private offline snapshot; a separate
   validated mutation publishes them to the Workspace. A private per-Workspace
   StateRoot archive reuses bounded build outputs and dependency data inside each
@@ -84,16 +87,20 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
   mount propagation plus bounded namespace mount-table checks; macOS uses exact
   Seatbelt grants and native mount-table checks. The owning Tools spec records
   disclosure, exclusions and the remaining native evidence.
-- Fixed ceilings block real builds: 60 seconds per unit, 300 seconds per Run,
-  16 Tool effects per Run, 512 MiB memory, 64 MiB scratch and writable
-  project storage, 2,048-entry snapshots and 8 KiB edit strings
-  ([limits](../../docs/specs/tools.md#limits-and-failure-behavior)).
+- Tool loops have no fixed per-Run call or effect count; Goal call, Run and
+  active-time budgets bound the task. Fixed per-command limits remain: the
+  default profile has 512 MiB memory, 64 MiB scratch and project storage and a
+  120-second default command time; Build settings allow up to 4 GiB memory,
+  1 GiB project storage and 600 seconds. Snapshots hold 2,048 entries and edit
+  strings 8 KiB ([limits](../../docs/specs/tools.md#limits-and-failure-behavior)).
 - A Run pins one ProviderProfile: the primary and every child share one
   account, model and effort
   ([system overview](../../docs/architecture/system-overview.md)). Mixed
   saved access is chosen on every new start
   ([D-20](../../docs/research/next-step-decision-register.md#d-20--mixed-saved-access-is-chosen-on-every-new-start)).
-- `.git` is excluded from every grant, so agents cannot inspect history or diffs.
+- `.git` stays excluded from every file grant. Typed Git status/diff/log reads
+  are Linux-only, read-only and primary-only
+  ([Tools](../../docs/specs/tools.md#typed-git-reads)).
 - Approval exists as human Allow once/Deny and per-action AI review. Nothing
   evaluates the trajectory of a Run against what the agent was asked to do.
 - Detection is not enforcement: observers and classifiers run after the OS
