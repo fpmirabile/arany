@@ -8,7 +8,6 @@ mod test_process;
 mod diagnostics;
 mod engine;
 #[cfg(any(test, feature = "test-support"))]
-#[cfg_attr(not(test), allow(dead_code))]
 mod fault;
 mod presentation;
 mod private_fs;
@@ -31,6 +30,8 @@ pub use engine::{
     create_session, fork_session, list_sessions, rename_session, resume_session,
     set_session_defaults, validate_workspace_inputs,
 };
+#[cfg(feature = "test-support")]
+pub use fault::FaultPlan;
 pub use presentation::{
     Output, escape_terminal, goal_status, render_cache_update_feedback, render_exec,
     render_run_feedback, render_session,

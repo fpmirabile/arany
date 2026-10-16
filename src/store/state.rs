@@ -118,7 +118,8 @@ impl RecordKind {
         }
     }
 
-    pub const fn file(self) -> &'static str {
+    #[cfg(test)]
+    const fn file(self) -> &'static str {
         self.spec().0
     }
 
@@ -150,14 +151,14 @@ impl Record<'_> {
 
     pub fn replace(&self, record: &[u8]) -> Result<(), StoreError> {
         let (name, pending, limit) = self.kind.spec();
-        let pending = pending.ok_or(StoreError::InvalidStateDirectory)?;
+        let pending = pending.ok_or(StoreError::ReadOnly)?;
         self.root
             .replace_private_record(name, pending, record, limit)
     }
 
     pub fn remove(&self) -> Result<(), StoreError> {
         let (name, pending, limit) = self.kind.spec();
-        let pending = pending.ok_or(StoreError::InvalidStateDirectory)?;
+        let pending = pending.ok_or(StoreError::ReadOnly)?;
         self.root.remove_private_record(name, pending, limit)
     }
 }
@@ -703,6 +704,31 @@ mod tests {
                 .collect::<String>()
         );
         crate::test_process::assert_single_test_completed(&output.stdout, "cross-user");
+    }
+
+    #[test]
+    fn read_only_record_kinds_refuse_replace_and_remove() {
+        let temp = tempfile::tempdir().expect("test root");
+        let path = temp.path().join("state");
+        let state = StateRoot::admit(&path).expect("private state");
+        for kind in [RecordKind::ToolsConfig, RecordKind::ProviderProfiles] {
+            assert!(matches!(
+                state.record(kind).replace(b"synthetic"),
+                Err(StoreError::ReadOnly)
+            ));
+            assert!(matches!(
+                state.record(kind).remove(),
+                Err(StoreError::ReadOnly)
+            ));
+            assert!(!path.join(kind.file()).exists());
+        }
+        assert!(std::fs::read_dir(&path).unwrap().all(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_none_or(|e| e != "pending")
+        }));
     }
 
     #[test]
