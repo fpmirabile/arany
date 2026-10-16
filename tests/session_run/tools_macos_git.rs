@@ -259,7 +259,7 @@ async fn native_git_journey_helper() {
     for index in 0..3 {
         let observation = outcome.run.tools[index].observation.as_ref().unwrap();
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
-        assert!(observation.guard.is_some());
+        assert!(observation.attestation.is_some());
         assert!(
             output(index).get("failed").is_none(),
             "{}",
@@ -287,7 +287,7 @@ async fn native_git_journey_helper() {
     assert_eq!(subjects, ["second commit", "first commit"]);
     let failed = outcome.run.tools[3].observation.as_ref().unwrap();
     assert_eq!(failed.disposition, ToolDisposition::Failed);
-    assert!(failed.guard.is_some());
+    assert!(failed.attestation.is_some());
 
     let requests = requests.lock().unwrap().clone();
     let catalog: serde_json::Value =

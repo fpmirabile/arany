@@ -11,10 +11,18 @@ pub(crate) enum Family {
     Git,
 }
 
+/// Where an operation may execute: in the Engine under the admitted Workspace handle, or in the Guard.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Site {
+    InProcess,
+    Guard,
+}
+
 #[derive(Debug)]
 pub(crate) struct OperationFacts {
     pub(crate) name: &'static str,
     pub(crate) family: Family,
+    pub(crate) site: Site,
     pub(crate) mutates: bool,
     pub(crate) spawns_process: bool,
     pub(crate) prelude: bool,
@@ -34,6 +42,7 @@ const fn facts_row(
     OperationFacts {
         name,
         family,
+        site: Site::Guard,
         mutates: false,
         spawns_process: false,
         prelude: false,
@@ -52,6 +61,11 @@ const fn read_row(
     description: &'static str,
 ) -> OperationFacts {
     OperationFacts {
+        site: if matches!(family, Family::File) {
+            Site::InProcess
+        } else {
+            Site::Guard
+        },
         prelude: true,
         researcher: !matches!(family, Family::Git),
         ..facts_row(name, family, order, description)
@@ -204,8 +218,8 @@ pub(crate) fn git_operations() -> Vec<&'static str> {
         .collect()
 }
 
-pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..4096, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)";
-pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..4096, whole-file sha256), search (literal UTF-8 content in a file or directory)";
+pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..65536, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)";
+pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..65536, whole-file sha256), search (literal UTF-8 content in a file or directory)";
 pub(crate) const COMMAND_CONTRACT: &str = if cfg!(target_os = "macos") {
     "Explicit argv only. Private selected-project cwd; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication."
 } else {
@@ -465,6 +479,21 @@ mod tests {
         let mut orders: Vec<_> = ALL.iter().map(|facts| facts.order).collect();
         orders.sort_unstable();
         assert_eq!(orders, (0..ALL.len() as u8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn only_file_reads_run_in_process() {
+        let in_process: Vec<_> = ALL
+            .iter()
+            .filter(|facts| facts.site == Site::InProcess)
+            .map(|facts| facts.name)
+            .collect();
+        assert_eq!(in_process, ["list", "read", "search"]);
+        assert!(
+            ALL.iter()
+                .filter(|facts| facts.site == Site::InProcess)
+                .all(|facts| !facts.mutates && !facts.spawns_process && !facts.asks_approval)
+        );
     }
 
     #[test]

@@ -15,6 +15,8 @@ use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+/// Native preparation and handshake time the Engine adds to a Guard call's action deadline.
+pub(in crate::tools) const RESERVATION_OVERHEAD: Duration = Duration::from_secs(5);
 const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
 const MOUNTINFO_BYTES_CAP: usize = 1024 * 1024;
 const MOUNTINFO_ENTRIES_CAP: usize = 4096;
@@ -646,10 +648,7 @@ pub(super) async fn execute_inner(
         .args(BWRAP_BOOTSTRAP);
     let native = matches!(
         intent.call,
-        ToolCall::List { .. }
-            | ToolCall::Read { .. }
-            | ToolCall::Search { .. }
-            | ToolCall::Write { .. }
+        ToolCall::Write { .. }
             | ToolCall::Edit { .. }
             | ToolCall::Mkdir { .. }
             | ToolCall::ApplyChangeset { .. }

@@ -105,7 +105,7 @@ pub(super) fn apply(
                 .is_some_and(|contract| !contract.allows_call(&observation.intent.call));
             if out_of_plan_integration
                 && (observation.disposition != crate::tools::ToolDisposition::Denied
-                    || observation.guard.is_some()
+                    || observation.attestation.is_some()
                     || observation.cache_update != crate::tools::CacheUpdate::NotApplicable)
             {
                 return Err(ReplayError::InvalidTransition);
@@ -140,7 +140,7 @@ pub(super) fn apply(
                 && (!no_review
                     || observation.intent.limits.runtime_ms != requested
                     || observation.disposition != crate::tools::ToolDisposition::Limit
-                    || observation.guard.is_some()
+                    || observation.attestation.is_some()
                     || observation.cache_update != crate::tools::CacheUpdate::NotApplicable
                     || observation.output
                         != crate::tools::types::command_timeout_limit_message(requested, maximum))

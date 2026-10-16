@@ -412,7 +412,7 @@
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Number of UTF-8 bytes to read: integer 1 through 4096 inclusive. Use 4096 for a normal page; never request the whole file with a larger limit.",
+            "description": "Number of UTF-8 bytes to read: integer 1 through 65536 inclusive. Use 65536 for a normal page; never request the whole file with a larger limit.",
             "type": "integer"
           },
           "offset": {
@@ -5615,7 +5615,7 @@
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Number of UTF-8 bytes to read: integer 1 through 4096 inclusive. Use 4096 for a normal page; never request the whole file with a larger limit.",
+            "description": "Number of UTF-8 bytes to read: integer 1 through 65536 inclusive. Use 65536 for a normal page; never request the whole file with a larger limit.",
             "type": "integer"
           },
           "offset": {
@@ -6064,7 +6064,7 @@
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Number of UTF-8 bytes to read: integer 1 through 4096 inclusive. Use 4096 for a normal page; never request the whole file with a larger limit.",
+            "description": "Number of UTF-8 bytes to read: integer 1 through 65536 inclusive. Use 65536 for a normal page; never request the whole file with a larger limit.",
             "type": "integer"
           },
           "offset": {

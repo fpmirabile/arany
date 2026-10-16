@@ -123,10 +123,10 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "GoalSteeringNoteRecorded"
         | "AssistantDisplayRecorded"
         | "ToolStarted"
-        | "ToolFinished"
         | "AgentFinished"
         | "MessageCommitted"
         | "RunFinished" => Some(6),
+        "ToolFinished" => Some(7),
         _ => None,
     }
 }
@@ -528,12 +528,12 @@ mod goal_success_tests {
             use_count: 1,
         };
         ToolObservation {
-            guard: Some(GuardReceipt {
+            attestation: Some(crate::tools::Attestation::Guard(GuardReceipt {
                 contract_version: 1,
                 intent_digest: intent.digest(),
                 enforcement_digest: intent.enforcement_digest,
                 limits: intent.limits.clone(),
-            }),
+            })),
             intent,
             disposition,
             output,
@@ -3456,5 +3456,135 @@ mod payload_version_tests {
             Err(ReplayError::UnknownEvent)
         ));
         assert_eq!(payload_version("NotAKind"), None);
+    }
+
+    fn read_observation(run: RunId, agent: AgentRunId) -> crate::tools::ToolObservation {
+        let intent = crate::tools::EffectIntent {
+            id: Uuid::now_v7(),
+            run_id: run,
+            agent_run_id: agent,
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: crate::tools::ToolCall::Read {
+                path: "src/lib.rs".into(),
+                offset: 0,
+                limit: 16,
+            },
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        crate::tools::ToolObservation {
+            attestation: Some(crate::tools::Attestation::InProcess {
+                policy_digest: intent.policy_digest,
+                workspace_device: intent.workspace_device,
+                workspace_inode: intent.workspace_inode,
+            }),
+            intent,
+            disposition: crate::tools::ToolDisposition::Succeeded,
+            output: "{}".into(),
+            cache_update: crate::tools::CacheUpdate::NotApplicable,
+        }
+    }
+
+    #[test]
+    fn a_tool_finished_bump_rejects_its_previous_version_while_run_started_still_decodes() {
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        let finished = Event::ToolFinished {
+            run_id: run,
+            agent_run_id: agent,
+            observation: read_observation(run, agent),
+        };
+        let payload = finished.payload().expect("payload");
+        assert_eq!(payload_version("ToolFinished"), Some(7));
+        assert_eq!(
+            Event::decode("ToolFinished", 7, &payload, Some(run), Some(agent)).expect("current"),
+            finished
+        );
+        assert!(matches!(
+            Event::decode("ToolFinished", 6, &payload, Some(run), Some(agent)),
+            Err(ReplayError::UnknownEvent)
+        ));
+
+        let started = Event::RunStarted {
+            run_id: run,
+            config: RunConfig {
+                provider: "openai".into(),
+                model: "gpt-5.4".into(),
+                effort: None,
+                custom_profile_provenance: None,
+                saved_api_account_id: None,
+                chatgpt_provenance: None,
+                output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
+                policy: CollaborationPolicy::Single,
+                output_token_cap: 4096,
+                provider_concurrency: 1,
+                workspace_device: 1,
+                workspace_inode: 2,
+                instruction_digest: None,
+                include_digests: Vec::new(),
+                history_run_ids: Vec::new(),
+                excluded_history_runs: 0,
+                context_usage: None,
+                compaction_event_sequence: None,
+                compaction_content_digest: None,
+                tool_policy: None,
+            },
+        };
+        let payload = started.payload().expect("payload");
+        assert_eq!(payload_version("RunStarted"), Some(6));
+        assert_eq!(
+            Event::decode("RunStarted", 6, &payload, Some(run), None).expect("unbumped kind"),
+            started
+        );
+    }
+
+    #[test]
+    fn an_in_process_attestation_never_validates_a_guard_site_operation() {
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        let read = read_observation(run, agent);
+        assert!(read.valid());
+        let mut drifted = read.clone();
+        drifted.attestation = Some(crate::tools::Attestation::InProcess {
+            policy_digest: [1; 32],
+            workspace_device: 1,
+            workspace_inode: 3,
+        });
+        assert!(!drifted.valid());
+
+        let mut write = read.clone();
+        write.intent.call = crate::tools::ToolCall::Write {
+            path: "src/lib.rs".into(),
+            expected_digest: None,
+            content: "x".into(),
+        };
+        assert!(
+            !write.valid(),
+            "a read attestation cannot authorize a write"
+        );
+        assert!(matches!(
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: agent,
+                observation: write.clone(),
+            }
+            .validate(),
+            Err(ReplayError::InvalidPayload)
+        ));
+
+        let mut guarded_read = read;
+        guarded_read.attestation = Some(crate::tools::Attestation::Guard(
+            crate::tools::GuardReceipt {
+                contract_version: 1,
+                intent_digest: guarded_read.intent.digest(),
+                enforcement_digest: guarded_read.intent.enforcement_digest,
+                limits: guarded_read.intent.limits.clone(),
+            },
+        ));
+        assert!(!guarded_read.valid(), "reads attest only in process");
     }
 }

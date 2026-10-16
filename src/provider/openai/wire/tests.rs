@@ -894,7 +894,7 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
             "read bounds",
             json!([function_call(
                 "arany_read",
-                &json!({"path":"README.md","offset":0,"limit":4097,"plan_contract":null})
+                &json!({"path":"README.md","offset":0,"limit":65537,"plan_contract":null})
             )]),
         ),
         (
@@ -964,7 +964,7 @@ fn rejected_native_calls_report_their_diagnostic_stage() {
     let request = primary_request(MODEL);
     for (call, expected) in [
         (
-            json!({"operation":"read","path":"README.md","offset":0,"limit":4097}),
+            json!({"operation":"read","path":"README.md","offset":0,"limit":65537}),
             Stage::OutcomeReadBounds,
         ),
         (

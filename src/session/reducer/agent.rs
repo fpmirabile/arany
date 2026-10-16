@@ -123,7 +123,7 @@ impl SessionView {
             .is_some_and(|contract| !contract.allows_call(&observation.intent.call));
         if out_of_plan
             && (observation.disposition != ToolDisposition::Denied
-                || observation.guard.is_some()
+                || observation.attestation.is_some()
                 || observation.cache_update != CacheUpdate::NotApplicable)
         {
             return Err(ReplayError::InvalidTransition);
