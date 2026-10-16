@@ -185,8 +185,11 @@ impl Provider for Journey {
                         result: "Built, tested, loaded Skill and called local MCP.".into(),
                     }),
                     response_id: None,
-                    input_tokens: None,
-                    output_tokens: None,
+                    usage: arany::Usage {
+                        input_tokens: None,
+                        output_tokens: None,
+                        ..Default::default()
+                    },
                     wire_provenance: None,
                 });
             }
@@ -199,8 +202,11 @@ impl Provider for Journey {
                 plan_contract: (step == 0).then(|| Box::new(journey_plan_contract())),
             },
             response_id: None,
-            input_tokens: None,
-            output_tokens: None,
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: None,
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -213,8 +219,11 @@ impl Provider for Journey {
         Ok(CompactionResponse {
             summary: "Tool work completed; no reusable authority".into(),
             response_id: None,
-            input_tokens: None,
-            output_tokens: None,
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: None,
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -541,8 +550,11 @@ impl Provider for Proposal {
                     },
                 },
                 response_id: None,
-                input_tokens: None,
-                output_tokens: None,
+                usage: arany::Usage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    ..Default::default()
+                },
                 wire_provenance: None,
             });
         }
@@ -576,8 +588,11 @@ impl Provider for Proposal {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: None,
-            output_tokens: None,
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: None,
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -661,8 +676,11 @@ impl Provider for OverTimeoutCommand {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: None,
-            output_tokens: None,
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: None,
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -822,8 +840,11 @@ impl arany::Provider for ExactTokenTool {
                 })),
             },
             response_id: None,
-            input_tokens: Some(0),
-            output_tokens: Some(8),
+            usage: arany::Usage {
+                input_tokens: Some(0),
+                output_tokens: Some(8),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -931,8 +952,11 @@ impl Provider for GoalWorkspaceLease {
                 result: "No Workspace mutation was needed".into(),
             }),
             response_id: None,
-            input_tokens: Some(1),
-            output_tokens: Some(1),
+            usage: arany::Usage {
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -1332,8 +1356,11 @@ impl Provider for BoundedLoop {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: None,
-            output_tokens: None,
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: None,
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -2465,12 +2492,15 @@ impl Provider for ApprovalJourney {
                 })
             },
             response_id: None,
-            input_tokens: Some(3),
-            output_tokens: Some(if review && self.review == "over-cap" {
-                257
-            } else {
-                1
-            }),
+            usage: arany::Usage {
+                input_tokens: Some(3),
+                output_tokens: Some(if review && self.review == "over-cap" {
+                    257
+                } else {
+                    1
+                }),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }
@@ -2849,8 +2879,11 @@ impl Provider for GitJourney {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: Some(1),
-            output_tokens: Some(1),
+            usage: arany::Usage {
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }

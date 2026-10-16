@@ -119,8 +119,11 @@ impl Provider for GatedFailureProvider {
                                     children: vec!["not permitted".into()],
                                 }),
                                 response_id: None,
-                                input_tokens: Some(10),
-                                output_tokens: Some(5),
+                                usage: crate::provider::Usage {
+                                    input_tokens: Some(10),
+                                    output_tokens: Some(5),
+                                    ..Default::default()
+                                },
                                 wire_provenance: None,
                             });
                         }
@@ -131,8 +134,11 @@ impl Provider for GatedFailureProvider {
                                     result: "done".into(),
                                 }),
                                 response_id: None,
-                                input_tokens: Some(10),
-                                output_tokens: Some(request.max_output_tokens + 1),
+                                usage: crate::provider::Usage {
+                                    input_tokens: Some(10),
+                                    output_tokens: Some(request.max_output_tokens + 1),
+                                    ..Default::default()
+                                },
                                 wire_provenance: None,
                             });
                         }
@@ -143,8 +149,11 @@ impl Provider for GatedFailureProvider {
                                     result: "done".into(),
                                 }),
                                 response_id: None,
-                                input_tokens: Some(1_000_001),
-                                output_tokens: Some(5),
+                                usage: crate::provider::Usage {
+                                    input_tokens: Some(1_000_001),
+                                    output_tokens: Some(5),
+                                    ..Default::default()
+                                },
                                 wire_provenance: None,
                             });
                         }
@@ -162,8 +171,11 @@ impl Provider for GatedFailureProvider {
         Ok(ProviderResponse {
             outcome,
             response_id: None,
-            input_tokens: Some(10),
-            output_tokens: Some(5),
+            usage: crate::provider::Usage {
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                ..Default::default()
+            },
             wire_provenance: None,
         })
     }

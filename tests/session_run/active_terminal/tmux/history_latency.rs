@@ -260,6 +260,9 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         output_tokens: None,
                         wire_provenance: None,
                         failure_reason: None,
+                        requested_tools: 0,
+                        cache_read_input_tokens: None,
+                        cache_creation_input_tokens: None,
                     },
                 },
                 Event::GoalActiveTimeSettled {
@@ -298,6 +301,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         changes: Vec::new(),
                         evidence: Vec::new(),
                         unresolved: Vec::new(),
+                        cached_input_tokens: 0,
                     },
                 },
             )

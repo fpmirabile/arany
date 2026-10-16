@@ -708,6 +708,7 @@ mod exec_jsonl_tests {
                 changes: Vec::new(),
                 evidence: Vec::new(),
                 unresolved: Vec::new(),
+                cached_input_tokens: 0,
             },
         }
     }

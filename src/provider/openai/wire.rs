@@ -2,7 +2,7 @@ use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, name_of, specs};
 use crate::provider::{
     CompactionRequest, CompactionResponse, Delegate, Effort, Finish, ProviderError,
-    ProviderOutcome, ProviderRequest, ProviderResponse, ProviderWireProvenance,
+    ProviderOutcome, ProviderRequest, ProviderResponse, ProviderWireProvenance, Usage,
 };
 use crate::provider::{compaction_input, outcome_schema, run_input, summary_schema};
 use serde::{Deserialize, Serialize};
@@ -98,8 +98,7 @@ fn decode_outcome(
     Ok(ProviderResponse {
         outcome,
         response_id: Some(response_id),
-        input_tokens: usage.as_ref().map(|value| value.input_tokens),
-        output_tokens: usage.map(|value| value.output_tokens),
+        usage: provider_usage(usage.as_ref()),
         wire_provenance: Some(ProviderWireProvenance::ResponsesCompletedStoreFalseRequested),
     })
 }
@@ -238,8 +237,7 @@ fn decode_compaction_response(
     Ok(CompactionResponse {
         summary: summary.summary,
         response_id: Some(response_id),
-        input_tokens: usage.as_ref().map(|value| value.input_tokens),
-        output_tokens: usage.map(|value| value.output_tokens),
+        usage: provider_usage(usage.as_ref()),
         wire_provenance: Some(ProviderWireProvenance::ResponsesCompletedStoreFalseRequested),
     })
 }
@@ -453,6 +451,25 @@ struct WireContent {
 struct WireUsage {
     input_tokens: u32,
     output_tokens: u32,
+    #[serde(default)]
+    input_tokens_details: Option<WireInputTokensDetails>,
+}
+
+/// `input_tokens` already includes the cached part; cache writes are not reported on this route.
+#[derive(Deserialize, Serialize)]
+struct WireInputTokensDetails {
+    cached_tokens: u32,
+}
+
+fn provider_usage(usage: Option<&WireUsage>) -> Usage {
+    Usage {
+        input_tokens: usage.map(|value| value.input_tokens),
+        output_tokens: usage.map(|value| value.output_tokens),
+        cache_read_input_tokens: usage
+            .and_then(|value| value.input_tokens_details.as_ref())
+            .map(|details| details.cached_tokens),
+        cache_creation_input_tokens: None,
+    }
 }
 
 impl WireItem {

@@ -516,6 +516,27 @@ fn tool_wire_uses_semantic_outcomes_and_separates_untrusted_catalog_data() {
 }
 
 #[test]
+fn anthropic_usage_reports_cache_read_and_creation_separately() {
+    let finish = response(
+        "end_turn",
+        json!([text_block(
+            r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
+        )]),
+    );
+    let answer = decode_run(
+        &serde_json::to_vec(&finish).unwrap(),
+        "claude-sonnet-5",
+        4096,
+    )
+    .expect("cached finish");
+    assert_eq!(answer.usage.input_tokens, Some(19));
+    assert_eq!(answer.usage.cache_read_input_tokens, Some(4));
+    assert_eq!(answer.usage.cache_creation_input_tokens, Some(3));
+    assert_eq!(answer.usage.output_tokens, Some(8));
+    assert!(answer.usage.cache_consistent());
+}
+
+#[test]
 fn inbound_messages_require_one_complete_structured_answer() {
     let finish = response(
         "end_turn",
@@ -532,8 +553,8 @@ fn inbound_messages_require_one_complete_structured_answer() {
     )
     .expect("schema-constrained finish");
     assert_eq!(answer.response_id.as_deref(), Some("msg_example"));
-    assert_eq!(answer.input_tokens, Some(19));
-    assert_eq!(answer.output_tokens, Some(8));
+    assert_eq!(answer.usage.input_tokens, Some(19));
+    assert_eq!(answer.usage.output_tokens, Some(8));
     assert_eq!(
         answer.wire_provenance,
         Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified)
@@ -576,6 +597,7 @@ fn inbound_messages_require_one_complete_structured_answer() {
             4096
         )
         .expect("uncached usage")
+        .usage
         .input_tokens,
         Some(12)
     );
@@ -628,7 +650,7 @@ fn inbound_messages_require_one_complete_structured_answer() {
             }
         }
     }
-    assert_eq!(summary.output_tokens, Some(8));
+    assert_eq!(summary.usage.output_tokens, Some(8));
     assert_eq!(
         summary.wire_provenance,
         Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified)

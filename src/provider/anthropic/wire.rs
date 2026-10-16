@@ -2,7 +2,7 @@ use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::{
     CompactionRequest, CompactionResponse, Delegate, Effort, Finish, MAX_REPORTED_INPUT_TOKENS,
     MAX_RESPONSE_BYTES, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
-    ProviderWireProvenance,
+    ProviderWireProvenance, Usage,
 };
 use crate::provider::{compaction_input, outcome_schema, run_input, summary_schema};
 use serde::Deserialize;
@@ -283,8 +283,7 @@ pub(super) fn decode_run(
     Ok(ProviderResponse {
         outcome,
         response_id: Some(response_id),
-        input_tokens: Some(usage.total_input_tokens),
-        output_tokens: Some(usage.output_tokens),
+        usage,
         wire_provenance: Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified),
     })
 }
@@ -302,8 +301,7 @@ pub(super) fn decode_compaction(
     Ok(CompactionResponse {
         summary: summary.summary,
         response_id: Some(response_id),
-        input_tokens: Some(usage.total_input_tokens),
-        output_tokens: Some(usage.output_tokens),
+        usage,
         wire_provenance: Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified),
     })
 }
@@ -405,17 +403,13 @@ struct WireUsage {
     output_tokens: u32,
 }
 
-struct UsageTotals {
-    total_input_tokens: u32,
-    output_tokens: u32,
-}
-
 impl WireResponse {
     fn completed_text(
         self,
         model: &str,
         output_cap: u32,
-    ) -> Result<(String, UsageTotals, String), ProviderError> {
+    ) -> Result<(String, Usage, String), ProviderError> {
+        // Messages reports cache counts beside `input_tokens`; the record total keeps the billed sum.
         let total_input_tokens = self
             .usage
             .input_tokens
@@ -466,9 +460,11 @@ impl WireResponse {
         }
         Ok((
             self.id,
-            UsageTotals {
-                total_input_tokens,
-                output_tokens: self.usage.output_tokens,
+            Usage {
+                input_tokens: Some(total_input_tokens),
+                output_tokens: Some(self.usage.output_tokens),
+                cache_read_input_tokens: self.usage.cache_read_input_tokens,
+                cache_creation_input_tokens: self.usage.cache_creation_input_tokens,
             },
             text.ok_or(ProviderError::InvalidOutcome)?,
         ))
