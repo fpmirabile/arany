@@ -1770,7 +1770,9 @@ impl CompactionRecord {
                 .map_err(|_| ReplayError::InvalidSnapshot)?;
             if *summary_bytes != summary.len() as u32
                 || *summary_tokens_estimate != summary_bytes.div_ceil(4)
-                || self.output_tokens.is_some_and(|count| count > 1024)
+                || self
+                    .output_tokens
+                    .is_some_and(|count| count > super::MAX_COMPACTION_OUTPUT_TOKENS)
             {
                 return Err(ReplayError::InvalidSnapshot);
             }
