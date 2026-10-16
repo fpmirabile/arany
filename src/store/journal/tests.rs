@@ -195,7 +195,7 @@ fn run_start_admission_reserves_the_current_version_payload_exceptions() {
     assert_eq!(
         crate::store::RUN_START_EXTRA_BYTES,
         event_payload_limit("MessageAccepted", message) + event_payload_limit("GoalStarted", goal)
-            - 2 * crate::store::MAX_EVENT_SLOT_BYTES
+            - 2 * crate::store::MAX_EVENT_BYTES
     );
     assert_eq!(
         event_payload_limit("MessageAccepted", message - 1),

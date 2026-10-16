@@ -114,8 +114,8 @@ pub enum ToolError {
 pub(crate) struct ToolRuntime {
     config: Config,
     workspace: PathBuf,
-    // Opened once at admission; `None` only in a runtime rebuilt inside a Guard unit, which never reads in process.
-    workspace_root: Option<std::sync::Arc<cap_std::fs::Dir>>,
+    // Set at admission; `None` only in a runtime rebuilt inside a Guard unit, which never reads in process.
+    reads: Option<InProcessReads>,
     workspace_identity: (u64, u64),
     guard_executable: PathBuf,
     enforcement_digest: [u8; 32],
@@ -351,7 +351,10 @@ impl ToolRuntime {
                     .map_err(|_| ToolError::ProtectionUnavailable)?,
             )),
             workspace: workspace.to_owned(),
-            workspace_root: Some(std::sync::Arc::new(root)),
+            reads: Some(InProcessReads {
+                root: std::sync::Arc::new(root),
+                slots: std::sync::Arc::clone(&IN_PROCESS_READS),
+            }),
             workspace_identity,
             guard_executable,
             enforcement_digest,
@@ -491,8 +494,9 @@ impl ToolRuntime {
         intent: &EffectIntent,
     ) -> Result<std::sync::Arc<cap_std::fs::Dir>, ToolError> {
         let root = self
-            .workspace_root
-            .clone()
+            .reads
+            .as_ref()
+            .map(|reads| std::sync::Arc::clone(&reads.root))
             .ok_or(ToolError::ProtectionUnavailable)?;
         if !intent.valid()
             || intent.policy_digest != self.config.digest()
@@ -519,29 +523,33 @@ impl ToolRuntime {
         if cancellation.is_cancelled() {
             return cancelled_read(intent);
         }
-        let root = match self.pinned_root(&intent) {
-            Ok(root) => root,
-            Err(error) => return unstarted_observation(intent, error),
+        // The owned permit moves into the blocking task, so a timed-out read keeps its slot.
+        let Some(Ok(permit)) = self
+            .reads
+            .as_ref()
+            .map(|reads| std::sync::Arc::clone(&reads.slots).try_acquire_owned())
+        else {
+            return unattested_limit(intent, "In-process read capacity is full; nothing was read");
         };
-        let (call, config) = (intent.call.clone(), self.config.clone());
-        let result_bytes = intent.limits.result_bytes as usize;
-        let read =
-            tokio::task::spawn_blocking(move || fs::inspect(&root, &call, &config, result_bytes));
+        let (runtime, read_intent) = (self.clone(), intent.clone());
+        let read = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let root = runtime.pinned_root(&read_intent)?;
+            Ok(fs::inspect(
+                &root,
+                &read_intent.call,
+                &runtime.config,
+                read_intent.limits.result_bytes as usize,
+            ))
+        });
         let result = tokio::select! {
             biased;
             () = cancellation.cancelled() => return cancelled_read(intent),
             joined = tokio::time::timeout_at(deadline, read) => match joined {
-                Ok(Ok(result)) => result,
+                Ok(Ok(Ok(result))) => result,
+                Ok(Ok(Err(error))) => return unstarted_observation(intent, error),
                 Ok(Err(_)) => Err(ToolError::Operation),
-                Err(_) => {
-                    return ToolObservation {
-                        intent,
-                        disposition: ToolDisposition::Limit,
-                        output: "Tool result or resource limit reached".into(),
-                        attestation: None,
-                        cache_update: CacheUpdate::NotApplicable,
-                    };
-                }
+                Err(_) => return unattested_limit(intent, "Tool result or resource limit reached"),
             },
         };
         let (disposition, output) = dispatch::outcome(&intent, result);
@@ -561,6 +569,30 @@ impl ToolRuntime {
             observation.output = "Tool result exceeded its reserved serialized capacity".into();
         }
         observation
+    }
+}
+
+/// The Workspace handle opened once at admission and the process-wide read slots.
+#[derive(Clone)]
+struct InProcessReads {
+    root: std::sync::Arc<cap_std::fs::Dir>,
+    slots: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+/// Concurrent in-process reads across the process; a full set refuses the call before dispatch.
+const MAX_IN_PROCESS_READS: usize = 16;
+static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_IN_PROCESS_READS))
+    });
+
+fn unattested_limit(intent: EffectIntent, output: &str) -> ToolObservation {
+    ToolObservation {
+        intent,
+        disposition: ToolDisposition::Limit,
+        output: output.into(),
+        attestation: None,
+        cache_update: CacheUpdate::NotApplicable,
     }
 }
 
@@ -595,11 +627,11 @@ pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
 }
 
 fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
-    crate::diagnostics::guard_failure(&error);
     let site = match intent.call.facts().site {
-        Site::InProcess => "Tool",
+        Site::InProcess => "Read",
         Site::Guard => "Guard",
     };
+    crate::diagnostics::tool_failure(site, &error);
     ToolObservation {
         output: match error {
             ToolError::QueueFull => format!("{error}. No operation was dispatched."),
@@ -620,7 +652,7 @@ fn uncertain_observation(
     error: ToolError,
     cache_update: crate::tools::CacheUpdate,
 ) -> ToolObservation {
-    crate::diagnostics::guard_failure(&error);
+    crate::diagnostics::tool_failure("Guard", &error);
     let stage = failure_stage(&error);
     ToolObservation {
         intent,

@@ -29,6 +29,7 @@ pub(super) fn admit_operation(
     connection: &mut Connection,
     session_id: SessionId,
     event_slots: usize,
+    tool_observations: usize,
     run_start: bool,
 ) -> Result<(), StoreError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -42,8 +43,12 @@ pub(super) fn admit_operation(
     }
     let page_count: i64 = transaction.query_row("PRAGMA page_count", [], |row| row.get(0))?;
     let page_size: i64 = transaction.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-    let event_bytes = i64::try_from(event_slots).map_err(|_| StoreError::ReplayLimit)?
-        * (super::MAX_EVENT_SLOT_BYTES as i64 + EVENT_SQLITE_OVERHEAD_PAGES * page_size);
+    let slots = i64::try_from(event_slots).map_err(|_| StoreError::ReplayLimit)?;
+    let observations =
+        i64::try_from(tool_observations.min(event_slots)).map_err(|_| StoreError::ReplayLimit)?;
+    let event_bytes = slots
+        * (super::MAX_EVENT_BYTES as i64 + EVENT_SQLITE_OVERHEAD_PAGES * page_size)
+        + observations * (super::MAX_TOOL_FINISHED_BYTES - super::MAX_EVENT_BYTES) as i64;
     let run_start_extra = if run_start {
         super::RUN_START_EXTRA_BYTES as i64
     } else {

@@ -39,7 +39,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         cache_state: None,
         config,
         workspace: PathBuf::new(),
-        workspace_root: None,
+        reads: None,
         workspace_identity: (1, 2),
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
@@ -1897,7 +1897,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         cache_state: None,
         config,
         workspace: PathBuf::new(),
-        workspace_root: None,
+        reads: None,
         workspace_identity: (1, 2),
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
@@ -1999,7 +1999,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         cache_state: None,
         config: serde_json::from_value(value).unwrap(),
         workspace: PathBuf::new(),
-        workspace_root: None,
+        reads: None,
         workspace_identity: (1, 2),
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
@@ -2051,7 +2051,10 @@ fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::Tool
         config: serde_json::from_value(config).unwrap(),
         workspace: workspace.to_owned(),
         workspace_identity: super::fs::identity(&root).unwrap(),
-        workspace_root: Some(std::sync::Arc::new(root)),
+        reads: Some(super::InProcessReads {
+            root: std::sync::Arc::new(root),
+            slots: std::sync::Arc::new(tokio::sync::Semaphore::new(super::MAX_IN_PROCESS_READS)),
+        }),
         guard_executable: std::path::PathBuf::new(),
         enforcement_digest: [1; 32],
         queue_progress: None,
@@ -2230,4 +2233,75 @@ async fn in_process_results_fit_their_budget_before_serialization() {
     intent.limits.result_bytes = 128;
     let observation = runtime.execute(intent, super::Cancellation::new()).await;
     assert_eq!(observation.disposition, ToolDisposition::Limit);
+}
+
+#[test]
+fn the_primary_prompt_states_the_read_page_limit() {
+    assert!(
+        include_str!("../provider/prompts/primary.txt")
+            .contains(&format!("a limit from 1 to {MAX_READ_PAGE_BYTES}."))
+    );
+}
+
+#[tokio::test]
+async fn in_process_read_p95_stays_within_fifty_milliseconds() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n".repeat(4096)).unwrap();
+    let runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let mut elapsed = Vec::new();
+    for _ in 0..40 {
+        let started = std::time::Instant::now();
+        let observation = run_in_process(
+            &runtime,
+            ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: MAX_READ_PAGE_BYTES,
+            },
+        )
+        .await;
+        elapsed.push(started.elapsed());
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    }
+    elapsed.sort_unstable();
+    let p95 = elapsed[(elapsed.len() * 95).div_ceil(100) - 1];
+    assert!(
+        p95 <= std::time::Duration::from_millis(50),
+        "Read p95 {p95:?}"
+    );
+}
+
+#[tokio::test]
+async fn in_process_reads_are_refused_before_dispatch_when_every_slot_is_held() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let slots = std::sync::Arc::clone(&runtime.reads.as_ref().unwrap().slots);
+    let held = slots
+        .try_acquire_many_owned(super::MAX_IN_PROCESS_READS as u32)
+        .unwrap();
+    let refused = run_in_process(
+        &runtime,
+        ToolCall::Read {
+            path: "src/main.rs".into(),
+            offset: 0,
+            limit: 16,
+        },
+    )
+    .await;
+    drop(held);
+    assert_eq!(refused.disposition, ToolDisposition::Limit);
+    assert!(refused.attestation.is_none());
+    assert!(!refused.stops_run());
+    assert!(!refused.output.contains("fn main"));
 }

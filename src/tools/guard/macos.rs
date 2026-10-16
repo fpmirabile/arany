@@ -900,7 +900,7 @@ impl Task {
             cache_state: None,
             config: self.config,
             workspace: self.workspace,
-            workspace_root: None,
+            reads: None,
             workspace_identity: (self.intent.workspace_device, self.intent.workspace_inode),
             guard_executable: self.guard_executable,
             enforcement_digest: self.intent.enforcement_digest,

@@ -492,29 +492,24 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             .iter()
             .filter(|event| matches!(event.event, arany::Event::GoalActiveTimeReserved { .. }))
             .count();
-        match observation
+        if observation
             .observation
             .as_ref()
-            .and_then(|observation| observation.attestation.as_ref())
+            .is_some_and(|observation| observation.attestation.is_some())
         {
-            Some(arany::Attestation::Guard(_)) => {
-                assert_eq!(
-                    active_reservations, 1,
-                    "an admitted Tool reserves its Goal action after ToolStarted and before Guard setup"
-                );
-                assert!(matches!(
-                    events.get(finish + 1).map(|event| &event.event),
-                    Some(arany::Event::GoalActiveTimeSettled { run_id, .. }) if *run_id == outcome.run.id
-                ));
-            }
-            Some(arany::Attestation::InProcess { .. }) => assert_eq!(
-                active_reservations, 0,
-                "an in-process read carries its time into the next active segment"
-            ),
-            None => assert_eq!(
+            assert_eq!(
+                active_reservations, 1,
+                "an admitted Tool reserves its Goal action after ToolStarted and before Guard setup"
+            );
+            assert!(matches!(
+                events.get(finish + 1).map(|event| &event.event),
+                Some(arany::Event::GoalActiveTimeSettled { run_id, .. }) if *run_id == outcome.run.id
+            ));
+        } else {
+            assert_eq!(
                 active_reservations, 0,
                 "a denied Tool that never reaches Guard has no action reservation"
-            ),
+            );
         }
     }
     store.close().await.unwrap();
@@ -912,20 +907,29 @@ async fn in_process_reads_are_attested_and_replay_after_exit_or_a_crash() {
         }
     }
     durations.sort_unstable();
-    let p95 = durations[(durations.len() * 95).div_ceil(100) - 1];
-    eprintln!("in-process read journal latency ms: p95={p95} all={durations:?}");
-    assert!(p95 <= 50, "Read p95 {p95} ms exceeds 50 ms: {durations:?}");
+    // Journal timestamps include ToolStarted's and the reservation's commits; the gate times execute() in src/tools/tests.rs.
+    eprintln!("in-process read journal span ms: {durations:?}");
 
     let last_started = events
         .iter()
         .rposition(|envelope| matches!(envelope.event, arany::Event::ToolStarted { .. }))
         .unwrap();
-    let crashed = SessionView::replay(outcome.session_id, &events[..=last_started])
+    let Some(arany::Event::GoalActiveTimeReserved { reserved_ms, .. }) =
+        events.get(last_started + 1).map(|envelope| &envelope.event)
+    else {
+        panic!("an in-process read reserves its Goal action after ToolStarted");
+    };
+    let crashed = SessionView::replay(outcome.session_id, &events[..=last_started + 1])
         .unwrap()
         .unwrap();
     assert_eq!(crashed.runs[0].status, RunStatus::Interrupted);
     assert_eq!(crashed.goals[0].status, arany::GoalStatus::Interrupted);
     assert!(crashed.runs[0].tools.last().unwrap().observation.is_none());
+    assert_eq!(
+        crashed.goals[0].reserved_active_ms,
+        Some(*reserved_ms),
+        "replay keeps the unsettled read reservation charged"
+    );
 }
 
 fn assert_goal_provider_request(request: &ProviderRequest, expected_budget: &arany::GoalBudget) {

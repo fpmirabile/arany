@@ -594,6 +594,25 @@ mod tests {
                     "Error: Tool completion is uncertain. Files or effects may have changed; inspect them before retrying. No answer was committed."
                 )
             );
+            let observation = finished.tools[0].observation.as_mut().unwrap();
+            observation.disposition = crate::tools::ToolDisposition::Failed;
+            observation.attestation = None;
+            observation.cache_update = crate::tools::CacheUpdate::NotApplicable;
+            assert!(
+                render_run_feedback(&finished)
+                    .unwrap()
+                    .contains("inspect the Guard stage")
+            );
+            let read = crate::tools::ToolCall::Read {
+                path: "src/lib.rs".into(),
+                offset: 0,
+                limit: 16,
+            };
+            finished.tools[0].intent.call = read.clone();
+            finished.tools[0].observation.as_mut().unwrap().intent.call = read;
+            let feedback = render_run_feedback(&finished).unwrap();
+            assert!(feedback.contains("Workspace read stopped before it started"));
+            assert!(!feedback.contains("Guard"));
             let observation = run.tools[0].observation.as_mut().unwrap();
             observation.disposition = crate::tools::ToolDisposition::Succeeded;
             observation.cache_update = crate::tools::CacheUpdate::NotApplicable;

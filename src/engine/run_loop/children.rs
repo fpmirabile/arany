@@ -719,7 +719,11 @@ impl RunLoop<'_> {
             in_flight: self.ledger().in_flight_children(),
         };
         self.store
-            .admit_operation(self.session_id, child_step.max_events())
+            .admit_operation(
+                self.session_id,
+                child_step.max_events(),
+                child_step.tool_observations(),
+            )
             .await?;
         self.append(Event::ToolStarted {
             run_id: self.run_id,

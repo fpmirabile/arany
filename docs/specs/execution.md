@@ -79,6 +79,7 @@ Run and compaction hold the Session lock and every fork ancestor's operation loc
 | Event payload, default | 64 KiB | append refused |
 | `MessageAccepted` | 656 KiB, with inline PNG bytes (an empty list for text) | append refused |
 | `GoalStarted` | 400 KiB | append refused |
+| `ToolFinished` | 144 KiB: twice the 64 KiB Tool result plus the 16 KiB argument bound; admission reserves it only for the `ToolFinished` slots an action may append | append refused |
 | Steering note per Run | 8 KiB, including history labels | offer refused; the caller keeps its text |
 | Requested Tools per model step | 0, or 1 to 4 for a `ToolRequested` disposition | replay refused |
 | Evidence caches | 32 custom Provider rows and 256 native rows; native rows expire after 24 hours | expired rows are removed first; a new row beyond the bound is refused as storage full |

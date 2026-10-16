@@ -62,6 +62,27 @@ impl Action {
         }
     }
 
+    /// `ToolFinished` Events among `max_events`, which Store admission sizes at their larger bound.
+    pub(super) fn tool_observations(self) -> usize {
+        match self {
+            // A Tool step, and the review or pause inside it, ends with its observation and any
+            // integration observation.
+            Self::Tool | Self::Review | Self::Pause => 2,
+            Self::Child { in_flight } => usize::try_from(in_flight)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+            Self::Delegation {
+                children,
+                research: true,
+            } => children.saturating_mul(MAX_CHILD_TOOL_CALLS),
+            Self::ProviderCall { .. }
+            | Self::Compaction
+            | Self::BoundaryCompaction { .. }
+            | Self::Stop
+            | Self::Delegation { .. } => 0,
+        }
+    }
+
     /// What is left of the bound once `appended` of the action's Events are committed.
     pub(super) fn remaining(self, appended: usize) -> usize {
         self.max_events().saturating_sub(appended)

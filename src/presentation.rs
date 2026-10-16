@@ -376,12 +376,15 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
                     "Error: Run failed. {reason} No answer was committed. Use /agents to inspect this Run."
                 ));
             }
-            if run.tools.last().is_some_and(|tool| {
+            if let Some(tool) = run.tools.last().filter(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == crate::tools::ToolDisposition::Failed
                         && observation.attestation.is_none()
                 })
             }) {
+                if tool.intent.call.facts().site == crate::tools::catalog::Site::InProcess {
+                    return Some("Error: A Workspace read stopped before it started because the admitted Workspace or its intent no longer verified. Nothing was read; earlier completed actions remain. Use /agents to inspect this Run.".into());
+                }
                 return Some("Error: Native Tool protection failed before the action started. That action did not run; earlier completed actions remain. Use /agents to inspect the Guard stage before submitting again.".into());
             }
             if run.tools.last().is_some_and(|tool| {

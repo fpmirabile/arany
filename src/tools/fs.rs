@@ -308,7 +308,7 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
         let fd = openat2(
             root,
             path,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::NOCTTY,
             Mode::empty(),
             ResolveFlags::BENEATH
                 | ResolveFlags::NO_SYMLINKS
@@ -335,7 +335,11 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
                 openat(
                     &file,
                     component,
-                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+                    OFlags::RDONLY
+                        | OFlags::CLOEXEC
+                        | OFlags::NONBLOCK
+                        | OFlags::NOFOLLOW
+                        | OFlags::NOCTTY,
                     Mode::empty(),
                 )
                 .map_err(|_| ToolError::Path)?,
