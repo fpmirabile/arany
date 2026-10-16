@@ -1435,24 +1435,24 @@ mod tests {
                     requests
                         .iter()
                         .all(|request| request.phase == AgentPhase::RootPlan
-                            && request.objective == "hola hola"
-                            && request.tools.is_some() == permissions.is_some()
+                            && request.input.objective == "hola hola"
+                            && request.input.tools.is_some() == permissions.is_some()
                             && request.collaboration == CollaborationPolicy::Single
                             && request.model == "synthetic-model"
-                            && request.instructions.is_none()
-                            && request.includes.is_empty()
-                            && request.images.is_empty()
-                            && request.child_results.is_empty()
-                            && request.context_summary.is_none())
+                            && request.input.workspace_guidance.is_none()
+                            && request.input.includes.is_empty()
+                            && request.input.images.is_empty()
+                            && request.input.child_results.is_empty()
+                            && request.input.context_summary.is_none())
                 );
-                assert!(requests[0].history.is_empty());
+                assert!(requests[0].input.history.is_empty());
                 assert_eq!(
-                    requests[1].history.len(),
+                    requests[1].input.history.len(),
                     1,
                     "resumed greeting retains its accepted turn"
                 );
-                assert_eq!(requests[1].history[0].user, "hola hola");
-                assert_eq!(requests[1].history[0].assistant, "Hola");
+                assert_eq!(requests[1].input.history[0].user, "hola hola");
+                assert_eq!(requests[1].input.history[0].assistant, "Hola");
             }
             let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
             let events = store.load_session(session.unwrap()).await.unwrap();

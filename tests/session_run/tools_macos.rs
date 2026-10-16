@@ -174,6 +174,7 @@ impl Provider for Journey {
         let mut requests = self.requests.lock().unwrap();
         let step = requests.len();
         let context = request
+            .input
             .tools
             .as_ref()
             .ok_or(ProviderError::InvalidOutcome)?;
@@ -182,7 +183,7 @@ impl Provider for Journey {
         assert_eq!(catalog["mcp_servers"][0]["name"], "synthetic");
         assert_eq!(
             context
-                .observations
+                .observations()
                 .iter()
                 .filter(|observation| !matches!(
                     observation.intent.call,
@@ -1052,10 +1053,11 @@ async fn native_runtime_mount_journey_helper() {
     );
     assert_eq!(
         refused_requests.lock().unwrap()[0]
+            .input
             .tools
             .as_ref()
             .unwrap()
-            .observations
+            .observations()
             .len(),
         0
     );
@@ -1383,16 +1385,28 @@ async fn native_runtime_mount_journey_helper() {
         assert_eq!(accepted_requests.len(), 4);
         assert!(
             accepted_requests[0]
+                .input
                 .tools
                 .as_ref()
                 .unwrap()
-                .observations
+                .observations()
                 .is_empty()
         );
-        let first_output = &accepted_requests[1].tools.as_ref().unwrap().observations()[0].output;
+        let first_output = &accepted_requests[1]
+            .input
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations()[0]
+            .output;
         let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
         assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
-        let overflow_observation = &accepted_requests[3].tools.as_ref().unwrap().observations()[2];
+        let overflow_observation = &accepted_requests[3]
+            .input
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations()[2];
         let overflow_output = &overflow_observation.output;
         let overflow_result: serde_json::Value = serde_json::from_str(overflow_output).unwrap();
         assert_eq!(overflow_result["exit_code"], 0);
@@ -1400,11 +1414,13 @@ async fn native_runtime_mount_journey_helper() {
             overflow_observation.cache_update,
             arany::CacheUpdate::Rejected
         );
-        let provider_observation = accepted_requests[2]
+        let provider_observations = accepted_requests[2]
+            .input
             .tools
             .as_ref()
             .unwrap()
-            .observations
+            .observations();
+        let provider_observation = provider_observations
             .get(1)
             .expect("Provider request after explicit selected-cache read");
         assert_eq!(provider_observation.intent.call, accepted_calls[1]);
@@ -1823,7 +1839,7 @@ int main(void) {
         if case == "receipt-loss" {
             // A Guard error after dispatch never attempts cache publication; the command outcome stays uncertain.
             assert_eq!(
-                replay.runs[0].tools[0]
+                replay.runs[0].input.tools[0]
                     .observation
                     .as_ref()
                     .unwrap()
@@ -1845,7 +1861,7 @@ int main(void) {
                 "no cache publication was attempted: {unresolved:?}"
             );
         }
-        let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
+        let observation = replay.runs[0].input.tools[0].observation.as_ref().unwrap();
         assert_eq!(
             observation.disposition,
             match case {
