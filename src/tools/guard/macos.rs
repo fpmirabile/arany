@@ -41,6 +41,9 @@ const SYSTEM_PROGRAMS_CAP: usize = 2048;
 const PROFILE_BYTES_CAP: usize = 96 * 1024;
 pub(super) const SUPERVISION_INTERVAL: Duration = Duration::from_millis(10);
 pub(super) const PREPARATION_DEADLINE: Duration = Duration::from_secs(30);
+/// The preparation deadline plus slack for the handshake that follows it.
+pub(crate) const PREPARATION_OVERHEAD: Duration =
+    Duration::from_secs(PREPARATION_DEADLINE.as_secs() + 5);
 const PROCESS_LIMITS: &[(rustix::process::Resource, u64)] = &[
     (rustix::process::Resource::Nofile, 64),
     (rustix::process::Resource::Core, 0),

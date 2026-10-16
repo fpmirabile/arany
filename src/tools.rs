@@ -3,6 +3,7 @@ pub(crate) mod config;
 mod fs;
 mod git;
 mod guard;
+pub(crate) use guard::PREPARATION_OVERHEAD;
 mod mcp;
 mod skills;
 pub(crate) mod toolchains;

@@ -1,7 +1,7 @@
 use super::{
     CallFailure, CallResult, MAX_PRIMARY_RESULT_BYTES, RunLoop, STORE_ACTION_OVERHEAD,
-    TOOL_CLEANUP_OVERHEAD, TOOL_PREPARATION_OVERHEAD, call_record, call_trace_result,
-    call_trace_usage, duration_ms, invoke_bounded, valid_finish,
+    TOOL_CLEANUP_OVERHEAD, call_record, call_trace_result, call_trace_usage, duration_ms,
+    invoke_bounded, valid_finish,
 };
 use crate::engine::{EngineError, OUTPUT_TOKEN_CAP, RunCancellation};
 use crate::provider::{
@@ -12,6 +12,7 @@ use crate::session::{
     MAX_CHILD_TOOL_CALLS,
 };
 use crate::telemetry::{AgentTrace, ProviderTrace, TraceOutcome};
+use crate::tools::PREPARATION_OVERHEAD;
 use crate::tools::{
     CacheUpdate, GuardReceipt, ToolCall, ToolContext, ToolDisposition, ToolObservation,
 };
@@ -681,9 +682,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         let mut intent = runtime.intent(self.run_id, agent_run_id, call);
         let available = deadline
             .saturating_duration_since(Instant::now())
-            .saturating_sub(
-                TOOL_PREPARATION_OVERHEAD + TOOL_CLEANUP_OVERHEAD + STORE_ACTION_OVERHEAD,
-            );
+            .saturating_sub(PREPARATION_OVERHEAD + TOOL_CLEANUP_OVERHEAD + STORE_ACTION_OVERHEAD);
         // Half for the Guard capacity wait (it ends at `expires_at_ms`), half for the run itself.
         let runtime_ms = intent
             .limits

@@ -23,6 +23,10 @@ mod profile;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::PREPARATION_OVERHEAD;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::PREPARATION_OVERHEAD;
 #[cfg(target_os = "macos")]
 pub(super) use macos::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 #[cfg(target_os = "macos")]
