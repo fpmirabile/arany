@@ -1,48 +1,88 @@
 # Design and errors
 
-Use Clean Code as a lens for intent and cohesion. The guidance below is this adaptation's interpretation, not a claim that the book prescribes Rust patterns.
+## Functions and boundaries
 
-## Names and boundaries
+Extract a function when its name explains a meaningful operation, isolates a tricky invariant or centralizes a decision that must change consistently. A single caller can justify a helper; similar-looking expressions can stay separate when they are independent decisions.
 
-Choose names that reveal the domain operation, relevant units, and side effects. Keep vocabulary consistent with the project. A boolean is natural for a predicate; a named enum or separate operation may clarify a mode argument whose meaning is invisible at the call site.
+Thresholds are prompts, and Clippy enforces two of them: `too_many_arguments` (fires above 7 parameters, warn by default) and pedantic `too_many_lines` (100). A function over either is a cohesive state machine or transition table, in which case say so in `#[expect(clippy::too_many_lines, reason = "one transition table")]`, or it is split. Seven parameters usually means a missing struct: group the ones that travel together.
 
-Extract a function when its name explains a meaningful operation, isolates a tricky invariant, or centralizes a decision that must change consistently. A single caller can justify a helper. Similar-looking expressions can also remain separate when they represent independent decisions. Line counts, parameter counts, and a fixed number of duplicated call sites are prompts to inspect, not extraction thresholds.
+Keep a cohesive flow together when splitting makes the reader chase state through helpers. Local mutation is often the clearest algorithm; effects at meaningful boundaries help tests, but do not wrap every operation in a trait or layer.
 
-Keep a cohesive flow together when splitting it makes the reader chase state through many helpers. A small interface that hides substantial implementation can be easier to maintain than many tiny public types. Place code together when it owns the same invariant or reason to change; use the repository's architecture to choose actual seams.
+## Control-flow idioms
 
-Local mutation is often the most direct expression of an algorithm. Keeping effects at meaningful boundaries can help reasoning and tests, but does not require a trait, wrapper, or separate layer around every operation.
+Prefer the form that puts the happy path at the left margin:
+
+- `let Some(x) = opt else { return Err(..) };` for a required value with an early exit; it replaces a `match` whose other arm only diverges.
+- `if let Some(a) = x && a.ready() && let Ok(b) = parse(a)` (edition 2024, Rust 1.88) replaces nested `if let` pyramids. Each `let` binds for the rest of the chain.
+- `matches!(state, State::Open | State::Draining)` for a boolean over patterns; `match` when each arm does work.
+- `Option`/`Result` combinators (`map`, `and_then`, `ok_or_else`, `unwrap_or_default`, `is_some_and`) for one or two steps; a `match` when the branches carry logic or need naming. `?` applies to `Option` inside a function returning `Option`.
+- Exhaustive `match` without a `_` arm on the crate's own enums, so adding a variant fails to compile at every site that must decide. Use `_` only for foreign `#[non_exhaustive]` types.
+- Iterate with `for` when the body mutates or branches; with iterator chains when it is a transformation ([ownership](ownership.md#copy-cow-and-iteration)).
 
 ## Concrete types, enums, and traits
 
-Start with the shape the problem actually has:
+Start with the shape the problem has and move one step only when the current one cannot express it:
 
 - **Concrete type:** one implementation with no current need for substitution.
-- **Enum:** a known set of alternatives; exhaustive matching helps keep cases visible.
-- **Generic input parameter (`T: Trait` or argument-position `impl Trait`):** callers supply a concrete implementation while code shares a behavior contract. Generating code for each concrete type can help optimization, with possible compile-time and code-size costs. Return-position `impl Trait` instead hides a concrete type chosen by the implementation.
-- **`dyn Trait`:** erase the concrete type to support runtime selection, mixed implementations, or a simpler interface that avoids spreading generics. Indirection may affect hot paths; its practical cost needs evidence. `&dyn Trait` borrows and needs no new heap allocation; `Box<dyn Trait>` owns.
+- **Enum:** a known set of alternatives; exhaustive matching keeps every case visible. A closed set of implementations (sites, record kinds, providers known at compile time) is an enum with a `match`, not a trait.
+- **Generic (`T: Trait`, argument-position `impl Trait`):** callers supply a concrete type and code shares a behavior contract; monomorphization helps optimization and costs compile time and code size. Return-position `impl Trait` hides a concrete type the implementation chooses; in edition 2024 it captures all in-scope lifetimes unless narrowed with `use<..>`.
+- **`dyn Trait`:** erase the type for runtime selection, mixed implementations or to stop generics spreading through a codebase. `&dyn` borrows, `Box<dyn>`/`Arc<dyn>` own. The indirection cost is real only on a measured hot path.
 
-A trait describes a meaningful capability or substitution boundary. An inheritance-style hierarchy, a trait for every struct, or generic parameters throughout a codebase do not follow automatically from separation of concerns. Both static and dynamic dispatch can support a clear design. Check dyn compatibility against the compiler and Rust Reference rather than a simplified list of forbidden method shapes.
+A trait describes a capability or a substitution boundary with at least two implementations, or one plus a test double at an intentional seam. A trait per struct, an inheritance-style hierarchy or generics everywhere do not follow from "separation of concerns". Dyn compatibility is the Reference's list: no generic methods, no `Self` outside the receiver, no `async fn`/`impl Trait` returns unless `where Self: Sized`, no associated consts. An `async fn` in a trait that is used as `dyn` needs `async-trait` or a boxed future ([async rules](verification-and-concurrency.md#async-rules)).
 
 ## Model useful guarantees
 
-Private fields with a validating constructor or a newtype can establish an invariant. An enum can replace combinations of flags that admit invalid states. Add this structure when it removes realistic misuse or repeated validation.
+Private fields with a validating constructor, or a newtype (`struct Port(u16)`, `struct SessionId(Uuid)`), establish an invariant once (C-NEWTYPE, C-VALIDATE, C-STRUCT-PRIVATE). An enum replaces flag combinations that admit invalid states (`struct { running: bool, finished: bool }` becomes `enum Status`). Add structure when it removes realistic misuse or repeated validation.
 
-Typestate represents lifecycle stages as distinct types so only appropriate operations are available. It fits a protocol whose legal sequence is known in the calling code. Runtime state machines often fit an enum and validated transitions better, especially when loading persisted state or processing external events. A state marker cannot prove that an external resource remains available. Keep external failure handling even when call order is checked by types.
+Typestate (lifecycle stages as distinct types) fits a protocol whose legal sequence is known in the calling code. A runtime state machine fits an enum and validated transitions better, especially when loading persisted state or processing external events. A state marker cannot prove an external resource is still there; keep that failure handling. Prefer each state carrying exactly its data over a marker beside contradictory `Option` fields.
 
-Prefer a representation carrying the data required by each state; a marker alongside contradictory optional fields still needs internal discipline. The complexity of generic state transitions should pay for a concrete guarantee, and typestate itself does not require unsafe code.
+A builder (C-BUILDER) is for a type with several optional parts; a struct literal with `..Default::default()` or two `with_` constructors covers most cases without one.
 
-## Preserve useful errors
+## Error mechanics
 
-Use `Option` for meaningful absence and `Result` for failure the caller needs to handle. `Result<Option<T>, E>` is useful when both absence and failure are distinct outcomes. Propagate with `?` when propagation is the intended behavior; use a match when recovery or classification matters. Discard an error or substitute a default only when that behavior is part of the contract.
+Use `Option` for meaningful absence, `Result` for failure the caller handles, `Result<Option<T>, E>` when both are distinct outcomes. Propagate with `?` when propagation is the behavior; `match` when the caller recovers or classifies.
 
-Choose typed errors where callers need stable distinctions or recovery. An application boundary concerned mainly with reporting may benefit from an erased error type with context. `thiserror` and `anyhow` are tools for those needs, not mandatory library/binary categories; use the project's existing approach and dependencies. Preserve underlying causes when useful, and expose domain distinctions without unnecessarily coupling a public API to implementation dependencies.
+A good error type (C-GOOD-ERR) implements `std::error::Error + Send + Sync + 'static`, so it can cross threads and be boxed. In this crate:
 
-Expected malformed input, unavailable resources, and network failures usually deserve explicit handling. A proven internal invariant can justify `expect` if project policy permits it; its message should explain why failure should be impossible. Assess the panic's impact on the surrounding service or process. Substituting `unreachable!` for `unwrap` does not improve the proof, and a harmless-looking default can hide a real defect.
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error("state storage is full")]
+    StorageFull,
+    #[error("session {0} has an active operation")]
+    SessionBusy(SessionId),
+    #[error("could not open journal at {path}")]
+    Open { path: PathBuf, #[source] source: std::io::Error },
+}
+```
 
-Add context where it contributes the failed operation or domain meaning, and report at the layer responsible for presentation. Avoid logging the same propagated error at every layer. Error strings and debug output need the same attention to sensitive data and untrusted content as any other output.
+- **Variants classify, prose does not.** A caller matches `StoreError::StorageFull`; nobody matches a string. A variant carries the data needed to act or report (`path`, id, limit), not a pre-rendered message.
+- **`Display` is one lowercase sentence without trailing punctuation and without the source.** `source()` returns the cause; a report walks the chain. Rendering the cause in `Display` *and* returning it from `source()` prints it twice.
+- **`#[from]` only when the mapping is one-to-one and needs no context.** `io::Error` into a variant with a `path` needs `.map_err(|source| StoreError::Open { path, source })?`, not `#[from]`. `#[error(transparent)]` wraps a cause without adding a layer of text.
+- **Attach context once**, at the layer that knows the operation, with `map_err` or a typed variant. Report at the presentation boundary. Logging and returning the same error at each layer prints it N times.
+- **Never `e.to_string()` before the presentation boundary.** `map_err(|e| e.to_string())` or `Result<T, String>` loses the variant and the chain; the terminal and the JSONL writer render, nothing below them does.
+- **`Box<dyn Error + Send + Sync>` or `anyhow` only in a binary's `main`/top-level reporting**, where no caller matches. A library-style module keeps a typed enum. Arany uses `thiserror` and no `anyhow`; keep it that way unless the owner adds it.
+- **Keep error values small.** Clippy's `result_large_err` fires above 128 bytes; box a large payload rather than widening every `Result`.
+- Error text is output: it must not leak secrets, hostile control bytes or untrusted content unescaped.
 
-## Comments and public documentation
+## Integer and float casts
 
-Prefer clear names and types for what the code does. Preserve concise comments explaining non-obvious invariants, ordering constraints, or tradeoffs. Rustdoc describes how callers use the API, including meaningful errors, panics, side effects, and safety obligations. Document why when that helps callers use the API correctly. Keep architecture rationale in the project's design documents; teaching a language concept does not by itself warrant a source comment.
+`as` never fails and therefore never tells you about a problem: integer narrowing truncates, same-width sign changes reinterpret bits, float-to-int saturates and maps NaN to 0. Pedantic Clippy names each case (`cast_possible_truncation`, `cast_sign_loss`, `cast_possible_wrap`, `cast_precision_loss`, `cast_lossless`).
 
-Sources: [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/checklist.html), [trait objects](https://doc.rust-lang.org/book/ch18-02-trait-objects.html), [dyn compatibility](https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility), [panic or Result](https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html), and [rustdoc examples](https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html).
+| Conversion | Write |
+| --- | --- |
+| Widening or lossless (`u8` → `u32`, `u32` → `u64`, `u32` → `f64`) | `u64::from(n)` or `.into()`; `as` is acceptable but `From` documents losslessness |
+| Narrowing or sign change (`u64` → `u32`, `i64` → `usize`, `usize` → `u32`) | `u32::try_from(n)?` or `.try_into()`; on a declared bound, `u32::try_from(n).unwrap_or(u32::MAX)` with the saturation named |
+| Float to integer | `as` only when saturation and NaN → 0 are the intended policy; otherwise check range first |
+| Index arithmetic | stay in `usize`; convert the external value once at the boundary |
+| Enum discriminant | `as` is fine for a fieldless enum; `TryFrom<u8>` for the inverse |
+
+Checked, wrapping and saturating arithmetic (`checked_add`, `saturating_sub`) are the same decision for operations: a bound you can name picks the method.
+
+## Panics and proofs
+
+Expected malformed input, unavailable resources, network and storage failures return `Result`. A panic is for a violated internal invariant, and the message is the proof: `expect("ids were validated by admit()")`. `unwrap()` has no proof, so it belongs in tests only. `unreachable!()` with no argument is `unwrap()` in a hat; give it the reason. A `std::sync::Mutex` poisoned by a panic elsewhere is handled explicitly: `lock().unwrap_or_else(PoisonError::into_inner)` when the data stays valid, `expect` when poisoning is itself a bug.
+
+Assess the panic's blast radius: in a Tokio task it ends the task and surfaces as `JoinError::is_panic()`; in the Guard helper it ends the process. A harmless-looking default (`unwrap_or_default()`) can hide a real defect; substitute a default only when that is the contract.
+
+Sources: [API Guidelines checklist](https://rust-lang.github.io/api-guidelines/checklist.html), [Reference dyn compatibility](https://doc.rust-lang.org/reference/items/traits.html#dyn-compatibility), [Reference numeric casts](https://doc.rust-lang.org/reference/expressions/operator-expr.html#type-cast-expressions), [`std::error::Error`](https://doc.rust-lang.org/std/error/trait.Error.html), [thiserror](https://docs.rs/thiserror/latest/thiserror/), [Book ch. 9 panic or Result](https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html), [Rust 1.88 let chains](https://blog.rust-lang.org/2025/06/26/Rust-1.88.0/), [Rust 2024 edition guide](https://doc.rust-lang.org/edition-guide/rust-2024/index.html), [Effective Rust items 1–7, 12, 18](https://www.lurklurk.org/effective-rust/).
