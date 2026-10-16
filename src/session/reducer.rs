@@ -1912,7 +1912,7 @@ mod goal_replay_tests {
         assert!(accepts(full.clone()));
         full.push(note(
             goal_id,
-            &"f".repeat(crate::session::MAX_USER_MESSAGE_BYTES),
+            &"f".repeat(crate::session::MAX_STEERING_NOTE_BYTES),
         ));
         assert!(!accepts(full), "a Run's notes stay within the byte cap");
 
@@ -2018,8 +2018,8 @@ mod goal_replay_tests {
             text: text.into(),
         };
         // One byte of text plus its label is the densest packing the bound allows.
-        let most =
-            crate::session::MAX_USER_MESSAGE_BYTES / (1 + crate::session::MAX_STEERING_LABEL_BYTES);
+        let most = crate::session::MAX_STEERING_NOTE_BYTES
+            / (1 + crate::session::MAX_STEERING_LABEL_BYTES);
         events.extend((0..most).map(|_| note("n")));
         let view = SessionView::replay_open(session, &session_with(session, events.clone()))
             .expect("the maximum tiny notes replay")

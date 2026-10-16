@@ -4,7 +4,7 @@ use crate::provider::{CompactionItem, HistoryTurn, UnansweredStatus};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-pub(crate) const MAX_COMPACTION_INPUT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_COMPACTION_INPUT_BYTES: usize = 368 * 1024;
 pub(crate) const MAX_COMPACTION_TURNS: usize = 256;
 pub(crate) const MAX_COMPACTION_OUTPUT_TOKENS: u32 = 1024;
 pub(crate) const MAX_COMPACTION_SUMMARY_BYTES: usize = 8 * 1024;
