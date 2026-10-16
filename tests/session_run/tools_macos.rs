@@ -1962,3 +1962,290 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         }
     }
 }
+
+const CLT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
+
+fn host_git(repository: &Path, home: &Path, args: &[&str]) {
+    let status = std::process::Command::new(CLT_GIT)
+        .args(args)
+        .current_dir(repository)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Arany Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Arany Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+        .env("GIT_AUTHOR_DATE", "1700000000 +0000")
+        .env("GIT_COMMITTER_DATE", "1700000000 +0000")
+        .status()
+        .expect("pinned Command Line Tools git");
+    assert!(status.success(), "git {args:?}");
+}
+
+fn tree_snapshot(root: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        entries.sort();
+        for entry in entries {
+            let metadata = std::fs::symlink_metadata(&entry).unwrap();
+            let relative = entry.strip_prefix(root).unwrap().to_owned();
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::read_link(&entry).unwrap();
+                out.push((relative, target.to_string_lossy().into_owned().into_bytes()));
+            } else if metadata.is_dir() {
+                out.push((relative, Vec::new()));
+                walk(root, &entry, out);
+            } else {
+                out.push((relative, std::fs::read(&entry).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out
+}
+
+struct GitJourney {
+    requests: Arc<Mutex<Vec<ProviderRequest>>>,
+}
+
+impl Provider for GitJourney {
+    fn profile_name(&self) -> &str {
+        "scripted"
+    }
+    fn model_name(&self) -> &str {
+        "tool-model"
+    }
+    fn max_concurrent_calls(&self) -> u8 {
+        1
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let mut requests = self.requests.lock().unwrap();
+        let step = requests.len();
+        requests.push(request);
+        let outcome = match step {
+            0 => ProviderOutcome::Tool {
+                call: ToolCall::GitStatus { path: ".".into() },
+                plan_contract: None,
+            },
+            1 => ProviderOutcome::Tool {
+                call: ToolCall::GitDiff {
+                    path: "src".into(),
+                    base: None,
+                    head: None,
+                    staged: false,
+                },
+                plan_contract: None,
+            },
+            2 => ProviderOutcome::Tool {
+                call: ToolCall::GitLog {
+                    path: ".".into(),
+                    revision: None,
+                    max_count: 5,
+                },
+                plan_contract: None,
+            },
+            3 => ProviderOutcome::Tool {
+                call: ToolCall::GitLog {
+                    path: ".".into(),
+                    revision: Some("missing-branch".into()),
+                    max_count: 1,
+                },
+                plan_contract: None,
+            },
+            4 => ProviderOutcome::Finish(Finish {
+                summary: "Inspected".into(),
+                result: "Git state observed".into(),
+            }),
+            _ => return Err(ProviderError::InvalidOutcome),
+        };
+        Ok(ProviderResponse {
+            outcome,
+            response_id: None,
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(
+        &self,
+        _request: CompactionRequest,
+    ) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+#[test]
+#[cfg_attr(not(arany_ci), ignore = "native macOS Seatbelt typed Git reads")]
+fn guarded_native_git_reads_survive_closed_replay() {
+    native_journey("tools::native_git_journey_helper");
+}
+
+#[tokio::test]
+#[ignore = "isolated helper owned by native Git journey"]
+async fn native_git_journey_helper() {
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    trace_case(root, "git");
+    assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
+    let home = root.join("home");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    host_git(&workspace, &home, &["init", "-q", "-b", "main"]);
+    std::fs::write(workspace.join("src/a.txt"), "alpha\n").unwrap();
+    host_git(&workspace, &home, &["add", "-A"]);
+    host_git(&workspace, &home, &["commit", "-q", "-m", "first commit"]);
+    std::fs::write(workspace.join("src/a.txt"), "bravo\n").unwrap();
+    host_git(&workspace, &home, &["commit", "-q", "-am", "second commit"]);
+    std::fs::write(workspace.join("src/a.txt"), "delta\n").unwrap();
+    std::fs::write(workspace.join("src/new.txt"), "new\n").unwrap();
+    {
+        use std::io::Write;
+        let mut config = std::fs::OpenOptions::new()
+            .append(true)
+            .open(workspace.join(".git/config"))
+            .unwrap();
+        config
+            .write_all(
+                b"[core]\n\tfsmonitor = /usr/bin/false\n[diff]\n\texternal = /usr/bin/false\n[filter \"evil\"]\n\tclean = /usr/bin/false\n\trequired = true\n",
+            )
+            .unwrap();
+    }
+    std::fs::write(workspace.join(".gitattributes"), "* filter=evil\n").unwrap();
+    let before = tree_snapshot(&workspace.join(".git"));
+
+    let state_path = root.join("state");
+    let state = StateRoot::admit(&state_path).unwrap();
+    let git = std::fs::canonicalize(CLT_GIT).unwrap();
+    let config = json!({
+        "version": 1,
+        "workspace_paths": ["."],
+        "write": false,
+        "commands": [],
+        "skills": [],
+        "mcp": [],
+        "git": {
+            "name": "git",
+            "executable": git,
+            "sha256": hash(&std::fs::read(&git).unwrap()),
+            "interpreter": false,
+            "inputs": []
+        }
+    });
+    private_file(
+        &state_path.join("tools.json"),
+        &serde_json::to_vec(&config).unwrap(),
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = Engine::open(
+        state,
+        GitJourney {
+            requests: requests.clone(),
+        },
+    )
+    .unwrap();
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .unwrap();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(120),
+        engine.run(RunRequest {
+            session_id: None,
+            title: Some("Git".into()),
+            objective: "Inspect Git state".into(),
+            images: Vec::new(),
+            workspace: workspace.clone(),
+            include_paths: Vec::new(),
+            policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::default(),
+        }),
+    )
+    .await
+    .expect("Git journey deadline")
+    .unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(
+        outcome.run.status,
+        RunStatus::Finished,
+        "{:?}",
+        outcome.run.tools
+    );
+    assert_eq!(outcome.run.tools.len(), 4);
+
+    let output = |index: usize| -> serde_json::Value {
+        let observation = outcome.run.tools[index].observation.as_ref().unwrap();
+        serde_json::from_str(&observation.output).unwrap()
+    };
+    for index in 0..3 {
+        let observation = outcome.run.tools[index].observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert!(observation.guard.is_some());
+        assert!(
+            output(index).get("failed").is_none(),
+            "{}",
+            observation.output
+        );
+    }
+    let status = output(0);
+    let entries = status["entries"].as_array().unwrap();
+    assert!(entries.contains(&json!({"path": "src/a.txt", "state": ".M"})));
+    assert!(entries.contains(&json!({"path": "src/new.txt", "state": "??"})));
+    let diff = output(1);
+    assert_eq!(
+        diff["files"],
+        json!([{"path": "src/a.txt", "added": 1, "deleted": 1}])
+    );
+    let patch = diff["patch"].as_str().unwrap();
+    assert!(patch.contains("-bravo") && patch.contains("+delta"));
+    let log = output(2);
+    let subjects: Vec<&str> = log["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|commit| commit["subject"].as_str().unwrap())
+        .collect();
+    assert_eq!(subjects, ["second commit", "first commit"]);
+    let failed = outcome.run.tools[3].observation.as_ref().unwrap();
+    assert_eq!(failed.disposition, ToolDisposition::Failed);
+    assert!(failed.guard.is_some());
+
+    let requests = requests.lock().unwrap().clone();
+    let catalog: serde_json::Value =
+        serde_json::from_str(&requests[0].tools.as_ref().unwrap().catalog).unwrap();
+    assert_eq!(
+        catalog["git"]["operations"],
+        json!(["git_status", "git_diff", "git_log"])
+    );
+    assert_eq!(tree_snapshot(&workspace.join(".git")), before);
+
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    let replay = SessionView::replay(outcome.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs.last().unwrap(), &outcome.run);
+    store.close().await.unwrap();
+    let is_git = |call: &ToolCall| {
+        matches!(
+            call,
+            ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. }
+        )
+    };
+    let started = events
+        .iter()
+        .filter(|event| matches!(&event.event, arany::Event::ToolStarted { intent, .. } if is_git(&intent.call)))
+        .count();
+    let finished = events
+        .iter()
+        .filter(|event| matches!(&event.event, arany::Event::ToolFinished { observation, .. } if is_git(&observation.intent.call)))
+        .count();
+    assert_eq!((started, finished), (4, 4));
+}
