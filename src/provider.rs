@@ -10,8 +10,10 @@ mod custom;
 mod effort;
 mod image;
 #[cfg(test)]
+pub(crate) use image::MAX_IMAGE_METADATA_BYTES;
+#[cfg(test)]
 pub(crate) use image::test_image;
-pub(crate) use image::{MAX_IMAGE_METADATA_BYTES, deserialize_images, valid_image_collection};
+pub(crate) use image::{deserialize_images, valid_image_collection};
 mod native_check;
 mod openai;
 mod streaming;
@@ -205,6 +207,14 @@ pub(crate) fn compaction_input(request: &CompactionRequest) -> Value {
     let input = json!({"previous_derived_summary": request.previous_summary, "items": items});
     input
 }
+
+/// The request body ceiling each wire adapter enforces before sending (`encode_request`).
+pub(crate) const MAX_PROVIDER_REQUEST_BYTES: usize = 512 * 1024;
+/// Both adapters send the compaction input as one JSON string, so each quote and backslash of
+/// the serialized input is escaped again: at most two request bytes per input byte.
+pub(crate) const COMPACTION_INPUT_EXPANSION: usize = 2;
+/// Bytes of a compaction request outside its input string: instructions, schema and fixed fields.
+pub(crate) const COMPACTION_REQUEST_ENVELOPE_BYTES: usize = 8 * 1024;
 
 pub(crate) fn compaction_input_bytes(
     request: &CompactionRequest,
@@ -1152,5 +1162,41 @@ mod tests {
         assert!(request.validate_scope().is_ok());
         assert!(!run_instructions("base", &request).contains(STEERING_INSTRUCTIONS));
         assert!(run_input(&request).get("steering_notes").is_none());
+    }
+}
+
+#[cfg(test)]
+mod compaction_envelope_tests {
+    use super::*;
+
+    #[test]
+    fn compaction_envelope_fits_its_reserve_in_both_adapter_shapes() {
+        let openai = json!({
+            "model": "gpt-5.4",
+            "instructions": COMPACTION_INSTRUCTIONS,
+            "input": "",
+            "max_output_tokens": crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
+            "store": false,
+            "truncation": "disabled",
+            "tools": [],
+            "tool_choice": "none",
+            "text": {"format": {"type": "json_schema", "name": "arany_compaction", "strict": true, "schema": summary_schema()}},
+            "reasoning": {"effort": "xhigh"},
+        });
+        let anthropic = json!({
+            "model": "claude-opus-4-5",
+            "max_tokens": crate::session::MAX_COMPACTION_OUTPUT_TOKENS,
+            "system": COMPACTION_INSTRUCTIONS,
+            "messages": [{"role": "user", "content": ""}],
+            "output_config": {"format": {"type": "json_schema", "schema": summary_schema()}, "effort": "xhigh"},
+            "stream": false,
+        });
+        for body in [openai, anthropic] {
+            let bytes = serde_json::to_vec(&body).expect("envelope JSON").len();
+            assert!(
+                bytes <= COMPACTION_REQUEST_ENVELOPE_BYTES,
+                "envelope {bytes} bytes"
+            );
+        }
     }
 }
