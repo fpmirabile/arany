@@ -2891,7 +2891,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         )
         .unwrap();
     }
-    // Typed Git cannot run arbitrary probes; plain-Git controls prove these config attacks work.
+    // These controls prove config neutralization; the native Linux launch probe owns mount isolation.
     let plain_git = |args: &[&str]| {
         use crate::process::BoundedOutput;
         let output = std::process::Command::new(GIT)
@@ -3008,7 +3008,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     assert!(entries.contains(&json!({"path": "src/a.txt", "state": ".M"})));
     assert!(
         entries.contains(&json!({"path": "src/new.txt", "state": "??"})),
-        "guarded Git must not apply the synthetic host gitconfig via HOME or repository include"
+        "guarded Git must neutralize host config settings from HOME and repository includes"
     );
     let diff = output(1);
     assert_eq!(

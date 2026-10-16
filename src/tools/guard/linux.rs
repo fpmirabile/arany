@@ -1273,6 +1273,144 @@ mod tests {
         }
     }
 
+    #[test]
+    #[cfg_attr(not(arany_ci), ignore = "native Linux Git namespace isolation")]
+    fn native_git_launch_keeps_workspace_read_only_and_host_home_absent() {
+        use crate::test_process::BoundedOutput;
+
+        let _native_gate = crate::test_process::NATIVE_GATE.lock().unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let home = fixture.path().join("home");
+        let seed = fixture.path().join("seed");
+        for directory in [&workspace, &home, &seed] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let host_config = home.join(".gitconfig");
+        let config_bytes = b"[user]\n\tname = Synthetic Host\n";
+        std::fs::write(&host_config, config_bytes).unwrap();
+        assert_eq!(std::fs::read(&host_config).unwrap(), config_bytes);
+        let git = crate::tools::git::discover().expect("pinned Git");
+        let initialized = std::process::Command::new(&git.executable)
+            .args(["init", "--quiet", "--initial-branch=main"])
+            .current_dir(&workspace)
+            .env_clear()
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .bounded_output_for(Duration::from_secs(20), 16 * 1024)
+            .unwrap();
+        assert!(initialized.status.success(), "pinned Git baseline");
+        for path in [workspace.join("a.txt"), workspace.join(".git/write-probe")] {
+            std::fs::write(&path, b"allowed\n").unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"allowed\n");
+        }
+
+        let mut command = Command::new(BWRAP_BOOTSTRAP[0]);
+        command.args(&BWRAP_BOOTSTRAP[1..]);
+        profile_arguments(
+            &mut command,
+            "/usr/bin:/bin",
+            &seed,
+            &[],
+            Some((&workspace, false)),
+            &ToolLimits::default(),
+            &std::env::current_exe().unwrap(),
+        );
+        command
+            .args(["--setenv", "ARANY_TEST_GIT_HOST_CONFIG"])
+            .arg(&host_config)
+            .args(["--setenv", "ARANY_TEST_GIT_PIN"])
+            .arg(serde_json::to_string(&git).unwrap())
+            .args(["--setenv", "ARANY_TEST_GIT_PARENT_NAMESPACES"])
+            .arg(serde_json::to_string(&profile::Namespaces::read().unwrap()).unwrap())
+            .args([
+                "--chdir",
+                "/",
+                "--",
+                "/arany",
+                "--exact",
+                "tools::guard::linux::tests::native_git_launch_probe",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear();
+        let output = command
+            .into_std()
+            .bounded_output_for(Duration::from_secs(40), 32 * 1024)
+            .expect("native Git namespace probe");
+        assert!(
+            output.status.success(),
+            "Git namespace probe: {:?}; stdout={:?}; stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        crate::test_process::assert_single_test_completed(&output.stdout, "Git namespace probe");
+        assert!(output.stderr.is_empty());
+        for path in [workspace.join("a.txt"), workspace.join(".git/write-probe")] {
+            assert_eq!(std::fs::read(path).unwrap(), b"allowed\n");
+        }
+        assert_eq!(std::fs::read(host_config).unwrap(), config_bytes);
+    }
+
+    #[test]
+    #[ignore = "isolated Linux Git namespace probe"]
+    fn native_git_launch_probe() {
+        let host_config =
+            std::env::var_os("ARANY_TEST_GIT_HOST_CONFIG").expect("private synthetic host config");
+        let git = serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PIN").unwrap()).unwrap();
+        let parent =
+            serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PARENT_NAMESPACES").unwrap())
+                .unwrap();
+        assert!(profile::Namespaces::read().unwrap().isolated_from(&parent));
+        harden().expect("production Guard hardening");
+        for path in ["/workspace/a.txt", "/workspace/.git/write-probe"] {
+            assert_eq!(std::fs::read(path).unwrap(), b"allowed\n");
+            assert_eq!(
+                std::fs::write(path, b"forbidden")
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(nix::libc::EROFS),
+                "Git Workspace bind must be read-only: {path}"
+            );
+        }
+        assert_eq!(
+            std::fs::File::open(host_config).unwrap_err().raw_os_error(),
+            Some(nix::libc::ENOENT),
+            "synthetic host HOME/.gitconfig must be absent from the Git namespace"
+        );
+        let view = Path::new("/scratch").join(crate::tools::git::VIEW);
+        std::fs::create_dir(&view).unwrap();
+        std::fs::write(view.join("write-probe"), b"allowed\n").unwrap();
+        assert_eq!(
+            std::fs::read(view.join("write-probe")).unwrap(),
+            b"allowed\n"
+        );
+        std::fs::remove_dir_all(view).unwrap();
+        let output = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(crate::tools::git::execute(
+                Path::new("/workspace"),
+                Path::new("/scratch"),
+                &git,
+                &ToolCall::GitStatus { path: ".".into() },
+                16 * 1024,
+                Duration::from_secs(20),
+            ))
+            .unwrap();
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(output.get("failed").is_none(), "{output}");
+        assert!(
+            output["entries"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({"path": "a.txt", "state": "??"}))
+        );
+    }
+
     fn mountinfo_with_runtime(optional: &str, descendants: &[&str]) -> Vec<u8> {
         let mut bytes = format!(
             "1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /cache /opt/toolchains/rust ro{optional} - ext4 /dev/root ro\n"
