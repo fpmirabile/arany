@@ -37,15 +37,15 @@
 
 | Area | Owner for behavior | Owner for implementation shape |
 |---|---|---|
-| Journal, Events, reducer, replay | [Session](../../agents/session.md), [Store](../../agents/store.md) | `src/session/`, `src/store/` |
+| Journal, Events, reducer, replay | [Session spec](../../docs/specs/session.md), [Execution spec](../../docs/specs/execution.md) | `src/session/`, `src/store/` |
 | Goal lifecycle, budgets, recovery | [Goal spec](../../docs/specs/goals.md) | `src/engine/run_loop.rs`, `src/session/reducer/goal.rs` |
-| Tools, grants, Guard, MCP, Skills | [Tools spec](../../docs/specs/tools.md), [Tools](../../agents/tools.md), [Guard](../../agents/guard.md) | `src/tools/` |
-| Provider seam and adapters | [Provider](../../agents/provider.md), [Provider streaming](../../agents/provider-streaming.md) | `src/provider/` |
-| Engine lifetime and Runs | [Engine](../../agents/engine.md) | `src/engine.rs`, `src/engine/` |
-| Telemetry and diagnostics | [Telemetry](../../agents/telemetry.md), [Diagnostics](../../agents/diagnostics.md) | `src/telemetry.rs`, `src/diagnostics.rs` |
-| Terminal and CLI | [Terminal](../../agents/terminal.md), [CLI](../../agents/cli.md) | `src/terminal.rs`, `src/cli/` |
-| Credentials and saved accounts | [Credential spec](../../docs/specs/credentials.md), [Credentials](../../agents/credentials.md) | `src/cli/credentials/`, `src/cli/chatgpt/` |
-| Private directories | [Private filesystem](../../agents/private-fs.md) | `src/private_fs.rs` |
+| Tools, grants, Guard, MCP, Skills | [Tools spec](../../docs/specs/tools.md) | `src/tools/` |
+| Provider seam and adapters | [Provider spec](../../docs/specs/provider.md) | `src/provider/` |
+| Engine lifetime and Runs | [Execution spec](../../docs/specs/execution.md) | `src/engine.rs`, `src/engine/` |
+| Telemetry and diagnostics | [Telemetry spec](../../docs/specs/telemetry.md), [Diagnostics spec](../../docs/specs/diagnostics.md) | `src/telemetry.rs`, `src/diagnostics.rs` |
+| Terminal and CLI | [Terminal spec](../../docs/specs/terminal.md) | `src/terminal.rs`, `src/cli/` |
+| Credentials and saved accounts | [Credential spec](../../docs/specs/credentials.md) | `src/cli/credentials/`, `src/cli/chatgpt/` |
+| Private directories | [Credential spec (private directories)](../../docs/specs/credentials.md) | `src/private_fs.rs` |
 | System shape | [System overview](../../docs/architecture/system-overview.md) | n/a |
 
 **Verified facts the PRs depend on.** Every line reference was read on `8857765`.
@@ -73,7 +73,7 @@ This plan changes behavior in three places and otherwise preserves contracts. Ea
 - **Owning specs and proposed changes:**
   - [Tools spec](../../docs/specs/tools.md): PR7 adds in-process `List`, `Read` and `Search`, raises the Read page limit and `MAX_TOOL_RESULT_BYTES` to 64 KiB with a derived `ToolFinished` bound, and changes the `read.limit` schema text (this invalidates the cached prefix once, by design). PR13 keeps Guard behavior in this spec.
   - [Goal spec](../../docs/specs/goals.md) lifecycle, budgets and recovery: PR9 changes Event count and active-time accounting granularity. This is the one PR where spec work is unavoidable.
-  - [Telemetry](../../agents/telemetry.md): PR11 moves span start and end timestamps to commit time. The architecture document already promises "a projection of committed safe facts".
+  - [Telemetry spec](../../docs/specs/telemetry.md): PR11 moves span start and end timestamps to commit time. The architecture document already promises "a projection of committed safe facts".
   - [System overview](../../docs/architecture/system-overview.md) §2 and the [AGENTS.md](../../AGENTS.md) routing table: PR13 corrects the long-lived Engine, the Journal tap, the two-crate shape and the children's Tool allowance (F12).
 - **Journal format.** Per-kind payload versions (PR5) replace the global constant. PR7 bumps `ToolFinished`; PR9 bumps `RunStarted`, `RunFinished` and `GoalFinished` and deletes two kinds. Unknown or stale versions are rejected as today, with no compatibility readers and no migrations (pre-beta rule in [AGENTS.md](../../AGENTS.md#global-rules)).
 - **Successful path and meaningful rejection, failure and recovery scenarios:**

@@ -158,6 +158,7 @@ const PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/Sys
 (allow file-read* (literal \"/dev/random\") (literal \"/dev/urandom\"))
 ";
 
+// The loader opens /, so this grants root metadata only, nothing beneath it.
 const COMMAND_PROFILE: &str = "(allow file-read-metadata (literal \"/\") (literal \"/System\") (literal \"/usr\") (literal \"/dev\"))
 (allow file-read-metadata (literal \"/System/Cryptexes\") (literal \"/System/Cryptexes/OS\") (literal \"/var\") (literal \"/etc\") (literal \"/private/var\") (literal \"/private/var/select\") (literal \"/private/var/select/sh\"))
 (allow file-read* file-map-executable (subpath \"/System/Library\") (subpath \"/usr/lib\"))

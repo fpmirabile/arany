@@ -1,5 +1,3 @@
-//! System prompt text, loaded byte-for-byte from `prompts/` files.
-
 pub(super) const PRIMARY_INSTRUCTIONS: &str = include_str!("prompts/primary.txt");
 pub(super) const READ_ONLY_INSTRUCTIONS: &str = include_str!("prompts/read_only.txt");
 pub(super) const RESEARCH_INSTRUCTIONS: &str = include_str!("prompts/researcher.txt");

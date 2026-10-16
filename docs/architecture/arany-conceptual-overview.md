@@ -27,12 +27,12 @@ separate enforcement boundary; telemetry cannot determine durable state.
 |---|---|
 | Physical modules, data model and dependency direction | [System overview](./system-overview.md) |
 | Run coordination, delegation and budgets | [Execution spec](../specs/execution.md) |
-| Session lifecycle, resume, fork and context | [Session rules](../../agents/session.md) |
+| Session lifecycle, resume, fork and context | [Session spec](../specs/session.md) |
 | Terminal interaction, accessibility and machine output | [Terminal spec](../specs/terminal.md) |
 | Account scope, storage and recovery | [Credential spec](../specs/credentials.md) |
-| Provider admission and billing route | [Provider rules](../../agents/provider.md), [ChatGPT rules](../../agents/chatgpt.md) |
+| Provider admission and billing route | [Provider spec](../specs/provider.md), [ChatGPT spec](../specs/chatgpt.md) |
 | Files, commands, runtime Skills and MCP | [Tool spec](../specs/tools.md) |
-| Trace export | [Telemetry rules](../../agents/telemetry.md) |
+| Trace export | [Telemetry spec](../specs/telemetry.md) |
 | Reasons and alternatives | [Decision register](../research/next-step-decision-register.md), [research index](../research/README.md) |
 | Missing functionality and platform evidence | [Next steps](../../NEXT_STEPS.md) |
 

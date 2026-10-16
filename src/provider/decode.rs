@@ -1,5 +1,3 @@
-//! Outcome decoding shared by every adapter: Finish, Delegate and native Tool requests.
-
 use super::{Delegate, Finish, ProviderError, ProviderOutcome, ToolUseId};
 use crate::tools::types::MAX_TOOL_ARGUMENT_BYTES;
 use crate::tools::{ToolCall, ToolRequest};

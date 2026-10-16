@@ -436,6 +436,7 @@ struct StopSignals {
 #[cfg(unix)]
 impl StopSignals {
     fn install() -> std::io::Result<Self> {
+        // Tokio never restores default signal dispositions, so a SIGINT after the Run is absorbed.
         use tokio::signal::unix::{SignalKind, signal};
         Ok(Self {
             interrupt: signal(SignalKind::interrupt())?,

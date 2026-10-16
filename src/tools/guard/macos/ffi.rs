@@ -1,5 +1,3 @@
-//! Safe wrappers over the reviewed Darwin, Seatbelt and Security ABIs used by the native Guard.
-
 use crate::tools::ToolError;
 use nix::libc;
 use std::ffi::CStr;

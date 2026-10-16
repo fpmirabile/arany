@@ -125,6 +125,7 @@ fn helper_command(operation: &str, slot: &str) -> Result<(Command, usize), Crede
         return Err(CredentialError::InvalidAccount);
     }
     #[cfg(all(not(test), target_os = "linux"))]
+    // Spawn /proc/self/exe: a rebuilt binary's deleted pathname could resolve to another image.
     let executable = std::path::Path::new("/proc/self/exe");
     #[cfg(all(not(test), not(target_os = "linux")))]
     let executable = std::env::current_exe().map_err(|_| CredentialError::Unavailable)?;

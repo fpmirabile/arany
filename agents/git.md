@@ -4,7 +4,7 @@ Load before running a git command or proposing a git step in a plan.
 
 ## Authorization
 
-- The user's standing instruction authorizes inspecting repository state and creating or switching to a dedicated branch for every new feature. Do this before editing, without asking again.
+- The user's standing instruction authorizes inspecting repository state and creating or switching to a dedicated branch for every new feature, before editing and without asking again.
 - Other git operations require an explicit user request or an approved plan containing the step; that authorization does not carry into later plans or tasks.
 
 ## Forbidden
@@ -45,16 +45,17 @@ Load before running a git command or proposing a git step in a plan.
 ## Review before a PR
 
 - Read the complete diff after the last edit; remove debug output, dead code, commented-out blocks and untracked TODOs, and confirm every changed line belongs to the approved task.
-- Run the targeted [repository checks](../docs/development.md#verification) after the final edit; [testing rules](./testing.md) own evidence selection and reporting.
+- Run the [repository checks](../docs/development.md#verification) after the final edit; [testing rules](./testing.md) own evidence selection and reporting.
 
 ## Pull requests
 
 - When publishing is authorized under the rules above, open a PR once the branch has a reviewable unit; do not merge it unless the user asks.
 - Use a short, imperative, scoped title without a trailing period.
-- Agents must read and use the [PR template](../.github/pull_request_template.md) whenever creating a PR, including through the CLI or API; the publishing tool does not apply it. The body contains `Summary`, `Verification` and `Notes`; Notes is required when a security-pass trigger in [security rules](./security.md) fires (name the trust boundary touched, the attack or failure prevented, and the evidence or remaining gap; passing tests alone are not a safety claim) and is otherwise omitted. Verification names the OS for native evidence.
+- Use the [PR template](../.github/pull_request_template.md) for every PR, including CLI or API PRs; the publishing tool does not apply it. `Notes` is required when a [security-pass trigger](./security.md#security-pass-triggers) fires; passing tests are not a safety claim.
 - For issues created through the CLI or API, use the [bug report](../.github/ISSUE_TEMPLATE/bug_report.md) or [improvement/task](../.github/ISSUE_TEMPLATE/improvement.md) template.
 - Report skipped or blocked checks; do not claim checks that were not run.
-- After pushing, watch the PR's CI without waiting indefinitely and fix a red result before handoff; if the failure is demonstrably unrelated or infrastructural, say so with the run link and ask the user. If GitHub retargets a stacked PR after its base merges, push or re-run the workflow so CI covers the new merge.
+- After pushing, watch the PR's CI without waiting indefinitely.
+- Stacked PRs are fine: base the branch on its parent, open the PR against that parent, and when GitHub retargets it after the parent merges, push or re-run the workflow so CI covers the retargeted merge.
 
 ## Rollback
 

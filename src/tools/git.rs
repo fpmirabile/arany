@@ -1,4 +1,3 @@
-//! Typed read-only Git operations, run by the Guard helper on a private repository view.
 use super::ToolError;
 use super::config::Program;
 use super::types::{FORBIDDEN_NAMES, MAX_SNAPSHOT_BYTES, ToolCall, forbidden, hex_digest};

@@ -69,7 +69,7 @@ The historical parent-deadline miss has no established cause and is not a demons
 
 ## Application to Arany
 
-Keep the existing [supervised credential boundary](../../agents/credentials.md): a bounded same-binary helper with kill/reap on deadline is stronger lifecycle evidence than a promise race or an in-process synchronous keyring call. Do not replace it with the latter patterns or increase its timeout as a substitute for diagnosis.
+Keep the existing [supervised credential boundary](../../src/cli/credentials/keyring_helper.rs): a bounded same-binary helper with kill/reap on deadline is stronger lifecycle evidence than a promise race or an in-process synchronous keyring call. Do not replace it with the latter patterns or increase its timeout as a substitute for diagnosis.
 
 The separate native-store release gate requires a fresh private bus, isolated synthetic store and independent synthetic client. Record only operation-stage metadata: service activation, session establishment, default alias, collection count/locked state, creation versus unlock prompt, and prompt completion. Compare Arany's helper with an independent client on the same isolated service before attributing failure to either side. The deliberately silent authentication peer cannot prove those later native stages. Never inspect the user's real wallet or credential payloads.
 

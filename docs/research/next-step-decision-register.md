@@ -31,7 +31,7 @@ real dependency, release, privilege, ownership or Client boundary. See
 Arany owns conversation history across Provider changes and process exit.
 Resume continues that identity; fork creates a new lineage; compaction is
 rebuildable context. This avoids depending on opaque Provider continuation for
-recovery. [Session rules](../../agents/session.md) own lifecycle semantics;
+recovery. [Session spec](../specs/session.md) owns lifecycle semantics;
 [context rationale](./context-memory-and-compaction.md) explains the distinction.
 
 ### D-03 — Generic bounded agent protocol
@@ -48,7 +48,7 @@ owns alternatives and expansion conditions.
 Provider is the substitutable Engine behavior seam because multiple real
 adapters exist. Semantic types prevent vendor schemas from defining policy.
 Exact custom profiles require data-free conformance: resemblance to an API does
-not prove output, privacy or routing guarantees. [Provider rules](../../agents/provider.md)
+not prove output, privacy or routing guarantees. [Provider spec](../specs/provider.md)
 own admission and current capability requirements.
 
 ### D-05 — Event contract and replay
@@ -56,7 +56,7 @@ own admission and current capability requirements.
 One SQLite journal owns canonical facts; Session and Run views are reductions.
 This keeps durable acknowledgement, causal history and replay consistent without
 multiple mutable representations of the same state. Rollback journaling fits
-the single-owner workload. [Store rules](../../agents/store.md) own durability
+the single-owner workload. [Execution spec](../specs/execution.md#admission-persistence-and-recovery) owns durability
 and format checks; [architecture](../architecture/system-overview.md) owns schema.
 
 ### D-06 — Identity and time
@@ -70,7 +70,7 @@ suffice; no Clock or ID-generator seam is earned by the current flow.
 
 Pinned handles and immutable bounded snapshots tie disclosure to admitted
 objects. Project text cannot select credentials or grant capabilities. Exact
-root instructions avoid implicit discovery and expansion. [Session input rules](../../agents/session.md)
+root instructions avoid implicit discovery and expansion. [Session spec](../specs/session.md)
 and [security rules](../../agents/security.md) own the admission contract.
 
 ### D-08 — Resource bounds
@@ -85,8 +85,8 @@ overflow; this register keeps no parallel constant table.
 
 Explicit attached and machine modes make interpretation predictable for humans
 and scripts. A compiled local registry prevents project/model text from becoming
-command authority. [Terminal](../specs/terminal.md) and [CLI rules](../../agents/cli.md)
-own current entry modes, channels and syntax.
+command authority. [Terminal spec](../specs/terminal.md)
+owns current entry modes, channels and syntax.
 
 ### D-10 — Terminal contract
 
@@ -106,7 +106,7 @@ Accounts belong to the current OS user across Sessions and StateRoots; a
 Session override must not create another billing identity. Trusted selection
 precedes secret access and project input. OS stores have distinct availability
 and confidentiality limits, so fallback must be explicit. [Credentials](../specs/credentials.md)
-owns scope, storage and recovery; [Provider rules](../../agents/provider.md)
+owns scope, storage and recovery; [Provider spec](../specs/provider.md)
 own destination admission.
 
 ### D-12 — Cancellation, errors, and retries
@@ -114,7 +114,7 @@ own destination admission.
 Local cancellation preserves an honest durable prefix; it cannot undo remote
 usage or an already dispatched effect. Automatic retries and fallback would add
 billable attempts and recovery ambiguity. [Execution](../specs/execution.md),
-[Tools](../specs/tools.md) and [Provider rules](../../agents/provider.md) own the
+[Tools](../specs/tools.md) and [Provider spec](../specs/provider.md) own the
 applicable outcomes and retry policy.
 
 The [transactional-outbox comparison](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)
@@ -135,7 +135,7 @@ own the current set and review scope.
 Traces describe timing and causality; they are not durable history. A local
 Collector keeps remote authentication and routing outside the harness. Bounded,
 content-free export protects Run correctness and privacy even when delivery
-fails. [Telemetry rules](../../agents/telemetry.md) own enforcement;
+fails. [Telemetry spec](../specs/telemetry.md) owns enforcement;
 [OTLP rationale](./otlp-observability.md) explains the transport and SDK choices.
 
 ### D-15 — Security boundary
@@ -150,7 +150,7 @@ The macOS executable catalogue uses one union of exact literal paths to avoid
 repeating the same operation rule for each admitted program. This keeps the
 intended allow set narrow; directory-wide grants would broaden it. Fresh file
 revalidation and independent denies remain governed by
-[Guard rules](../../agents/guard.md).
+[Tool spec](../specs/tools.md).
 
 Source syntax reviewed on 2026-10-12: Apple's shipped
 `/System/Library/Sandbox/Profiles/application.sb` and
@@ -175,7 +175,7 @@ across processes. Earlier `mcp-version` timeouts were captured with most time
 before Ready, where that scan ran; after both changes the case completed in
 about 4 seconds across three `arany_ci` suites and twelve journeys run four at a
 time. A recurrence is a new defect; capture its stages through the
-[fixture](../../agents/guard-fixture.md) before changing budgets.
+[fixture](../specs/tools.md) before changing budgets.
 
 ### D-16 — Evidence-dense testing
 
@@ -208,7 +208,7 @@ The user accepted a distinct consented plan route with a weaker remote cost
 guarantee: local stream/time limits cannot enforce a remote output-token or
 plan-usage cap. The benefit is eligible plan access; the cost is that explicitly
 accepted limitation. It does not weaken API-key/custom guarantees or authorize
-billing fallback. [ChatGPT rules](../../agents/chatgpt.md) own account-bound
+billing fallback. [ChatGPT spec](../specs/chatgpt.md) owns account-bound
 consent and transport; the [subscription source review](./subscription-provider-routes-2026-10.md)
 retains the dated provider-policy evidence.
 

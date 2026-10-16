@@ -1,9 +1,3 @@
-//! The one renderer from a typed `ProviderRequest` to a `Conversation`.
-//!
-//! It alone decides what is `system` (a closed set), what is user input and what is labelled
-//! untrusted data. Everything before a Run's loop is byte-stable for that Run, and each later
-//! request is the previous one plus appended blocks; compaction is the only rewrite.
-
 use super::conversation::{Block, Conversation, Message, Role, SystemBlock};
 use super::prompts;
 use super::tool_specs::specs;

@@ -18,6 +18,7 @@ const LOCK_NAMESPACE_FILE: &str = "session-locks.guard";
 #[cfg(unix)]
 const ACCOUNT_LOCK_FILE: &str = "account-credentials.lock";
 #[cfg(unix)]
+// history.lock stays separate from the database: a macOS flock on the SQLite file conflicts with SQLite's own locking.
 const HISTORY_LOCK_FILE: &str = "history.lock";
 #[cfg(unix)]
 const MAX_SESSION_LOCK_FILES: usize = 65_536;
@@ -34,6 +35,7 @@ struct NamespaceLock(File);
 #[cfg(unix)]
 impl Drop for NamespaceLock {
     fn drop(&mut self) {
+        // Explicit unlock: relying on descriptor closure caused flaky self-contention in parallel tests.
         let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
     }
 }

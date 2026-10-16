@@ -1,5 +1,3 @@
-//! Explicitly activated, bounded native fixture observations; never Tool authority.
-
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Stage {

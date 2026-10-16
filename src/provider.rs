@@ -41,6 +41,7 @@ pub(crate) use render::history_tool_block;
 pub use streaming::{PreviewText, ResponsePreview};
 
 fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
+    // Decompression stays off even when another dependency enables reqwest's compression features.
     reqwest::Client::builder()
         .no_proxy()
         .no_gzip()

@@ -3,8 +3,8 @@
 **Research baseline:** 2026-09-29.
 
 [The system overview](../architecture/system-overview.md) owns physical modules
-and interfaces. [Execution](../specs/execution.md), [Session rules](../../agents/session.md)
-and [Provider rules](../../agents/provider.md) own semantics. This report retains
+and interfaces. [Execution](../specs/execution.md), [Session spec](../specs/session.md)
+and [Provider spec](../specs/provider.md) own semantics. This report retains
 why the runtime and integration choices fit the harness.
 
 ## One coordinator, explicit blocking owners
@@ -53,12 +53,12 @@ Bounded channels keep memory use and backpressure visible. A journal request
 already accepted by its owner can finish committing even if its caller stops
 waiting, so cancellation must not fabricate a rollback. Commit acknowledgement
 precedes feedback; interrupted replay describes an honest committed prefix.
-[Store rules](../../agents/store.md) and [Engine rules](../../agents/engine.md)
-own the exact ordering and admission requirements.
+[Execution spec](../specs/execution.md#admission-persistence-and-recovery)
+owns the exact ordering and admission requirements.
 
 Telemetry is a separate lossy output owner. Its SDK worker and shutdown must
 fit the coordinator lifetime without blocking Run correctness. See
-[OTLP rationale](./otlp-observability.md) and [telemetry rules](../../agents/telemetry.md).
+[OTLP rationale](./otlp-observability.md) and [telemetry spec](../specs/telemetry.md).
 
 ## Maintenance
 

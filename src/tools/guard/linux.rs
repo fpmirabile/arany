@@ -25,6 +25,7 @@ const BWRAP_BOOTSTRAP: &[&str] = &[
     "/usr/bin/env",
     "-i",
     "PATH=/usr/bin:/bin",
+    // No --keep-caps: retained capabilities make Bubblewrap reject a non-root real UID.
     "/usr/bin/unshare",
     "--user",
     "--map-current-user",
@@ -526,6 +527,7 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
             "usr/lib",
             "/lib",
             "--symlink",
+            // /lib and /lib64 keep their own targets: mapping both to /usr/lib hides the x86-64 ELF loader.
             "usr/lib64",
             "/lib64",
             "--proc",

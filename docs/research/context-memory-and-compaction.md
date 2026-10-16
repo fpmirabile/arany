@@ -2,7 +2,7 @@
 
 **Research baseline:** 2026-09-28.
 
-[Session rules](../../agents/session.md) own current context compilation,
+[Session spec](../specs/session.md) owns current context compilation,
 compaction and lineage; [architecture](../architecture/system-overview.md) owns
 placement. Cross-Session Memory, general Artifact storage, autonomous retrieval
 and opaque Provider continuation are expansion options, not an implementation
@@ -48,7 +48,7 @@ These operations have different loss and provenance behavior. A summary should
 retain source coverage and unresolved constraints; exact identifiers and security
 decisions should remain recoverable from originals. Cancellation or a stale
 source snapshot must not publish a half-valid context revision. The current
-contract and acceptance owners are in [Session rules](../../agents/session.md).
+contract and acceptance owners are in [Session spec](../specs/session.md).
 
 Hierarchical summaries add error propagation and invalidation work. Introduce
 levels only if a held-out task corpus shows they improve useful context under
@@ -100,7 +100,7 @@ receipt must exclude the deleted content and recoverable derivatives.
 
 General Artifact storage would also need bounded extraction, media handling and
 retention. Adding content objects alone does not authorize parsers or replace
-the [current image contract](../../agents/image.md). Proposed implementations
+the [current image contract](../specs/terminal.md). Proposed implementations
 belong in [planning](../../planning/README.md), not Rust type sketches here.
 
 ## Evidence before expansion
@@ -145,7 +145,7 @@ installed, so subsequent appends cold-resolve and reduce the persisted prefix.
 The view becomes the next cache only after the transaction commits. The Store
 replies to append only after commit, so the optimization preserves durable
 acknowledgement. [Store append path](../../src/store/journal.rs)
-and [Store rules](../../agents/store.md) own these constraints. SQLite defines
+and [Execution spec](../specs/execution.md#admission-persistence-and-recovery) own these constraints. SQLite defines
 `data_version` as connection-local: it changes on commits from other
 connections and does not change for that connection's own commits, so Arany also
 checks global sequence. It is an invalidation hint, not a durable revision
@@ -161,7 +161,7 @@ and 10,000 combined Events are admitted. The schema already has
 the global scan with a per-Session lookup alone would stop checking the global
 journal properties on that path. Keep canonical replay and its integrity checks
 as the source of truth. [Replay](../../src/store/replay.rs), [digest
-implementation](../../src/session/lineage.rs), and [Session rules](../../agents/session.md)
+implementation](../../src/session/lineage.rs), and [Session spec](../specs/session.md)
 own this behavior.
 
 Terminal history is an ephemeral row-count/source-anchor index over the
@@ -169,7 +169,7 @@ already-loaded `SessionView`; it does not retain another transcript or read
 State. A same-Session/same-width append replaces only the last Run's index.
 Session switches, width changes and detail-mode changes rebuild it; find scans
 its bounded rows synchronously. [History implementation](../../src/terminal/history.rs)
-and [terminal-history rules](../../agents/history.md) own this boundary.
+and [Terminal spec](../specs/terminal.md) own this boundary.
 
 **Smallest path, proposed:** Measure serialized Event payload, DB size, append
 latency and peak RSS through the 128 MiB cache boundary and toward the shared
@@ -233,8 +233,7 @@ the shared file limit to check StorageFull admission and canonical reopen; it
 is not history replay or latency evidence. Record sanitized Linux CPU/kernel,
 load and pressure metadata on the named run; neither this metadata nor an
 unexecuted fixture is performance evidence. The remaining evidence gap is
-tracked in [`agents/history.md`](../../agents/history.md) and
-[`NEXT_STEPS.md`](../../NEXT_STEPS.md).
+tracked in [`NEXT_STEPS.md`](../../NEXT_STEPS.md).
 
 ### Proposed policy, not accepted behavior
 

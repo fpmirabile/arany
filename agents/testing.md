@@ -1,82 +1,75 @@
 # Testing
 
-Load when continuing beta 1, adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. For documentation-only work, use [documentation and instruction checks](#documentation-and-instruction-changes). The [testing strategy](../docs/research/testing-strategy-for-rust-cli-harness.md) explains the design rationale; keep this file as the concise working contract.
-
-Until a stable pre-beta, synthetic tests plus a green CI run on the final head are sufficient evidence for a change. Live-account, native-host and manual checklists in `NEXT_STEPS.md` do not block day-to-day changes; they remain the only basis for a native, live or accessibility support claim.
+Load when continuing beta 1, adding or changing behavior, fixing a defect, editing tests or fixtures, changing user-visible output, or making a correctness, security, durability, provider, performance, or platform-support claim. For documentation-only work, use [documentation and instruction checks](#documentation-and-instruction-changes). The [testing strategy](../docs/research/testing-strategy-for-rust-cli-harness.md) explains the rationale; this file is the working contract.
 
 ## Load for the affected task
 
 - Local verification or CI reproduction → [commands and native prerequisites](./references/testing-details.md#local-verification-and-ci).
-- Beta continuation or unavailable verification prerequisites → [delivery order and deferred evidence](./references/testing-details.md#beta-continuation-and-deferred-evidence).
+- Release-policy workflow or dependency audits → [release-policy CI](./references/testing-details.md#release-policy-ci).
 - Live Provider or named-host performance claims → [native and live evidence](./references/testing-details.md#native-and-live-evidence).
-- Process, account, OS-service or private-state fixtures; local Unix test commands → [host and account isolation](./references/testing-details.md#host-and-account-isolation).
-- PTY input, signals, restoration, terminal faults or tmux → [terminal process fixtures](./references/testing-details.md#terminal-process-fixtures).
-- Storage/Workspace faults, response RSS or paused deadlines → [storage, Workspace and resource faults](./references/testing-details.md#storage-workspace-and-resource-faults).
+- Process, account, OS-service, or private-state fixtures → [host and account isolation](./references/testing-details.md#host-and-account-isolation).
+- PTY input, signals, restoration, terminal faults, or tmux → [terminal process fixtures](./references/testing-details.md#terminal-process-fixtures).
+- Storage, Workspace faults, response RSS, or paused deadlines → [storage, Workspace and resource faults](./references/testing-details.md#storage-workspace-and-resource-faults).
+- Native Guard topology, PID or pidfd fixtures → [native Guard fixtures](./references/testing-details.md#native-guard-fixtures).
 
 ## Documentation and instruction changes
 
-Use the [shared documentation checks](../docs/development.md#verification).
-When changing instruction routing, follow representative tasks from `AGENTS.md`
-to their contract, editing rules and evidence owner: terminal output, Provider
-decoding and Session persistence. Check affected inbound links after moving or
-renaming a heading. Keep commands at their existing owner and distinguish
-requirements from past verification. These checks establish documentation
-consistency, not measured agent quality or runtime/platform support.
+Use the [shared documentation checks](../docs/development.md#verification). When changing instruction routing, follow representative tasks from `AGENTS.md` (terminal output, Provider decoding, Session persistence) to their contract, editing rules, and evidence owner. Check inbound links after moving or renaming a heading. These checks establish documentation consistency, not agent quality or platform support.
 
 ## Evidence budget
 
-- Optimize for evidence per test, not test count or coverage percentage.
-- Report completed checks and their scope in the handoff/PR and CI; do not append
-  chronological result logs to strategy documents or plans. Keep only unresolved
-  defects and missing verification in `NEXT_STEPS.md`, removing closed items.
-- Add a test only when it protects a user-visible contract, durable or security invariant, protocol boundary, concurrency or failure mode, or demonstrated regression; no existing test may already catch the same defect with equally useful diagnostics.
-- State the owned claim and the defect the test would catch. If the test cannot be shown to fail for that defect, strengthen an existing test, type, or parser instead.
-- Prefer adding a row to an existing scenario, table, corpus, or failpoint harness over adding another test function or file.
-- Keep one authoritative test owner per claim. Duplicate a claim at another layer only when real process, platform, durability, or security evidence is materially different.
-- Refactors with unchanged observable behavior normally rely on existing tests. Do not test private helpers, getters, type-enforced facts, third-party behavior, mock call order outside the protocol, or abstractions created only for testing.
-- Delete or merge tests and fixtures when a stronger owner subsumes them, the contract disappears, or the failure becomes structurally impossible. Keep durable and security regressions in the narrowest stable corpus.
+- Optimize for evidence per test, not count or coverage. Add a test only for a user-visible contract, durable or security invariant, protocol boundary, concurrency or failure mode, or demonstrated regression that no existing test catches with equally useful diagnostics.
+- State the owned claim and the defect the test catches. If it cannot be shown to fail for that defect, strengthen an existing test, type, or parser instead.
+- Prefer a row in an existing scenario, table, corpus, or failpoint harness over a new test function or file. Keep one authoritative owner per claim; duplicate it only for materially different process, platform, durability, or security evidence.
+- Refactors with unchanged behavior rely on existing tests. Do not test private helpers, getters, type-enforced facts, third-party behavior, or test-only abstractions; delete or merge tests a stronger owner subsumes.
+- Record completed checks in the handoff, PR, and CI. Keep only unresolved defects and missing verification in `NEXT_STEPS.md`, removing closed items.
 
 ## User-visible proof
 
-- Noninteractive acceptance scenarios produce an `ObservationBundle`: exit class, exact stdout bytes, exact stderr bytes, Events reopened from a closed SQLite store, and the SessionView/RunView reduced from those Events. Interactive scenarios add a separate PTY observation rather than weakening exact `exec` evidence.
-- A successful assertion is incomplete when it checks only an Engine return, a Provider call, stdout, or live in-memory state.
-- Compare `exec` text, screen-reader output, final receipts, and `show` as exact bytes. Canonicalize only parsed UUIDs, timestamps, and temporary paths explicitly declared volatile; preserve identity relationships, ordering, counts, and every user-controlled byte. Raw interactive escape bytes are not public golden output.
-- Parse JSONL one line at a time, compare it semantically with persisted Events, and verify its exact newline and channel contract.
-- Use a fresh product process for argument parsing, exit codes, stdout/stderr separation, signal wiring, and `show`. Use Cargo's absolute binary path, an explicit working directory, a cleared allowlisted environment, isolated temporary Session and user-account roots, a parent deadline, and guaranteed kill/reap cleanup. Drain piped channels while waiting, cap each capture, and include EOF collection in the deadline; waiting for exit before draining can deadlock on a valid large export. Existing PTY pumps and descendant guards retain their separate ownership. Unconfigured resume fixtures must isolate the effective UID passwd home in both profiles; clearing HOME or Session state alone cannot exclude host preferences. The shared Linux script fixture uses Bubblewrap user/network namespaces with a private home while preserving host PIDs for lifecycle observers.
-- The deterministic successful `exec` exercises the real CLI adapter, Engine, SQLite file, reducer, and renderers in-process with the strict scripted Provider. Bare interactive `arany` reuses the same semantic scenario through the PTY lane. Do not expose a fake-provider CLI mode or add a second product binary for tests.
-- The central deterministic Session journey covers process exit/resume, multiple ordered Runs, one single-agent Run, one bounded `N`-child Run with controlled completion order, fork lineage, compaction failure safety, replay, cancellation, and task/thread cleanup. Boundary tables own other collaboration capacities and invalid snapshots.
-- Keep a few manually reviewed goldens only for public human/JSONL output. CI never rewrites them, and an agent updates them only with an intentional contract change and a summarized diff.
+- Noninteractive acceptance scenarios produce an `ObservationBundle`: exit class, exact stdout and stderr bytes, Events reopened from a closed SQLite store, and the SessionView or RunView reduced from them. An Engine return, Provider call, stdout, or in-memory state alone is incomplete proof; interactive scenarios add a separate PTY observation.
+- Compare `exec` text, screen-reader output, receipts, and `show` as exact bytes. Canonicalize only explicitly volatile UUIDs, timestamps, and temporary paths. Parse JSONL one line at a time and compare it semantically with persisted Events.
+- Use a fresh product process for argument parsing, exit codes, channel separation, signals, and `show`: absolute Cargo binary path, explicit working directory, cleared allowlisted environment, isolated roots, a parent deadline, and guaranteed kill and reap. Drain piped channels while waiting and cap each capture, or a valid large export can deadlock. The credential-owner rule applies to every observation process: a bounded parent wait and output plus kill and reap, in addition to the descendant timeout.
+- The deterministic successful `exec` runs the real CLI adapter, Engine, SQLite file, reducer, and renderers with the strict scripted Provider. Do not add a fake-provider CLI mode or a second product binary for tests.
+- Keep a few manually reviewed goldens for public human and JSONL output. CI never rewrites them; update them only with an intentional contract change and a summarized diff. Do not duplicate Engine scenarios per width or key.
 
 ## Test doubles and fixtures
 
-- Provider is the only Engine behavior double. Its scripted fake matches semantic expectations, controls concurrency with gates, fails on missing/duplicate/extra calls, and proves cancellation with drop guards. Check complete observed request semantics and exact counts outside Engine task panic handling, including failure/cancellation owners; an accidental fake panic must not satisfy an expected failed Run. A held subprocess publishes readiness only after its request matches the fixture.
-- A refusal peer must return a valid success if a forbidden request arrives, so the owner's rejection assertion fails; a peer assertion/crash followed by generic product failure is not refusal proof. A native OOM owner must prove its actual payload reached execution, a kernel OOM-kill counter advanced, and cleanup was positively observed. Observer timeout, malformed output or command failure is not disappearance.
-- Use real temporary filesystem objects and real file-backed SQLite for state, reopen, permission, journaling, replay, and recovery evidence. `:memory:` is not durability evidence.
+- Provider is the only Engine behavior double. The scripted fake matches semantic expectations, gates concurrency, fails on missing, duplicate, or extra calls, and proves cancellation with drop guards. Check request semantics and exact counts outside Engine panic handling, so an accidental fake panic cannot satisfy an expected failed Run.
+- A refusal peer must return a valid success if a forbidden request arrives, so the rejection assertion fails; a peer crash followed by generic failure is not refusal proof. A native OOM owner proves its payload reached execution, the kernel OOM-kill counter advanced, and cleanup was observed. A timeout, malformed output, or command failure is not disappearance.
+- Use real temporary filesystem objects and real file-backed SQLite for state, reopen, permission, replay, and recovery evidence. `:memory:` is not durability evidence.
 - Use explicit gates and paused Tokio time for schedules and deadlines. Never coordinate with wall sleeps, randomness, repeated attempts, or assumed task order.
 - Pause Tokio time only after real subprocess or Guard I/O has finished: while paused, an idle runtime auto-advances timers, so Guard timeouts can fire during a Tool call. Pause from a Provider hook after the Tool result, as the Goal Finish tests do. Advance the clock inside the Provider call that needs it; a progress observer races the Engine, which can pass several store round trips inside one poll before the observer runs.
 - Keep provider response fixtures minimal and hand-reviewed from the official wire contract. Never capture production responses, credentials, prompts, or user data.
-- Use one bounded canary assertion across Provider observations, Events, database bytes, stdout, stderr, controlled panic/error text, and runtime-opt-in telemetry without echoing the canary on failure.
+- Use one bounded canary assertion across Provider observations, Events, database bytes, stdout, stderr, panic or error text, and opt-in telemetry, without echoing the canary on failure.
 
 ## Evidence lanes
 
-- Default `cargo test` is offline, deterministic, isolated, retry-free, free of wall sleeps and hardware-sensitive timing assertions, and quiet on success.
-- Most heavy native gates use `cfg_attr(not(arany_ci), ignore)`, so CI's `--cfg arany_ci` runs them in the ordinary test step while local runs stay ignored until requested. Explicitly ignored release gates require a named opt-in lane that proves a nonzero exact test count. Gates in one test binary hold `crate::test_process::NATIVE_GATE`; a locally ignored gate is not evidence. Standard check commands live in the [development guide](../docs/development.md#verification); CI reproduction lives in [testing details](./references/testing-details.md#local-verification-and-ci).
+- Default `cargo test` is offline, deterministic, isolated, retry-free, free of wall sleeps and hardware-sensitive timing, and quiet on success.
+- Heavy native gates use `cfg_attr(not(arany_ci), ignore)`, so CI's `--cfg arany_ci` runs them in its ordinary test step. Explicitly ignored release gates need a named opt-in lane that proves a nonzero exact test count. Gates in one test binary hold `crate::test_process::NATIVE_GATE`. A locally ignored gate is not evidence. Check commands live in the [development guide](../docs/development.md#verification).
 - Before activating an ignored native parent, reconcile its fixture with the current Provider wire, Tool admission, Goal lifecycle, and persisted success criteria; a stale fixture is not native evidence.
 - Keep beta integration scenarios in one `tests/session_run.rs` target. Focused owning-module tests use compact transition, boundary, hostile-input, or parser tables only where the central journey cannot prove the claim.
-- Use pure presentation tables and Ratatui `TestBackend` for Session/composer/status/activity-shelf frames, including single/team/overflow states. Use native Linux/macOS PTY process tests for terminal acquisition/restoration, Session and agent pickers, transient mouse reporting, signals, resize, suspend/resume, cancellation, fallback, tmux, and broken stderr. Do not duplicate Engine scenarios per width or key.
-- Exact linear accessibility fixtures prove the absence of CSI/OSC and carriage-return rewriting; manual VoiceOver and Orca checks are release evidence, not silent CI skips.
-- One closed-registry contract test owns slash help, aliases, availability, exact parsing, completion, and handlers. A compact corpus owns unknown commands, `//` escape, hostile Unicode/control text, lifecycle availability, and the invariant that interactive commands never enter Provider input while `exec` treats them literally.
-- Cross-platform claims require native behavior tests for filesystem, ACL, signal, process, SQLite reopen, and terminal semantics. A compile-only target or silent skip is not evidence.
-- Process-death, disk-fault, fuzz, repeated-flake, and named-host performance work may run as scheduled or release gates when too expensive for the default loop.
-- Stochastic model quality belongs to evaluations; latency and resource distributions belong to benchmarks. Neither can override a failed deterministic invariant.
-- Add property, fuzz, model-checking, snapshot, process-test, or concurrency frameworks only when their named boundary has outgrown readable tables or a tool replaces material repeated machinery.
+- Cross-platform claims need native behavior tests for filesystem, ACL, signal, process, SQLite reopen, and terminal semantics. A compile-only target or silent skip is not evidence.
+- Process-death, disk-fault, fuzz, repeated-flake, and named-host performance work may run as scheduled or release gates. Stochastic model quality belongs to evaluations and latency to benchmarks; neither overrides a failed deterministic invariant.
+- Add property, fuzz, model-checking, snapshot, or concurrency frameworks only when their named boundary has outgrown readable tables.
+- Security test coverage: hostile repository/Git configuration, every path-component type, state-path links and permissions, omitted-input egress canaries per adapter, credential isolation, broker-route drift, terminal-control payloads, oversized input/output, malformed replay, cancellation cleanup, and unavailable-provider/telemetry failure.
+
+## Deferred evidence
+
+- A check needing manual interaction, real credentials, paid usage, an unavailable OS service, another machine, or an unavailable toolchain is recorded once in [NEXT_STEPS.md](../NEXT_STEPS.md) with its unverified claim and user-owned procedure. Continue the next implementable task; pending checks are not evidence.
+- Never bypass security or resource bounds to obtain evidence. Manual screen-reader checks are deferred evidence, not silent skips.
+
+## Diagnosing failures
+
+- Read the development log ([diagnostics spec](../docs/specs/diagnostics.md)) before adding instrumentation.
+- New instrumentation records only closed categories and counters at typed boundaries, never display strings.
+- A synthetic distinction between causes does not establish the cause of a live failure.
 
 ## Failure and maintenance discipline
 
-- After a hosted CI failure, consolidate the confirmed failures and review findings from that exact head before correcting. Dispatch a [focused CI lane](./references/testing-details.md#local-verification-and-ci) only after diagnosis identifies the OS and profile; its pass is diagnostic, not verification. Before marking a change ready, require the complete `ci.yml` workflow on the exact final head: an automatic PR run (any base branch), a push run or a manual dispatch. A red CI blocks handoff; fix it rather than reporting around it. Local verification is targeted (fmt, Clippy and the owning tests of the change); the workspace suite is CI's job.
-- Focused Cargo and test-binary invocations must report their intended nonzero test count. A self-spawned helper filtered with `--exact` must assert exactly one completed test and have a bounded parent wait/output plus kill/reap cleanup. Helper-only tests are explicitly ignored by default and require their parent's private fixture when activated; returning early without assertions is not a default passing test. Zero-test or ignored-child success provides no evidence.
-- Failure output names the scenario and case, expected and observed exit, bounded escaped stdout/stderr, semantic Event difference, and safe fixture identifier. It never dumps secrets, raw hostile controls, provider bodies, or database payloads.
-- Every test runs independently and owns its directories, files, ports, runtime, database, and processes. Do not mutate shared process environment from parallel tests.
-- A flaky deterministic test is a product-or-test synchronization bug. Fix it; do not retry until green or weaken the assertion. Temporary quarantine names an owner, the missing claim, and a removal condition and does not count as passing evidence.
-- For behavior changes, identify the current owner, demonstrate the failure, update the smallest scenario or corpus row, review exact output changes, and remove superseded evidence.
-- Report verification by claims proved and lanes run, not by the number of tests added. State explicitly when live, platform, release, or performance gates were not run.
+- After a hosted CI failure, consolidate confirmed failures and review findings from that exact head before correcting. Dispatch a [focused CI lane](./references/testing-details.md#local-verification-and-ci) only once diagnosis names the OS and profile; its pass is diagnostic, not verification. Before marking a change ready, the complete `ci.yml` workflow must pass on the exact final head, as an automatic PR run on any base branch, a push run or a manual dispatch.
+- Focused Cargo and test-binary invocations report their intended nonzero test count. A self-spawned helper filtered with `--exact` asserts exactly one completed test, with a bounded wait, output limit, and kill and reap. Helper-only tests are ignored by default and need their parent's private fixture. Zero-test or ignored-child success provides no evidence.
+- Failure output names the scenario, case, expected and observed exit, bounded escaped output, the semantic Event difference, and a safe fixture identifier. It never dumps secrets, raw hostile controls, provider bodies, or database payloads.
+- Every test owns its directories, files, ports, runtime, database, and processes, and never mutates shared process environment.
+- A flaky deterministic test is a product-or-test synchronization bug. Fix it; do not retry until green or weaken the assertion. Quarantine names an owner, the missing claim, and a removal condition, and never counts as passing evidence.
+- For behavior changes, identify the owner, demonstrate the failure, update the smallest scenario or corpus row, review exact output changes, and remove superseded evidence.
+- Report verification by claims proved and lanes run, not tests added. State explicitly when live, platform, release, or performance gates did not run.
