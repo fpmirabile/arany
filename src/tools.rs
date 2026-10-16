@@ -206,6 +206,16 @@ impl ToolRuntime {
     pub(crate) fn context_limit_bytes(&self) -> usize {
         self.context_limit_bytes
     }
+
+    /// Result bytes one Tool may return after its serialized `overhead` and `reserved` extra bytes;
+    /// `None` when fewer than 128 bytes remain.
+    pub(crate) fn result_capacity(&self, overhead: usize, reserved: usize) -> Option<usize> {
+        let capacity = self
+            .context_limit_bytes
+            .saturating_sub(overhead.saturating_add(512 + reserved))
+            / 6;
+        (capacity >= 128).then_some(capacity)
+    }
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         self.config.allows(call)
     }

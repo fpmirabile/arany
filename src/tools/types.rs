@@ -714,14 +714,13 @@ impl ToolContext {
         }
         let mut branches = self.outcome_branch_with_plan(false, None);
         for branch in &mut branches {
-            branch["properties"]["call"]["anyOf"]
-                .as_array_mut()
-                .expect("compiled Tool branches")
-                .retain(|call| {
+            if let Some(calls) = branch["properties"]["call"]["anyOf"].as_array_mut() {
+                calls.retain(|call| {
                     call["properties"]["operation"]["enum"][0]
                         .as_str()
                         .is_some_and(|operation| GOAL_PLAN_PRELUDE_OPERATIONS.contains(&operation))
                 });
+            }
         }
         branches
     }

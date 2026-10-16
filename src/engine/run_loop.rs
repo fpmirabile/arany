@@ -1474,13 +1474,10 @@ impl<'a, P: Provider + 'static> RunLoop<'a, P> {
             } else {
                 0
             };
-            let context_limit = runtime.context_limit_bytes();
-            let capacity = context_limit
-                .saturating_sub(overhead.saturating_add(512 + integration_capacity))
-                / 6;
-            if capacity < 128 {
+            let Some(capacity) = runtime.result_capacity(overhead, integration_capacity) else {
                 return Ok(false);
-            }
+            };
+            let context_limit = runtime.context_limit_bytes();
             intent.limits.result_bytes =
                 if matches!(intent.call, crate::tools::ToolCall::ApplyChangeset { .. }) {
                     128

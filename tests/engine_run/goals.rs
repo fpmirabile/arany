@@ -3794,3 +3794,62 @@ async fn near_deadline_child_tool_stops_before_tool_started() {
             if *agent_run_id == child && *disposition == arany::AgentDisposition::Failed
     )));
 }
+
+#[tokio::test]
+async fn pause_before_queued_children_start_cancels_them_without_failing_the_run() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let steering = RunSteering::new();
+    let pause = steering.clone();
+    let mut provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            children: vec!["Inspect facts".into(), "Inspect facts again".into()],
+        }),
+        ProviderOutcome::Tool {
+            call: facts_read(),
+            plan_contract: None,
+        },
+        finish_with("never reached"),
+    ])
+    .with_before_call(1, move || assert!(pause.pause(), "first pause"));
+    // One call at a time: the second child stays queued when the pause lands.
+    provider.capacity = 1;
+    let requests = provider.requests.clone();
+    let mut engine = facts_engine(
+        StateRoot::admit(&state_path).expect("state"),
+        &state_path,
+        provider,
+    );
+    engine.set_steering(steering);
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 2,
+    };
+    let outcome = engine.run(input).await.expect("paused Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+    assert_eq!(requests.lock().expect("requests").len(), 2);
+
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let children: Vec<_> = view.runs[0]
+        .agents
+        .iter()
+        .skip(1)
+        .map(|agent| agent.id)
+        .collect();
+    assert_eq!(children.len(), 2);
+    for child in children {
+        assert_eq!(child_tool_starts(&events, child), 0);
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::AgentFinished { agent_run_id, disposition, .. }
+                if *agent_run_id == child && *disposition == arany::AgentDisposition::Cancelled
+        )));
+    }
+    assert_eq!(
+        view.goal(outcome.goal_id).expect("Goal").status,
+        arany::GoalStatus::Interrupted
+    );
+}

@@ -236,9 +236,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         {
             return Err(queue.abort_with(error).await);
         }
-        let mut abort_reason = (!queue.pending.is_empty()
-            && !self.controls.goal_budget.can_start_provider_call())
-        .then_some(AbortReason::Budget);
+        let mut abort_reason = self.unstarted_abort(&queue);
         let mut drain_deadline = None;
 
         while !queue.active.is_empty() {
@@ -405,10 +403,7 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 {
                     return Err(queue.abort_with(error).await);
                 }
-                if !queue.pending.is_empty() && !self.controls.goal_budget.can_start_provider_call()
-                {
-                    abort_reason = Some(AbortReason::Budget);
-                }
+                abort_reason = self.unstarted_abort(&queue);
             }
         }
 
@@ -550,6 +545,19 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         }
     }
 
+    /// Why children still queued after a fill will not start: a pause first, then an exhausted call budget.
+    fn unstarted_abort(&self, queue: &ChildQueue) -> Option<AbortReason> {
+        if queue.pending.is_empty() {
+            None
+        } else if self.pause_requested() {
+            Some(AbortReason::Paused)
+        } else if !self.controls.goal_budget.can_start_provider_call() {
+            Some(AbortReason::Budget)
+        } else {
+            None
+        }
+    }
+
     async fn fill_slots(
         &self,
         queue: &mut ChildQueue,
@@ -572,10 +580,10 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
             let child = &mut children[index];
             if let Some(tools) = child.tools.as_mut() {
                 let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-                let limit = runtime.context_limit_bytes();
                 let room = tools.serialized_len().is_ok_and(|bytes| {
-                    limit.saturating_sub(bytes + CHILD_INTENT_RESERVE_BYTES + 512) / 6
-                        >= MIN_CHILD_RESULT_BYTES
+                    runtime
+                        .result_capacity(bytes + CHILD_INTENT_RESERVE_BYTES, 0)
+                        .is_some_and(|capacity| capacity >= MIN_CHILD_RESULT_BYTES)
                 });
                 if !room {
                     child.tool_calls_remaining = 0;
@@ -604,7 +612,11 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
                 history: Vec::new(),
                 context_summary: None,
                 goal_budget: root_request.goal_budget,
-                goal_plan_contract: root_request.goal_plan_contract.clone(),
+                goal_plan_contract: children[index]
+                    .tools
+                    .is_some()
+                    .then(|| root_request.goal_plan_contract.clone())
+                    .flatten(),
                 goal_context_facts: None,
                 child_results: Vec::new(),
                 steering_notes: Vec::new(),
@@ -698,10 +710,9 @@ impl<P: Provider + 'static> RunLoop<'_, P> {
         let overhead = serde_json::to_vec(&reserved)
             .map_err(|_| EngineError::InvalidRequest)?
             .len();
-        let capacity = runtime.context_limit_bytes().saturating_sub(overhead + 512) / 6;
-        if capacity < 128 {
+        let Some(capacity) = runtime.result_capacity(overhead, 0) else {
             return Ok(false);
-        }
+        };
         intent.limits.result_bytes =
             capacity.min(crate::tools::types::MAX_TOOL_RESULT_BYTES) as u32;
         let pending = self
