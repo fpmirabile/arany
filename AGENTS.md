@@ -2,11 +2,23 @@
 
 Arany is a Rust-first, CLI-only agent harness. The product and executable are named Arany and `arany`; the repository directory name is not part of the public contract. This file guides agents developing Arany. [Documentation map](./docs/README.md) locates contracts and their owners.
 
+## Mission
+
+Arany is the specialist harness for multi-agent coding teams that can be trusted to work autonomously. Multi-agent coordination builds on four non-negotiable guarantees; never trade them for speed, convenience or parity with another harness:
+
+- **Journal-first durability.** Every Provider call, Tool intent and effect is a committed Event before the next step; strict replay never re-executes.
+- **Honest uncertainty.** An effect whose outcome is unknown is Uncertain, stops its continuation and never retries itself.
+- **Per-effect isolation.** Every effect runs in the Guard and publishes only through validated changesets with receipts; unsupported enforcement fails closed.
+- **Durable, budgeted Goals.** Goal budgets, pause, cancellation and recovery survive process exit and crashes.
+
+Everything else, including the agent loop shape, wire formats, defaults, UX and extensibility, follows proven harness designs (priority 4).
+
 ## Product and implementation priorities
 
 1. **Build the harness.** Arany owns agent execution, context, Tools, permissions and durable Sessions. Keep product policy in the Engine and platform, Provider and presentation details at their existing boundaries. Evaluate changes against the complete task lifecycle, including failure, cancellation and recovery. The [system overview](./docs/architecture/system-overview.md) owns the architecture.
 2. **Design for Linux and macOS parity.** Arany targets Linux and macOS with equivalent behavior. Native Windows is out of scope: Windows users run the Linux build under WSL2. For every implementation, consider platform impact on both targets; when OS facilities are involved, prefer standard/library capabilities with equivalent guarantees, then narrow native adapters. Do not assume a shell, path layout, desktop, distribution or service manager. Document unavoidable differences and unavailable capabilities in the owning contract; unsupported security enforcement fails closed. A Linux-first milestone is delivery order, not the product boundary. Native evidence is required before claiming support; current gaps belong in [NEXT_STEPS.md](./NEXT_STEPS.md).
 3. **Apply Ponytail on every implementation.** Read [Ponytail](./.agents/skills/ponytail/SKILL.md) before implementing, refactoring or reviewing code; install it through [project skill setup](./agents/skills/README.md#install-for-a-harness) if missing. Prefer existing code, the standard library, OS facilities and installed dependencies; add only complexity the agreed task or a demonstrated constraint requires. Never reduce scope, correctness, security, accessibility, error handling, resource bounds or verification to save lines; repository rules win over the skill's shortcuts.
+4. **Prefer proven harness designs.** When established harnesses (Claude Code, Codex CLI, OpenCode, Goose, Aider) share a working answer for a behavior, default or wire format, replicate it; diverge only for a documented Arany constraint (security, durability, strict replay) and name the peer behavior and reason in the owning contract.
 
 ## Rules to load before editing
 
