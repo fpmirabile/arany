@@ -135,7 +135,6 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "SessionDefaultChanged"
         | "SessionForked"
         | "SessionRenamed"
-        | "GoalStarted"
         | "GoalRunLinked"
         | "GoalResumed"
         | "GoalPlanContractRecorded"
@@ -148,6 +147,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "GoalFinished"
         | "AgentFinished"
         | "MessageCommitted" => Some(6),
+        "GoalStarted" => Some(7),
         "ProviderFallbackUsed" => Some(1),
         "ToolPermissionDecided" => Some(1),
         "ToolFinished" => Some(8),
@@ -223,6 +223,8 @@ pub enum Event {
         /// Engine iterates Runs on the pinned objective until a Goal stop condition.
         autonomous: bool,
         resource_settings: crate::tools::ToolResourceSettings,
+        /// The exhausted Goal this one continues with a fresh budget; it stays closed.
+        continues: Option<GoalId>,
     },
     GoalRunLinked {
         goal_id: GoalId,
@@ -408,6 +410,8 @@ struct GoalStartedPayload {
     phase: GoalPhase,
     autonomous: bool,
     resource_settings: crate::tools::ToolResourceSettings,
+    #[serde(deserialize_with = "Option::deserialize")]
+    continues: Option<GoalId>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -659,6 +663,7 @@ impl Event {
                 phase,
                 autonomous,
                 resource_settings,
+                continues,
             } => serialize(&GoalStartedPayload {
                 goal_id: *goal_id,
                 objective: objective.clone(),
@@ -668,6 +673,7 @@ impl Event {
                 phase: *phase,
                 autonomous: *autonomous,
                 resource_settings: *resource_settings,
+                continues: *continues,
             }),
             Self::GoalRunLinked { goal_id, phase, .. } => serialize(&GoalRunPayload {
                 goal_id: *goal_id,
@@ -840,6 +846,7 @@ impl Event {
                     phase: data.phase,
                     autonomous: data.autonomous,
                     resource_settings: data.resource_settings,
+                    continues: data.continues,
                 }
             }
             "GoalRunLinked" if run_id.is_some() && agent_run_id.is_none() => {

@@ -88,6 +88,8 @@ pub enum EngineError {
     GoalAdmissionUncertain,
     #[error("Goal budget is exhausted")]
     GoalBudgetExhausted,
+    #[error("no exhausted Goal is available to continue")]
+    GoalNotContinuable,
     #[error("Engine has an active operation")]
     Busy,
     #[error("Guard executable unavailable")]
@@ -176,6 +178,8 @@ pub struct GoalRequest {
     pub finish_after_run: bool,
     /// Set only by `autonomous`; a resumed Goal keeps the flag it was started with.
     pub autonomous: bool,
+    /// Set only by `continue_from`: the exhausted Goal whose objective, phase and mode seed a new Goal.
+    pub continues: Option<crate::session::GoalId>,
 }
 
 impl GoalRequest {
@@ -188,6 +192,25 @@ impl GoalRequest {
             resource_settings: crate::tools::ToolResourceSettings::default(),
             finish_after_run: true,
             autonomous: false,
+            continues: None,
+        }
+    }
+
+    /// A new Goal seeded from the most recent exhausted Goal with this fresh budget; empty `RunRequest.objective`.
+    #[must_use]
+    pub fn continue_from(
+        source: crate::session::GoalId,
+        budget: crate::session::GoalBudget,
+        resource_settings: crate::tools::ToolResourceSettings,
+    ) -> Self {
+        Self {
+            id: None,
+            phase: None,
+            budget: Some(budget),
+            resource_settings,
+            finish_after_run: true,
+            autonomous: false,
+            continues: Some(source),
         }
     }
 
@@ -212,6 +235,7 @@ impl GoalRequest {
             resource_settings: crate::tools::ToolResourceSettings::default(),
             finish_after_run,
             autonomous: false,
+            continues: None,
         }
     }
 }
@@ -526,6 +550,7 @@ struct GoalAdmission {
     plan_contract: Option<GoalPlanContract>,
     entry: GoalEntry,
     usage: GoalUsage,
+    continues: Option<GoalId>,
 }
 
 fn goal_context_metadata_reservation(
@@ -594,6 +619,30 @@ fn resolve_goal_admission(
             plan_contract: goal.plan_contract.clone(),
             entry,
             usage: goal.resume_usage(view),
+            continues: None,
+        })
+    } else if let Some(source_id) = request.goal.continues {
+        let source = history
+            .and_then(crate::session::SessionView::continuable_goal)
+            .filter(|source| source.id == source_id && request.objective.trim().is_empty())
+            .ok_or(EngineError::GoalNotContinuable)?;
+        Ok(GoalAdmission {
+            id: GoalId::new(),
+            objective: source.objective.clone(),
+            phase: source.phase,
+            budget: request.goal.budget.ok_or(EngineError::InvalidRequest)?,
+            autonomous: source.autonomous,
+            resource_settings: request.goal.resource_settings,
+            plan_contract: None,
+            entry: GoalEntry::New,
+            usage: GoalUsage {
+                runs: 0,
+                provider_calls: 0,
+                active_ms: 0,
+                known_tokens: 0,
+                token_usage_unknown: false,
+            },
+            continues: Some(source_id),
         })
     } else {
         // A paused Goal does not block a new one; the Session lock serializes live Runs.
@@ -613,6 +662,7 @@ fn resolve_goal_admission(
                 known_tokens: 0,
                 token_usage_unknown: false,
             },
+            continues: None,
         })
     }
 }
@@ -1199,6 +1249,7 @@ impl Engine {
                         phase: goal.phase,
                         autonomous: goal.autonomous,
                         resource_settings: goal.resource_settings,
+                        continues: goal.continues,
                     },
                 )
                 .await?;
@@ -1345,7 +1396,9 @@ impl Engine {
             ensure_session_workspace(view, workspace_identity)?;
         }
         let goal = resolve_goal_admission(request, history.as_ref(), entry)?;
-        let objective = if request.objective.trim().is_empty() && request.goal.id.is_some() {
+        let objective = if request.objective.trim().is_empty()
+            && (request.goal.id.is_some() || request.goal.continues.is_some())
+        {
             goal.objective.clone()
         } else {
             request.objective.clone()
@@ -1630,7 +1683,8 @@ impl Engine {
     fn validate_request(&self, request: &RunRequest) -> Result<(), EngineError> {
         if (request.objective.trim().is_empty()
             && request.images.is_empty()
-            && request.goal.id.is_none())
+            && request.goal.id.is_none()
+            && request.goal.continues.is_none())
             || request.objective.len() > MAX_USER_MESSAGE_BYTES
             || !crate::provider::valid_image_collection(&request.images)
             || (request.session_id.is_some() && request.title.is_some())
@@ -1647,6 +1701,10 @@ impl Engine {
             }
             || (request.goal.id.is_some() && request.session_id.is_none())
             || (request.goal.autonomous && request.goal.id.is_some())
+            || (request.goal.continues.is_some()
+                && (request.goal.id.is_some()
+                    || request.session_id.is_none()
+                    || !request.images.is_empty()))
         {
             return Err(EngineError::InvalidRequest);
         }

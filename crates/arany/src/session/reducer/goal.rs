@@ -24,8 +24,20 @@ impl SessionView {
         resource_settings: &crate::tools::ToolResourceSettings,
         phase: &GoalPhase,
         autonomous: bool,
+        continues: Option<GoalId>,
         prior: u64,
     ) -> Result<(), ReplayError> {
+        if let Some(source_id) = continues {
+            let source = self.continuable_goal();
+            if source.is_none_or(|source| {
+                source.id != source_id
+                    || source.objective != objective
+                    || source.phase != *phase
+                    || source.autonomous != autonomous
+            }) {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
         if self.goals.iter().any(|goal| goal.id == *goal_id)
             || self
                 .workspace_identity
@@ -71,6 +83,7 @@ impl SessionView {
             started_sequence: prior,
             finished_sequence: None,
             known_cached_tokens: 0,
+            continues,
         });
         Ok(())
     }
@@ -524,6 +537,7 @@ pub(super) fn apply(
             resource_settings,
             phase,
             autonomous,
+            continues,
         } => {
             current.start_goal(
                 goal_id,
@@ -533,6 +547,7 @@ pub(super) fn apply(
                 resource_settings,
                 phase,
                 *autonomous,
+                *continues,
                 prior,
             )?;
         }

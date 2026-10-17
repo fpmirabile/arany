@@ -2024,6 +2024,7 @@ mod tests {
                     phase: arany::GoalPhase::Implementation,
                     autonomous: false,
                     resource_settings: arany::ToolResourceSettings::default(),
+                    continues: None,
                 },
             )
             .await

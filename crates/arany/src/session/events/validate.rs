@@ -33,8 +33,12 @@ impl Event {
                 workspace_identity: WorkspaceIdentity { inode, .. },
                 budget,
                 resource_settings,
+                continues,
                 ..
             } => {
+                if continues.is_some_and(|id| !id.valid()) {
+                    return Err(ReplayError::InvalidPayload);
+                }
                 if objective.len() > super::MAX_USER_MESSAGE_BYTES || *inode == 0 {
                     return Err(ReplayError::InvalidPayload);
                 }

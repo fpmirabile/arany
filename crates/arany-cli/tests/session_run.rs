@@ -1571,6 +1571,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
                     phase: arany::GoalPhase::Research,
                     autonomous: false,
                     resource_settings: arany::ToolResourceSettings::default(),
+                    continues: None,
                 },
             )
             .await
@@ -2233,6 +2234,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     phase: arany::GoalPhase::Research,
                     autonomous: false,
                     resource_settings: arany::ToolResourceSettings::default(),
+                    continues: None,
                 },
                 Event::GoalRunLinked {
                     goal_id,

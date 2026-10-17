@@ -801,6 +801,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                     }) if argument != "pause" => {
                         let start = if argument == "resume" {
                             GoalStart::Resume
+                        } else if argument == "continue" {
+                            GoalStart::Continue
                         } else {
                             GoalStart::Autonomous
                         };
@@ -894,6 +896,8 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                     } if argument != "pause" => {
                         let (start, objective) = if argument == "resume" {
                             (GoalStart::Resume, String::new())
+                        } else if argument == "continue" {
+                            (GoalStart::Continue, String::new())
                         } else {
                             (GoalStart::Autonomous, argument.to_owned())
                         };

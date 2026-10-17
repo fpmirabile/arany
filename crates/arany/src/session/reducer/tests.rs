@@ -107,6 +107,7 @@ mod goal_recovery_tests {
                 started_sequence: 1,
                 finished_sequence: None,
                 active_ceiling_ms: 0,
+                continues: None,
             }],
         }
     }
@@ -221,6 +222,7 @@ mod goal_replay_tests {
             resource_settings: crate::tools::ToolResourceSettings::default(),
             phase: GoalPhase::Implementation,
             autonomous: false,
+            continues: None,
         }
     }
 
@@ -1392,6 +1394,74 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn goal_continuation_replays_only_from_a_budget_closed_unclaimed_source() {
+        let session_id = SessionId::new();
+        let (source, target) = (GoalId::new(), GoalId::new());
+        let continued = |goal_id, continues| {
+            let Event::GoalStarted {
+                objective,
+                workspace_identity,
+                budget,
+                resource_settings,
+                phase,
+                autonomous,
+                ..
+            } = goal_started(goal_id, GoalBudget::default())
+            else {
+                unreachable!();
+            };
+            Event::GoalStarted {
+                goal_id,
+                objective,
+                workspace_identity,
+                budget,
+                resource_settings,
+                phase,
+                autonomous,
+                continues: Some(continues),
+            }
+        };
+        let replay =
+            |events: Vec<Event>| SessionView::replay(session_id, &journal(session_id, events));
+        let open_source = vec![
+            Event::SessionStarted {
+                title: "t".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+            goal_started(source, GoalBudget::default()),
+            continued(target, source),
+        ];
+        let started = |goal_id| {
+            vec![
+                Event::SessionStarted {
+                    title: "t".into(),
+                    workspace_identity: WorkspaceIdentity {
+                        device: 1,
+                        inode: 2,
+                    },
+                },
+                goal_started(goal_id, GoalBudget::default()),
+            ]
+        };
+        assert!(replay(started(source)).is_ok());
+        assert!(replay(open_source).is_err(), "an open Goal is not a source");
+        let unknown = vec![
+            Event::SessionStarted {
+                title: "t".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+            continued(target, source),
+        ];
+        assert!(replay(unknown).is_err(), "an unknown source is refused");
+    }
+
+    #[test]
     fn exhausted_autonomous_goal_closes_over_a_crash_left_compaction_call() {
         let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
         let budget = GoalBudget {
@@ -1409,6 +1479,7 @@ mod goal_replay_tests {
             resource_settings: crate::tools::ToolResourceSettings::default(),
             phase: GoalPhase::Implementation,
             autonomous: true,
+            continues: None,
         }];
         events.extend(start_run(
             goal_id,
@@ -1601,6 +1672,7 @@ mod goal_replay_tests {
                     resource_settings: crate::tools::ToolResourceSettings::default(),
                     phase: GoalPhase::Implementation,
                     autonomous: true,
+                    continues: None,
                 },
             ];
             events.extend(start_run(
@@ -2007,6 +2079,7 @@ mod goal_replay_tests {
                 finished_sequence: None,
                 known_cached_tokens: 0,
                 active_ceiling_ms: 0,
+                continues: None,
             }],
         }
     }
@@ -2632,6 +2705,7 @@ mod goal_replay_tests {
                 started_sequence: 1,
                 finished_sequence: None,
                 active_ceiling_ms: 0,
+                continues: None,
             }],
         };
         view.apply_committed(&EventEnvelope {
@@ -2780,6 +2854,7 @@ mod goal_replay_tests {
                 started_sequence: 1,
                 finished_sequence: None,
                 active_ceiling_ms: 0,
+                continues: None,
             }],
         };
         view.apply_committed(&EventEnvelope {

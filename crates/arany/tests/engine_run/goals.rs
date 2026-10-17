@@ -865,6 +865,129 @@ async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
     store.close().await.expect("Store shutdown");
 }
 
+#[tokio::test]
+async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after_restart() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let first_provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
+        Finish {
+            summary: "first Run complete".into(),
+            result: "continue later".into(),
+        },
+    )]));
+    let first_engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("first engine");
+    let mut first = request(&workspace, "Ship the migration");
+    first.include_paths.clear();
+    first.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_provider_calls: Some(1),
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    first.goal.finish_after_run = false;
+    let initial = run_to_end(&first_engine, &first_provider, first)
+        .await
+        .expect("first Goal Run");
+    first_engine.close().await.expect("first engine shutdown");
+
+    let engine = Engine::open(
+        StateRoot::open_existing(&state_path).expect("reopened state"),
+        EngineConfig::default(),
+    )
+    .expect("second engine");
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
+        Finish {
+            summary: "second Run complete".into(),
+            result: "done".into(),
+        },
+    )]));
+    let continue_request = |source| {
+        let mut next = request(&workspace, "");
+        next.session_id = Some(initial.session_id);
+        next.title = None;
+        next.include_paths.clear();
+        next.goal = arany::GoalRequest::continue_from(
+            source,
+            arany::GoalBudget {
+                max_provider_calls: Some(4),
+                ..arany::GoalBudget::default()
+            },
+            arany::ToolResourceSettings::default(),
+        );
+        next
+    };
+
+    // The budget-paused Goal is not closed yet, so it is not an exhausted source.
+    assert!(matches!(
+        run_to_end(&engine, &provider, continue_request(initial.goal_id)).await,
+        Err(EngineError::GoalNotContinuable)
+    ));
+
+    let mut closing = request(&workspace, "");
+    closing.session_id = Some(initial.session_id);
+    closing.title = None;
+    closing.include_paths.clear();
+    closing.goal = arany::GoalRequest::resume(initial.goal_id, true);
+    assert!(matches!(
+        run_to_end(&engine, &provider, closing).await,
+        Err(EngineError::GoalBudgetExhausted)
+    ));
+
+    let unknown = arany::GoalId::new();
+    assert!(matches!(
+        run_to_end(&engine, &provider, continue_request(unknown)).await,
+        Err(EngineError::GoalNotContinuable)
+    ));
+    let mut with_text = continue_request(initial.goal_id);
+    with_text.objective = "another objective".into();
+    assert!(matches!(
+        run_to_end(&engine, &provider, with_text).await,
+        Err(EngineError::GoalNotContinuable)
+    ));
+
+    let continued = run_to_end(&engine, &provider, continue_request(initial.goal_id))
+        .await
+        .expect("continued Goal Run");
+    assert_ne!(continued.goal_id, initial.goal_id);
+    assert!(matches!(
+        run_to_end(&engine, &provider, continue_request(initial.goal_id)).await,
+        Err(EngineError::GoalNotContinuable)
+    ));
+    engine.close().await.expect("engine shutdown");
+
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let events = store
+        .load_session(initial.session_id)
+        .await
+        .expect("Events");
+    let view = SessionView::replay(initial.session_id, &events)
+        .expect("strict replay")
+        .expect("Session");
+    let old = view.goal(initial.goal_id).expect("source Goal");
+    let new = view.goal(continued.goal_id).expect("continued Goal");
+    assert_eq!(old.status, arany::GoalStatus::Failed);
+    assert_eq!(old.run_ids.len(), 1);
+    assert_eq!(new.continues, Some(initial.goal_id));
+    assert_eq!(new.objective, "Ship the migration");
+    assert_eq!(new.budget.max_provider_calls, Some(4));
+    assert_eq!(new.status, arany::GoalStatus::Completed);
+    assert_eq!(new.run_ids.len(), 1);
+    assert_eq!(new.provider_calls, 1);
+    assert!(!events.iter().any(|event| matches!(
+        &event.event,
+        Event::GoalResumed { goal_id } if *goal_id == initial.goal_id
+    )));
+    store.close().await.expect("Store shutdown");
+}
+
 struct FiniteTokenTeam {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
@@ -1143,6 +1266,7 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
                         ..arany::GoalBudget::default()
                     },
                     resource_settings: arany::ToolResourceSettings::default(),
+                    continues: None,
                 },
             )
             .await
@@ -1251,6 +1375,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
                 max_provider_calls: Some(1),
                 ..arany::GoalBudget::default()
             },
+            continues: None,
         },
         Event::GoalRunLinked {
             goal_id,
@@ -4495,6 +4620,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
                 max_runs: 2,
                 ..arany::GoalBudget::default()
             },
+            continues: None,
         },
         Event::GoalRunLinked {
             goal_id,

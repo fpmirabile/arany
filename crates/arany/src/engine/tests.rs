@@ -92,6 +92,7 @@ mod goal_workspace_lease_tests {
                 phase: GoalPhase::Implementation,
                 autonomous: false,
                 resource_settings: crate::tools::ToolResourceSettings::default(),
+                continues: None,
             },
         ));
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -220,6 +221,7 @@ mod goal_workspace_lease_tests {
                     phase: GoalPhase::Implementation,
                     autonomous: false,
                     resource_settings: crate::tools::ToolResourceSettings::default(),
+                    continues: None,
                 },
             )
             .await
@@ -247,6 +249,7 @@ mod goal_workspace_lease_tests {
                 resource_settings: crate::tools::ToolResourceSettings::default(),
                 finish_after_run: true,
                 autonomous: false,
+                continues: None,
             },
         }
     }

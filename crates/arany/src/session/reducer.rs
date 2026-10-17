@@ -75,6 +75,8 @@ pub struct GoalView {
     pub report: Option<GoalReport>,
     pub started_sequence: u64,
     pub finished_sequence: Option<u64>,
+    /// The exhausted Goal this one continues.
+    pub continues: Option<GoalId>,
 }
 
 impl GoalView {
@@ -639,6 +641,18 @@ impl SessionView {
             .map(|index| &self.goals[index])
             .filter(|goal| goal.status == GoalStatus::Interrupted)
             .map(|goal| goal.id)
+    }
+
+    /// The most recent budget-closed Goal that no later Goal continues yet.
+    pub fn continuable_goal(&self) -> Option<&GoalView> {
+        self.goals.iter().rev().find(|goal| {
+            goal.status == GoalStatus::Failed
+                && !goal.admits_next_run()
+                && !self
+                    .goals
+                    .iter()
+                    .any(|other| other.continues == Some(goal.id))
+        })
     }
 
     pub fn goal(&self, id: GoalId) -> Option<&GoalView> {
