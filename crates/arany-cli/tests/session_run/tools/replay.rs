@@ -1289,7 +1289,7 @@ pub(super) async fn native_command_changeset_corpus(
             } else {
                 ApprovalMode::Request
             });
-        // The test keeps the sender, as the Engine kept it before, so the inbox stays open after the Run.
+        // The test holds the sender so the inbox stays open after the Run.
         let granted = (interactive || matches!(case, "ai-approve" | "scope" | "scope-auto"))
             .then(|| approvals.clone());
         let cancellation = RunCancellation::new();
