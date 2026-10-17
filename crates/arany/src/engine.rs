@@ -916,12 +916,12 @@ impl Engine {
         let include_paths = request.include_paths.clone();
         let policy = request.policy;
         let mut leases = WorkspaceLeases::new();
-        // Boxed: keeps the large Run future off the caller stack in debug builds.
         let entry = if request.goal.id.is_some() {
             GoalEntry::Resume
         } else {
             GoalEntry::New
         };
+        // Boxed: keeps the large Run future off the caller stack in debug builds.
         let mut turn = Box::pin(self.run_turn(
             submission,
             request,
