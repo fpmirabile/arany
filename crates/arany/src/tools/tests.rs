@@ -1415,6 +1415,10 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         ("handshake", "handshake"),
         ("payload", "execution"),
         ("receipt", "receipt"),
+        ("process_stop", "process cleanup"),
+        ("launcher_reap", "launcher reap"),
+        ("stderr_drain", "output EOF"),
+        ("storage_cleanup", "storage cleanup"),
     ] {
         let error = super::ToolError::GuardBootstrap(
             serde_json::from_value(serde_json::json!({"stage": stage})).unwrap(),

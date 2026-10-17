@@ -919,6 +919,7 @@ async fn execute_worker(
     control: &mut tokio::net::unix::OwnedWriteHalf,
     receive_go: tokio::sync::oneshot::Receiver<()>,
     root: &Path,
+    teardown: &mut Option<tokio::time::Instant>,
 ) -> Result<ToolObservation, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
     let task = super::encode_task(&Task::new(runtime, intent, None))?;
@@ -1019,11 +1020,13 @@ async fn execute_worker(
     if result.is_err() {
         let _ = child.start_kill();
     }
+    let deadline = tokio::time::Instant::now() + TEARDOWN_WAIT;
+    *teardown = Some(deadline);
     let capture = fixture::Span::begin(fixture::Stage::WorkerReap);
     let reaped = match status {
         Some(status) => Ok(status),
         None => {
-            tokio::time::timeout(TEARDOWN_WAIT, async {
+            tokio::time::timeout_at(deadline, async {
                 child.wait().await.map_err(|_| ToolError::Operation)
             })
             .await
@@ -1031,9 +1034,9 @@ async fn execute_worker(
     };
     if reaped.is_err() {
         let _ = child.start_kill();
-        let _ = tokio::time::timeout(TEARDOWN_WAIT, child.wait()).await;
+        let _ = tokio::time::timeout_at(deadline, child.wait()).await;
     }
-    let drained = drain_stderr(&mut stderr_task).await;
+    let drained = drain_stderr(&mut stderr_task, deadline).await;
     capture.finish(matches!(reaped, Ok(Ok(_))) && drained.is_some());
     if result.is_err()
         && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)

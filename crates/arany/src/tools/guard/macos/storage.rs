@@ -1,4 +1,4 @@
-use super::super::CAPTURE_BYTES;
+use super::super::{CAPTURE_BYTES, TEARDOWN_WAIT, retry_transient};
 use super::system_program;
 use crate::private_fs::open_directory;
 use crate::tools::toolchains::RuntimeGrant;
@@ -386,7 +386,14 @@ pub(super) fn storage_mounted(root: &Path) -> Result<bool, ToolError> {
 }
 
 pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
-    super::super::retry_transient(CLEANUP_ATTEMPTS, CLEANUP_PAUSE, || {
+    cleanup_storage_until(root, tokio::time::Instant::now() + TEARDOWN_WAIT).await
+}
+
+pub(super) async fn cleanup_storage_until(
+    root: &Path,
+    deadline: tokio::time::Instant,
+) -> Result<(), ToolError> {
+    retry_transient(CLEANUP_ATTEMPTS, CLEANUP_PAUSE, deadline, || {
         cleanup_storage_once(root)
     })
     .await
@@ -589,14 +596,10 @@ fn attachments(bytes: &[u8], root: &Path) -> Result<Vec<Attachment>, ToolError> 
     let mut result = Vec::new();
     for image in images.iter() {
         let image = super::ffi::dictionary(&image)?;
-        // Images attached by concurrent processes may be listed mid-transition; only ours are pinned by path.
-        let Some(image_path) = image
-            .find(CFString::new("image-path"))
-            .and_then(|path| path.downcast::<CFString>())
-            .map(|path| path.to_string())
-        else {
-            continue;
-        };
+        let image_path = value(&image, "image-path")?
+            .downcast::<CFString>()
+            .ok_or(ToolError::ProtectionUnavailable)?
+            .to_string();
         if image_path.len() > 4096 {
             return Err(ToolError::Limit);
         }

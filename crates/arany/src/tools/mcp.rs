@@ -259,8 +259,9 @@ pub(super) async fn execute(
     }).await.unwrap_or(Err(ToolError::Limit));
     let _ = connection.writer.shutdown().await;
     let _ = connection.child.start_kill();
-    let reaped = tokio::time::timeout(TEARDOWN_WAIT, reap_owned_child(&mut connection.child)).await;
-    let drained = drain_stderr(&mut stderr_task).await;
+    let teardown = tokio::time::Instant::now() + TEARDOWN_WAIT;
+    let reaped = tokio::time::timeout_at(teardown, reap_owned_child(&mut connection.child)).await;
+    let drained = drain_stderr(&mut stderr_task, teardown).await;
     if !matches!(reaped, Ok(Ok(_))) || drained.is_none() {
         return Err(ToolError::Operation);
     }

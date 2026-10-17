@@ -1,7 +1,8 @@
 use super::super::{BootstrapFailure, GuardStage, Task, read_line_capped};
 use super::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 use super::storage::{
-    cleanup_storage, prepare_command_storage, read_record, storage_mounted, write_record,
+    cleanup_storage, cleanup_storage_until, prepare_command_storage, read_record, storage_mounted,
+    write_record,
 };
 use super::{
     CPU_LIMIT, PREPARATION_DEADLINE, SUPERVISION_INTERVAL, TEARDOWN_WAIT, bootstrap, ffi,
@@ -258,7 +259,15 @@ impl Scope {
     }
 
     pub(super) async fn stop(&mut self, except: Option<u32>) -> Result<(), ToolError> {
-        let deadline = tokio::time::Instant::now() + TEARDOWN_WAIT;
+        self.stop_until(except, tokio::time::Instant::now() + TEARDOWN_WAIT)
+            .await
+    }
+
+    pub(super) async fn stop_until(
+        &mut self,
+        except: Option<u32>,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), ToolError> {
         loop {
             match self.members() {
                 Ok(members) => {
@@ -904,7 +913,18 @@ pub(super) async fn execute(
                 match cache_status.as_slice() {
                     b"CACHE_DONE\n" => {}
                     b"CACHE_FAILED\n" => {
-                        return Err(ToolError::GuardRejected(GuardStage::StorageCleanup));
+                        let failure = tokio::time::timeout_at(
+                            completion_deadline,
+                            read_line_capped(&mut stream, 256),
+                        )
+                        .await
+                        .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<BootstrapFailure>(&bytes).ok());
+                        return Err(failure.map_or(
+                            ToolError::GuardRejected(GuardStage::StorageCleanup),
+                            ToolError::GuardBootstrap,
+                        ));
                     }
                     _ => return Err(ToolError::Operation),
                 }
@@ -1036,6 +1056,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let mut reader = None;
             let mut storage: Option<Vec<cap_std::fs::Dir>> = None;
             let mut command_before = None;
+            let mut teardown = None;
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
@@ -1105,12 +1126,14 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     &mut output,
                     receive_go,
                     path.parent().ok_or(ToolError::Path)?,
+                    &mut teardown,
                 )
                 .await
             }
             .await;
             let capture = FixtureSpan::begin(FixtureStage::SupervisorCoalition);
-            let cleanup = scope.stop(Some(std::process::id())).await;
+            let teardown = teardown.unwrap_or_else(|| tokio::time::Instant::now() + TEARDOWN_WAIT);
+            let cleanup = scope.stop_until(Some(std::process::id()), teardown).await;
             capture.finish(cleanup.is_ok());
             let result = result.and_then(|mut observation| {
                 observation.cache_update = if cache.is_some() {
@@ -1233,7 +1256,8 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             drop(storage);
             let storage_cleanup = if cleanup.is_ok() {
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorDetach);
-                let result = cleanup_storage(path.parent().ok_or(ToolError::Path)?).await;
+                let result =
+                    cleanup_storage_until(path.parent().ok_or(ToolError::Path)?, teardown).await;
                 capture.finish(result.is_ok());
                 result
             } else {
@@ -1247,14 +1271,41 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 output.shutdown().await.map_err(|_| ToolError::Operation)?;
                 return Err(ToolError::Operation);
             }
-            let result = cleanup.and(storage_cleanup).and(result);
+            let teardown_stage = if cleanup.is_err() {
+                Some(super::super::BootstrapStage::ProcessStop)
+            } else if storage_cleanup.is_err() {
+                Some(super::super::BootstrapStage::StorageCleanup)
+            } else {
+                match &result {
+                    Err(ToolError::GuardRejected(GuardStage::LauncherReap)) => {
+                        Some(super::super::BootstrapStage::LauncherReap)
+                    }
+                    Err(ToolError::GuardRejected(GuardStage::OutputEof)) => {
+                        Some(super::super::BootstrapStage::StderrDrain)
+                    }
+                    _ => None,
+                }
+            };
+            let result = match (cleanup.and(storage_cleanup).and(result), teardown_stage) {
+                (Err(_), Some(stage)) => Err(ToolError::GuardBootstrap(BootstrapFailure { stage })),
+                (result, _) => result,
+            };
             if response_sent {
+                let bytes = match &result {
+                    Ok(_) => b"CACHE_DONE\n".to_vec(),
+                    Err(error) => {
+                        let failure = match error {
+                            ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
+                            _ => serde_json::to_vec(&BootstrapFailure {
+                                stage: super::super::BootstrapStage::StorageCleanup,
+                            }),
+                        }
+                        .map_err(|_| ToolError::Operation)?;
+                        [&b"CACHE_FAILED\n"[..], failure.as_slice(), &b"\n"[..]].concat()
+                    }
+                };
                 output
-                    .write_all(if result.is_ok() {
-                        b"CACHE_DONE\n"
-                    } else {
-                        b"CACHE_FAILED\n"
-                    })
+                    .write_all(&bytes)
                     .await
                     .map_err(|_| ToolError::Operation)?;
             } else {
