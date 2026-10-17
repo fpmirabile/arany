@@ -19,6 +19,8 @@ mod telemetry;
 mod terminal;
 mod tools;
 
+pub use tools::permissions;
+
 #[cfg(target_os = "macos")]
 pub use tools::tool_guard_unit_main;
 

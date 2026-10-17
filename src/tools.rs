@@ -10,6 +10,7 @@ mod fs;
 mod git;
 mod guard;
 mod mcp;
+pub mod permissions;
 mod process;
 mod skills;
 pub(crate) mod toolchains;

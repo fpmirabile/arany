@@ -40,6 +40,115 @@ Workspace input resolves one component at a time beneath the pinned directory ha
 
 Each accepted AI review is pinned to its pending Tool in the projection. Ownership is never inferred from adjacent review calls, so an approval-mode change cannot duplicate an integration review.
 
+## Permission modes, rules and hooks
+
+This slice exposes the pure `arany::permissions::PermissionConfig` parser and evaluator. It does not discover settings, change the current terminal modes, enter the Engine loop, execute commands or persist verdicts. Engine integration waits for the shared `before_dispatch` seam in [NEXT_STEPS item 6](../../NEXT_STEPS.md). Settings must eventually come from authenticated user configuration admitted outside the Workspace; repository, Skill, model and hook text never select trust. Parsed settings are immutable data, not executable configuration or a grant.
+
+### Modes and approval decisions
+
+The peer contract is [Claude Code permission modes](https://code.claude.com/docs/en/permissions#permission-modes). The five accepted spellings are case-sensitive; aliases and bypass modes reject. The parser's omitted `defaultMode` is `default`; it does not change Arany's existing interactive default.
+
+| Mode | Peer behavior | Arany mapping and narrowing |
+|---|---|---|
+| `default` | Prompt on first Tool use. | Existing `Request`: absent a matching allow, a fresh one-use human approval for each effect needing approval. Remembering Tool use cannot renew an immutable intent. |
+| `acceptEdits` | Accept file edits and common filesystem commands in working directories. | Existing `AutoEdits`: typed mutations, including changeset integration; commands and MCP calls still ask because arbitrary process behavior is not a typed edit. |
+| `plan` | Explore without source edits; read-only shell commands are available. | Deny mutations and generic command/MCP processes, even with allow rules. Permit admitted typed reads, Skill reads and typed Git reads. Arbitrary argv and MCP metadata cannot prove a read-only effect. |
+| `auto` | Classify actions before running without routine prompts; broad execution allows are dropped. | Preserve existing `Auto` AI review for approval-needing calls. Add review for typed Git processes and MCP discovery; every `spawns_process` call and MCP operation requires review. Matching allows never skip it. Existing budgets, uncertainty-to-human fallback and cancellation remain mandatory. |
+| `dontAsk` | Deny actions that would prompt; pre-approved actions remain available. | Convert an unresolved `Ask` to `Deny`; permit otherwise admitted no-question calls and matching allow rules. An explicit ask rule still denies. |
+
+`decision(call)` returns only `Allow`, `Deny` or `Ask`. These are approval dispositions within the pinned grant, never executable authority. Invalid or oversized calls deny. `approval_mode(call)` selects human `Request` for an explicit ask rule even under `auto` or `acceptEdits`; only an otherwise unresolved `auto` decision selects AI review. A caller must still journal the exact intent and verdict and obtain deterministic Policy admission and Guard attestation before dispatch. `Decision::narrow` combines independent restrictions with `Deny > Ask > Allow`; an allow from a hook or review cannot erase an earlier denial or question. Children retain the intersection with parent authority. There is no bypass or implicit unguarded execution.
+
+**Owner-accepted peer behavior — 2026-10-17:** in `default`, a matching allow rule pre-approves commands and MCP calls without a human prompt or AI review, as in [Claude Code permissions](https://code.claude.com/docs/en/permissions#permission-rule-syntax). This is an explicit user-configured approval, not a bypass of the Guard, deterministic Policy or the pinned grant. Deny and ask retain precedence. `acceptEdits` keeps human approval for commands and MCP calls even with an allow rule; its existing typed-edit approval is unchanged.
+
+[Claude Code drops broad execution allows on entering auto mode](https://code.claude.com/docs/en/permission-modes#how-auto-mode-evaluates-actions), including blanket command rules and wildcarded interpreters. Arany enforces the stricter behavior directly during decision evaluation: `auto` ignores allow rules for processes, MCP operations and calls that already need approval, including bare `Bash`/`command`, `Bash(*)`, `Bash(python*)`, `Bash(python *)`, `:*` equivalents, bare `mcp_call` and whole-server MCP rules. Existing AI review for commands, MCP calls and typed mutations remains mandatory. Arany adds AI review for typed Git processes and MCP discovery, which today's Auto mode does not review. Explicit ask rules still select a human and deny rules still block.
+
+### Permission rules
+
+The envelope copies [Claude Code settings](https://code.claude.com/docs/en/settings) and [rule syntax](https://code.claude.com/docs/en/permissions#permission-rule-syntax):
+
+```json
+{
+  "permissions": {
+    "defaultMode": "default",
+    "allow": ["Bash(git diff *)", "Read(./src/**)"],
+    "deny": ["Read(./private/**)"],
+    "ask": ["Edit(./src/**)"]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "/reviewed/check", "timeout": 30}]
+      }
+    ]
+  }
+}
+```
+
+All fields shown at the envelope and permissions levels are optional with empty lists/maps as defaults. Unknown or duplicate fields, wrong types, unsupported names and malformed rules reject the entire document; no invalid rule is silently skipped. A rule is a bare Tool or `Tool(specifier)`; inner parentheses are literal. Lists are evaluated in deny, ask, allow order, regardless of specificity or input ordering. Within each list there are no exceptions that undo a match.
+
+| Peer Tool | Typed Arany operations |
+|---|---|
+| `Bash` | `command`; the subject uses its admitted logical program identifier and argv, not an inferred executable basename. |
+| `Read` | `list`, `read`, `search`; deny and ask also cover `git_status`, `git_diff` and `git_log` paths. A deny also covers typed mutations and changeset paths to prevent writing through a read denial. |
+| `Edit` | `mkdir`, `write`, `edit`, `apply_changeset`. |
+| `Write`, `Glob` | Bare `write` and `list` respectively; path specifiers reject in favor of `Edit` and `Read`. |
+| `Grep`, `Skill` | `search` path and admitted `skill` name respectively. Skill wildcards match names, not authority or resource discovery. |
+| `mcp__<server>__<tool>` | `mcp_call` matched against separate server and tool fields; the Tool segment supports `*`. `mcp__<server>` also covers that server's catalog listing and all calls; `mcp__*` covers all servers for deny/ask. |
+| Exact Arany catalog name | That operation only, including `git_status`, `git_diff`, `git_log`, `mcp_list` and `mcp_call`. Native MCP operation names accept bare rules only. |
+
+Bare Tool-name `*` globs are supported for deny and ask against peer and native operation names. A non-MCP glob that matches no known operation rejects, preventing silent no-op restrictions. MCP allow rules require a literal server; generic allow name-globs reject. Server patterns are at most 64 bytes and use lowercase ASCII letters, digits, `_`, `-` and `*`; Tool patterns are at most 128 bytes within the complete-rule ceiling. MCP allows compare the parsed server and Tool fields separately. Deny/ask also test the complete peer-name glob against the call or catalog subject, including `__` descendants so the rule can restrict a whole server. This conservatively covers ambiguous server names containing `__` or ending in `_`; an ambiguous spelling may restrict more calls, but never pre-approve them. Tool names supply no authority and matching discovers no servers. A changeset allow requires every path to match the same rule; deny/ask requires any path. Separate allows cannot assemble authority for an otherwise unmatched batch.
+
+Bash patterns follow the peer's [wildcard examples](https://code.claude.com/docs/en/permissions#wildcard-patterns): `*` spans spaces; exact patterns stay exact. A sole trailing ` *` also matches the bare command but keeps its word boundary; trailing `:*` is equivalent. `Bash(*)` equals bare `Bash`. Other characters are literal.
+
+Arany-specific command narrowing: only unambiguous argv words composed of ASCII letters/digits and `_./:@+=,%~-` are joined with spaces for specifier matching. Empty, quoted, whitespace-bearing or shell/control-bearing arguments are opaque. An opaque command cannot match a specifier allow and conservatively matches every applicable specifier deny/ask. A bare Tool rule still covers it. For deny/ask only, the pattern also checks every word-boundary suffix of the joined argv, so `timeout 30 rm x`, `nice rm x`, `xargs rm x` and `env FOO=1 rm x` cannot hide an `rm *` restriction. This is a conservative narrowing: even a word used as ordinary data may trigger a restriction. Allows match only the complete argv projection. Arany does not split shell strings, expand variables or infer commands from scripts as the peer does. This avoids shell parsing becoming an authority boundary; all execution remains under the pinned command grant and Guard. Text matching does not prove an executable's effects, filesystem disclosure or read-only behavior.
+
+File patterns use the peer's [Read/Edit matching depths](https://code.claude.com/docs/en/permissions#read-and-edit) and [gitignore wildcards](https://git-scm.com/docs/gitignore#_pattern_format): `*` and `?` stay within a segment; whole-segment `**` crosses zero or more directories; alphanumeric classes/ranges, class negation and backslash-escaped literals are supported. Bare filenames match at any depth. `/path` and `./path` anchor at the admitted Workspace; multi-segment relative patterns anchor there too. This is an explicit peer divergence for `/path`: Claude Code anchors it at the settings source, while Arany uses its admitted directory capability to prevent settings placement from changing path authority. Unanchored `src/**` matches only root `src` for allow, and a `src` directory at any depth for deny/ask. An explicit `**/src/**` matches at any depth for every list. Deny/ask path patterns compile case-insensitively on Linux and macOS; allow patterns remain case-sensitive. Deny/ask reject non-ASCII pattern literals. Any non-ASCII subject path conservatively matches an applicable restrictive path rule, including changeset and Git paths, closing NFC/NFD and Unicode case aliases without normalization dependencies. This deliberately over-restricts unrelated Unicode paths. Allow literals retain exact Unicode spelling and cannot normalize into a wider match. There is no filesystem access or symlink following; actual filesystem aliases and result filtering remain outside this matcher, under the separate no-follow grant and Guard.
+
+The admitted path vocabulary is Workspace-relative. This slice rejects `//` absolute and `~/` home anchors, traversal, empty components, trailing directory-only slashes, non-segment `**`, unsupported classes and dangling escapes rather than guessing filesystem identities or settings-source roots. Leading comments and gitignore `!` exceptions also reject: restrict-only sources cannot remove prior restrictions. The existing no-follow admission and exclusions still apply. Rules match proposed typed paths; they do not filter directory/search results, includes, interpreter I/O or subprocess filesystem access. Such disclosure remains bounded by the independent grant and Guard; this config API is not an OS path filter.
+
+### Hook configuration and owner decision
+
+The envelope and nested groups copy the [Claude Code hooks reference](https://code.claude.com/docs/en/hooks#configuration) and [command fields](https://code.claude.com/docs/en/hooks#command-hook-fields). Accepted events are exactly `PreToolUse`, `PostToolUse`, `Stop`, `SubagentStop` and `PreCompact`. Groups contain a `hooks` array of command handlers, an optional matcher, and no other fields. Handlers accept `type: "command"`, a nonempty `command`, optional `args` and an optional integer `timeout` in seconds. Omitted `args` retains shell-form text; a present array, including `[]`, retains exec form. Nothing is interpolated, resolved, installed or executed.
+
+Matchers absent, empty or `*` select every occurrence. The peer's exact-name/`|`/`,` alternatives are copied; other patterns use an unanchored regex. Arany narrows regexes to the bounded finite-automaton syntax: JavaScript lookaround/backreferences and oversized compiled patterns reject. Tool events must use `matches_tool` so invalid or ambiguous calls cannot evade a hook; other events use `matches` on their event-specific subject. Tool matching uses canonical peer names above, including actual `mcp__<server>__<tool>` call subjects and `mcp__<server>` catalog subjects; `SubagentStop` matches agent type and `PreCompact` matches the trigger (`manual`/`auto`). `Stop` accepts only match-all: a filtering matcher rejects instead of the peer's silent ignore. An MCP server name containing `__` produces a blocking Tool-subject error rather than an ambiguous canonical name; native MCP rules still compare typed fields. A present `null` is invalid, not an omitted field. Empty handler groups, other events/types, async handlers and extra execution options reject.
+
+**Recorded owner decision — 2026-10-17:** hook commands run inside the Guard like every process, under pinned interpreter/executable identities, an explicit environment and typed grants. Arany copies Claude Code's hook protocol: events, matchers, JSON on stdin, event-specific exit-2 blocking, `permissionDecision` `allow|deny|ask` and timeouts. The peer divergence is execution authority: [Claude Code command hooks run with full user permissions](https://code.claude.com/docs/en/hooks#security-considerations); Arany requires Guard isolation because of its [Per-effect isolation security guarantee](../../AGENTS.md#non-negotiable-guarantees). Descendants cannot gain authority, and repository or hook output cannot select trust.
+
+If a hook fails because of Guard enforcement, the planned [NEXT_STEPS item 7 escape hatch](../../NEXT_STEPS.md) applies to that exact command. Running it outside the Guard requires a new intent and explicit user approval for that command; it is never an automatic retry. The approval and unguarded execution are journaled, and the effect and Run are marked unguarded. Journal-first durability, honest uncertainty, budgets and restrict-only verdicts still apply. Hook execution and this escape hatch remain unimplemented in this configuration-only slice.
+
+Future Engine work must commit hook intent, effect and verdict before continuation, carry bounded JSON on stdin, distinguish exit-2 blocking from observation-only events, accept `permissionDecision` `allow|deny|ask` only as a restriction, and accept `updatedInput` only after proving it narrows the immutable authorization. Post-use hooks cannot undo an effect. Unknown outcomes stop continuation without retry; cancellation must reap descendants; replay never executes hooks. Human and AI approval adapters wait for the same `before_dispatch` seam. None of this execution protocol is implemented or claimed by the config parser.
+
+### Limits and acceptance scenarios
+
+The whole document is at most 64 KiB, with the existing JSON ceiling of 4096 nodes and 32 levels. There are at most 128 permission rules across all lists, each complete rule at most 1024 UTF-8 bytes; controls reject. Tool calls retain the 16 KiB serialized input ceiling, checked without an allocation proportional to oversized input before typed validation. Hooks have at most 64 groups and 128 handlers across all events. Matchers and match subjects are at most 1024 bytes and control-free. Subject overflow, controls or an invalid Tool call return an error, not a non-match; callers must block the pending action on this error and cannot skip the hook. Commands are at most 4096 bytes; tab/newline are permitted as inert command text, other controls reject. Exec form has at most 64 arguments of 4096 bytes each, without NUL, within the aggregate document limit. Hook timeout is 1–600 seconds, default 600; the finite maximum is an Arany narrowing. Each regex has a 128 KiB compiled-size ceiling, a 32 KiB DFA cache and 32 nesting levels. All overflow rejects, with no truncation, partial config, retry or fallback. Errors identify the list/index or hook constraint without echoing command/rule text.
+
+All owners below are unit tests in [permissions/tests.rs](../../src/tools/permissions/tests.rs), under `tools::permissions::tests::`. They prove pure parsing and decisions, not runtime dispatch, journal durability, native OS or live classifier support.
+
+| Acceptance scenario | Exact test owner |
+|---|---|
+| Five spellings preserve per-call approval behavior; plan and dontAsk remain restrictive even with allows. | `permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask` |
+| Deny beats ask, ask beats allow in every mode. | `permission_rule_precedence_is_deny_then_ask_then_allow` |
+| Explicit asks remain human; composed restrictions never widen. | `explicit_ask_uses_humans_and_decision_composition_only_narrows` |
+| Bash exact/wildcard matching preserves word boundaries, bare-prefix and `:*` semantics. | `bash_globs_follow_peer_word_boundaries_and_trailing_star` |
+| Opaque argv cannot obtain a specifier allow; restrictive rules conservatively match. | `opaque_argv_never_auto_allows_and_conservatively_matches_restrictions` |
+| File anchors, segment wildcards, recursive globs, Unicode subjects, escapes and classes have deterministic depth. | `file_globs_follow_segment_depth_anchors_and_peer_directory_rules` |
+| Peer names map to typed operations; Read denials cover writes. | `tool_mappings_cover_typed_operations_and_read_denials_cover_writes` |
+| Changeset allow needs all paths; deny/ask needs any path. | `changeset_rules_require_all_paths_for_allow_and_any_path_for_deny_or_ask` |
+| Malformed/unsupported rules, duplicate keys, unknown modes and wrong schemas reject. | `malformed_and_unsupported_permission_rules_fail_closed_without_echoing_input` |
+| Exact permission/input ceilings admit, overflow and invalid calls reject. | `permission_limits_accept_boundaries_and_reject_overflow` |
+| All five hook events parse, preserve command text and distinguish shell/exec form without execution. | `hook_schema_accepts_peer_events_defaults_exec_form_and_inert_commands` |
+| Exact/list/regex matchers preserve peer matching; excessive, control-bearing and invalid Tool subjects return blocking errors. | `hook_matchers_use_exact_alternatives_or_bounded_unanchored_regex` |
+| Unsupported hooks/regexes, controls, nulls, wrong timeout types and duplicate fields reject. | `hook_schema_rejects_ambiguous_unsupported_or_unsafe_config` |
+| Hook group/handler/command/argument/matcher and compiled-regex bounds reject excess. | `hook_limits_accept_boundaries_and_reject_aggregate_overflow` |
+| A deterministic hostile punctuation/Unicode/control corpus parses or returns errors without panicking. | `hostile_rule_text_is_total_and_deterministic` |
+| Auto rules cannot skip mandatory AI review; explicit ask and deny still win. | `auto_allow_rules_never_bypass_execution_review` |
+| Default allows are explicit preapprovals; acceptEdits keeps command/MCP human approval. | `default_allows_are_explicit_preapprovals_and_accept_edits_keeps_command_approval` |
+| Restrictive paths cover case and normalization aliases; allows keep exact spelling. | `restrictive_paths_cover_case_and_normalization_aliases_without_widening_allows` |
+| MCP rules and hooks match real typed server/tool subjects; ambiguous MCP restrictions conservatively cover both interpretations, allows keep parsed fields, and ambiguous hook subjects reject. | `peer_mcp_names_match_real_servers_tools_and_hook_subjects` |
+| Read deny/ask also cover typed Git path inspection. | `read_restrictions_cover_git_paths_without_preapproving_git` |
+| Deny/ask inspect every argv word-boundary suffix; allows do not inherit this expansion. | `bash_restrictions_cover_word_boundary_suffixes_without_expanding_allows` |
+
 ## Private grants
 
 Put an owner-only `tools.json` beside the admitted Session database, outside the Workspace. Its directory must be private (`0700`) and the file must be regular, single-link, no-follow, current-user-owned and `0600`. `--state-dir` selects this Session and configuration root; it does not move your saved account. Permissions are not encryption or protection from another process running as the same user.
