@@ -48,6 +48,9 @@ A concurrent submission or compaction is refused with `EngineError::Busy`;
 Session and ancestor locks remain scoped to a Run, while the Store thread lives
 until the Engine is closed or dropped. The [execution contract](../specs/execution.md#admission-persistence-and-recovery)
 owns Engine lifetime and admission.
+Submit returns a handle; an actor Engine over `mpsc` waits
+for a second Client when `serve --stdio` starts, because a queue adds no
+ownership boundary for the current single Client.
 
 The Engine owns admission, scheduling, context, Goal accounting and Run
 transitions. `GoalLedger` admits, reserves and settles actions over the reducer's
@@ -61,7 +64,8 @@ and [Goal contract](../specs/goals.md) own lifecycle, budgets and recovery.
 256 envelopes. Progress, telemetry and diagnostics each subscribe to that tap;
 a lagging receiver gets `Resync { missed }` and rebuilds from the committed view.
 Observers never block control flow or authorize work. Provider previews remain
-separate provisional data. [Execution](../specs/execution.md#committed-event-stream),
+separate provisional data. The tap belongs to Journal rather than the Store
+thread so persistence does not own observer delivery. [Execution](../specs/execution.md#committed-event-stream),
 [telemetry](../specs/telemetry.md) and [diagnostics](../specs/diagnostics.md) own
 their observable contracts.
 
@@ -115,6 +119,14 @@ The CLI depends on `arany`; the library never depends on CLI, terminal,
 presentation or accounts, and has no ratatui, crossterm or keyring dependency.
 `accounts/` owns ChatGPT OAuth, saved API accounts and the credential helper.
 Terminal rendering and pure view projection belong to the binary.
+
+Tool operations remain a closed enum with one facts table and per-family
+dispatch: a `dyn Tool` registry would duplicate a closed set without adding
+substitutability. Per-variant operation structs wait until a family payload
+gains a third caller. Model-facing schemas remain hand-written to preserve
+descriptions and byte-stable ordering; a derive needs caching evidence and a
+byte snapshot before reconsideration. Guard adapters remain `cfg`-selected
+functions because the host kernel, not runtime configuration, selects them.
 
 Children are direct read-only AgentRuns: without Tools they make one reasoning
 call; with Tools they may make up to 16 read-only Tool calls before reporting.
@@ -422,8 +434,8 @@ It does not force private users or hosted services to show a public “Powered b
 
 ## 15. Implementation order
 
-The [active beta plan](../../planning/arany-beta/README.md) routes remaining
-execution through [next steps](../../NEXT_STEPS.md). This architecture does not
+[Next steps](../../NEXT_STEPS.md) owns remaining execution priority; the
+[team plan](../../planning/agentic-teams/README.md) defines the live team slices. This architecture does not
 retain a second task sequence for already implemented foundations. Accepted
 contracts stay with their mapped owners; completed work and checks stay in the
 handoff and Git/PR/CI history. Missing live, native or accessibility evidence

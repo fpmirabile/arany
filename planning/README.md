@@ -1,6 +1,6 @@
 # Planning
 
-Use `planning/` for implementation plans, rollout plans, investigations, migrations, and other maintained execution work. Investigation findings belong in `docs/research/`; accepted architectural choices remain in the [decision register](../docs/research/next-step-decision-register.md), or a focused ADR when warranted. Do not create a parallel decision record for an already owned choice.
+Use `planning/` for implementation plans, rollout plans, investigations, migrations, and other maintained execution work. Investigation findings belong in `docs/research/`; accepted behavior and decisions belong in the [owning spec](../docs/specs/README.md), or the [system overview](../docs/architecture/system-overview.md) for architecture shape. Link existing rationale instead of creating a parallel decision record.
 
 Read [PLANNING.md](./PLANNING.md) before writing a plan and start from [TEMPLATE.md](./TEMPLATE.md).
 
@@ -39,3 +39,11 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 ## Lifecycle
 
 When implementation completes, accepted behavior moves into the owning spec and the execution plan is deleted in the same change (also when the work is still local). Unresolved defects and deferred checks go to `NEXT_STEPS.md`; update inbound links; Git/PR/CI history keeps completed results. Retain a plan only when the user explicitly asks for a historical record; a scoped security finding may retain the evidence needed for its reasoning.
+
+## Active plans
+
+| Plan | Remaining scope |
+|---|---|
+| [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
+
+[Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.

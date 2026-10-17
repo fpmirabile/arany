@@ -307,6 +307,11 @@ macOS trade-offs, known and accepted for this release:
 
 ## In-process reads
 
+Execution-site dispatch stays inside `ToolRuntime::execute` using the operation's
+pinned site. A `ToolExecutor` trait with interchangeable InProcess and Guard
+adapters was rejected: the sites enforce different contracts, and a fake Guard
+could make Engine tests pass without exercising enforcement.
+
 List, Read and Search run in the Engine process, as Claude Code and Codex CLI run reads outside their command sandbox. Typed Git reads, typed mutations, commands, Skills and MCP stay in the Guard, because they spawn a process or change the Workspace. The Engine opens the Workspace directory handle once at Tool admission, which still requires available native protection, and resolves every path beneath it with the Guard's no-follow, link, mount, special-file and protected-name rules (including `.env`) and the same `workspace_paths` scope, so disclosure does not widen. Before each read it rechecks the intent, its expiry and policy digest, and that both the pinned handle and the Workspace path still have the admitted device and inode; a replaced directory records Failed at `pinned input` without attestation before reading and stops the Run.
 
 Results fit the intent's result budget before serialization: a Read page ends early with `truncated` and `next_offset`, and List and Search drop trailing rows and set `may_be_truncated`; a budget too small for any content is Limit. A read is bounded by its intent runtime: timeout records Limit and cancellation records Cancelled, neither attested. It waits for no Guard capacity and reserves its Goal action with zero preparation overhead, so exhausted active time refuses it and its runtime is clamped to the remaining active time.

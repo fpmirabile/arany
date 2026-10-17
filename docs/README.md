@@ -49,6 +49,6 @@ Read the owning contract and the rules [AGENTS.md](../AGENTS.md) triggers, then 
 
 ## Current milestone and evidence
 
-The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) owns open defects, unperformed checks and release work; [the active beta plan](../planning/arany-beta/README.md) holds remaining Beta 1 execution; [the agentic coding teams plan](../planning/agentic-teams/README.md) owns the remaining Beta 1 implementation work; accepted behavior belongs in specs. Keep specs independent of test totals, artifact hashes and past run logs.
+The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) owns open defects, unperformed checks and release work; [the agentic coding teams plan](../planning/agentic-teams/README.md) owns the remaining Beta 1 implementation work; accepted behavior belongs in specs. Keep specs independent of test totals, artifact hashes and past run logs.
 
 The executable snapshots the exact Workspace-root AGENTS.md, with CLAUDE.md only as an absence fallback. This documentation workflow does not make Arany discover nested rules, follow spec links, or expand outbound content. Its admission contract remains in [Session spec](./specs/session.md) and [security rules](../agents/security.md).
