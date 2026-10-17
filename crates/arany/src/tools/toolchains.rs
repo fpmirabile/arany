@@ -168,8 +168,7 @@ impl RuntimeGrant {
 
     pub(crate) fn verify_at(&self, path: &Path) -> Result<(), ToolError> {
         let directory = fs::open_directory(path).map_err(|_| ToolError::ChangedInput)?;
-        let identity = fs::identity(&directory)?;
-        if (identity.device, identity.inode) != (self.device, self.inode) {
+        if fs::identity(&directory)? != (self.device, self.inode) {
             return Err(ToolError::ChangedInput);
         }
         if !has_executables(self.kind, path) {
@@ -479,7 +478,7 @@ fn admit_directory(
     let Ok(directory) = fs::open_directory(&path) else {
         return Ok(None);
     };
-    let crate::session::WorkspaceIdentity { device, inode } = fs::identity(&directory)?;
+    let (device, inode) = fs::identity(&directory)?;
     let grant = RuntimeGrant {
         kind,
         manager,

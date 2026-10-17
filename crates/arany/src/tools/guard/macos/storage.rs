@@ -221,7 +221,7 @@ async fn prepare_storage_with_sizes(
         let volume = directory
             .open_dir_nofollow(name)
             .map_err(|_| ToolError::Path)?;
-        verify_volume(&volume, parent.device, *bytes)?;
+        verify_volume(&volume, parent.0, *bytes)?;
         volume
             .set_permissions(".", cap_std::fs::Permissions::from_mode(0o700))
             .map_err(|_| ToolError::Path)?;
@@ -275,7 +275,7 @@ pub(super) fn verify_storage(
         let volume = directory
             .open_dir_nofollow(name)
             .map_err(|_| ToolError::Path)?;
-        verify_volume(&volume, parent.device, bytes)?;
+        verify_volume(&volume, parent.0, bytes)?;
         if volume.dir_metadata().map_err(|_| ToolError::Path)?.mode() & 0o7777 != 0o700 {
             return Err(ToolError::ProtectionUnavailable);
         }
@@ -292,7 +292,7 @@ pub(super) async fn prepare_command_storage(
 
     runtime.config.validate()?;
     let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
-    if crate::tools::fs::identity(&workspace)? != runtime.workspace_identity {
+    if crate::tools::fs::workspace_identity(&workspace)? != runtime.workspace_identity {
         return Err(ToolError::ChangedInput);
     }
     for grant in &runtime.config.runtime_grants {
@@ -376,7 +376,7 @@ pub(super) fn storage_mounted(root: &Path) -> Result<bool, ToolError> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Err(ToolError::Path),
         };
-        if name == STORAGE_PENDING || !metadata.is_dir() || metadata.dev() != parent.device {
+        if name == STORAGE_PENDING || !metadata.is_dir() || metadata.dev() != parent.0 {
             return Ok(true);
         }
     }
@@ -462,7 +462,7 @@ pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
                     return Err(ToolError::ProtectionUnavailable);
                 }
             }
-            if metadata.dev() != parent.device {
+            if metadata.dev() != parent.0 {
                 if !mounts.iter().any(|(device, target)| {
                     device == &attachment.device && target == &root.join(name)
                 }) {
@@ -472,7 +472,7 @@ pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
                 return Err(ToolError::ProtectionUnavailable);
             }
             devices.push(attachment.device.clone());
-        } else if metadata.dev() != parent.device {
+        } else if metadata.dev() != parent.0 {
             return Err(ToolError::ProtectionUnavailable);
         }
     }

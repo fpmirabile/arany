@@ -1,8 +1,7 @@
 use super::*;
-use crate::session::WorkspaceIdentity;
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, RunConfig, RunDisposition, RunId,
-    RunStatus,
+    RunStatus, WorkspaceIdentity,
 };
 use crate::store::Store;
 use std::{

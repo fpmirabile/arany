@@ -106,7 +106,7 @@ pub(super) fn command_snapshot(workspace: &Path) -> Result<CommandSnapshot, Tool
     let mut retained = 0usize;
     command_collect(&root, "", &mut entries, &mut budget, &mut retained)?;
     Ok(CommandSnapshot {
-        root_identity: identity(&root)?,
+        root_identity: workspace_identity(&root)?,
         entries,
     })
 }
@@ -267,21 +267,23 @@ pub(crate) fn open_directory(path: &Path) -> Result<Dir, ToolError> {
     crate::private_fs::open_workspace_directory(path).map_err(|_| ToolError::Path)
 }
 
-pub(crate) fn identity(dir: &Dir) -> Result<WorkspaceIdentity, ToolError> {
+pub(crate) fn identity(dir: &Dir) -> Result<(u64, u64), ToolError> {
     #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
         let meta = dir.dir_metadata().map_err(|_| ToolError::Path)?;
-        Ok(WorkspaceIdentity {
-            device: meta.dev(),
-            inode: meta.ino(),
-        })
+        Ok((meta.dev(), meta.ino()))
     }
     #[cfg(not(unix))]
     {
         let _ = dir;
         Err(ToolError::ProtectionUnavailable)
     }
+}
+
+pub(crate) fn workspace_identity(dir: &Dir) -> Result<WorkspaceIdentity, ToolError> {
+    let (device, inode) = identity(dir)?;
+    Ok(WorkspaceIdentity { device, inode })
 }
 
 pub(crate) fn open_absolute(path: &str) -> Result<File, ToolError> {
@@ -330,7 +332,7 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
     {
         use rustix::fs::{Mode, OFlags, openat};
         use std::os::unix::fs::MetadataExt;
-        let device = identity(root)?.device;
+        let device = identity(root)?.0;
         let mut file = root
             .try_clone()
             .map_err(|_| ToolError::Path)?
@@ -773,9 +775,7 @@ fn entries(root: &Dir, folder: &str, prefix: &str) -> Result<Vec<String>, ToolEr
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
-            if metadata.dev() != identity(root)?.device
-                || metadata.is_file() && metadata.nlink() != 1
-            {
+            if metadata.dev() != identity(root)?.0 || metadata.is_file() && metadata.nlink() != 1 {
                 continue;
             }
         }
@@ -835,9 +835,7 @@ fn find_entries(
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
-            if metadata.dev() != identity(root)?.device
-                || metadata.is_file() && metadata.nlink() != 1
-            {
+            if metadata.dev() != identity(root)?.0 || metadata.is_file() && metadata.nlink() != 1 {
                 continue;
             }
         }
@@ -1151,7 +1149,7 @@ fn change_parent(root: &Dir, path: &str) -> Result<ChangeParent, ToolError> {
 
 fn check_change_directory(root: &Dir, directory: &Dir) -> Result<(), ToolError> {
     let metadata = directory.dir_metadata().map_err(|_| ToolError::Path)?;
-    if !metadata.is_dir() || identity(directory)?.device != identity(root)?.device {
+    if !metadata.is_dir() || identity(directory)?.0 != identity(root)?.0 {
         return Err(ToolError::Path);
     }
     #[cfg(unix)]
@@ -1455,7 +1453,7 @@ fn replace_file(
 }
 
 pub(super) fn validate_workspace(runtime: &ToolRuntime) -> Result<(), ToolError> {
-    if identity(&open_directory(&runtime.workspace)?)? != runtime.workspace_identity {
+    if workspace_identity(&open_directory(&runtime.workspace)?)? != runtime.workspace_identity {
         return Err(ToolError::ChangedInput);
     }
     Ok(())

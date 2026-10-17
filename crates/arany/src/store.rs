@@ -1,10 +1,9 @@
 use crate::provider::evidence::{
     EvidenceOp, EvidenceRecord, NativeEvidenceRecord, ProviderEvidenceRecord,
 };
-use crate::session::WorkspaceIdentity;
 use crate::session::{
     Event, EventEnvelope, ReplayError, RunId, SessionId, SessionListItem, SessionView,
-    payload_version,
+    WorkspaceIdentity, payload_version,
 };
 use std::io;
 use std::sync::mpsc::sync_channel;

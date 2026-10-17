@@ -1,8 +1,7 @@
 #[cfg(unix)]
 use super::nonblocking;
 use super::{StateRoot, StoreError};
-use crate::session::SessionId;
-use crate::session::WorkspaceIdentity;
+use crate::session::{SessionId, WorkspaceIdentity};
 #[cfg(unix)]
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 #[cfg(unix)]

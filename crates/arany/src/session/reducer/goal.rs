@@ -3,12 +3,11 @@ use super::{
     current_run, is_integration_tool, pending_tool_requests,
 };
 use crate::provider::AgentPhase;
-use crate::session::WorkspaceIdentity;
 use crate::session::events::{
     AgentRole, AgentRunId, CompactionStatus, Event, GoalBudget, GoalId, GoalPhase,
     GoalPlanContract, GoalReport, GoalStatus, ProviderCallDisposition, ReplayError, RunId,
 };
-use crate::session::{MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES};
+use crate::session::{MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES, WorkspaceIdentity};
 
 impl SessionView {
     // The event's fields plus the replay prior; a struct would only forward them.

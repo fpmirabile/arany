@@ -2108,7 +2108,7 @@ fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::Tool
         cache_state: None,
         config: serde_json::from_value(config).unwrap(),
         workspace: workspace.to_owned(),
-        workspace_identity: super::fs::identity(&root).unwrap(),
+        workspace_identity: super::fs::workspace_identity(&root).unwrap(),
         reads: Some(super::InProcessReads {
             root: std::sync::Arc::new(root),
             slots: std::sync::Arc::new(tokio::sync::Semaphore::new(super::MAX_IN_PROCESS_READS)),

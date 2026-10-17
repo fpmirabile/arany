@@ -1,8 +1,7 @@
 use super::*;
-use crate::session::WorkspaceIdentity;
 use crate::session::{
     AgentRole, AgentRunId, AgentStatus, AgentView, GoalBudget, GoalId, GoalPhase, GoalStatus,
-    GoalView, RunId, RunStatus, SessionId, ToolView,
+    GoalView, RunId, RunStatus, SessionId, ToolView, WorkspaceIdentity,
 };
 use crate::tools::{
     Attestation, CacheUpdate, EffectIntent, GuardReceipt, ToolCall, ToolDisposition, ToolLimits,

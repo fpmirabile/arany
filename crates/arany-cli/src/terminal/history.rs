@@ -1,8 +1,6 @@
 use crate::presentation::{
     escape_terminal, escaped_terminal_width, image_message_text, safe_truncate,
 };
-#[cfg(test)]
-use arany::WorkspaceIdentity;
 use arany::{RunId, RunView, SessionId, SessionView};
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -981,7 +979,7 @@ mod tests {
     use super::*;
     use arany::{
         AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, Event, RunConfig,
-        RunDisposition, RunStatus, RunView, SessionDefaults,
+        RunDisposition, RunStatus, RunView, SessionDefaults, WorkspaceIdentity,
     };
     use arany::{StateRoot, Store};
     use std::time::Instant;

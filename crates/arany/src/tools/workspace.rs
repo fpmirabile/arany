@@ -285,7 +285,8 @@ impl WorkspacePermissions {
             Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 let directory =
                     fs::open_directory(path).map_err(|_| TrustRecordError::Workspace)?;
-                let identity = fs::identity(&directory).map_err(|_| TrustRecordError::Workspace)?;
+                let identity =
+                    fs::workspace_identity(&directory).map_err(|_| TrustRecordError::Workspace)?;
                 fs::reject_overlap(path, &account)
                     .map_err(|_| TrustRecordError::StateInsideWorkspace)?;
                 Ok(Self {
@@ -317,7 +318,8 @@ impl WorkspacePermissions {
 
     fn load(path: &Path, root: &StateRoot) -> Result<Self, TrustRecordError> {
         let directory = fs::open_directory(path).map_err(|_| TrustRecordError::Workspace)?;
-        let identity = fs::identity(&directory).map_err(|_| TrustRecordError::Workspace)?;
+        let identity =
+            fs::workspace_identity(&directory).map_err(|_| TrustRecordError::Workspace)?;
         root.ensure_outside_workspace(&directory)
             .map_err(|_| TrustRecordError::StateInsideWorkspace)?;
         let record = read(root)?;
@@ -437,7 +439,8 @@ impl WorkspacePermissions {
     }
 
     pub(crate) fn verify(&self, path: &Path) -> Result<(), ToolError> {
-        if path != self.path || fs::identity(&fs::open_directory(path)?)? != self.identity {
+        if path != self.path || fs::workspace_identity(&fs::open_directory(path)?)? != self.identity
+        {
             return Err(ToolError::ChangedInput);
         }
         Ok(())
@@ -799,8 +802,7 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         let cache = temp.path().join(".cargo/registry/cache");
         std::fs::create_dir_all(&cache).unwrap();
-        let WorkspaceIdentity { device, inode } =
-            fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
         let grant = RuntimeGrant {
             kind: RuntimeKind::CargoCache,
             manager: RuntimeManager::HostCache,
@@ -835,8 +837,7 @@ mod tests {
         let cache = temp.path().join(".cargo/registry/cache");
         std::fs::create_dir_all(&cache).unwrap();
         let grant_at = |path: &Path| {
-            let WorkspaceIdentity { device, inode } =
-                fs::identity(&fs::open_directory(path).unwrap()).unwrap();
+            let (device, inode) = fs::identity(&fs::open_directory(path).unwrap()).unwrap();
             RuntimeGrant {
                 kind: RuntimeKind::CargoCache,
                 manager: RuntimeManager::HostCache,
@@ -877,8 +878,7 @@ mod tests {
         }
         let discovered = discover(&home);
         assert!(matches!(discovered, Err(ToolError::Limit)));
-        let WorkspaceIdentity { device, inode } =
-            fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
         access
             .save(
@@ -922,8 +922,7 @@ mod tests {
         let cargo = temp.path().join("home/.cargo");
         let cache = cargo.join("registry/cache");
         std::fs::create_dir_all(&cache).unwrap();
-        let WorkspaceIdentity { device, inode } =
-            fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
         let grant = RuntimeGrant {
             kind: RuntimeKind::CargoCache,
             manager: RuntimeManager::HostCache,
@@ -971,8 +970,7 @@ mod tests {
         let workspace = temp.path().join("home");
         let cache = workspace.join(".cargo/registry/cache");
         std::fs::create_dir_all(&cache).unwrap();
-        let WorkspaceIdentity { device, inode } =
-            fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
         let grant = RuntimeGrant {
             kind: RuntimeKind::CargoCache,
             manager: RuntimeManager::HostCache,

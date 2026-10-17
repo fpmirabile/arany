@@ -1,7 +1,8 @@
 use super::EngineError;
-use crate::session::WorkspaceIdentity;
 use crate::session::input::WorkspaceInputs;
-use crate::session::{Event, RunStatus, SessionDefaults, SessionId, SessionListItem, SessionView};
+use crate::session::{
+    Event, RunStatus, SessionDefaults, SessionId, SessionListItem, SessionView, WorkspaceIdentity,
+};
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError};
 use std::path::{Path, PathBuf};
 

@@ -360,10 +360,7 @@ fn unit_root(task: &Task) -> Result<PathBuf, ToolError> {
     crate::private_fs::open_directory(&root, false).map_err(|_| ToolError::Path)?;
     crate::tools::fs::reject_overlap(&root, &task.workspace)?;
     if crate::tools::fs::identity(&crate::tools::fs::open_directory(&task.workspace)?)?
-        != (WorkspaceIdentity {
-            device: task.intent.workspace_device,
-            inode: task.intent.workspace_inode,
-        })
+        != (task.intent.workspace_device, task.intent.workspace_inode)
     {
         return Err(ToolError::ChangedInput);
     }
@@ -1190,7 +1187,7 @@ mod tests {
             .unwrap();
         let cpu = std::env::var("ARANY_TEST_FILE_PROFILE_CPU").unwrap() == "1";
         let workspace = root.join("workspace");
-        let WorkspaceIdentity { device, inode } =
+        let (device, inode) =
             crate::tools::fs::identity(&crate::tools::fs::open_directory(&workspace).unwrap())
                 .unwrap();
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,
@@ -1391,7 +1388,7 @@ mod tests {
             .parse::<u16>()
             .unwrap();
         let git = crate::tools::git::discover().expect("pinned git");
-        let WorkspaceIdentity { device, inode } =
+        let (device, inode) =
             crate::tools::fs::identity(&crate::tools::fs::open_directory(&workspace).unwrap())
                 .unwrap();
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,

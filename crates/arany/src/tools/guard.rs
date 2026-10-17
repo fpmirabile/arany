@@ -976,10 +976,7 @@ pub(super) fn helper_main() -> ExitCode {
         if (matches!(family, Family::File | Family::Git)
             || cfg!(target_os = "macos") && family == Family::Skill)
             && super::fs::identity(&super::fs::open_directory(workspace)?)?
-                != (crate::session::WorkspaceIdentity {
-                    device: task.intent.workspace_device,
-                    inode: task.intent.workspace_inode,
-                })
+                != (task.intent.workspace_device, task.intent.workspace_inode)
         {
             return Err(ToolError::ChangedInput);
         }
@@ -1414,7 +1411,7 @@ mod tests {
         let node = root.join("bin/node");
         std::fs::write(&node, b"synthetic node executable").unwrap();
         std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let crate::session::WorkspaceIdentity { device, inode } =
+        let (device, inode) =
             crate::tools::fs::identity(&crate::tools::fs::open_directory(&root).unwrap()).unwrap();
         let config = config(vec![RuntimeGrant {
             kind: super::super::toolchains::RuntimeKind::Node,

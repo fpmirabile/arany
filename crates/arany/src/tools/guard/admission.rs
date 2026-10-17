@@ -438,13 +438,12 @@ impl Permit {
         {
             return Err(ToolError::Path);
         }
-        let parent_identity = crate::tools::fs::identity(&parent)?;
         let mut seed = SeedRecord {
             version: 1,
             id: self.id,
             boot: self.boot,
             path: self.seed_path(),
-            parent: (parent_identity.device, parent_identity.inode),
+            parent: crate::tools::fs::identity(&parent)?,
             phase: SeedPhase::Preparing,
         };
         replace_record(&self.dir, &self.seed_name(), &seed)?;
@@ -466,9 +465,7 @@ impl Permit {
         if root != crate::tools::fs::identity(&checked.dir)? {
             return Err(ToolError::Path);
         }
-        seed.phase = SeedPhase::Ready {
-            root: (root.device, root.inode),
-        };
+        seed.phase = SeedPhase::Ready { root };
         replace_record(&self.dir, &self.seed_name(), &seed)?;
         #[cfg(test)]
         self.seed_checkpoint("owned");
@@ -522,8 +519,7 @@ impl Permit {
             SeedPhase::LaunchRequested { .. } => return Err(ToolError::ProtectionUnavailable),
         };
         let parent = crate::tools::fs::open_directory(&self.seed_parent)?;
-        let parent_identity = crate::tools::fs::identity(&parent)?;
-        if (parent_identity.device, parent_identity.inode) != seed.parent {
+        if crate::tools::fs::identity(&parent)? != seed.parent {
             return Err(ToolError::Path);
         }
         let name = seed
@@ -548,14 +544,14 @@ impl Permit {
         }
         let actual = crate::tools::fs::identity(&dir)?;
         if let Some(root) = root {
-            if (actual.device, actual.inode) != root {
+            if actual != root {
                 return Err(ToolError::Path);
             }
             let mut remaining = SEED_ENTRY_LIMIT;
             remove_seed_contents(&dir, &mut remaining, 0)?;
         }
         let named = parent.symlink_metadata(name).map_err(|_| ToolError::Path)?;
-        if !named.is_dir() || (named.dev(), named.ino()) != (actual.device, actual.inode) {
+        if !named.is_dir() || (named.dev(), named.ino()) != actual {
             return Err(ToolError::Path);
         }
         parent.remove_dir(name).map_err(|_| ToolError::Operation)?;
@@ -1572,10 +1568,7 @@ mod tests {
         let mut remaining = SEED_ENTRY_LIMIT;
         remove_seed_contents(&checked, &mut remaining, 0).unwrap();
         let named = parent.dir.symlink_metadata(&name).unwrap();
-        assert_eq!(
-            (named.dev(), named.ino()),
-            (identity.device, identity.inode)
-        );
+        assert_eq!((named.dev(), named.ino()), identity);
         parent.dir.remove_dir(&name).unwrap();
         sync_directory(&parent.dir).unwrap();
         remove(&directory.dir, &lease_name).unwrap();
@@ -1783,12 +1776,11 @@ mod tests {
             let lease = try_lock(checked_file(&root.dir, "unit.lock", true).unwrap())
                 .unwrap()
                 .unwrap();
-            let root_identity = crate::tools::fs::identity(&root.dir).unwrap();
             write_record(
                 &root.dir,
                 "recovery.json",
                 &serde_json::json!({
-                    "version":1, "root": (root_identity.device, root_identity.inode),
+                    "version":1, "root":crate::tools::fs::identity(&root.dir).unwrap(),
                     "boot":uuid::Uuid::now_v7(), "supervisor":null,
                 }),
             )

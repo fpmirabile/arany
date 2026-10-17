@@ -1,5 +1,3 @@
-#[cfg(test)]
-use arany::WorkspaceIdentity;
 use arany::{
     AgentStatus, Event, EventEnvelope, ProviderCallDisposition, ProviderCallRecord, RunStatus,
     RunView, SessionView,
@@ -694,7 +692,9 @@ pub fn render_exec(
 #[cfg(test)]
 mod exec_jsonl_tests {
     use super::*;
-    use arany::{GoalBudget, GoalId, GoalPhase, GoalReport, GoalStatus, SessionId};
+    use arany::{
+        GoalBudget, GoalId, GoalPhase, GoalReport, GoalStatus, SessionId, WorkspaceIdentity,
+    };
 
     fn envelope(
         sequence: u64,
@@ -1146,7 +1146,7 @@ mod tests {
 #[cfg(test)]
 mod goal_status_tests {
     use super::*;
-    use arany::{GoalBudget, GoalId, GoalPhase, GoalStatus};
+    use arany::{GoalBudget, GoalId, GoalPhase, GoalStatus, WorkspaceIdentity};
 
     fn session_with_goal(autonomous: bool) -> SessionView {
         let session_id = arany::SessionId::new();

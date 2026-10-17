@@ -2,10 +2,9 @@ use super::events::{
     AgentDisposition, AgentRole, AgentRunId, CompactionRecord, Event, EventEnvelope, ForkLineage,
     GoalBudget, GoalId, GoalPhase, GoalPlanContract, GoalReport, GoalStatus, GoalUsage,
     ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition, RunId,
-    SessionDefaults, SessionId,
+    SessionDefaults, SessionId, WorkspaceIdentity,
 };
 use crate::provider::AgentPhase;
-use crate::session::WorkspaceIdentity;
 
 mod agent;
 mod goal;

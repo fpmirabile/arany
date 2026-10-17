@@ -4,13 +4,12 @@ use crate::journal::{Journal, Subscription};
 use crate::provider::{
     AgentPhase, ImageAttachment, PromptRole, Provider, ProviderRequest, RunInput,
 };
-use crate::session::WorkspaceIdentity;
 use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
     AgentRole, AgentRunId, CollaborationPolicy, CompiledContext, Event, GoalBudget, GoalId,
     GoalPhase, GoalPlanContract, GoalStatus, GoalUsage, MAX_STEERING_CONTEXT_BYTES,
     MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES, MAX_USER_MESSAGE_BYTES, RunConfig, RunId,
-    RunView, SessionId,
+    RunView, SessionId, WorkspaceIdentity,
 };
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
 use crate::telemetry::Telemetry;

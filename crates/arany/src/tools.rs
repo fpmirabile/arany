@@ -1,6 +1,5 @@
 #![cfg_attr(not(test), warn(clippy::too_many_lines))]
 
-use crate::session::WorkspaceIdentity;
 mod approval;
 mod cancel;
 pub(crate) mod catalog;
@@ -21,7 +20,7 @@ mod workspace;
 #[cfg(test)]
 mod tests;
 
-use crate::session::{AgentRunId, RunId};
+use crate::session::{AgentRunId, RunId, WorkspaceIdentity};
 use crate::store::StateRoot;
 pub use approval::{ApprovalInbox, ApprovalMode, ToolApproval, ToolApprovals};
 pub use cancel::Cancellation;
@@ -77,7 +76,7 @@ pub fn list_workspace_entries(
 
 pub(crate) fn workspace_identity(workspace: &Path) -> Result<WorkspaceIdentity, ToolError> {
     let root = fs::open_directory(workspace)?;
-    fs::identity(&root)
+    fs::workspace_identity(&root)
 }
 use catalog::Site;
 use std::path::{Path, PathBuf};
@@ -340,9 +339,9 @@ impl ToolRuntime {
         for grant in &config.runtime_grants {
             grant.reject_overlap(&[workspace, state.path(), account.as_path()])?;
         }
-        let workspace_identity = fs::identity(&root)?;
+        let workspace_identity = fs::workspace_identity(&root)?;
         config.discover_skills(workspace)?;
-        if fs::identity(&fs::open_directory(workspace)?)? != workspace_identity {
+        if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
             return Err(ToolError::ChangedInput);
         }
         for program in config
@@ -543,12 +542,7 @@ impl ToolRuntime {
         {
             return Err(ToolError::Configuration);
         }
-        if fs::identity(&root)?
-            != (WorkspaceIdentity {
-                device: intent.workspace_device,
-                inode: intent.workspace_inode,
-            })
-        {
+        if fs::identity(&root)? != (intent.workspace_device, intent.workspace_inode) {
             return Err(ToolError::ChangedInput);
         }
         fs::validate_workspace(self)?;

@@ -58,10 +58,7 @@ fn recovery(directory: &PrivateDirectory) -> Result<Recovery, ToolError> {
     let record: Recovery = read_record(&directory.dir, RECOVERY_RECORD)?;
     if record.version != 1
         || record.boot.is_nil()
-        || record.root != {
-            let identity = crate::tools::fs::identity(&directory.dir)?;
-            (identity.device, identity.inode)
-        }
+        || record.root != crate::tools::fs::identity(&directory.dir)?
         || record.supervisor.is_some_and(|identity| {
             identity.pid <= 1
                 || identity.pid > i32::MAX as u32
@@ -572,10 +569,7 @@ impl Unit {
             RECOVERY_RECORD,
             &Recovery {
                 version: 1,
-                root: {
-                    let identity = crate::tools::fs::identity(&unit._directory.dir)?;
-                    (identity.device, identity.inode)
-                },
+                root: crate::tools::fs::identity(&unit._directory.dir)?,
                 boot: ffi::boot_session()?,
                 supervisor: None,
             },
@@ -1390,10 +1384,7 @@ mod tests {
             let lock = hold_liveness_lock(&directory).unwrap();
             let mut record = Recovery {
                 version: 1,
-                root: {
-                    let identity = crate::tools::fs::identity(&directory.dir).unwrap();
-                    (identity.device, identity.inode)
-                },
+                root: crate::tools::fs::identity(&directory.dir).unwrap(),
                 boot: uuid::Uuid::now_v7(),
                 supervisor: None,
             };
@@ -1477,10 +1468,7 @@ mod tests {
             RECOVERY_RECORD,
             &Recovery {
                 version: 1,
-                root: {
-                    let identity = crate::tools::fs::identity(&directory.dir).unwrap();
-                    (identity.device, identity.inode)
-                },
+                root: crate::tools::fs::identity(&directory.dir).unwrap(),
                 boot: uuid::Uuid::now_v7(),
                 supervisor: None,
             },
@@ -1630,10 +1618,7 @@ done
         std::fs::create_dir_all(&pip_cache_path).unwrap();
         std::fs::write(pip_cache_path.join("index.marker"), b"private pip metadata").unwrap();
         let identity = |path: &Path| {
-            let identity =
-                crate::tools::fs::identity(&crate::tools::fs::open_directory(path).unwrap())
-                    .unwrap();
-            (identity.device, identity.inode)
+            crate::tools::fs::identity(&crate::tools::fs::open_directory(path).unwrap()).unwrap()
         };
         let (node_device, node_inode) = identity(&node_path);
         let (cache_device, cache_inode) = identity(&cache_path);
@@ -1732,7 +1717,7 @@ done
             },
             workspace: workspace.to_path_buf(),
             reads: None,
-            workspace_identity: crate::tools::fs::identity(&directory).unwrap(),
+            workspace_identity: crate::tools::fs::workspace_identity(&directory).unwrap(),
             guard_executable: std::env::current_exe().unwrap(),
             enforcement_digest: super::super::super::enforcement_digest(&[]).unwrap(),
             system_programs: Some(std::sync::Arc::new(system_programs)),
@@ -2032,10 +2017,7 @@ done
                 RECOVERY_RECORD,
                 &Recovery {
                     version: 1,
-                    root: {
-                        let identity = crate::tools::fs::identity(&directory.dir).unwrap();
-                        (identity.device, identity.inode)
-                    },
+                    root: crate::tools::fs::identity(&directory.dir).unwrap(),
                     boot: uuid::Uuid::now_v7(),
                     supervisor: Some(own),
                 },

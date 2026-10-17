@@ -1,8 +1,7 @@
 use super::*;
-use crate::session::WorkspaceIdentity;
 use crate::session::{
     GoalPhase, GoalStatus, GoalSuccessCriterion, GoalSuccessState, RunId, SessionDefaults,
-    SessionId,
+    SessionId, WorkspaceIdentity,
 };
 
 fn goal_view(goal_id: GoalId, budget: GoalBudget) -> GoalView {

@@ -7,8 +7,6 @@ use crate::terminal::{
     AttachedTerminal, Composer, ComposerEdit, ShutdownSignal, TerminalError, TerminalInput,
     TerminalNotice,
 };
-#[cfg(test)]
-use arany::WorkspaceIdentity;
 use arany::{
     CompactionFailure, CompactionRecord, CompactionStatus, ImageAttachment, RunCancellation,
     RunOutcome, RunProgress, RunRequest, RunSteering, SessionView, SteeringRefused,
@@ -1048,6 +1046,7 @@ fn upsert_goal(goals: &mut Vec<arany::GoalView>, goal: arany::GoalView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arany::WorkspaceIdentity;
 
     #[test]
     fn switches_shown_before_a_stale_view_do_not_skip_or_panic() {
@@ -1214,7 +1213,7 @@ mod tests {
 mod goal_request_tests {
     use super::*;
     use crate::cli::attached::{Admission, EntryMode};
-    use arany::SessionDefaults;
+    use arany::{SessionDefaults, WorkspaceIdentity};
 
     fn session_with_goal(autonomous: bool) -> SessionView {
         let session_id = arany::SessionId::new();

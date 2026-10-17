@@ -3,9 +3,9 @@ use super::{
     current_run, is_delegated_synthesis, is_tool_continuation,
 };
 use crate::provider::AgentPhase;
-use crate::session::WorkspaceIdentity;
 use crate::session::events::{
     Event, GoalStatus, ProviderCallDisposition, ProviderCallRecord, ReplayError, RunDisposition,
+    WorkspaceIdentity,
 };
 
 pub(super) fn apply(

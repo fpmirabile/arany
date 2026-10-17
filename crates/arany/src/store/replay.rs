@@ -1,10 +1,9 @@
 use super::{ResolvedSession, StoreError, event_payload_limit};
 use crate::session::ForkInheritance;
-use crate::session::WorkspaceIdentity;
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, ForkLineage, RunConfig,
-    RunDisposition, RunId, SessionDefaults, SessionId, SessionListItem, SessionView, prefix_digest,
-    validate_compaction_references,
+    RunDisposition, RunId, SessionDefaults, SessionId, SessionListItem, SessionView,
+    WorkspaceIdentity, prefix_digest, validate_compaction_references,
 };
 use rusqlite::{Connection, types::ValueRef};
 use std::collections::HashMap;
