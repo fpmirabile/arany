@@ -314,9 +314,6 @@ enum BootstrapStage {
     LauncherReap,
     StderrDrain,
     StorageCleanup,
-    ServerReap,
-    ServerOutput,
-    ServerResponse,
 }
 
 impl BootstrapStage {
@@ -333,9 +330,6 @@ impl BootstrapStage {
             Self::LauncherReap => "launcher reap",
             Self::StderrDrain => "stderr drain",
             Self::StorageCleanup => "storage cleanup",
-            Self::ServerReap => "MCP server reap",
-            Self::ServerOutput => "MCP server output",
-            Self::ServerResponse => "MCP server response",
         }
     }
 }
@@ -366,9 +360,6 @@ impl BootstrapFailure {
             BootstrapStage::LauncherReap => "launcher reap",
             BootstrapStage::StderrDrain => "output EOF",
             BootstrapStage::StorageCleanup => "storage cleanup",
-            BootstrapStage::ServerReap => "MCP server reap",
-            BootstrapStage::ServerOutput => "MCP server output EOF",
-            BootstrapStage::ServerResponse => "MCP server response",
         }
     }
 }
@@ -558,22 +549,6 @@ pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<
             result => return result,
         }
     }
-}
-
-pub(super) enum ServerStep {
-    Reap,
-    Output,
-    Response,
-}
-
-pub(super) fn server_unconfirmed(step: ServerStep) -> ToolError {
-    ToolError::GuardBootstrap(BootstrapFailure {
-        stage: match step {
-            ServerStep::Reap => BootstrapStage::ServerReap,
-            ServerStep::Output => BootstrapStage::ServerOutput,
-            ServerStep::Response => BootstrapStage::ServerResponse,
-        },
-    })
 }
 
 pub(super) fn bootstrap_failure(stderr: &[u8]) -> Option<ToolError> {
@@ -1111,10 +1086,6 @@ pub(super) fn helper_main() -> ExitCode {
             parent_namespaces: &task.parent_namespaces,
         };
         let result = runtime.block_on(super::dispatch::run(&site));
-        if let Err(ToolError::GuardBootstrap(failure)) = &result {
-            stage = failure.stage.clone();
-            return Err(ToolError::Operation);
-        }
         let (disposition, output, enforcement_cause) =
             super::dispatch::outcome(&task.intent, result);
         stage = BootstrapStage::Receipt;
@@ -1288,20 +1259,6 @@ pub(super) fn payload(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn server_failures_name_the_unconfirmed_step() {
-        for (step, label) in [
-            (ServerStep::Reap, "MCP server reap"),
-            (ServerStep::Output, "MCP server output EOF"),
-            (ServerStep::Response, "MCP server response"),
-        ] {
-            assert!(matches!(
-                server_unconfirmed(step),
-                ToolError::GuardBootstrap(found) if found.failure_stage() == label
-            ));
-        }
-    }
 
     #[test]
     fn worker_failure_lines_keep_their_closed_stage() {
