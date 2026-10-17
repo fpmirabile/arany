@@ -672,8 +672,7 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     if length == 0 || length > lease.candidate_limit() {
         return Err(ToolError::Limit);
     }
-    // A host-side staging failure keeps the command result: stop staging but keep draining
-    // the archive so the protocol stays in sync with the worker's trailing marker.
+    // Drain the archive after staging fails so the worker's trailing marker remains aligned.
     let staged = drain_candidate(reader, length, lease.candidate_writer().ok()).await?;
     let Some(file) = staged else {
         return Ok(CacheCandidate::Failed);

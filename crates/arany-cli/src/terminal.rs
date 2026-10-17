@@ -2097,7 +2097,7 @@ impl AttachedTerminal {
     }
 }
 
-// Ratatui's scrolling-region path cannot handle a screen this short; draw each row from blank cells.
+// Too short for Ratatui's scrolling region: draw rows as diffs from blank cells so wide-cell padding is not sent.
 fn insert_rows_scrolling_screen<'a, B: Backend>(
     terminal: &mut Terminal<B>,
     screen: u16,

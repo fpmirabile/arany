@@ -6,7 +6,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
-// Bind persisted coalitions to this boot so recovery cannot signal identities from a later boot.
+// Persisted coalitions record this boot ID so a later boot never signals their stale identities.
 pub(super) fn boot_session() -> Result<uuid::Uuid, ToolError> {
     let mut bytes = [0_u8; 37];
     let mut length = bytes.len();

@@ -69,7 +69,7 @@ An explicit unknown effort is admitted without a compatibility claim and runs on
 
 Anthropic thinking blocks are opaque: they replay unchanged within a Run, are never interpreted, and are dropped from kept turns when compaction rewrites history.
 
-An opaque in-memory assistant turn is bounded to eight bytes per requested output token plus 64 KiB of framing and ciphertext overhead, capped at the 1 MiB response ceiling.
+An opaque in-memory assistant turn is bounded to eight bytes per requested output token plus 64 KiB of framing and ciphertext overhead, capped at the 1 MiB response ceiling; exceeding this bound fails the call with `InvalidOutcome`.
 
 ## Prompt caching
 

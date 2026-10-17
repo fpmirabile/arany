@@ -21,7 +21,6 @@ const MAX_CHILD_OBJECTIVE_BYTES: usize = 2 * 1024;
 const MAX_CHILD_RESULT_BYTES: usize = 16 * 1024;
 const CANCELLATION_DRAIN: Duration = Duration::from_secs(2);
 const MAX_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
-// Reserve room for the next child intent before allocating result space.
 const CHILD_INTENT_RESERVE_BYTES: usize = 4 * 1024;
 // Keep enough room for a full Read page and its metadata before offering child Tools.
 const MIN_CHILD_RESULT_BYTES: usize = 4096 + 512;
@@ -649,8 +648,7 @@ impl RunLoop<'_> {
                 if !room {
                     child.tool_calls_remaining = 0;
                 }
-                // The catalog is the request head and stays as first sent; later calls carry the
-                // remaining budget in their newest step.
+                // Keep the request head frozen; later calls carry their remaining budget in the newest step.
                 match tools.steps.last_mut() {
                     Some(step) => step.calls_remaining = Some(child.tool_calls_remaining),
                     None => {

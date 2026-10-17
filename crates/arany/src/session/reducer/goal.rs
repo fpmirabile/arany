@@ -370,8 +370,6 @@ impl SessionView {
             .ok_or(ReplayError::InvalidTransition)?;
         let goal = current_goal_mut(self, *goal_id)?;
         let active_limit = goal.effective_budget().max_active_ms;
-        // Settlement fails an unsatisfied planned Goal whose Finished Run admits no next Run; a planless or
-        // satisfied Goal completes instead.
         let exhausted_after_finish = goal.autonomous
             && run_status == RunStatus::Finished
             && goal.plan_contract.is_some()
@@ -428,9 +426,7 @@ impl SessionView {
         } else {
             run_status
         };
-        // A paused Goal is one whose last Run was cancelled or interrupted, or whose non-autonomous Run
-        // finished without finishing the Goal. A Finished autonomous Run is paused only when a crash left
-        // its between-Run compaction call open.
+        // A crash with open between-Run compaction can pause an autonomous Goal even after a Finished Run.
         let paused = matches!(run_status, RunStatus::Cancelled | RunStatus::Interrupted)
             || (run_status == RunStatus::Finished
                 && (!goal.autonomous || goal.compaction_call_reserved.is_some()));

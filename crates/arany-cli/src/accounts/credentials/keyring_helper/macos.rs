@@ -70,8 +70,7 @@ impl Entry {
                 return Err(Error::NoDefaultStore);
             }
             let interaction = SecKeychain::disable_user_interaction().map_err(decode_error)?;
-            // Security opens keychains only by path; the admitted owner-only root keeps the
-            // checked file from being replaced by another user before this reopen.
+            // The owner-only root prevents other users replacing the checked keychain before Security reopens by path.
             (
                 SecKeychain::open(root.path().join(TEST_KEYCHAIN)).map_err(decode_error)?,
                 Some(interaction),
