@@ -644,9 +644,9 @@ impl RunLoop<'_> {
                 && !self.pause_at_boundary()
                 && let Some(approvals) = self.controls.approvals
             {
-                source = PermissionSource::Human;
                 match self.reserve_active_pause() {
                     Ok(pause) => {
+                        source = PermissionSource::Human;
                         let mut cancellation = self.controls.cancellation.clone();
                         let expires = intent.expires_at_ms.saturating_sub(crate::tools::now_ms());
                         approved = tokio::select! {
