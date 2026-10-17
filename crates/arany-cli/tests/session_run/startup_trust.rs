@@ -377,7 +377,8 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                         needle: &[u8]| {
                 let deadline = Instant::now() + Duration::from_secs(10);
                 // Styled text can be split by cursor moves in the raw bytes; the rendered screen is authoritative.
-                let text = std::str::from_utf8(needle).ok();
+                // Linear output is an append-only log whose replayed screen keeps stale banners, so only new bytes count.
+                let text = std::str::from_utf8(needle).ok().filter(|_| !linear);
                 while !transcript[from..]
                     .windows(needle.len())
                     .any(|part| part == needle)
@@ -553,6 +554,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 if linear {
                     input.write_all(b"trust\r").unwrap();
                 } else {
+                    review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
                     input.write_all(b"\t\t\x1b[B\r").unwrap();
                 }
                 wait(
@@ -592,8 +594,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     input.write_all(b"trust none\r").unwrap();
                 } else {
                     review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
-                    // Keeps the remembered profile: Down selects Trust and Enter confirms without toggling.
-                    input.write_all(b"\x1b[B\r").unwrap();
+                    toggle_and_confirm(&mut output, &mut input, &mut transcript, &mut answered);
                 }
                 wait(
                     &mut output,
@@ -608,8 +609,9 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 .path()
                 .join("account-home/.local/state/arany/workspace-permissions.json");
             let before_cancel = std::fs::read(&record).ok();
+            let interrupted = transcript.len();
             input.write_all(b"\x03").unwrap();
-            let mut confirmed = linear;
+            let mut confirmed = false;
             let deadline = Instant::now() + Duration::from_secs(10);
             let status = loop {
                 super::session_picker::pump(
@@ -618,14 +620,18 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     &mut transcript,
                     &mut answered,
                 );
-                // Chat asks for a second Ctrl+C before exiting; consent-free linear chat exits at once.
+                // Chat asks for a second Ctrl+C before exiting; linear output is a log, so match new bytes.
+                let again = b"Ctrl+C again exits";
                 if !confirmed
-                    && super::session_picker::screen_contains(
-                        &transcript,
-                        80,
-                        24,
-                        "Ctrl+C again exits",
-                    )
+                    && (transcript[interrupted..]
+                        .windows(again.len())
+                        .any(|part| part == again)
+                        || super::session_picker::screen_contains(
+                            &transcript,
+                            80,
+                            24,
+                            "Ctrl+C again exits",
+                        ))
                 {
                     input.write_all(b"\x03").unwrap();
                     confirmed = true;
