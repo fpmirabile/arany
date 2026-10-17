@@ -509,6 +509,13 @@ impl RunSteering {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GoalEntry {
+    New,
+    Resume,
+    Continue,
+}
+
 struct GoalAdmission {
     id: GoalId,
     objective: String,
@@ -517,8 +524,7 @@ struct GoalAdmission {
     autonomous: bool,
     resource_settings: crate::tools::ToolResourceSettings,
     plan_contract: Option<GoalPlanContract>,
-    is_new: bool,
-    resume: bool,
+    entry: GoalEntry,
     usage: GoalUsage,
 }
 
@@ -543,7 +549,7 @@ fn goal_context_metadata_reservation(
 fn resolve_goal_admission(
     request: &RunRequest,
     history: Option<&crate::session::SessionView>,
-    continuation: bool,
+    entry: GoalEntry,
 ) -> Result<GoalAdmission, EngineError> {
     if let Some(id) = request.goal.id {
         let goal = history
@@ -569,9 +575,10 @@ fn resolve_goal_admission(
         {
             return Err(EngineError::GoalUnavailable);
         }
-        let resume = match goal.status {
-            GoalStatus::Running => false,
-            GoalStatus::Interrupted => !continuation,
+        let entry = match goal.status {
+            GoalStatus::Running => GoalEntry::Continue,
+            GoalStatus::Interrupted if entry == GoalEntry::Continue => GoalEntry::Continue,
+            GoalStatus::Interrupted => GoalEntry::Resume,
             GoalStatus::Completed | GoalStatus::Failed => {
                 return Err(EngineError::GoalUnavailable);
             }
@@ -585,8 +592,7 @@ fn resolve_goal_admission(
             autonomous: goal.autonomous,
             resource_settings: goal.resource_settings,
             plan_contract: goal.plan_contract.clone(),
-            is_new: false,
-            resume,
+            entry,
             usage: goal.resume_usage(view),
         })
     } else {
@@ -599,8 +605,7 @@ fn resolve_goal_admission(
             autonomous: request.goal.autonomous,
             resource_settings: request.goal.resource_settings,
             plan_contract: None,
-            is_new: true,
-            resume: false,
+            entry: GoalEntry::New,
             usage: GoalUsage {
                 runs: 0,
                 provider_calls: 0,
@@ -912,12 +917,17 @@ impl Engine {
         let policy = request.policy;
         let mut leases = WorkspaceLeases::new();
         // Boxed: keeps the large Run future off the caller stack in debug builds.
+        let entry = if request.goal.id.is_some() {
+            GoalEntry::Resume
+        } else {
+            GoalEntry::New
+        };
         let mut turn = Box::pin(self.run_turn(
             submission,
             request,
             cancellation.clone(),
             progress.clone(),
-            false,
+            entry,
             &mut leases,
         ))
         .await?;
@@ -938,7 +948,7 @@ impl Engine {
                 next,
                 cancellation.clone(),
                 progress.clone(),
-                true,
+                GoalEntry::Continue,
                 &mut leases,
             ))
             .await
@@ -972,7 +982,7 @@ impl Engine {
         request: RunRequest,
         cancellation: RunCancellation,
         progress: Option<RunProgress>,
-        continuation: bool,
+        entry: GoalEntry,
         leases: &mut WorkspaceLeases,
     ) -> Result<RunTurn, EngineError> {
         submission.cancel_if_paused(&cancellation);
@@ -987,7 +997,7 @@ impl Engine {
                 submission,
                 &request,
                 identity,
-                continuation,
+                entry,
                 progress.as_ref().is_some_and(RunProgress::previews_enabled),
                 leases,
             )
@@ -1176,28 +1186,32 @@ impl Engine {
             workspace_identity,
             ..
         } = *started;
-        if goal.is_new {
-            self.append_goal_lifecycle(
-                session_id,
-                Some(ledger),
-                Event::GoalStarted {
-                    goal_id: goal.id,
-                    objective: objective.to_owned(),
-                    workspace_identity,
-                    budget: goal.budget,
-                    phase: goal.phase,
-                    autonomous: goal.autonomous,
-                    resource_settings: goal.resource_settings,
-                },
-            )
-            .await?;
-        } else if goal.resume {
-            self.append_goal_lifecycle(
-                session_id,
-                Some(ledger),
-                Event::GoalResumed { goal_id: goal.id },
-            )
-            .await?;
+        match goal.entry {
+            GoalEntry::New => {
+                self.append_goal_lifecycle(
+                    session_id,
+                    Some(ledger),
+                    Event::GoalStarted {
+                        goal_id: goal.id,
+                        objective: objective.to_owned(),
+                        workspace_identity,
+                        budget: goal.budget,
+                        phase: goal.phase,
+                        autonomous: goal.autonomous,
+                        resource_settings: goal.resource_settings,
+                    },
+                )
+                .await?;
+            }
+            GoalEntry::Resume => {
+                self.append_goal_lifecycle(
+                    session_id,
+                    Some(ledger),
+                    Event::GoalResumed { goal_id: goal.id },
+                )
+                .await?;
+            }
+            GoalEntry::Continue => {}
         }
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
@@ -1295,7 +1309,7 @@ impl Engine {
         submission: &AdmittedSubmission,
         request: &RunRequest,
         identity: &crate::provider::ProviderIdentity,
-        continuation: bool,
+        entry: GoalEntry,
         previews: bool,
         leases: &WorkspaceLeases,
     ) -> Result<AdmittedTurn, EngineError> {
@@ -1330,7 +1344,7 @@ impl Engine {
         if let Some(view) = &history {
             ensure_session_workspace(view, workspace_identity)?;
         }
-        let goal = resolve_goal_admission(request, history.as_ref(), continuation)?;
+        let goal = resolve_goal_admission(request, history.as_ref(), entry)?;
         let objective = if request.objective.trim().is_empty() && request.goal.id.is_some() {
             goal.objective.clone()
         } else {
@@ -1338,7 +1352,7 @@ impl Engine {
         };
         let budget = goal.budget.effective(goal.plan_contract.as_ref());
         if !budget.admits_next_run(goal.usage) {
-            if goal.resume {
+            if goal.entry == GoalEntry::Resume {
                 let view = history.as_ref().ok_or(EngineError::InvalidHistory)?;
                 self.close_exhausted_goal(session_id, view, &goal).await?;
             }
