@@ -1,8 +1,8 @@
+use crate::protocol::EventLine;
 use arany::{
     AgentStatus, Event, EventEnvelope, ProviderCallDisposition, ProviderCallRecord, RunStatus,
     RunView, SessionView,
 };
-use serde::Serialize;
 use std::borrow::Cow;
 use unicode_width::UnicodeWidthStr;
 
@@ -528,18 +528,6 @@ fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
         | ProviderCallDisposition::ToolRequested
         | ProviderCallDisposition::Cancelled => return None,
     })
-}
-
-#[derive(Serialize)]
-struct EventLine {
-    sequence: u64,
-    session_id: String,
-    run_id: Option<String>,
-    agent_run_id: Option<String>,
-    kind: &'static str,
-    event_version: u32,
-    payload: serde_json::Value,
-    created_at_ms: i64,
 }
 
 pub fn goal_status(view: &SessionView) -> String {
