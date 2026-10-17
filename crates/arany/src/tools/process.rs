@@ -6,19 +6,43 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 pub(super) fn valid(call: &ToolCall) -> bool {
-    matches!(call, ToolCall::Command { program, args, cwd }
-        if valid_name(program)
-            && valid_relative(cwd, true)
-            && args.len() <= 64
-            && args.iter().all(|arg| arg.len() <= 4096 && !arg.contains('\0')))
+    match call {
+        ToolCall::Command { program, args, cwd } => valid_command(program, args, cwd),
+        ToolCall::CommandUnguarded {
+            program,
+            args,
+            cwd,
+            justification,
+        } => {
+            valid_command(program, args, cwd)
+                && (1..=512).contains(&justification.len())
+                && !justification
+                    .chars()
+                    .any(|character| character.is_control() && character != '\t')
+        }
+        _ => false,
+    }
 }
 
-pub(super) fn schema() -> Option<Vec<(&'static str, Value)>> {
-    Some(vec![
+fn valid_command(program: &str, args: &[String], cwd: &str) -> bool {
+    valid_name(program)
+        && valid_relative(cwd, true)
+        && args.len() <= 64
+        && args
+            .iter()
+            .all(|arg| arg.len() <= 4096 && !arg.contains('\0'))
+}
+
+pub(super) fn schema(name: &str) -> Option<Vec<(&'static str, Value)>> {
+    let mut fields = vec![
         ("program", string()),
         ("args", json!({"type":"array", "items": {"type":"string"}})),
         ("cwd", string()),
-    ])
+    ];
+    if name == "command_unguarded" {
+        fields.push(("justification", string()));
+    }
+    Some(fields)
 }
 
 pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {

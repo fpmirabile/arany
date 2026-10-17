@@ -228,7 +228,7 @@ fn tool_failure_stage(
         | ToolCall::Mkdir { path }
         | ToolCall::Write { path, .. }
         | ToolCall::Edit { path, .. } => Some((path, false)),
-        ToolCall::Command { cwd, .. } => Some((cwd, true)),
+        ToolCall::Command { cwd, .. } | ToolCall::CommandUnguarded { cwd, .. } => Some((cwd, true)),
         _ => None,
     };
     if path.is_some_and(|(path, root)| !valid_relative(path, root)) {
@@ -250,7 +250,11 @@ fn tool_failure_stage(
         ToolCall::Search { query, .. } if query.is_empty() || query.len() > 512 => {
             Stage::OutcomeToolTextSize
         }
-        ToolCall::Command { program, .. } if !valid_name(program) => Stage::OutcomeToolProgram,
+        ToolCall::Command { program, .. } | ToolCall::CommandUnguarded { program, .. }
+            if !valid_name(program) =>
+        {
+            Stage::OutcomeToolProgram
+        }
         _ => Stage::OutcomeToolArguments,
     }
 }

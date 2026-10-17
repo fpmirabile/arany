@@ -494,7 +494,7 @@ impl ToolRuntime {
 
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
         match call.facts().site {
-            Site::InProcess => Duration::ZERO,
+            Site::InProcess | Site::Unguarded => Duration::ZERO,
             Site::Guard => guard::RESERVATION_OVERHEAD,
         }
     }
@@ -516,6 +516,15 @@ impl ToolRuntime {
         }
         match intent.call.facts().site {
             Site::InProcess => self.run_in_process(intent, cancellation).await,
+            // Slice 3 replaces this with the approved host executor; until then nothing dispatches.
+            Site::Unguarded => ToolObservation {
+                enforcement_cause: None,
+                intent,
+                disposition: ToolDisposition::Denied,
+                output: "Unguarded operations are not available".into(),
+                attestation: None,
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
+            },
             Site::Guard => match guard::execute(self, &intent, cancellation).await {
                 Ok(observation) => observation,
                 Err(error) => {
@@ -668,6 +677,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     let site = match intent.call.facts().site {
         Site::InProcess => "Read",
         Site::Guard => "Guard",
+        Site::Unguarded => "Unguarded",
     };
     crate::diagnostics::tool_failure(site, &error);
     ToolObservation {
