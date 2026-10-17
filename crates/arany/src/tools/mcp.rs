@@ -3,6 +3,7 @@ use super::catalog::string;
 use super::config::Config;
 use super::guard::{
     TEARDOWN_WAIT, drain_stderr, payload, read_capped, read_line_capped, reap_owned_child,
+    teardown_failure,
 };
 use super::skills::parse_json;
 use super::types::{
@@ -58,6 +59,7 @@ struct Connection {
     reader: BufReader<ChildStdout>,
     next_id: u64,
     notifications: usize,
+    sent: bool,
 }
 
 impl Connection {
@@ -66,6 +68,7 @@ impl Connection {
         if bytes.len() > FRAME_BYTES {
             return Err(ToolError::Limit);
         }
+        self.sent = true;
         self.writer
             .write_all(&bytes)
             .await
@@ -219,6 +222,7 @@ pub(super) async fn execute(
         reader,
         next_id: 1,
         notifications: 0,
+        sent: false,
     };
     let result = tokio::time::timeout(Duration::from_secs(40), async {
         let init = connection.request("initialize", json!({"protocolVersion":VERSION,"capabilities":{},"clientInfo":{"name":"arany","version":env!("CARGO_PKG_VERSION")}})).await?;
@@ -262,10 +266,25 @@ pub(super) async fn execute(
     let teardown = tokio::time::Instant::now() + TEARDOWN_WAIT;
     let reaped = tokio::time::timeout_at(teardown, reap_owned_child(&mut connection.child)).await;
     let drained = drain_stderr(&mut stderr_task, teardown).await;
-    if !matches!(reaped, Ok(Ok(_))) || drained.is_none() {
-        return Err(ToolError::Operation);
+    match teardown_error(
+        connection.sent,
+        matches!(reaped, Ok(Ok(_))),
+        drained.is_some(),
+    ) {
+        Some(error) => Err(error),
+        None => result,
     }
-    result
+}
+
+// Once a request reached the server its effect is unknown, so unconfirmed teardown is never a plain failure.
+fn teardown_error(sent: bool, reaped: bool, drained: bool) -> Option<ToolError> {
+    if reaped && drained {
+        None
+    } else if sent {
+        Some(teardown_failure(reaped))
+    } else {
+        Some(ToolError::Operation)
+    }
 }
 
 fn compile_schema(value: &Value) -> Result<jsonschema::Validator, ToolError> {
@@ -325,4 +344,25 @@ fn admit_schema(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), To
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unconfirmed_teardown_after_a_sent_request_is_uncertain_not_failed() {
+        assert!(teardown_error(true, true, true).is_none());
+        assert!(teardown_error(false, true, true).is_none());
+        for (reaped, drained) in [(false, true), (true, false), (false, false)] {
+            assert!(matches!(
+                teardown_error(true, reaped, drained),
+                Some(ToolError::GuardBootstrap(_))
+            ));
+            assert!(matches!(
+                teardown_error(false, reaped, drained),
+                Some(ToolError::Operation)
+            ));
+        }
+    }
 }

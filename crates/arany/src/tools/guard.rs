@@ -551,6 +551,16 @@ pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<
     }
 }
 
+pub(super) fn teardown_failure(reaped: bool) -> ToolError {
+    ToolError::GuardBootstrap(BootstrapFailure {
+        stage: if reaped {
+            BootstrapStage::StderrDrain
+        } else {
+            BootstrapStage::LauncherReap
+        },
+    })
+}
+
 pub(super) fn bootstrap_failure(stderr: &[u8]) -> Option<ToolError> {
     serde_json::from_slice::<BootstrapFailure>(stderr)
         .ok()
@@ -1086,6 +1096,10 @@ pub(super) fn helper_main() -> ExitCode {
             parent_namespaces: &task.parent_namespaces,
         };
         let result = runtime.block_on(super::dispatch::run(&site));
+        if let Err(ToolError::GuardBootstrap(failure)) = &result {
+            stage = failure.stage.clone();
+            return Err(ToolError::Operation);
+        }
         let (disposition, output, enforcement_cause) =
             super::dispatch::outcome(&task.intent, result);
         stage = BootstrapStage::Receipt;
@@ -1259,6 +1273,16 @@ pub(super) fn payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn teardown_failures_name_the_unconfirmed_step() {
+        for (reaped, label) in [(false, "launcher reap"), (true, "output EOF")] {
+            assert!(matches!(
+                teardown_failure(reaped),
+                ToolError::GuardBootstrap(found) if found.failure_stage() == label
+            ));
+        }
+    }
 
     #[test]
     fn worker_failure_lines_keep_their_closed_stage() {
