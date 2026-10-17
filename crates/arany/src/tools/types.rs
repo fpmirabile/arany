@@ -10,6 +10,7 @@ use uuid::Uuid;
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_READ_PAGE_BYTES: u32 = 64 * 1024;
+// ToolObservation::valid checks every producer against this serialized bound.
 pub(crate) const MAX_TOOL_OBSERVATION_BYTES: usize =
     2 * MAX_TOOL_RESULT_BYTES + MAX_TOOL_ARGUMENT_BYTES;
 pub const MAX_TOOL_CONTEXT_BYTES: usize = crate::session::MAX_CONTEXT_CONTENT_BYTES;

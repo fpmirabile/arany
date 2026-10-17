@@ -81,6 +81,7 @@ const fn write_row(name: &'static str, order: u8, description: &'static str) -> 
     }
 }
 
+// The same order for every request keeps the Tool prefix byte-stable for prompt caching.
 pub(crate) static ALL: [OperationFacts; 14] = [
     read_row(
         "list",
@@ -307,6 +308,7 @@ pub(crate) fn plan_contract_property(calls: &[Value]) -> Value {
     json!({"anyOf":[plan_contract_schema(goal_success_call_schema(calls).as_ref()), {"type":"null"}]})
 }
 
+// None because JSON Schema anyOf must not be empty.
 fn goal_success_call_schema(calls: &[Value]) -> Option<Value> {
     let calls: Vec<_> = calls
         .iter()

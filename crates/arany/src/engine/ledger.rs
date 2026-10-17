@@ -177,6 +177,7 @@ pub(super) struct Reservation<'a> {
 }
 
 impl Reservation<'_> {
+    // Commit comes after the append, so a refused append leaves no child counted.
     pub(super) fn commit(self) -> Result<(), EngineError> {
         if self.child {
             self.ledger.in_flight(|in_flight| {
@@ -207,6 +208,7 @@ impl GoalLedger {
         Ok(read(&state.view))
     }
 
+    // The ledger is fed before any subscriber can see the Event.
     pub(super) async fn append(
         &self,
         journal: &Journal,
@@ -306,6 +308,7 @@ impl GoalLedger {
         }
     }
 
+    // The admission guard is held until the reservation Event is appended.
     pub(super) async fn reserve(&self, action: Action) -> Result<Reservation<'_>, EngineError> {
         let admission = self.admission.lock().await;
         if !(self.can_start_provider_call() && self.remaining_calls() != Some(0)) {
