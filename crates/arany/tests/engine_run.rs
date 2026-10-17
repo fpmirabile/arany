@@ -3092,7 +3092,6 @@ fn collaboration_capacity_corpus_rejects_invalid_delegation() {
     });
 }
 
-#[cfg(unix)]
 #[test]
 fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3144,10 +3143,12 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
             calls[1].disposition,
             ProviderCallDisposition::InvalidResponse
         );
+        assert_eq!(calls[1].phase, AgentPhase::RootSynthesis);
         engine.close().await.expect("engine shutdown");
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn workspace_paths_fail_closed_before_a_run_is_accepted() {
     use std::os::unix::fs::symlink;
