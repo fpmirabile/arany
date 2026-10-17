@@ -4821,6 +4821,155 @@ async fn steered_run_near_the_event_cap_is_refused_up_front_never_stranded() {
     }
 }
 
+async fn reviewed_write_run(
+    root: &Path,
+    tag: &str,
+    free_at_tool_admission: Option<usize>,
+    run_offset: usize,
+) -> (Vec<arany::EventEnvelope>, arany::SessionView) {
+    use std::os::unix::fs::PermissionsExt;
+    let workspace = facts_workspace(&root.join(tag), "v1");
+    let state_path = root.join(tag).join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    for (name, bytes) in [
+        (
+            "tools.json",
+            &br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
+        ),
+        (
+            "permissions.json",
+            &br#"{"permissions":{"defaultMode":"auto"}}"#[..],
+        ),
+    ] {
+        let path = state_path.join(name);
+        std::fs::write(&path, bytes).expect("settings");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
+    }
+    let provider = Arc::new(ScriptedProvider::new(vec![finish_with("initial")]));
+    let mut first = request(&workspace, "Initial");
+    first.include_paths.clear();
+    let session_id = run_with(
+        &engine,
+        &provider,
+        first,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("initial Run")
+    .session_id;
+    engine.close().await.expect("initial shutdown");
+    if let Some(free) = free_at_tool_admission {
+        let prefix = 10_000 - run_offset - free;
+        let mut connection =
+            rusqlite::Connection::open(state_path.join("events.sqlite3")).expect("events");
+        let transaction = connection.transaction().expect("transaction");
+        let first_padding: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events",
+                [],
+                |row| row.get(0),
+            )
+            .expect("next sequence");
+        for sequence in first_padding..=i64::try_from(prefix).expect("prefix") {
+            transaction
+                .execute(
+                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)",
+                    rusqlite::params![sequence, session_id.to_string()],
+                )
+                .expect("padding");
+        }
+        transaction.commit().expect("padding commit");
+    }
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        crate::tool_outcome(
+            arany::ToolCall::Write {
+                path: "notes/facts.txt".into(),
+                expected_digest: None,
+                content: "v2".into(),
+            },
+            None,
+        ),
+        finish_with("ask"),
+        finish_with("done"),
+    ]));
+    let engine = Engine::open(
+        StateRoot::open_existing(&state_path).expect("state"),
+        EngineConfig {
+            guard_executable: Some(std::env::current_exe().expect("test executable")),
+            ..Default::default()
+        },
+    )
+    .expect("engine");
+    let mut second = request(&workspace, "Write after review");
+    second.session_id = Some(session_id);
+    second.title = None;
+    second.include_paths.clear();
+    let _ = run_with(
+        &engine,
+        &provider,
+        second,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await;
+    engine.close().await.expect("shutdown");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("facts"),
+        "v1"
+    );
+    replayed(&state_path, session_id).await
+}
+
+#[tokio::test]
+async fn reviewed_tool_step_at_the_event_cap_closes_its_tool_and_leaves_no_tool_without_an_observation()
+ {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let (dry, _) = reviewed_write_run(temp.path(), "dry", None, 0).await;
+    let index_of = |nth: usize, matches: fn(&Event) -> bool| {
+        dry.iter()
+            .enumerate()
+            .filter(|(_, envelope)| matches(&envelope.event))
+            .nth(nth)
+            .map(|(index, _)| index)
+            .expect("journal landmark")
+    };
+    let run_start = index_of(1, |event| matches!(event, Event::GoalStarted { .. }));
+    let tool_start = index_of(1, |event| matches!(event, Event::ToolStarted { .. }));
+    let free = arany::Action::Tool.max_events() - 1;
+    let (events, view) = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        reviewed_write_run(temp.path(), "capped", Some(free), tool_start - run_start),
+    )
+    .await
+    .expect("the capped Run settles");
+    let started = events
+        .iter()
+        .filter(|envelope| matches!(envelope.event, Event::ToolStarted { .. }))
+        .count();
+    let finished = events
+        .iter()
+        .filter(|envelope| matches!(envelope.event, Event::ToolFinished { .. }))
+        .count();
+    assert_eq!(started, 2, "the padded step reaches its Tool");
+    assert_eq!(
+        started, finished,
+        "the Tool is never left without an observation"
+    );
+    assert!(
+        view.runs
+            .iter()
+            .flat_map(|run| &run.tools)
+            .all(|tool| tool.observation.is_some()),
+        "no Tool blocks Goal resume"
+    );
+}
+
 #[tokio::test]
 async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
     let temp = tempfile::tempdir().expect("temporary root");

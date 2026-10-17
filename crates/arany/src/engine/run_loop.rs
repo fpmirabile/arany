@@ -274,13 +274,16 @@ impl<'a> RunLoop<'a> {
         pending_ms: u64,
     ) -> Result<(), EngineError> {
         let reservation = self.ledger().reserve(action).await?;
-        self.journal
-            .admit(
-                self.session_id,
-                action.max_events_for(&self.routing.providers),
-                action.tool_observations(),
-            )
-            .await?;
+        // A review runs inside the Tool step's admission, which already counts its slots.
+        if !matches!(action, Action::Review) {
+            self.journal
+                .admit(
+                    self.session_id,
+                    action.max_events_for(&self.routing.providers),
+                    action.tool_observations(),
+                )
+                .await?;
+        }
         self.append(Event::GoalProviderCallReserved {
             goal_id: self.goal_id,
             run_id: self.run_id,
