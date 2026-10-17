@@ -77,16 +77,28 @@ pub(crate) fn title_preview(text: &str) -> String {
     }
 }
 
+fn children_noun(count: u8) -> &'static str {
+    if count == 1 { "child" } else { "children" }
+}
+
 impl std::fmt::Display for CollaborationPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Single => f.write_str("single"),
             Self::Auto {
                 max_active_children,
-            } => write!(f, "auto · up to {max_active_children} children"),
+            } => write!(
+                f,
+                "auto · up to {max_active_children} {}",
+                children_noun(*max_active_children)
+            ),
             Self::Team {
                 max_active_children,
-            } => write!(f, "team · up to {max_active_children} children"),
+            } => write!(
+                f,
+                "team · up to {max_active_children} {}",
+                children_noun(*max_active_children)
+            ),
         }
     }
 }
