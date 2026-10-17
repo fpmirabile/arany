@@ -1033,7 +1033,7 @@ async fn review_chatgpt_risk(
     }
 }
 
-async fn review_warning(
+pub(super) async fn review_warning(
     terminal: &mut AttachedTerminal,
     title: &str,
     warning: &str,

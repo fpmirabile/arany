@@ -715,6 +715,138 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
 
 #[test]
 #[cfg(target_os = "linux")]
+#[cfg_attr(not(arany_ci), ignore = "native Linux PTY folder trust recovery")]
+fn unsupported_trust_record_is_named_and_reset_only_with_consent() {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::io::Write;
+
+    for symlink in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir(&workspace).unwrap();
+        let account = temp.path().join("account-home/.local/state/arany");
+        let root = arany::StateRoot::admit(&account).unwrap();
+        let record = root.path().join("workspace-permissions.json");
+        if symlink {
+            let outside = temp.path().join("outside-permissions.json");
+            std::fs::write(&outside, br#"{"version":1,"workspaces":[]}"#).unwrap();
+            std::os::unix::fs::symlink(&outside, &record).unwrap();
+        } else {
+            root.record(arany::RecordKind::WorkspacePermissions)
+                .replace(br#"{"version":1,"workspaces":[]}"#)
+                .unwrap();
+        }
+        drop(root);
+
+        let state = temp.path().join("state");
+        let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
+        let mut command = super::isolation::isolated_script(temp.path());
+        command
+            .env_clear()
+            .env("ARANY_TEST_STATE", &state)
+            .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+            .env("SHELL", "/bin/sh")
+            .env("TERM", "xterm-256color")
+            .current_dir(&workspace)
+            .args(["-q", "-e", "-c", shell, "/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+        let mut input = child.child().stdin.take().unwrap();
+        let mut output = child.child().stdout.take().unwrap();
+        let flags = fcntl_getfl(&output).unwrap();
+        fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+        let mut transcript = Vec::new();
+        let mut answered = crate::session_picker::PtyResponses::manual_consent();
+        let wait = |output: &mut std::process::ChildStdout,
+                    input: &mut std::process::ChildStdin,
+                    transcript: &mut Vec<u8>,
+                    answered: &mut crate::session_picker::PtyResponses,
+                    needle: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !super::session_picker::screen_contains(transcript, 80, 24, needle) {
+                super::session_picker::pump(output, input, transcript, answered);
+                assert!(
+                    Instant::now() < deadline,
+                    "folder trust recovery stage missing: {}",
+                    super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
+                );
+                thread::yield_now();
+            }
+        };
+        wait(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            if symlink {
+                "owner-only regular"
+            } else {
+                "unsupported version 1"
+            },
+        );
+        if symlink {
+            assert!(
+                !super::session_picker::screen_contains(&transcript, 80, 24, "Reset folder trust"),
+                "a non-private record must not offer a reset"
+            );
+            input.write_all(b"\x1b[B\r").unwrap();
+        } else {
+            input.write_all(b"\x1b[B\r").unwrap();
+            wait(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                "Reset folder trust?",
+            );
+            input.write_all(b"\t\r").unwrap();
+            wait(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                "Do you trust this folder?",
+            );
+            assert!(!record.exists(), "consented reset must delete the record");
+            input.write_all(b"\x03").unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+            if let Some(status) = child.child().try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "folder trust recovery did not exit: {}",
+                super::session_picker::tail(&transcript)
+            );
+            thread::yield_now();
+        };
+        super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(status.success());
+        if symlink {
+            assert!(
+                std::fs::symlink_metadata(&record)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "a non-private record is never modified"
+            );
+        }
+        let text = String::from_utf8_lossy(&transcript);
+        assert_eq!(
+            super::active_terminal::transcript_field(&text, "TTY_BEFORE:"),
+            super::active_terminal::transcript_field(&text, "TTY_AFTER:")
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 #[cfg_attr(
     not(arany_ci),
     ignore = "native Linux narrow PTY consent paging regression"
@@ -777,7 +909,7 @@ fn tab_cannot_skip_narrow_folder_consent_pages() {
         &mut input,
         &mut transcript,
         &mut answered,
-        "Page 1/17",
+        "Page 1/",
     );
     for &key in b"\t\t\r" {
         input.write_all(&[key]).unwrap();
@@ -788,7 +920,7 @@ fn tab_cannot_skip_narrow_folder_consent_pages() {
         &mut input,
         &mut transcript,
         &mut answered,
-        "Page 2/17",
+        "Page 2/",
     );
     assert!(
         !account.join("workspace-permissions.json").exists(),

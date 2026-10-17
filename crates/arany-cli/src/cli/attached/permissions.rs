@@ -71,9 +71,10 @@ pub(super) async fn admit(
     configured: bool,
 ) -> Result<PermissionChoice, SetupError> {
     composer.set_approval_mode(None);
-    let access = WorkspacePermissions::open(workspace).map_err(|error| {
-        SetupError::Recoverable(format!("Could not load folder trust: {error}"))
-    })?;
+    let access = match open_or_recover(terminal, workspace).await? {
+        TrustAdmission::Loaded(access) => access,
+        TrustAdmission::Exit => return Ok(PermissionChoice::Exit),
+    };
     if access.is_trusted() {
         composer.set_approval_mode(native_protection_supported().then_some(access.mode()));
         Ok(PermissionChoice::Selected(access))
@@ -85,6 +86,76 @@ pub(super) async fn admit(
             configured,
         )
         .await
+    }
+}
+
+pub(super) enum TrustAdmission {
+    Loaded(WorkspacePermissions),
+    Exit,
+}
+
+const RESET_WARNING: &str = "Reset deletes the remembered trust and runtime profile selections for every folder on this computer. Conversations, saved accounts and model choices are kept. Each folder asks for trust again. This cannot be undone.";
+
+fn recovery_choices(resettable: bool) -> &'static [(u8, &'static str)] {
+    if resettable {
+        &[
+            (b'1', "Retry"),
+            (b'2', "Reset folder trust"),
+            (b'0', "Exit"),
+        ]
+    } else {
+        &[(b'1', "Retry"), (b'0', "Exit")]
+    }
+}
+
+/// Opens the trust record or offers Retry, Reset folder trust or Exit, as history recovery does.
+pub(super) async fn open_or_recover(
+    terminal: &mut AttachedTerminal,
+    workspace: &Path,
+) -> Result<TrustAdmission, SetupError> {
+    let mut notice = None;
+    loop {
+        let error = match WorkspacePermissions::open(workspace) {
+            Ok(access) => return Ok(TrustAdmission::Loaded(access)),
+            Err(error) => error,
+        };
+        let resettable = error.is_resettable();
+        let reason = notice.take().unwrap_or_else(|| format!("{error}."));
+        let instruction = if resettable {
+            format!(
+                "{reason} Reset deletes only the remembered folder trust list; conversations, accounts and models are kept."
+            )
+        } else {
+            reason
+        };
+        match super::setup::choose_focused(
+            terminal,
+            1,
+            "Folder trust recovery",
+            &instruction,
+            recovery_choices(resettable),
+            None,
+        )
+        .await?
+        {
+            Some(b'1') => {}
+            Some(b'2') => {
+                let confirmed = super::setup::review_warning(
+                    terminal,
+                    "Reset folder trust?",
+                    RESET_WARNING,
+                    "Delete remembered folder trust?",
+                )
+                .await?;
+                if confirmed
+                    && let Err(error) = WorkspacePermissions::prepare_reset(workspace)
+                        .and_then(arany::TrustReset::apply)
+                {
+                    notice = Some(format!("Reset did not complete: {error}; retry."));
+                }
+            }
+            _ => return Ok(TrustAdmission::Exit),
+        }
     }
 }
 
@@ -398,6 +469,25 @@ mod tests {
                 "a rejected save must not write the trust record"
             );
         });
+    }
+
+    #[test]
+    fn trust_recovery_offers_reset_only_for_resettable_causes() {
+        use arany::TrustRecordError;
+
+        let labels = |choices: &[(u8, &str)]| {
+            choices
+                .iter()
+                .map(|(_, label)| label.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(super::recovery_choices(true)),
+            ["Retry", "Reset folder trust", "Exit"]
+        );
+        assert_eq!(labels(super::recovery_choices(false)), ["Retry", "Exit"]);
+        assert!(!TrustRecordError::RecordNotPrivate.is_resettable());
+        assert!(TrustRecordError::UnsupportedVersion(1).is_resettable());
     }
 
     fn option(token: &str, group: &'static str) -> arany::RuntimeProfileOption {
