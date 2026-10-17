@@ -15,12 +15,11 @@ pub(super) fn apply(
             current.defaults = defaults.clone();
         }
         Event::ContextCompacted { record, active_ms } => {
-            // Inherited Runs finished at or before the fork boundary; only this Session's own Runs follow it.
-            let own_last = current.runs.last().filter(|run| {
-                current
-                    .lineage
-                    .is_none_or(|lineage| run.finished_sequence > Some(lineage.source_sequence))
-            });
+            // Inherited Runs were accepted before the fork; this Session's own Runs follow it.
+            let own_last = current
+                .runs
+                .last()
+                .filter(|run| run.accepted_sequence > current.created_sequence);
             let boundary = if let Some(run) = own_last {
                 run.finished_sequence.map(|sequence| (run.id, sequence))
             } else {

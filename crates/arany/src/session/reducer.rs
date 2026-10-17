@@ -315,7 +315,6 @@ impl RunView {
     }
 }
 
-/// The Runs and compactions a fork inherits, projected from its source through the fork boundary.
 #[derive(Clone, Debug)]
 pub(crate) struct ForkInheritance {
     pub(crate) runs: Vec<RunView>,
@@ -445,7 +444,6 @@ impl SessionView {
         Self::replay_prefix(id, events, false, None)
     }
 
-    /// Replays a fork's own Events on top of the Runs and compactions it inherits from its source.
     pub(crate) fn replay_forked(
         id: SessionId,
         events: &[EventEnvelope],
