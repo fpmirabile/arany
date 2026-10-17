@@ -78,6 +78,7 @@ pub enum RecordKind {
     ProviderProfiles,
     ProviderRouting,
     Permissions,
+    UnguardedCommands,
     SavedAccount,
     UiPreferences,
     ModelPreferences,
@@ -97,6 +98,11 @@ impl RecordKind {
             ),
             Self::ProviderRouting => ("provider-routing.json", None, 16 * 1024),
             Self::Permissions => ("permissions.json", None, 64 * 1024),
+            Self::UnguardedCommands => (
+                "unguarded-commands.json",
+                Some("unguarded-commands.pending"),
+                64 * 1024,
+            ),
             Self::ProviderProfiles => ("provider-profiles.json", None, 64 * 1024),
             Self::SavedAccount => (
                 "account-credentials.json",
