@@ -2248,6 +2248,37 @@ async fn listing_without_a_fitting_row_is_a_limit_and_empty_results_succeed() {
     }
 }
 
+#[test]
+fn result_capacity_is_the_context_fit_formula_with_a_floor_and_the_general_ceiling() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut runtime = in_process_runtime(
+        temp.path(),
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    runtime.context_limit_bytes = 1 << 20;
+    let limit = runtime.context_limit_bytes();
+    let fitted = |overhead: usize| limit.saturating_sub(overhead + 512) / 6;
+    let ceiling = |overhead: usize| {
+        runtime
+            .result_capacity(overhead, 0)
+            .map(|capacity| capacity.min(MAX_TOOL_RESULT_BYTES))
+    };
+    let below_ceiling = limit - 512 - 6 * (MAX_TOOL_RESULT_BYTES / 2);
+    assert_eq!(
+        runtime.result_capacity(below_ceiling, 0),
+        Some(fitted(below_ceiling))
+    );
+    assert_eq!(ceiling(below_ceiling), Some(MAX_TOOL_RESULT_BYTES / 2));
+    assert!(
+        fitted(0) > MAX_TOOL_RESULT_BYTES,
+        "the context fit exceeds the ceiling at zero overhead"
+    );
+    assert_eq!(ceiling(0), Some(MAX_TOOL_RESULT_BYTES));
+    let at_floor = limit - 512 - 6 * 128;
+    assert_eq!(runtime.result_capacity(at_floor, 0), Some(128));
+    assert_eq!(runtime.result_capacity(at_floor + 1, 0), None);
+}
+
 #[tokio::test]
 async fn in_process_results_fit_their_budget_before_serialization() {
     let temp = tempfile::tempdir().unwrap();

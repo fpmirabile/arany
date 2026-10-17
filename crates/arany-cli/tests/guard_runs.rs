@@ -1708,7 +1708,6 @@ async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit(
         READ_ONLY,
     )
     .await;
-    assert_eq!(result_bytes(&child), 59099);
     assert!(result_bytes(&child) > 16 * 1024);
     assert!(result_bytes(&primary) > result_bytes(&child));
 }
