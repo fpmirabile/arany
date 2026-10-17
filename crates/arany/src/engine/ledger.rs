@@ -147,6 +147,8 @@ struct InFlight {
     reserved_ms: Option<u64>,
     // Start of the active time since the last settlement.
     origin: Option<Instant>,
+    // The Run ended because the Goal budget ran out.
+    budget_stopped: bool,
 }
 
 impl InFlight {
@@ -511,6 +513,15 @@ impl GoalLedger {
                 .saturating_add(open_ms)
                 .saturating_add(pending_ms)
         })
+    }
+
+    pub(super) fn mark_budget_stopped(&self) {
+        let _ = self.in_flight(|in_flight| in_flight.budget_stopped = true);
+    }
+
+    pub(super) fn budget_stopped(&self) -> bool {
+        self.in_flight(|in_flight| in_flight.budget_stopped)
+            .unwrap_or(false)
     }
 
     pub(super) fn active_reserved(&self) -> bool {

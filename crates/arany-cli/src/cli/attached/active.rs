@@ -57,6 +57,7 @@ pub(super) enum GoalStart {
     Plain,
     Autonomous,
     Resume,
+    Continue,
 }
 
 pub(super) fn goal_request(
@@ -74,6 +75,18 @@ pub(super) fn goal_request(
             "Goal {} is still active and cannot accept another Run",
             goal.id
         ));
+    }
+    if start == GoalStart::Continue {
+        return view
+            .continuable_goal()
+            .map(|source| {
+                arany::GoalRequest::continue_from(
+                    source.id,
+                    arany::GoalBudget::default(),
+                    arany::ToolResourceSettings::default(),
+                )
+            })
+            .ok_or_else(|| "No exhausted Goal is available to continue".into());
     }
     Ok(match start {
         GoalStart::Autonomous => arany::GoalRequest::autonomous(
@@ -238,8 +251,11 @@ pub(super) fn preflight_idle_run(
         );
     };
     goal_request(view, start).map_err(|error| format!("Error: {error}"))?;
-    if start == GoalStart::Resume && has_images {
-        return Err("Error: /goal resume takes no image attachments; clear them first".into());
+    if matches!(start, GoalStart::Resume | GoalStart::Continue) && has_images {
+        return Err(
+            "Error: /goal resume and /goal continue take no image attachments; clear them first"
+                .into(),
+        );
     }
     if has_images && profile.starts_with("custom:") {
         return Err("Error: Image input is not admitted for custom Providers; clear these attachments first".into());
@@ -289,6 +305,9 @@ pub(super) async fn submit_objective(
             .interrupted_goal_id()
             .and_then(|id| view.goal(id))
             .is_some_and(|resumed| resumed.autonomous),
+        GoalStart::Continue => view
+            .continuable_goal()
+            .is_some_and(|source| source.autonomous),
         GoalStart::Plain | GoalStart::Autonomous => goal == GoalStart::Autonomous,
     };
     let cancellation = RunCancellation::new();
@@ -1097,6 +1116,7 @@ mod tests {
                 phase: arany::GoalPhase::Implementation,
                 autonomous: false,
                 resource_settings: arany::ToolResourceSettings::default(),
+                continues: None,
             },
         ]
         .into_iter()
@@ -1228,6 +1248,7 @@ mod goal_request_tests {
             phase: arany::GoalPhase::Implementation,
             autonomous,
             resource_settings: arany::ToolResourceSettings::default(),
+            continues: None,
         };
         let started = arany::Event::SessionStarted {
             title: "Goals".into(),
@@ -1268,6 +1289,17 @@ mod goal_request_tests {
             goal_request(&view, GoalStart::Resume),
             Err("No interrupted Goal is available to resume".into())
         );
+    }
+
+    #[test]
+    fn goal_continue_refuses_goals_that_were_not_closed_by_exhaustion() {
+        let mut view = session_with_goal(true);
+        let refusal = Err("No exhausted Goal is available to continue".to_owned());
+        view.goals[0].status = arany::GoalStatus::Interrupted;
+        assert_eq!(goal_request(&view, GoalStart::Continue), refusal);
+        view.goals[0].status = arany::GoalStatus::Failed;
+        view.goals[0].budget.max_runs = 0;
+        assert_eq!(goal_request(&view, GoalStart::Continue), refusal);
     }
 
     #[test]

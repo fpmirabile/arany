@@ -55,6 +55,7 @@ struct Fixture {
     workspace: std::path::PathBuf,
     state: std::path::PathBuf,
     engine: Engine,
+    deny_humans: bool,
     command_maximum: Option<u32>,
     settings: Option<Value>,
 }
@@ -102,6 +103,7 @@ impl Fixture {
             workspace,
             state,
             engine,
+            deny_humans: false,
             command_maximum: None,
             settings: settings.cloned(),
         }
@@ -154,7 +156,7 @@ impl Fixture {
                 approval = inbox.next(), if mode.is_some() => {
                     humans += 1;
                     assert_eq!(humans, 1, "only the proposed Tool may ask");
-                    approval.unwrap().decide(true);
+                    approval.unwrap().decide(!self.deny_humans);
                 }
             }
         };
@@ -878,4 +880,25 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
             }
         );
     }
+}
+
+#[tokio::test]
+async fn human_denial_on_the_only_allowed_run_is_a_failure_not_a_budget_close() {
+    let mut fixture = Fixture::new(None, true);
+    fixture.deny_humans = true;
+    let call = call("edit");
+    let (result, _, humans) = fixture
+        .run(
+            vec![tool_outcome(call.clone(), Some(Box::new(plan(&call))))],
+            Some(arany::ApprovalMode::Request),
+            false,
+        )
+        .await;
+    assert_eq!(humans, 1);
+    assert_eq!(result.run.status, RunStatus::Failed);
+    let (_, view) = fixture.reopen(result.session_id).await;
+    let goal = view.goal(result.goal_id).unwrap();
+    assert_eq!(goal.status, arany::GoalStatus::Failed);
+    assert!(!goal.budget_closed);
+    assert!(view.continuable_goal().is_none());
 }

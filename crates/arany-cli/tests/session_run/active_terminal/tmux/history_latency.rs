@@ -186,6 +186,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     phase: GoalPhase::Implementation,
                     autonomous: false,
                     resource_settings: arany::ToolResourceSettings::default(),
+                    continues: None,
                 },
             )
             .await
@@ -304,6 +305,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         unresolved: Vec::new(),
                         cached_input_tokens: 0,
                     },
+                    exhausted: false,
                 },
             )
             .await

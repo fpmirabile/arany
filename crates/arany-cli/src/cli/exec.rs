@@ -39,6 +39,13 @@ pub(crate) struct ExecArgs {
     pub resume_goal: Option<String>,
     #[arg(
         long,
+        requires = "session_id",
+        conflicts_with_all = ["prompt", "goal", "resume_goal"],
+        help = "Start a new Goal with a fresh budget from the exhausted Goal in --session-id"
+    )]
+    pub continue_goal: Option<String>,
+    #[arg(
+        long,
         conflicts_with_all = ["prompt", "resume_goal"],
         help = "Run an autonomous Goal on this objective until it is satisfied or stops"
     )]
@@ -113,19 +120,34 @@ impl ExecArgs {
             .map(arany::GoalId::from_str)
             .transpose()
             .map_err(|_| "invalid Goal ID")?;
-        let resumes_without_text =
-            self.goal.is_none() && self.prompt.is_none() && resume_goal.is_some();
-        let (objective, goal) = match (&self.goal, &self.prompt, resume_goal) {
-            (Some(objective), None, None) => (
+        let continue_goal = self
+            .continue_goal
+            .as_deref()
+            .map(arany::GoalId::from_str)
+            .transpose()
+            .map_err(|_| "invalid Goal ID")?;
+        let resumes_without_text = self.goal.is_none()
+            && self.prompt.is_none()
+            && (resume_goal.is_some() || continue_goal.is_some());
+        let (objective, goal) = match (&self.goal, &self.prompt, resume_goal, continue_goal) {
+            (Some(objective), None, None, None) => (
                 objective.clone(),
                 GoalRequest::autonomous(GoalBudget::default(), GoalPhase::Implementation),
             ),
-            (None, Some(prompt), None) => (prompt.clone(), GoalRequest::default()),
-            (None, Some(prompt), Some(id)) => (prompt.clone(), GoalRequest::resume(id, true)),
-            (None, None, Some(id)) => (String::new(), GoalRequest::resume(id, true)),
+            (None, Some(prompt), None, None) => (prompt.clone(), GoalRequest::default()),
+            (None, Some(prompt), Some(id), None) => (prompt.clone(), GoalRequest::resume(id, true)),
+            (None, None, Some(id), None) => (String::new(), GoalRequest::resume(id, true)),
+            (None, None, None, Some(id)) => (
+                String::new(),
+                GoalRequest::continue_from(
+                    id,
+                    GoalBudget::default(),
+                    arany::ToolResourceSettings::default(),
+                ),
+            ),
             _ => {
                 return Err(
-                    "pass --goal alone, a prompt alone, or --resume-goal with an optional prompt",
+                    "pass --goal alone, a prompt alone, --resume-goal with an optional prompt, or --continue-goal alone",
                 );
             }
         };
@@ -558,6 +580,7 @@ mod tests {
             effort: None,
             session_id: None,
             resume_goal: None,
+            continue_goal: None,
             goal: None,
             output: OutputArg::Text,
             collaboration: CollaborationArg::Single,
@@ -663,6 +686,29 @@ mod tests {
         assert_eq!(admission.objective, "Ship the change");
         assert!(admission.goal.autonomous);
 
+        let admission = parse(&["--session-id", &session, "--continue-goal", &goal_id])
+            .expect("continue parses without a prompt")
+            .admit()
+            .expect("prompt-less continuation");
+        assert!(admission.objective.is_empty());
+        assert_eq!(
+            admission.goal.continues,
+            Some(goal_id.parse().expect("Goal ID"))
+        );
+        assert_eq!(admission.goal.id, None);
+        assert!(parse(&["--continue-goal", &goal_id]).is_err());
+        assert!(
+            parse(&[
+                "--session-id",
+                &session,
+                "--continue-goal",
+                &goal_id,
+                "--resume-goal",
+                &goal_id
+            ])
+            .is_err()
+        );
+
         let admission = parse(&["--session-id", &session, "--resume-goal", &goal_id])
             .expect("resume parses without a prompt")
             .admit()
@@ -686,7 +732,9 @@ mod tests {
         assert_eq!(admission.objective, "Keep going");
         assert_eq!(
             parse(&[]).expect("parses").admit().err(),
-            Some("pass --goal alone, a prompt alone, or --resume-goal with an optional prompt")
+            Some(
+                "pass --goal alone, a prompt alone, --resume-goal with an optional prompt, or --continue-goal alone"
+            )
         );
         assert_eq!(
             parse(&["--goal", " "]).expect("parses").admit().err(),

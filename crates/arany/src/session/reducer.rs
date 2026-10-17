@@ -75,6 +75,10 @@ pub struct GoalView {
     pub report: Option<GoalReport>,
     pub started_sequence: u64,
     pub finished_sequence: Option<u64>,
+    /// The exhausted Goal this one continues.
+    pub continues: Option<GoalId>,
+    /// Failed because the budget ran out (`GoalFinished.exhausted`).
+    pub budget_closed: bool,
 }
 
 impl GoalView {
@@ -639,6 +643,36 @@ impl SessionView {
             .map(|index| &self.goals[index])
             .filter(|goal| goal.status == GoalStatus::Interrupted)
             .map(|goal| goal.id)
+    }
+
+    /// The most recent Goal closed by budget exhaustion that no later Goal continues yet,
+    /// unless its last Run left a Tool without a known outcome.
+    pub fn continuable_goal(&self) -> Option<&GoalView> {
+        self.goals.iter().rev().find(|goal| {
+            goal.budget_closed
+                && goal
+                    .run_ids
+                    .iter()
+                    .rev()
+                    .find_map(|run_id| self.runs.iter().find(|run| run.id == *run_id))
+                    .is_some_and(|run| {
+                        run.tools
+                            .iter()
+                            .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
+                            .all(|tool| {
+                                tool.observation.as_ref().is_some_and(|observation| {
+                                    observation.disposition
+                                        != crate::tools::ToolDisposition::Uncertain
+                                        && observation.cache_update
+                                            != crate::tools::CacheUpdate::Uncertain
+                                })
+                            })
+                    })
+                && !self
+                    .goals
+                    .iter()
+                    .any(|other| other.continues == Some(goal.id))
+        })
     }
 
     pub fn goal(&self, id: GoalId) -> Option<&GoalView> {

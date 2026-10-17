@@ -381,6 +381,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
                     phase: arany::GoalPhase::Implementation,
                     autonomous: false,
                     resource_settings: arany::ToolResourceSettings::default(),
+                    continues: None,
                 },
             )
             .await
