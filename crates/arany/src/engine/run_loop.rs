@@ -157,9 +157,9 @@ impl<'a> RunLoop<'a> {
         self.ledger
     }
 
-    fn settle_result(&self, result: &CallResult) {
+    fn settle_result(&self, result: &CallResult) -> Result<(), EngineError> {
         let (input, output) = call_usage(result);
-        self.ledger().settle(input, output);
+        self.ledger().settle(input, output)
     }
 
     async fn append(&self, event: Event) -> Result<(), EngineError> {
@@ -524,7 +524,7 @@ impl<'a> RunLoop<'a> {
                 .routing
                 .invoke(request, deadline, self.controls.cancellation.clone(), None)
                 .await?;
-            self.settle_result(&result);
+            self.settle_result(&result)?;
             return Ok((result, active_segment));
         };
         let call_index = context.call_index;
@@ -572,7 +572,7 @@ impl<'a> RunLoop<'a> {
             }
             result => result,
         };
-        self.settle_result(&result);
+        self.settle_result(&result)?;
         if !matches!(
             result,
             CallResult::Failed(

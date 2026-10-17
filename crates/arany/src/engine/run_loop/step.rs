@@ -967,7 +967,7 @@ impl RunLoop<'_> {
                 None,
             )
             .await?;
-        self.settle_result(&result);
+        self.settle_result(&result)?;
         let valid = matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Finish(finish), .. }) if valid_finish(finish, 1024) && matches!(finish.result.as_str(), "approve" | "ask"));
         let valid = valid && self.ledger().tokens_within_limit();
         self.append(Event::ProviderCallRecorded {

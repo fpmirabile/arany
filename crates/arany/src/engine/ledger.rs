@@ -318,15 +318,19 @@ impl GoalLedger {
         })
     }
 
-    pub(super) fn settle(&self, input: Option<u32>, output: Option<u32>) {
-        let _ = self.in_flight(|in_flight| {
+    pub(super) fn settle(
+        &self,
+        input: Option<u32>,
+        output: Option<u32>,
+    ) -> Result<(), EngineError> {
+        self.in_flight(|in_flight| {
             in_flight.unrecorded_tokens = in_flight
                 .unrecorded_tokens
                 .saturating_add(tokens(input, output));
             if input.is_none() || output.is_none() {
                 in_flight.unrecorded_unknown = in_flight.unrecorded_unknown.saturating_add(1);
             }
-        });
+        })
     }
 
     pub(super) fn child_call_finished(&self) -> Result<(), EngineError> {

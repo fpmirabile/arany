@@ -71,7 +71,10 @@ pub(super) async fn preflight_selected(
     select_provider(state_dir, selection).await.map(|_| ())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "run admission carries independent inputs"
+)]
 pub(super) async fn run_selected(
     engine: &Engine,
     state_dir: &Path,

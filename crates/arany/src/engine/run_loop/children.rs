@@ -358,7 +358,7 @@ impl RunLoop<'_> {
             }
             queue.active.remove(&task_id);
             let result = result.result;
-            self.settle_result(&result);
+            self.settle_result(&result)?;
             let valid_response = self.ledger().tokens_within_limit()
                 && match &result {
                     CallResult::Response(ProviderResponse {
