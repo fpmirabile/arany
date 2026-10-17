@@ -78,6 +78,9 @@ pub struct RuntimeProfileOption {
     pub token: String,
     pub label: String,
     pub group: &'static str,
+    pub version: Option<String>,
+    pub path: PathBuf,
+    pub detected: bool,
     pub selected: bool,
 }
 
@@ -219,6 +222,9 @@ impl WorkspacePermissions {
                 token: candidate.token.clone(),
                 label: candidate.label.clone(),
                 group: candidate.grant.kind.label(),
+                version: candidate.grant.version.clone(),
+                path: candidate.grant.path.clone(),
+                detected: true,
                 selected: selected.contains(&candidate.token),
             })
             .collect::<Vec<_>>();
@@ -229,10 +235,14 @@ impl WorkspacePermissions {
             if options.iter().any(|option| option.token == token) {
                 continue;
             }
+            let detected = grant.verify_host().is_ok();
             options.push(RuntimeProfileOption {
                 token,
-                label: saved_profile_label(grant),
+                label: saved_profile_label(grant, detected),
                 group: grant.kind.label(),
+                version: grant.version.clone(),
+                path: grant.path.clone(),
+                detected,
                 selected: true,
             });
         }
@@ -244,7 +254,7 @@ impl WorkspacePermissions {
     pub fn selected_runtime_profiles(&self) -> Vec<String> {
         self.runtime_grants
             .iter()
-            .map(saved_profile_label)
+            .map(|grant| saved_profile_label(grant, grant.verify_host().is_ok()))
             .collect()
     }
 
@@ -512,8 +522,8 @@ impl TrustReset {
     }
 }
 
-fn saved_profile_label(grant: &RuntimeGrant) -> String {
-    if grant.verify_host().is_ok() {
+fn saved_profile_label(grant: &RuntimeGrant, detected: bool) -> String {
+    if detected {
         grant.profile_label()
     } else {
         format!("{} (no longer detected)", grant.profile_label())
@@ -873,7 +883,7 @@ mod tests {
                     kind: RuntimeKind::CargoCache,
                     manager: RuntimeManager::HostCache,
                     version: None,
-                    path: cache,
+                    path: cache.clone(),
                     device,
                     inode,
                 }],
@@ -888,6 +898,9 @@ mod tests {
         let choices = access.runtime_profile_choices();
         assert_eq!(choices.len(), 1);
         assert!(choices[0].selected);
+        assert!(choices[0].detected);
+        assert_eq!(choices[0].path, cache);
+        assert_eq!(choices[0].version, None);
         assert!(!choices[0].label.contains("no longer detected"));
     }
 

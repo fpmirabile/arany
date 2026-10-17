@@ -405,6 +405,9 @@ mod tests {
             token: token.into(),
             label: token.into(),
             group,
+            version: None,
+            path: std::path::PathBuf::from("/opt/profile"),
+            detected: true,
             selected: false,
         }
     }
