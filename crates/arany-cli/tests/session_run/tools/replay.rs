@@ -131,6 +131,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             phase: arany::GoalPhase::Implementation,
             autonomous: false,
             resource_settings: arany::ToolResourceSettings::default(),
+            continues: None,
         },
         Event::GoalRunLinked {
             goal_id: goal,

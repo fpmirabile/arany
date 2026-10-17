@@ -24,8 +24,20 @@ impl SessionView {
         resource_settings: &crate::tools::ToolResourceSettings,
         phase: &GoalPhase,
         autonomous: bool,
+        continues: Option<GoalId>,
         prior: u64,
     ) -> Result<(), ReplayError> {
+        if let Some(source_id) = continues {
+            let source = self.continuable_goal();
+            if source.is_none_or(|source| {
+                source.id != source_id
+                    || source.objective != objective
+                    || source.phase != *phase
+                    || source.autonomous != autonomous
+            }) {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
         if self.goals.iter().any(|goal| goal.id == *goal_id)
             || self
                 .workspace_identity
@@ -71,6 +83,8 @@ impl SessionView {
             started_sequence: prior,
             finished_sequence: None,
             known_cached_tokens: 0,
+            continues,
+            budget_closed: false,
         });
         Ok(())
     }
@@ -348,6 +362,7 @@ impl SessionView {
         status: &GoalStatus,
         active_ms: &u64,
         report: &GoalReport,
+        exhausted: bool,
         prior: u64,
     ) -> Result<(), ReplayError> {
         // The report's cache-read total must be exactly what the Goal accumulated from its Provider calls.
@@ -391,11 +406,21 @@ impl SessionView {
                 && goal.plan_contract.is_some()
                 && !goal.success_criterion_satisfied);
         if !terminal {
-            return self
-                .close_exhausted_goal(goal_id, *status, run_status, *active_ms, report, prior);
+            if !exhausted {
+                return Err(ReplayError::InvalidTransition);
+            }
+            self.close_exhausted_goal(goal_id, *status, run_status, *active_ms, report, prior)?;
+            current_goal_mut(self, *goal_id)?.budget_closed = true;
+            return Ok(());
         }
         let goal = current_goal_mut(self, *goal_id)?;
         goal.active_ms = *active_ms;
+        if exhausted && (*status != GoalStatus::Failed || !goal.budget_spent())
+            || (exhausted_after_finish && *status == GoalStatus::Failed && !exhausted)
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+        goal.budget_closed = exhausted;
         goal.status = *status;
         goal.report = Some(report.clone());
         goal.finished_sequence = Some(prior);
@@ -524,6 +549,7 @@ pub(super) fn apply(
             resource_settings,
             phase,
             autonomous,
+            continues,
         } => {
             current.start_goal(
                 goal_id,
@@ -533,6 +559,7 @@ pub(super) fn apply(
                 resource_settings,
                 phase,
                 *autonomous,
+                *continues,
                 prior,
             )?;
         }
@@ -633,8 +660,9 @@ pub(super) fn apply(
             status,
             active_ms,
             report,
+            exhausted,
         } => {
-            current.finish_goal(goal_id, status, active_ms, report, prior)?;
+            current.finish_goal(goal_id, status, active_ms, report, *exhausted, prior)?;
         }
         Event::GoalSteeringNoteRecorded {
             goal_id,

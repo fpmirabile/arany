@@ -97,9 +97,8 @@ impl ChildQueue {
 }
 
 impl RunLoop<'_> {
-    pub(super) fn valid_delegation(&self, children: &[String]) -> bool {
-        self.ledger().can_start_provider_call()
-            && !matches!(self.controls.policy, CollaborationPolicy::Single)
+    pub(super) fn well_formed_delegation(&self, children: &[String]) -> bool {
+        !matches!(self.controls.policy, CollaborationPolicy::Single)
             && !children.is_empty()
             && children.len() <= usize::from(self.controls.policy.max_children())
             && children.iter().all(|objective| {
