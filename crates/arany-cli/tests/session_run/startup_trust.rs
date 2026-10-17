@@ -205,39 +205,96 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
         transcript: &mut Vec<u8>,
         answered: &mut crate::session_picker::PtyResponses,
     ) {
-        fn settle(
+        fn wait_for(
             output: &mut std::process::ChildStdout,
             input: &mut std::process::ChildStdin,
             transcript: &mut Vec<u8>,
             answered: &mut crate::session_picker::PtyResponses,
+            page: usize,
         ) {
             let deadline = Instant::now() + Duration::from_secs(10);
-            while !super::session_picker::screen_contains(transcript, 80, 24, "Ctrl+C exit") {
+            let next = format!("Page {page}/");
+            while !(super::session_picker::screen_contains(transcript, 80, 24, &next)
+                || super::session_picker::screen_contains(transcript, 80, 24, "Continue read only"))
+            {
                 super::session_picker::pump(output, input, transcript, answered);
                 assert!(
                     Instant::now() < deadline,
-                    "consent page did not settle: {}",
+                    "consent page {page} missing: {}",
                     super::session_picker::tail(transcript)
                 );
                 thread::yield_now();
             }
         }
-        settle(output, input, transcript, answered);
-        while super::session_picker::screen_contains(transcript, 80, 24, "Enter/PgDn") {
-            let before = super::session_picker::screen_rows(transcript, 80, 24);
+        let mut page = 1;
+        wait_for(output, input, transcript, answered, page);
+        while super::session_picker::screen_contains(transcript, 80, 24, &format!("Page {page}/")) {
             input.write_all(b"\r").unwrap();
+            page += 1;
+            wait_for(output, input, transcript, answered, page);
+        }
+    }
+
+    // Each key waits for the marker it must produce, so no key lands on a stale consent state.
+    fn toggle_and_confirm(
+        output: &mut std::process::ChildStdout,
+        input: &mut std::process::ChildStdin,
+        transcript: &mut Vec<u8>,
+        answered: &mut crate::session_picker::PtyResponses,
+    ) {
+        fn send_until(
+            output: &mut std::process::ChildStdout,
+            input: &mut std::process::ChildStdin,
+            transcript: &mut Vec<u8>,
+            answered: &mut crate::session_picker::PtyResponses,
+            key: &[u8],
+            done: impl Fn(&[u8]) -> bool,
+        ) {
+            input.write_all(key).unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
-            while super::session_picker::screen_rows(transcript, 80, 24) == before {
+            while !done(transcript) {
                 super::session_picker::pump(output, input, transcript, answered);
                 assert!(
                     Instant::now() < deadline,
-                    "consent page did not advance: {}",
+                    "consent did not advance: {}",
                     super::session_picker::tail(transcript)
                 );
                 thread::yield_now();
             }
-            settle(output, input, transcript, answered);
         }
+        let shows = |text: &'static str| {
+            move |transcript: &[u8]| {
+                super::session_picker::screen_contains(transcript, 80, 24, text)
+            }
+        };
+        send_until(
+            output,
+            input,
+            transcript,
+            answered,
+            b"\t",
+            shows("Tab back"),
+        );
+        let before = super::session_picker::screen_rows(transcript, 80, 24);
+        send_until(output, input, transcript, answered, b"\r", |transcript| {
+            super::session_picker::screen_rows(transcript, 80, 24) != before
+        });
+        send_until(
+            output,
+            input,
+            transcript,
+            answered,
+            b"\t",
+            shows("Enter confirm"),
+        );
+        send_until(
+            output,
+            input,
+            transcript,
+            answered,
+            b"\r",
+            shows("Ask Arany"),
+        );
     }
     for linear in [false, true] {
         for (trust, startup_escape, unconfigured) in [
@@ -319,9 +376,14 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                         from: usize,
                         needle: &[u8]| {
                 let deadline = Instant::now() + Duration::from_secs(10);
+                // Styled text can be split by cursor moves in the raw bytes; the rendered screen is authoritative.
+                let text = std::str::from_utf8(needle).ok();
                 while !transcript[from..]
                     .windows(needle.len())
                     .any(|part| part == needle)
+                    && !text.is_some_and(|text| {
+                        super::session_picker::screen_contains(transcript, 80, 24, text)
+                    })
                 {
                     super::session_picker::pump(output, input, transcript, answered);
                     assert!(
@@ -340,7 +402,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 0,
                 b"Do you trust this folder?",
             );
-            if !linear {
+            if !linear && unconfigured {
                 review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
             }
             let from = transcript.len();
@@ -433,15 +495,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                         .unwrap();
                 } else {
                     review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
-                    for &key in b"\t\r\t\r" {
-                        input.write_all(&[key]).unwrap();
-                        super::session_picker::pump(
-                            &mut output,
-                            &mut input,
-                            &mut transcript,
-                            &mut answered,
-                        );
-                    }
+                    toggle_and_confirm(&mut output, &mut input, &mut transcript, &mut answered);
                 }
                 wait(
                     &mut output,
@@ -538,15 +592,8 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     input.write_all(b"trust none\r").unwrap();
                 } else {
                     review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
-                    for &key in b"\t\r\t\r" {
-                        input.write_all(&[key]).unwrap();
-                        super::session_picker::pump(
-                            &mut output,
-                            &mut input,
-                            &mut transcript,
-                            &mut answered,
-                        );
-                    }
+                    // Keeps the remembered profile: Down selects Trust and Enter confirms without toggling.
+                    input.write_all(b"\x1b[B\r").unwrap();
                 }
                 wait(
                     &mut output,
@@ -562,6 +609,7 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 .join("account-home/.local/state/arany/workspace-permissions.json");
             let before_cancel = std::fs::read(&record).ok();
             input.write_all(b"\x03").unwrap();
+            let mut confirmed = linear;
             let deadline = Instant::now() + Duration::from_secs(10);
             let status = loop {
                 super::session_picker::pump(
@@ -570,6 +618,18 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     &mut transcript,
                     &mut answered,
                 );
+                // Chat asks for a second Ctrl+C before exiting; consent-free linear chat exits at once.
+                if !confirmed
+                    && super::session_picker::screen_contains(
+                        &transcript,
+                        80,
+                        24,
+                        "Ctrl+C again exits",
+                    )
+                {
+                    input.write_all(b"\x03").unwrap();
+                    confirmed = true;
+                }
                 if let Some(status) = child.child().try_wait().unwrap() {
                     break status;
                 }
