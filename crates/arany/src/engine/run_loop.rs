@@ -414,26 +414,35 @@ impl<'a> RunLoop<'a> {
                 }
                 Err(error) => return Err(error),
             };
-            let valid_response = self.ledger().tokens_within_limit()
-                && match &first {
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Finish(finish),
-                        ..
-                    }) => {
-                        (!planning
-                            || !matches!(self.controls.policy, CollaborationPolicy::Team { .. }))
-                            && valid_finish(finish, MAX_PRIMARY_RESULT_BYTES)
-                    }
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Delegate(delegation),
-                        ..
-                    }) => planning && self.valid_delegation(&delegation.children),
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Tools(requests),
-                        ..
-                    }) => self.valid_tools(requests),
-                    _ => false,
-                };
+            let (well_formed, budget_admits) = match &first {
+                CallResult::Response(ProviderResponse {
+                    outcome: ProviderOutcome::Finish(finish),
+                    ..
+                }) => (
+                    (!planning
+                        || !matches!(self.controls.policy, CollaborationPolicy::Team { .. }))
+                        && valid_finish(finish, MAX_PRIMARY_RESULT_BYTES),
+                    true,
+                ),
+                CallResult::Response(ProviderResponse {
+                    outcome: ProviderOutcome::Delegate(delegation),
+                    ..
+                }) => (
+                    planning && self.well_formed_delegation(&delegation.children),
+                    self.ledger().can_start_provider_call(),
+                ),
+                CallResult::Response(ProviderResponse {
+                    outcome: ProviderOutcome::Tools(requests),
+                    ..
+                }) => (
+                    self.well_formed_tools(requests),
+                    self.ledger().admits(Action::Tool),
+                ),
+                _ => (false, true),
+            };
+            let tokens_ok = self.ledger().tokens_within_limit();
+            let valid_response = tokens_ok && well_formed && budget_admits;
+            let budget_refused = well_formed && !(tokens_ok && budget_admits);
             self.append(Event::ProviderCallRecorded {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
@@ -450,7 +459,6 @@ impl<'a> RunLoop<'a> {
             if self.ledger().active_time_exhausted() {
                 return self.settle_stopped_primary().await;
             }
-            let over_tokens = !self.ledger().tokens_within_limit();
             match first {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
@@ -499,7 +507,7 @@ impl<'a> RunLoop<'a> {
                     }
                 }
                 CallResult::Cancelled => return self.cancel_primary().await,
-                CallResult::Response(_) if over_tokens => return self.fail_for_budget().await,
+                CallResult::Response(_) if budget_refused => return self.fail_for_budget().await,
                 _ => return self.fail_primary().await,
             }
         }
@@ -693,11 +701,11 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
-    fn valid_tools(&self, requests: &[crate::tools::ToolRequest]) -> bool {
-        matches!(requests, [request] if self.valid_tool(&request.call, &request.plan_contract))
+    fn well_formed_tools(&self, requests: &[crate::tools::ToolRequest]) -> bool {
+        matches!(requests, [request] if self.well_formed_tool(&request.call, &request.plan_contract))
     }
 
-    fn valid_tool(
+    fn well_formed_tool(
         &self,
         call: &crate::tools::ToolCall,
         plan_contract: &Option<Box<crate::session::GoalPlanContract>>,
@@ -746,7 +754,6 @@ impl<'a> RunLoop<'a> {
             && plan_and_call_fit
             && plan_valid
             && contract_budget_available
-            && self.ledger().admits(Action::Tool)
             && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. })
     }
 

@@ -1505,10 +1505,6 @@ mod goal_replay_tests {
                 crate::tools::CacheUpdate::Uncertain,
             ),
             (
-                ToolDisposition::Cancelled,
-                crate::tools::CacheUpdate::NotApplicable,
-            ),
-            (
                 ToolDisposition::Uncertain,
                 crate::tools::CacheUpdate::NotApplicable,
             ),

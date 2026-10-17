@@ -1030,6 +1030,50 @@ async fn invalid_response_on_the_last_allowed_call_is_a_failure_not_a_budget_clo
     assert!(view.continuable_goal().is_none());
 }
 
+#[tokio::test]
+async fn tool_request_refused_on_the_last_allowed_call_is_a_budget_close() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_provider_calls: Some(1),
+        ..arany::GoalBudget::default()
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![crate::tool_outcome(
+        arany::ToolCall::Search {
+            path: "notes/facts.txt".into(),
+            query: "v".into(),
+        },
+        None,
+    )]));
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, "Read after the budget");
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::new(budget, arany::GoalPhase::Implementation);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("budget-stopped Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Failed);
+    assert!(goal.budget_closed);
+    assert_eq!(
+        view.continuable_goal().map(|source| source.id),
+        Some(goal.id)
+    );
+}
+
 struct FiniteTokenTeam {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }

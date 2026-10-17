@@ -156,9 +156,11 @@ impl GoalView {
                         .iter()
                         .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
                         .all(|tool| {
-                            tool.observation
-                                .as_ref()
-                                .is_some_and(|observation| !observation.stops_run())
+                            tool.observation.as_ref().is_some_and(|observation| {
+                                observation.disposition != crate::tools::ToolDisposition::Uncertain
+                                    && observation.cache_update
+                                        != crate::tools::CacheUpdate::Uncertain
+                            })
                         })
                 })
         })
