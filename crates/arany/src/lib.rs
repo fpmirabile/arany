@@ -73,9 +73,10 @@ pub use tools::{
     EnforcementCause, FileChange, FileVersion, GuardReceipt, MAX_SKILLS, NetworkGrant,
     ProjectSkills, RuntimeProfileOption, ToolApproval, ToolApprovals, ToolCall, ToolContext,
     ToolDisposition, ToolError, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,
-    ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep, WorkspacePermissions,
-    configured_skill_names, list_workspace_entries, mention_paths, native_protection_supported,
-    project_skills, runtime_skill_names, tool_guard_main,
+    ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep, TrustRecordError,
+    TrustReset, WorkspacePermissions, configured_skill_names, list_workspace_entries,
+    mention_paths, native_protection_supported, project_skills, runtime_skill_names,
+    tool_guard_main,
 };
 
 pub use session::DISPLAY_LIMIT_TEXT;
