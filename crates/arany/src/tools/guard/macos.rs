@@ -919,7 +919,6 @@ async fn execute_worker(
     control: &mut tokio::net::unix::OwnedWriteHalf,
     receive_go: tokio::sync::oneshot::Receiver<()>,
     root: &Path,
-    teardown: &mut Option<tokio::time::Instant>,
 ) -> Result<ToolObservation, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
     let task = super::encode_task(&Task::new(runtime, intent, None))?;
@@ -1021,7 +1020,7 @@ async fn execute_worker(
         let _ = child.start_kill();
     }
     let deadline = tokio::time::Instant::now() + TEARDOWN_WAIT;
-    *teardown = Some(deadline);
+    scope.teardown = Some(deadline);
     let capture = fixture::Span::begin(fixture::Stage::WorkerReap);
     let reaped = match status {
         Some(status) => Ok(status),

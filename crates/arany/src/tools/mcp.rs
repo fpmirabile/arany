@@ -2,8 +2,8 @@ use super::ToolError;
 use super::catalog::string;
 use super::config::Config;
 use super::guard::{
-    TEARDOWN_WAIT, drain_stderr, payload, read_capped, read_line_capped, reap_owned_child,
-    teardown_failure,
+    ServerStep, TEARDOWN_WAIT, drain_stderr, payload, read_capped, read_line_capped,
+    reap_owned_child, server_unconfirmed,
 };
 use super::skills::parse_json;
 use super::types::{
@@ -59,7 +59,7 @@ struct Connection {
     reader: BufReader<ChildStdout>,
     next_id: u64,
     notifications: usize,
-    sent: bool,
+    rejected: bool,
 }
 
 impl Connection {
@@ -68,7 +68,6 @@ impl Connection {
         if bytes.len() > FRAME_BYTES {
             return Err(ToolError::Limit);
         }
-        self.sent = true;
         self.writer
             .write_all(&bytes)
             .await
@@ -116,6 +115,7 @@ impl Connection {
                 return Err(ToolError::Operation);
             }
             if message.get("error").is_some() {
+                self.rejected = true;
                 return Err(ToolError::Operation);
             }
             return Ok(message["result"].take());
@@ -222,8 +222,9 @@ pub(super) async fn execute(
         reader,
         next_id: 1,
         notifications: 0,
-        sent: false,
+        rejected: false,
     };
+    let mut called = false;
     let result = tokio::time::timeout(Duration::from_secs(40), async {
         let init = connection.request("initialize", json!({"protocolVersion":VERSION,"capabilities":{},"clientInfo":{"name":"arany","version":env!("CARGO_PKG_VERSION")}})).await?;
         if init["protocolVersion"] != VERSION || !init["capabilities"]["tools"].is_object() { return Err(ToolError::ProtectionUnavailable); }
@@ -239,6 +240,7 @@ pub(super) async fn execute(
         if definition["sha256"].as_str() != Some(schema_digest) { return Err(ToolError::ChangedInput); }
         let arguments = parse_mcp_arguments(arguments)?;
         if !compile_schema(&definition["inputSchema"])?.is_valid(&arguments) { return Err(ToolError::Configuration); }
+        called = true;
         let reply = connection.request("tools/call", json!({"name":tool,"arguments":arguments})).await?;
         let is_error = match reply.get("isError") { None => false, Some(value) => value.as_bool().ok_or(ToolError::Operation)? };
         let content = reply["content"].as_array().filter(|items| items.len() <= 64).ok_or(ToolError::Operation)?;
@@ -266,24 +268,31 @@ pub(super) async fn execute(
     let teardown = tokio::time::Instant::now() + TEARDOWN_WAIT;
     let reaped = tokio::time::timeout_at(teardown, reap_owned_child(&mut connection.child)).await;
     let drained = drain_stderr(&mut stderr_task, teardown).await;
-    match teardown_error(
-        connection.sent,
-        matches!(reaped, Ok(Ok(_))),
-        drained.is_some(),
-    ) {
-        Some(error) => Err(error),
-        None => result,
-    }
+    settle(
+        called,
+        connection.rejected,
+        (matches!(reaped, Ok(Ok(_))), drained.is_some()),
+        result,
+    )
 }
 
-// Once a request reached the server its effect is unknown, so unconfirmed teardown is never a plain failure.
-fn teardown_error(sent: bool, reaped: bool, drained: bool) -> Option<ToolError> {
-    if reaped && drained {
-        None
-    } else if sent {
-        Some(teardown_failure(reaped))
-    } else {
-        Some(ToolError::Operation)
+// The server ran code once spawned, and a call may have taken effect once written: without a validated
+// reply or confirmed teardown the outcome is unknown, never a plain failure.
+fn settle(
+    called: bool,
+    rejected: bool,
+    (reaped, drained): (bool, bool),
+    result: Result<String, ToolError>,
+) -> Result<String, ToolError> {
+    if !reaped {
+        return Err(server_unconfirmed(ServerStep::Reap));
+    }
+    if !drained {
+        return Err(server_unconfirmed(ServerStep::Output));
+    }
+    match result {
+        Err(_) if called && !rejected => Err(server_unconfirmed(ServerStep::Response)),
+        result => result,
     }
 }
 
@@ -350,19 +359,44 @@ fn admit_schema(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), To
 mod tests {
     use super::*;
 
+    fn unconfirmed(error: ToolError) -> bool {
+        matches!(error, ToolError::GuardBootstrap(_))
+    }
+
     #[test]
-    fn unconfirmed_teardown_after_a_sent_request_is_uncertain_not_failed() {
-        assert!(teardown_error(true, true, true).is_none());
-        assert!(teardown_error(false, true, true).is_none());
-        for (reaped, drained) in [(false, true), (true, false), (false, false)] {
-            assert!(matches!(
-                teardown_error(true, reaped, drained),
-                Some(ToolError::GuardBootstrap(_))
-            ));
-            assert!(matches!(
-                teardown_error(false, reaped, drained),
-                Some(ToolError::Operation)
+    fn unconfirmed_teardown_is_uncertain_once_the_server_ran() {
+        assert!(settle(false, false, (true, true), Ok("x".into())).is_ok());
+        for confirmed in [(false, true), (true, false), (false, false)] {
+            for called in [false, true] {
+                let result = settle(called, false, confirmed, Ok("x".into()));
+                assert!(unconfirmed(result.unwrap_err()));
+            }
+        }
+    }
+
+    #[test]
+    fn a_call_without_a_validated_reply_is_uncertain() {
+        let healthy = (true, true);
+        for error in [
+            ToolError::Operation,
+            ToolError::Limit,
+            ToolError::ChangedInput,
+        ] {
+            assert!(unconfirmed(
+                settle(true, false, healthy, Err(error)).unwrap_err()
             ));
         }
+        assert!(matches!(
+            settle(true, true, healthy, Err(ToolError::Operation)),
+            Err(ToolError::Operation)
+        ));
+        assert!(matches!(
+            settle(false, false, healthy, Err(ToolError::Operation)),
+            Err(ToolError::Operation)
+        ));
+        assert!(matches!(
+            settle(false, false, healthy, Err(ToolError::Limit)),
+            Err(ToolError::Limit)
+        ));
     }
 }

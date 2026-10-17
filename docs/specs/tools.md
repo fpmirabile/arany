@@ -306,6 +306,8 @@ Discovery returns a digest of each admitted complete tool definition. A later ca
 
 ## Extension and transport admission
 
+Once the server process has started, an unconfirmed server reap or stderr EOF is Uncertain with the stage "MCP server reap" or "MCP server output EOF". Once `tools/call` has been written, a lost, late or malformed reply is Uncertain with the stage "MCP server response"; only a well-formed JSON-RPC error reply, an `isError` result and failures before the write keep their Failed or Limit outcome. The received result is not surfaced in the Uncertain case.
+
 The current MCP profile is [local stdio](#local-mcp); no generic listener, remote MCP or runtime self-update is admitted. A new listener requires a named feature and a separate reviewed protocol. The [stdio server](../../NEXT_STEPS.md#pursue-in-order) and network-capable extensions remain deferred.
 
 Any future HTTP or MCP listener must validate exact `Host` and `Origin`, authenticate and authorize each session, admit exact content types, bound bodies and sessions, reject DNS-rebinding, CSRF and cross-site requests, and encrypt traffic leaving loopback. Loopback routing is not authentication. The sole current listener exception is the one-shot [OAuth callback](./chatgpt.md#authorization-transaction). PTY, update, package-install, approval and other high-authority operations require a narrow authenticated protocol and explicit capability rather than a generic listener.

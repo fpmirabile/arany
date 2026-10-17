@@ -314,6 +314,9 @@ enum BootstrapStage {
     LauncherReap,
     StderrDrain,
     StorageCleanup,
+    ServerReap,
+    ServerOutput,
+    ServerResponse,
 }
 
 impl BootstrapStage {
@@ -330,6 +333,9 @@ impl BootstrapStage {
             Self::LauncherReap => "launcher reap",
             Self::StderrDrain => "stderr drain",
             Self::StorageCleanup => "storage cleanup",
+            Self::ServerReap => "MCP server reap",
+            Self::ServerOutput => "MCP server output",
+            Self::ServerResponse => "MCP server response",
         }
     }
 }
@@ -360,6 +366,9 @@ impl BootstrapFailure {
             BootstrapStage::LauncherReap => "launcher reap",
             BootstrapStage::StderrDrain => "output EOF",
             BootstrapStage::StorageCleanup => "storage cleanup",
+            BootstrapStage::ServerReap => "MCP server reap",
+            BootstrapStage::ServerOutput => "MCP server output EOF",
+            BootstrapStage::ServerResponse => "MCP server response",
         }
     }
 }
@@ -551,12 +560,18 @@ pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<
     }
 }
 
-pub(super) fn teardown_failure(reaped: bool) -> ToolError {
+pub(super) enum ServerStep {
+    Reap,
+    Output,
+    Response,
+}
+
+pub(super) fn server_unconfirmed(step: ServerStep) -> ToolError {
     ToolError::GuardBootstrap(BootstrapFailure {
-        stage: if reaped {
-            BootstrapStage::StderrDrain
-        } else {
-            BootstrapStage::LauncherReap
+        stage: match step {
+            ServerStep::Reap => BootstrapStage::ServerReap,
+            ServerStep::Output => BootstrapStage::ServerOutput,
+            ServerStep::Response => BootstrapStage::ServerResponse,
         },
     })
 }
@@ -1275,10 +1290,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn teardown_failures_name_the_unconfirmed_step() {
-        for (reaped, label) in [(false, "launcher reap"), (true, "output EOF")] {
+    fn server_failures_name_the_unconfirmed_step() {
+        for (step, label) in [
+            (ServerStep::Reap, "MCP server reap"),
+            (ServerStep::Output, "MCP server output EOF"),
+            (ServerStep::Response, "MCP server response"),
+        ] {
             assert!(matches!(
-                teardown_failure(reaped),
+                server_unconfirmed(step),
                 ToolError::GuardBootstrap(found) if found.failure_stage() == label
             ));
         }

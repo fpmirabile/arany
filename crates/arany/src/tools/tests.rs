@@ -1419,6 +1419,9 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         ("launcher_reap", "launcher reap"),
         ("stderr_drain", "output EOF"),
         ("storage_cleanup", "storage cleanup"),
+        ("server_reap", "MCP server reap"),
+        ("server_output", "MCP server output EOF"),
+        ("server_response", "MCP server response"),
     ] {
         let error = super::ToolError::GuardBootstrap(
             serde_json::from_value(serde_json::json!({"stage": stage})).unwrap(),

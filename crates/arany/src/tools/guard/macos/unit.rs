@@ -154,6 +154,7 @@ pub(super) struct Scope {
     pids: Vec<i32>,
     timebase: ffi::Timebase,
     limits: ToolLimits,
+    pub(super) teardown: Option<tokio::time::Instant>,
 }
 
 impl Scope {
@@ -174,6 +175,7 @@ impl Scope {
             pids: vec![0; maximum as usize + 1],
             timebase,
             limits: ToolLimits::default(),
+            teardown: None,
         })
     }
 
@@ -1056,7 +1058,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let mut reader = None;
             let mut storage: Option<Vec<cap_std::fs::Dir>> = None;
             let mut command_before = None;
-            let mut teardown = None;
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
@@ -1126,13 +1127,14 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     &mut output,
                     receive_go,
                     path.parent().ok_or(ToolError::Path)?,
-                    &mut teardown,
                 )
                 .await
             }
             .await;
             let capture = FixtureSpan::begin(FixtureStage::SupervisorCoalition);
-            let teardown = teardown.unwrap_or_else(|| tokio::time::Instant::now() + TEARDOWN_WAIT);
+            let teardown = scope
+                .teardown
+                .unwrap_or_else(|| tokio::time::Instant::now() + TEARDOWN_WAIT);
             let cleanup = scope.stop_until(Some(std::process::id()), teardown).await;
             capture.finish(cleanup.is_ok());
             let result = result.and_then(|mut observation| {
