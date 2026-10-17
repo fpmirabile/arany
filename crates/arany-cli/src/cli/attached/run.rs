@@ -1,13 +1,11 @@
-use crate::accounts::{chatgpt, credentials};
+use crate::cli::provider::routing::RoutingError;
+use crate::cli::provider::select::{Selection, SelectionError, select_provider};
 use arany::{
-    AdmittedProviders, AnthropicProvider, CompactionRecord, CustomProvider, Effort, Engine,
-    NativeApiCredentials, OpenAiProvider, Provider, RunCancellation, RunControls, RunId,
-    RunOutcome, RunProgress, RunRequest, RunResult, RunSteering, SessionId, StateRoot, ToolGrant,
-    native_protection_supported, resolve_native_effort_for_run,
+    AdmittedProviders, CompactionRecord, Engine, RunCancellation, RunControls, RunId, RunOutcome,
+    RunProgress, RunRequest, RunResult, RunSteering, SessionId, ToolGrant,
+    native_protection_supported,
 };
 use std::path::Path;
-use std::sync::Arc;
-use uuid::Uuid;
 
 #[derive(Clone, Copy)]
 pub(super) struct ToolAccess<'a> {
@@ -16,57 +14,38 @@ pub(super) struct ToolAccess<'a> {
     pub approvals: &'a arany::ToolApprovals,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub(super) enum RunAttemptError {
     InterruptedBeforeRun,
     Stopped {
         outcome: Box<arany::RunOutcome>,
         reason: String,
     },
-    Failed(String),
+    Failed(RunFailure),
 }
 
-impl From<String> for RunAttemptError {
-    fn from(error: String) -> Self {
-        Self::Failed(error)
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct Selection<'a> {
-    pub workspace: &'a Path,
-    pub profile: &'a str,
-    pub model: &'a str,
-    pub effort: Option<Effort>,
-    pub account_id: Option<Uuid>,
-}
-
-pub(super) fn validate_local_selection(selection: Selection<'_>) -> Result<(), &'static str> {
-    match selection.profile {
-        "openai" | "anthropic" => {
-            resolve_native_effort_for_run(selection.profile, selection.model, selection.effort)
-                .map_err(
-                    |_| "invalid native model/effort; choose a model and effort with /model",
-                )?;
-        }
-        "chatgpt" => {
-            if selection.account_id.is_none() {
-                return Err("select a ChatGPT account with /setup first");
-            }
-            if selection.effort.is_none() {
-                return Err("ChatGPT requires a model effort; use /model");
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+#[derive(Debug, thiserror::Error)]
+pub(super) enum RunFailure {
+    #[error(transparent)]
+    Selection(SelectionError),
+    #[error(transparent)]
+    Routing(RoutingError),
+    #[error("state directory unavailable or unsafe")]
+    StateUnavailable,
+    #[error("{}", super::permissions::UNAVAILABLE_NOTICE)]
+    ToolsUnavailable,
+    #[error(transparent)]
+    Engine(arany::EngineError),
 }
 
 pub(super) async fn preflight_selected(
     state_dir: &Path,
     selection: Selection<'_>,
 ) -> Result<(), String> {
-    select_provider(state_dir, selection).await.map(|_| ())
+    select_provider(state_dir, selection)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 #[expect(
@@ -85,13 +64,16 @@ pub(super) async fn run_selected(
 ) -> Result<RunOutcome, RunAttemptError> {
     let mut admission_cancellation = cancellation.clone();
     let admit = async {
-        let provider = select_provider(state_dir, selection).await?;
+        let provider = select_provider(state_dir, selection)
+            .await
+            .map_err(RunFailure::Selection)?;
         // Fail closed before route resolution can recreate a removed State directory.
         engine
             .readmit_state()
-            .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+            .map_err(|_| RunFailure::StateUnavailable)?;
         crate::cli::provider::routing::configured_providers(state_dir, &request.workspace, provider)
             .await
+            .map_err(RunFailure::Routing)
     };
     let providers = tokio::select! {
         biased;
@@ -122,12 +104,12 @@ async fn run_with_providers(
     // Each submission fails closed when the held State became unsafe or its path was swapped.
     engine
         .readmit_state()
-        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+        .map_err(|_| RunAttemptError::Failed(RunFailure::StateUnavailable))?;
     let trusted_tools =
         super::permissions::supports_tools(Some(&providers.primary[0].identity().profile));
     let grant = if tools.configured {
         if !native_protection_supported() {
-            return Err(super::permissions::UNAVAILABLE_NOTICE.to_owned().into());
+            return Err(RunAttemptError::Failed(RunFailure::ToolsUnavailable));
         }
         ToolGrant::Configured
     } else {
@@ -156,7 +138,7 @@ async fn run_with_providers(
             if grants_tools {
                 arany::record_development_failure(arany::DevelopmentFailure::ToolAdmission);
             }
-            error.to_string()
+            RunAttemptError::Failed(RunFailure::Engine(error))
         })?;
     match handle.await {
         Ok(RunResult {
@@ -174,7 +156,7 @@ async fn run_with_providers(
 fn classify_run_error(error: arany::EngineError) -> RunAttemptError {
     match error {
         arany::EngineError::CancelledBeforeStart => RunAttemptError::InterruptedBeforeRun,
-        error => RunAttemptError::Failed(error.to_string()),
+        error => RunAttemptError::Failed(RunFailure::Engine(error)),
     }
 }
 
@@ -186,12 +168,16 @@ pub(super) async fn compact_selected(
     workspace: &Path,
     expected_run_id: Option<RunId>,
 ) -> Result<Option<CompactionRecord>, String> {
-    let provider = select_provider(state_dir, selection).await?;
+    let provider = select_provider(state_dir, selection)
+        .await
+        .map_err(|error| error.to_string())?;
     engine
         .readmit_state()
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     let providers =
-        crate::cli::provider::routing::configured_providers(state_dir, workspace, provider).await?;
+        crate::cli::provider::routing::configured_providers(state_dir, workspace, provider)
+            .await
+            .map_err(|error| error.to_string())?;
     match expected_run_id {
         Some(expected_run_id) => {
             engine
@@ -211,98 +197,6 @@ pub(super) async fn compact_selected(
     .map_err(|error| error.to_string())
 }
 
-pub(crate) async fn select_provider(
-    state_dir: &Path,
-    selection: Selection<'_>,
-) -> Result<Arc<dyn Provider>, String> {
-    select_provider_inner(state_dir, selection)
-        .await
-        .inspect_err(|_| {
-            arany::record_development_failure(arany::DevelopmentFailure::ProviderAdmission);
-        })
-}
-
-async fn select_provider_inner(
-    state_dir: &Path,
-    selection: Selection<'_>,
-) -> Result<Arc<dyn Provider>, String> {
-    validate_local_selection(selection)?;
-    match selection.profile {
-        "openai" => {
-            let key = native_key(selection).await?.into_api_key();
-            let provider = match selection.account_id {
-                Some(id) => OpenAiProvider::from_saved_api_key_with_effort(
-                    selection.model.to_owned(),
-                    selection.effort,
-                    key,
-                    id,
-                ),
-                None => OpenAiProvider::from_api_key_with_effort(
-                    selection.model.to_owned(),
-                    selection.effort,
-                    key,
-                ),
-            }
-            .map_err(|_| "selected OpenAI API key unavailable".to_owned())?;
-            Ok(Arc::new(provider))
-        }
-        "anthropic" => {
-            let credentials = native_key(selection).await?;
-            let provider = AnthropicProvider::from_credentials_with_effort(
-                selection.model.to_owned(),
-                selection.effort,
-                credentials,
-                selection.account_id,
-            )
-            .map_err(|_| "selected Anthropic API key unavailable".to_owned())?;
-            Ok(Arc::new(provider))
-        }
-        "chatgpt" => {
-            let account_id = selection
-                .account_id
-                .ok_or("select a ChatGPT account with /setup first")?;
-            let effort = selection
-                .effort
-                .expect("local selection requires explicit ChatGPT effort");
-            let provider = chatgpt::provider_for_run(
-                selection.workspace.to_path_buf(),
-                Some(account_id),
-                selection.model.to_owned(),
-                effort,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-            Ok(Arc::new(provider))
-        }
-        _ => {
-            if selection.account_id.is_some() {
-                return Err("saved account requires a native Provider".into());
-            }
-            let name = selection
-                .profile
-                .strip_prefix("custom:")
-                .ok_or_else(|| "unsupported Provider profile".to_owned())?;
-            let root = StateRoot::open_existing(state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-            let provider = CustomProvider::admit(&root, name, selection.model, selection.effort)
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok(Arc::new(provider))
-        }
-    }
-}
-
-async fn native_key(selection: Selection<'_>) -> Result<NativeApiCredentials, String> {
-    match selection.account_id {
-        Some(id) => credentials::load_selected(id, selection.profile)
-            .await
-            .map_err(|error| error.to_string()),
-        None => NativeApiCredentials::from_env(selection.profile).map_err(|_| {
-            "selected native API credentials or workspace configuration unavailable".to_owned()
-        }),
-    }
-}
-
 // Linux release builds have no tests here: each one is debug-only or macOS-only.
 #[cfg(all(test, unix, any(debug_assertions, target_os = "macos")))]
 mod tests {
@@ -315,10 +209,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     use arany::{
         AgentPhase, ApprovalMode, ChatGptAdmission, ChatGptProvenance, CollaborationPolicy, Finish,
-        OutputTokenBound, Provenance, ProviderError, ProviderIdentity, ProviderOutcome,
+        OutputTokenBound, Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome,
         ProviderRequest, ProviderResponse, RunStatus,
     };
-    use arany::{SessionView, Store};
+    use arany::{Effort, SessionView, StateRoot, Store};
     #[cfg(target_os = "macos")]
     use std::sync::{Arc, Mutex};
     use std::{
@@ -328,6 +222,7 @@ mod tests {
         process::{Child, Command, Stdio},
         time::Duration,
     };
+    use uuid::Uuid;
 
     #[test]
     fn engine_cancellation_before_admission_is_an_interrupted_attempt() {
@@ -1434,16 +1329,22 @@ mod tests {
             .await
             .expect_err("explicit Tool admission must reject before inference");
             #[cfg(debug_assertions)]
-            assert_eq!(
-                error,
-                RunAttemptError::Failed(arany::ToolError::ChangedInput.to_string()),
+            assert!(
+                matches!(
+                    error,
+                    RunAttemptError::Failed(RunFailure::Engine(arany::EngineError::Tool(
+                        arany::ToolError::ChangedInput
+                    )))
+                ),
                 "the admitted private account fixture must reach stale executable-pin rejection"
             );
             #[cfg(not(debug_assertions))]
-            assert_eq!(
-                error,
-                RunAttemptError::Failed(
-                    arany::EngineError::Store(arany::StoreError::InvalidStateDirectory).to_string()
+            assert!(
+                matches!(
+                    error,
+                    RunAttemptError::Failed(RunFailure::Engine(arany::EngineError::Store(
+                        arany::StoreError::InvalidStateDirectory
+                    )))
                 ),
                 "the optimized account override must reject from the Workspace lease before Tool discovery or Provider use"
             );

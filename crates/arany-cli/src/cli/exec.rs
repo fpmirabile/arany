@@ -1,59 +1,14 @@
-use super::{CommandOutput, OutputArg, native_run_key_from_env};
-use crate::accounts::chatgpt;
+use super::provider::select::ProviderArg;
+use super::{CommandOutput, OutputArg};
 use crate::presentation::render_exec;
 use arany::{
-    AdmittedProviders, AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine,
-    EngineConfig, EngineError, GoalBudget, GoalId, GoalPhase, GoalRequest, GoalStatus,
-    OpenAiProvider, Provider, RunCancellation, RunControls, RunRequest, RunResult, RunStatus,
-    SessionId, StateRoot, Store, Telemetry, ToolGrant, native_protection_supported,
-    resolve_native_effort_for_run, validate_native_model_id,
+    AdmittedProviders, CollaborationPolicy, Effort, Engine, EngineConfig, EngineError, GoalBudget,
+    GoalId, GoalPhase, GoalRequest, GoalStatus, Provider, RunCancellation, RunControls, RunRequest,
+    RunResult, RunStatus, SessionId, StateRoot, Store, Telemetry, ToolGrant,
+    native_protection_supported, resolve_native_effort_for_run, validate_native_model_id,
 };
 use clap::{Args, ValueEnum};
 use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ProviderArg {
-    Openai,
-    Anthropic,
-    Chatgpt,
-    Custom(String),
-}
-
-impl ProviderArg {
-    pub(crate) fn profile_label(&self) -> String {
-        match self {
-            Self::Openai => "openai".into(),
-            Self::Anthropic => "anthropic".into(),
-            Self::Chatgpt => "chatgpt".into(),
-            Self::Custom(name) => format!("custom:{name}"),
-        }
-    }
-}
-
-impl FromStr for ProviderArg {
-    type Err = &'static str;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "openai" => Ok(Self::Openai),
-            "anthropic" => Ok(Self::Anthropic),
-            "chatgpt" => Ok(Self::Chatgpt),
-            _ => {
-                let name = value.strip_prefix("custom:").ok_or("invalid Provider")?;
-                if name.is_empty()
-                    || name.len() > 64
-                    || !name.starts_with(|character: char| character.is_ascii_lowercase())
-                    || !name.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
-                    })
-                {
-                    return Err("invalid custom Provider name");
-                }
-                Ok(Self::Custom(name.to_owned()))
-            }
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum CollaborationArg {
@@ -192,42 +147,15 @@ impl ExecArgs {
 
 pub(crate) async fn run(args: ExecArgs, telemetry: Telemetry) -> Result<CommandOutput, String> {
     let admission = args.admit().map_err(str::to_owned)?;
-    let provider: Arc<dyn Provider> = match &args.provider {
-        ProviderArg::Openai => Arc::new(
-            native_run_key_from_env("openai", &args.model, args.effort)
-                .and_then(|key| {
-                    OpenAiProvider::from_api_key_with_effort(args.model.clone(), args.effort, key)
-                })
-                .map_err(|_| "OPENAI_API_KEY unavailable".to_owned())?,
-        ),
-        ProviderArg::Anthropic => Arc::new(
-            AnthropicProvider::from_env_with_effort(args.model.clone(), args.effort).map_err(
-                |error| match error {
-                    arany::ProviderError::Rejected => "invalid ANTHROPIC_WORKSPACE_ID".to_owned(),
-                    _ => "ANTHROPIC_API_KEY unavailable".to_owned(),
-                },
-            )?,
-        ),
-        ProviderArg::Chatgpt => Arc::new(
-            chatgpt::provider_for_run(
-                admission.workspace.clone(),
-                None,
-                args.model.clone(),
-                args.effort.expect("validated ChatGPT effort"),
-            )
-            .await
-            .map_err(|error| error.to_string())?,
-        ),
-        ProviderArg::Custom(name) => {
-            let root = StateRoot::open_existing(&admission.state_dir)
-                .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-            Arc::new(
-                CustomProvider::admit(&root, name, &args.model, args.effort)
-                    .await
-                    .map_err(|error| error.to_string())?,
-            )
-        }
-    };
+    let provider = super::provider::select::select_env_provider(
+        &args.provider,
+        &args.model,
+        args.effort,
+        admission.workspace.clone(),
+        &admission.state_dir,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     run_with_provider(args, admission, provider, telemetry).await
 }
 
@@ -250,7 +178,8 @@ async fn run_with_provider(
         &admission.workspace,
         provider,
     )
-    .await?;
+    .await
+    .map_err(|error| error.to_string())?;
     let engine = Engine::open(
         state,
         EngineConfig {

@@ -3,7 +3,7 @@ use super::{
     update_defaults,
 };
 use crate::accounts::chatgpt;
-use crate::cli::exec::ProviderArg;
+use crate::cli::provider::select::ProviderArg;
 use crate::terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
     InteractiveCommand, Submission, TerminalInput, TerminalMode,

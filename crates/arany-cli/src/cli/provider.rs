@@ -1,4 +1,5 @@
 pub(crate) mod routing;
+pub(crate) mod select;
 
 use super::{CommandOutput, state_dir};
 use crate::accounts::{chatgpt, credentials};

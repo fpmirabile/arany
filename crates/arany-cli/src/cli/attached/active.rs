@@ -2,6 +2,7 @@ use super::{
     Admission, Feedback, controls::ActiveSubmission, emit_outcome, load_confirmed_outcome, run,
 };
 use crate::accounts::chatgpt;
+use crate::cli::provider::select::{Selection, validate_local_selection};
 use crate::terminal::{
     AttachedTerminal, Composer, ComposerEdit, ShutdownSignal, TerminalError, TerminalInput,
     TerminalNotice,
@@ -243,7 +244,7 @@ pub(super) fn preflight_idle_run(
     if has_images && profile.starts_with("custom:") {
         return Err("Error: Image input is not admitted for custom Providers; clear these attachments first".into());
     }
-    run::validate_local_selection(run::Selection {
+    validate_local_selection(Selection {
         workspace: &admission.workspace,
         profile,
         model,
@@ -327,7 +328,7 @@ pub(super) async fn submit_objective(
     let future = run::run_selected(
         engine,
         &admission.state_dir,
-        run::Selection {
+        Selection {
             workspace: &admission.workspace,
             profile: &profile,
             model: &model,
@@ -400,7 +401,7 @@ pub(super) async fn submit_objective(
                         Ok(RunSubmission::Completed(outcome, user_recorded, Some(reason)))
                     }
                     Err(run::RunAttemptError::InterruptedBeforeRun) => Ok(RunSubmission::InterruptedBeforeRun),
-                    Err(run::RunAttemptError::Failed(error)) => Err(error),
+                    Err(run::RunAttemptError::Failed(error)) => Err(error.to_string()),
                 };
             },
             preview = previews.changed() => {
@@ -860,7 +861,7 @@ pub(super) async fn compact_current(
             view.defaults.account_id,
         )
     };
-    let selection = run::Selection {
+    let selection = Selection {
         workspace: &admission.workspace,
         profile,
         model,
