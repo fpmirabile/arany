@@ -811,6 +811,28 @@ impl Engine {
             .map_err(|_| EngineError::Busy)
     }
 
+    pub async fn create_session(
+        &self,
+        workspace: PathBuf,
+        title: Option<String>,
+    ) -> Result<SessionId, EngineError> {
+        lifecycle::validate_session_title(title.as_deref())?;
+        let session_id = SessionId::new();
+        let mut session_lock = self.lock_session(session_id)?;
+        let workspace_identity = WorkspaceInputs::admit_identity(&workspace, &self.state)?;
+        self.journal
+            .append(
+                session_id,
+                Event::SessionStarted {
+                    title: title.unwrap_or_else(|| "New Session".into()),
+                    workspace_identity,
+                },
+            )
+            .await?;
+        session_lock.keep();
+        Ok(session_id)
+    }
+
     pub async fn fork_session(
         &self,
         source_session_id: SessionId,

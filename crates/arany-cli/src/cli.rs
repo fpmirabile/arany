@@ -8,6 +8,7 @@ pub(crate) mod attached;
 pub(crate) mod exec;
 pub(crate) mod generate_schema;
 pub(crate) mod provider;
+pub(crate) mod serve;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum OutputArg {
