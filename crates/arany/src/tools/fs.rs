@@ -1014,8 +1014,7 @@ fn escaped_len(character: char) -> usize {
     }
 }
 
-/// Drops trailing rows until the listing fits `result_bytes`, marking it possibly truncated; a
-/// listing with matches that keeps no row is a Limit, not an empty success.
+// Keeps a Limit, not an empty success, when matches exist but none fits.
 fn fit_rows(
     mut rows: Vec<Value>,
     mut truncated: bool,

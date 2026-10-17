@@ -995,7 +995,6 @@ fn compaction_switches(view: &SessionView) -> Vec<&arany::ProviderFallback> {
     })
 }
 
-/// Appends the Provider switches this compaction committed; earlier switches are already shown.
 async fn with_compaction_switches(
     state_dir: &std::path::Path,
     before: &SessionView,

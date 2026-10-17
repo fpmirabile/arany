@@ -490,7 +490,6 @@ impl Segment {
         segment
     }
 
-    /// A Run whose opening Events are committed but whose `RunStarted` is absent, as after a Resync.
     fn opened(telemetry: &Telemetry, context: (SystemTime, SystemTime)) -> Self {
         let session_id = SessionId::new();
         let goal_id = GoalId::new();
