@@ -995,6 +995,11 @@ fn compaction_switches(view: &SessionView) -> Vec<&arany::ProviderFallback> {
     })
 }
 
+/// `None` marks a view from another Run, so no earlier switch was shown for it.
+fn unshown<T>(switches: Vec<T>, shown: Option<usize>) -> Vec<T> {
+    switches.into_iter().skip(shown.unwrap_or(0)).collect()
+}
+
 async fn with_compaction_switches(
     state_dir: &std::path::Path,
     before: &SessionView,
@@ -1002,7 +1007,12 @@ async fn with_compaction_switches(
 ) -> String {
     let shown = compaction_switches(before).len();
     match super::load_view(state_dir, before.id).await {
-        Ok(after) => append_switch_notices(notice, &compaction_switches(&after)[shown..]),
+        Ok(after) => {
+            let same_run =
+                before.runs.last().map(|run| run.id) == after.runs.last().map(|run| run.id);
+            let shown = same_run.then_some(shown);
+            append_switch_notices(notice, &unshown(compaction_switches(&after), shown))
+        }
         Err(error) => {
             format!("{notice}\nError: compaction Provider switches could not be reloaded: {error}")
         }
@@ -1053,6 +1063,13 @@ fn upsert_goal(goals: &mut Vec<arany::GoalView>, goal: arany::GoalView) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn switches_shown_before_a_stale_view_do_not_skip_or_panic() {
+        assert_eq!(unshown(vec![1, 2, 3], Some(1)), vec![2, 3]);
+        assert_eq!(unshown(vec![1], Some(2)), Vec::<i32>::new());
+        assert_eq!(unshown(vec![1, 2], None), vec![1, 2]);
+    }
+
     use super::*;
 
     #[test]
