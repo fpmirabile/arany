@@ -171,26 +171,31 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             if !active && !(compaction && run.status.is_terminal()) {
                 return Err(ReplayError::InvalidTransition);
             }
+            // A forked Session inherits Runs but not their Goal; only a Compaction may switch there.
             let goal = current
                 .goals
                 .iter()
-                .find(|goal| goal.run_ids.contains(run_id))
-                .ok_or(ReplayError::InvalidTransition)?;
-            let charge_goal = goal.status == GoalStatus::Running;
-            let goal_id = goal.id;
-            let reserved = if compaction {
-                goal.compaction_call_reserved == Some(*run_id)
-            } else {
-                goal.unobserved_provider_calls.contains(agent_run_id)
+                .find(|goal| goal.run_ids.contains(run_id));
+            if goal.is_none() && !compaction {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let charge_goal = goal.is_some_and(|goal| goal.status == GoalStatus::Running);
+            let goal_id = goal.map(|goal| goal.id);
+            let reserved = match goal {
+                None => true,
+                Some(goal) if compaction => goal.compaction_call_reserved == Some(*run_id),
+                Some(goal) => goal.unobserved_provider_calls.contains(agent_run_id),
             };
             if (active || charge_goal)
                 && (!reserved
                     || !charge_goal
-                    || goal.effective_budget().max_tokens.is_some()
-                    || goal
-                        .effective_budget()
-                        .max_provider_calls
-                        .is_some_and(|limit| goal.provider_calls >= limit))
+                    || goal.is_none_or(|goal| {
+                        goal.effective_budget().max_tokens.is_some()
+                            || goal
+                                .effective_budget()
+                                .max_provider_calls
+                                .is_some_and(|limit| goal.provider_calls >= limit)
+                    }))
             {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -264,7 +269,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 .ok_or(ReplayError::InvalidTransition)?
                 .provider_fallbacks
                 .push((*agent_run_id, fallback.clone()));
-            if charge_goal {
+            if let (true, Some(goal_id)) = (charge_goal, goal_id) {
                 let goal = current_goal_mut(current, goal_id)?;
                 goal.provider_calls = goal
                     .provider_calls

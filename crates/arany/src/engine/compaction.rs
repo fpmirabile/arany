@@ -204,7 +204,7 @@ impl Engine {
     async fn compaction_ledger(
         &self,
         session_id: SessionId,
-        goal_id: crate::session::GoalId,
+        goal_id: Option<crate::session::GoalId>,
     ) -> Result<super::ledger::GoalLedger, EngineError> {
         let view = self
             .journal
@@ -292,14 +292,13 @@ fn compaction_route_ids(
     actor: Option<crate::session::AgentRunId>,
     open_view: &crate::session::SessionView,
     covered_run_id: crate::session::RunId,
-) -> Result<(crate::session::AgentRunId, crate::session::GoalId), EngineError> {
+) -> Result<(crate::session::AgentRunId, Option<crate::session::GoalId>), EngineError> {
     let actor = actor.ok_or(EngineError::InvalidRequest)?;
     let goal_id = open_view
         .goals
         .iter()
         .find(|goal| goal.run_ids.contains(&covered_run_id))
-        .map(|goal| goal.id)
-        .ok_or(EngineError::InvalidHistory)?;
+        .map(|goal| goal.id);
     Ok((actor, goal_id))
 }
 

@@ -198,10 +198,12 @@ impl CallRouter<'_> {
             let goal = view
                 .goals
                 .iter()
-                .find(|goal| goal.run_ids.contains(&run_id))?;
+                .find(|goal| goal.run_ids.contains(&run_id));
             if run.provider_fallbacks.len() >= MAX_PROVIDER_SWITCHES
-                || goal.status == crate::session::GoalStatus::Running
-                    && goal.effective_budget().max_tokens.is_some()
+                || goal.is_some_and(|goal| {
+                    goal.status == crate::session::GoalStatus::Running
+                        && goal.effective_budget().max_tokens.is_some()
+                })
             {
                 return None;
             }

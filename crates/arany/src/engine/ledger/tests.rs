@@ -53,7 +53,7 @@ fn ledger(budget: GoalBudget) -> GoalLedger {
         compactions: Vec::new(),
         goals: vec![goal_view(goal_id, budget)],
     };
-    GoalLedger::new(view, goal_id)
+    GoalLedger::new(view, Some(goal_id))
 }
 
 fn edit(ledger: &GoalLedger, change: impl FnOnce(&mut GoalView, &mut InFlight)) {

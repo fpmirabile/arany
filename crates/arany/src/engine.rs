@@ -1574,7 +1574,7 @@ impl Engine {
             .load_open_view(session_id)
             .await?
             .ok_or(EngineError::InvalidHistory)?;
-        Ok(GoalLedger::new(view, goal_id))
+        Ok(GoalLedger::new(view, Some(goal_id)))
     }
 
     async fn start_session(

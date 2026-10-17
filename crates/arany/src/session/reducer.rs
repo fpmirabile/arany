@@ -315,6 +315,13 @@ impl RunView {
     }
 }
 
+/// The Runs and compactions a fork inherits, projected from its source through the fork boundary.
+#[derive(Clone, Debug)]
+pub(crate) struct ForkInheritance {
+    pub(crate) runs: Vec<RunView>,
+    pub(crate) compactions: Vec<CompactionView>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactionView {
     pub event_sequence: u64,
@@ -428,20 +435,31 @@ impl SessionView {
     }
 
     pub fn replay(id: SessionId, events: &[EventEnvelope]) -> Result<Option<Self>, ReplayError> {
-        Self::replay_prefix(id, events, true)
+        Self::replay_prefix(id, events, true, None)
     }
 
     pub(crate) fn replay_open(
         id: SessionId,
         events: &[EventEnvelope],
     ) -> Result<Option<Self>, ReplayError> {
-        Self::replay_prefix(id, events, false)
+        Self::replay_prefix(id, events, false, None)
+    }
+
+    /// Replays a fork's own Events on top of the Runs and compactions it inherits from its source.
+    pub(crate) fn replay_forked(
+        id: SessionId,
+        events: &[EventEnvelope],
+        close_history: bool,
+        inherited: &ForkInheritance,
+    ) -> Result<Option<Self>, ReplayError> {
+        Self::replay_prefix(id, events, close_history, Some(inherited))
     }
 
     fn replay_prefix(
         id: SessionId,
         events: &[EventEnvelope],
         close_history: bool,
+        inherited: Option<&ForkInheritance>,
     ) -> Result<Option<Self>, ReplayError> {
         let mut view: Option<Self> = None;
         let mut prior = 0;
@@ -499,8 +517,9 @@ impl SessionView {
                             source_sequence: *source_sequence,
                             prefix_digest: *prefix_digest,
                         }),
-                        runs: Vec::new(),
-                        compactions: Vec::new(),
+                        runs: inherited.map_or_else(Vec::new, |inherited| inherited.runs.clone()),
+                        compactions: inherited
+                            .map_or_else(Vec::new, |inherited| inherited.compactions.clone()),
                         goals: Vec::new(),
                     });
                     continue;

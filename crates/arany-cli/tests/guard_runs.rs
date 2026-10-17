@@ -2498,4 +2498,69 @@ mod routing {
             "done"
         );
     }
+
+    #[tokio::test]
+    async fn compaction_fallback_in_a_fork_runs_without_the_inherited_goal() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
+        let state = temp.path().join("state");
+        let primary =
+            route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
+        let first = route(
+            ScriptedProvider::new(vec![])
+                .with_profile("scripted", "compaction")
+                .with_compactions(vec![Err(ProviderError::RemoteHttp(503))]),
+        );
+        let second = route(
+            ScriptedProvider::new(vec![])
+                .with_profile("scripted", "compaction-fallback")
+                .with_compactions(vec![Ok(CompactionResponse {
+                    summary: "Fork summary".into(),
+                    response_id: None,
+                    usage: arany::Usage {
+                        input_tokens: Some(20),
+                        output_tokens: Some(8),
+                        ..Default::default()
+                    },
+                    wire_provenance: None,
+                })]),
+        );
+        let engine = Engine::open(
+            StateRoot::admit(&state).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..EngineConfig::default()
+            },
+        )
+        .unwrap();
+        let config = state.join("tools.json");
+        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut bindings = routes(&primary);
+        bindings.compaction = vec![first.clone(), second.clone()];
+        let outcome = run_routed(&engine, bindings.clone(), input(&workspace), configured())
+            .await
+            .unwrap();
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        let fork = engine
+            .fork_session(outcome.session_id, workspace.clone(), None)
+            .await
+            .unwrap();
+        let record = engine
+            .compact_session(&bindings, fork, workspace.clone())
+            .await
+            .unwrap();
+        assert!(matches!(record.status, CompactionStatus::Succeeded { .. }));
+        engine.close().await.unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let view = store.load_view(fork).await.unwrap().unwrap();
+        store.close().await.unwrap();
+        assert_eq!(view.runs.last().unwrap().provider_fallbacks.len(), 1);
+        assert_eq!(
+            view.runs.last().unwrap().provider_fallbacks[0].1.role,
+            ProviderRole::Compaction
+        );
+        assert_eq!(second.compact_requests.lock().unwrap().len(), 1);
+    }
 }
