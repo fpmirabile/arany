@@ -777,6 +777,7 @@ impl RunLoop<'_> {
                 biased;
                 () = run_cancellation.cancelled() => {
                     worker_cancellation.cancel();
+                    refuse_pending_windows(&mut active_receiver);
                     break execution.await;
                 }
                 request = active_receiver.recv(), if active_segment.is_none() => {
@@ -1046,6 +1047,12 @@ fn active_window(
         .ok_or(ToolError::Limit)
 }
 
+// Dropping a buffered request drops its reply, which the Guard reads as an unstarted action.
+fn refuse_pending_windows(receiver: &mut tokio::sync::mpsc::Receiver<ActiveActionRequest>) {
+    receiver.close();
+    while receiver.try_recv().is_ok() {}
+}
+
 async fn execute_cancellable(
     runtime: &ToolRuntime,
     intent: EffectIntent,
@@ -1094,4 +1101,37 @@ fn active_time_limit_observation(intent: EffectIntent) -> ToolObservation {
         ToolDisposition::Limit,
         "Goal active-time budget exhausted; no operation was dispatched",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_refuses_a_buffered_active_window_request() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let (reply, receipt) = tokio::sync::oneshot::channel();
+        sender
+            .send(ActiveActionRequest {
+                admitted_at: Instant::now(),
+                reply,
+            })
+            .await
+            .expect("buffer the request");
+        refuse_pending_windows(&mut receiver);
+        let settled = tokio::time::timeout(Duration::from_secs(5), receipt)
+            .await
+            .expect("the Guard must not wait for a reply nobody sends");
+        assert!(settled.is_err());
+        let (late, _) = tokio::sync::oneshot::channel();
+        assert!(
+            sender
+                .send(ActiveActionRequest {
+                    admitted_at: Instant::now(),
+                    reply: late,
+                })
+                .await
+                .is_err()
+        );
+    }
 }
