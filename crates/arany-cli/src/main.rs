@@ -30,6 +30,10 @@ struct Cli {
 enum Command {
     Exec(ExecArgs),
     Provider(ProviderArgs),
+    GenerateSchema {
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     Show {
         #[arg(long)]
         state_dir: Option<PathBuf>,
@@ -152,6 +156,7 @@ async fn run(command: Command, telemetry: Telemetry) -> Result<CommandOutput, St
     match command {
         Command::Exec(args) => cli::exec::run(args, telemetry).await,
         Command::Provider(args) => cli::provider::run(args).await,
+        Command::GenerateSchema { out } => cli::generate_schema::run(out.as_deref()),
         Command::Show {
             state_dir,
             output,

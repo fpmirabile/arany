@@ -174,6 +174,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         finished_sequence: None,
         known_cached_tokens: 0,
         active_ceiling_ms: 0,
+        continues: None,
+        budget_closed: false,
     };
     let view = crate::session::SessionView {
         id: session_id,

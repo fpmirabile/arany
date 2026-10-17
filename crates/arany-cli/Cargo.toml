@@ -25,6 +25,7 @@ keyring.workspace = true
 ratatui.workspace = true
 rusqlite.workspace = true
 reqwest.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -45,6 +46,7 @@ security-framework.workspace = true
 
 [dev-dependencies]
 arany = { path = "../arany", features = ["test-support"] }
+jsonschema.workspace = true
 opentelemetry-proto.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
 prost.workspace = true

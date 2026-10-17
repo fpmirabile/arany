@@ -75,6 +75,10 @@ pub struct GoalView {
     pub report: Option<GoalReport>,
     pub started_sequence: u64,
     pub finished_sequence: Option<u64>,
+    /// The exhausted Goal this one continues.
+    pub continues: Option<GoalId>,
+    /// Failed because the budget ran out (`GoalFinished.exhausted`).
+    pub budget_closed: bool,
 }
 
 impl GoalView {
@@ -84,6 +88,16 @@ impl GoalView {
 
     pub(crate) fn admits_next_run(&self) -> bool {
         self.effective_budget().admits_next_run(GoalUsage {
+            runs: self.run_ids.len(),
+            provider_calls: self.provider_calls,
+            active_ms: self.active_ms,
+            known_tokens: self.known_tokens,
+            token_usage_unknown: self.token_usage_unknown,
+        })
+    }
+
+    pub(crate) fn budget_spent(&self) -> bool {
+        self.effective_budget().spent(GoalUsage {
             runs: self.run_ids.len(),
             provider_calls: self.provider_calls,
             active_ms: self.active_ms,
@@ -665,6 +679,35 @@ impl SessionView {
             .map(|index| &self.goals[index])
             .filter(|goal| goal.status == GoalStatus::Interrupted)
             .map(|goal| goal.id)
+    }
+
+    /// The most recent Goal closed by budget exhaustion that no later Goal continues yet,
+    /// unless its last Run left a Tool without a known outcome.
+    pub fn continuable_goal(&self) -> Option<&GoalView> {
+        let latest = self.goals.iter().rev().find(|goal| {
+            goal.budget_closed
+                && !self
+                    .goals
+                    .iter()
+                    .any(|other| other.continues == Some(goal.id))
+        })?;
+        latest
+            .run_ids
+            .iter()
+            .rev()
+            .find_map(|run_id| self.runs.iter().find(|run| run.id == *run_id))
+            .is_some_and(|run| {
+                run.tools
+                    .iter()
+                    .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
+                    .all(|tool| {
+                        tool.observation.as_ref().is_some_and(|observation| {
+                            observation.disposition != crate::tools::ToolDisposition::Uncertain
+                                && observation.cache_update != crate::tools::CacheUpdate::Uncertain
+                        })
+                    })
+            })
+            .then_some(latest)
     }
 
     pub fn goal(&self, id: GoalId) -> Option<&GoalView> {

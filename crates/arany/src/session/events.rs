@@ -16,7 +16,7 @@ pub use goal::{
     MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES,
     MAX_GOAL_RUNS,
 };
-pub(crate) use goal::{GoalSuccessState, GoalUsage};
+pub(crate) use goal::{GoalSuccessState, GoalUsage, STORE_ACTION_OVERHEAD_MS};
 pub use records::{
     AgentDisposition, AgentRole, ChildGrant, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
@@ -135,7 +135,6 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "SessionDefaultChanged"
         | "SessionForked"
         | "SessionRenamed"
-        | "GoalStarted"
         | "GoalRunLinked"
         | "GoalResumed"
         | "GoalPlanContractRecorded"
@@ -145,9 +144,9 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "GoalContextCompacted"
         | "GoalSteeringNoteRecorded"
         | "AssistantDisplayRecorded"
-        | "GoalFinished"
         | "AgentFinished"
         | "MessageCommitted" => Some(6),
+        "GoalStarted" | "GoalFinished" => Some(7),
         "ProviderFallbackUsed" => Some(1),
         "ToolPermissionDecided" => Some(2),
         "ToolFinished" => Some(9),
@@ -223,6 +222,8 @@ pub enum Event {
         /// Engine iterates Runs on the pinned objective until a Goal stop condition.
         autonomous: bool,
         resource_settings: crate::tools::ToolResourceSettings,
+        /// The exhausted Goal this one continues with a fresh budget; it stays closed.
+        continues: Option<GoalId>,
     },
     GoalRunLinked {
         goal_id: GoalId,
@@ -242,6 +243,8 @@ pub enum Event {
         status: GoalStatus,
         active_ms: u64,
         report: GoalReport,
+        /// A Failed Goal closed because its budget ran out, not because a Run failed for another reason.
+        exhausted: bool,
     },
     MessageAccepted {
         run_id: RunId,
@@ -408,6 +411,8 @@ struct GoalStartedPayload {
     phase: GoalPhase,
     autonomous: bool,
     resource_settings: crate::tools::ToolResourceSettings,
+    #[serde(deserialize_with = "Option::deserialize")]
+    continues: Option<GoalId>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -433,6 +438,7 @@ struct GoalFinishedPayload {
     status: GoalStatus,
     active_ms: u64,
     report: GoalReport,
+    exhausted: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -659,6 +665,7 @@ impl Event {
                 phase,
                 autonomous,
                 resource_settings,
+                continues,
             } => serialize(&GoalStartedPayload {
                 goal_id: *goal_id,
                 objective: objective.clone(),
@@ -668,6 +675,7 @@ impl Event {
                 phase: *phase,
                 autonomous: *autonomous,
                 resource_settings: *resource_settings,
+                continues: *continues,
             }),
             Self::GoalRunLinked { goal_id, phase, .. } => serialize(&GoalRunPayload {
                 goal_id: *goal_id,
@@ -685,10 +693,12 @@ impl Event {
                 status,
                 active_ms,
                 report,
+                exhausted,
             } => serialize(&GoalFinishedPayload {
                 goal_id: *goal_id,
                 status: *status,
                 active_ms: *active_ms,
+                exhausted: *exhausted,
                 report: report.clone(),
             }),
             Self::MessageAccepted { text, images, .. } => serialize(&MessagePayload {
@@ -840,6 +850,7 @@ impl Event {
                     phase: data.phase,
                     autonomous: data.autonomous,
                     resource_settings: data.resource_settings,
+                    continues: data.continues,
                 }
             }
             "GoalRunLinked" if run_id.is_some() && agent_run_id.is_none() => {
@@ -868,6 +879,7 @@ impl Event {
                     status: data.status,
                     active_ms: data.active_ms,
                     report: data.report,
+                    exhausted: data.exhausted,
                 }
             }
             "MessageAccepted" if run_id.is_some() && agent_run_id.is_none() => {

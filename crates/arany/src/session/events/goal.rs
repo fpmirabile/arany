@@ -10,6 +10,7 @@ pub const MAX_GOAL_PLAN_MCP_TOOLS: usize = 64;
 pub const MAX_GOAL_PLAN_SKILLS: usize = 64;
 pub const MAX_GOAL_PLAN_CONTRACT_BYTES: usize = 8 * 1024;
 pub const MAX_GOAL_REPORT_BYTES: usize = 8 * 1024;
+pub(crate) const STORE_ACTION_OVERHEAD_MS: u64 = 5_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,6 +82,14 @@ impl GoalBudget {
             && self
                 .max_tokens
                 .is_none_or(|limit| !usage.token_usage_unknown && usage.known_tokens < limit)
+    }
+
+    /// No next Run is admissible, or the remaining active time cannot cover one Store action.
+    pub(crate) fn spent(&self, usage: GoalUsage) -> bool {
+        !self.admits_next_run(usage)
+            || self.max_active_ms.is_some_and(|limit| {
+                limit.saturating_sub(usage.active_ms) <= STORE_ACTION_OVERHEAD_MS
+            })
     }
 
     pub(crate) fn is_within(&self, pinned: &Self) -> bool {

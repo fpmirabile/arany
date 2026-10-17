@@ -57,6 +57,20 @@ fn linear_approval_reply(answer: &str, unguarded: bool) -> Option<arany::Approva
     }
 }
 
+// A continuation submits no text, so its @-mentions come from the source Goal's objective.
+pub(super) fn mention_source<'a>(
+    view: &'a SessionView,
+    start: GoalStart,
+    text: &'a str,
+) -> &'a str {
+    if start == GoalStart::Continue {
+        view.continuable_goal()
+            .map_or(text, |source| source.objective.as_str())
+    } else {
+        text
+    }
+}
+
 pub(super) fn objective_includes(
     admission: &Admission,
     objective: &str,
@@ -86,6 +100,7 @@ pub(super) enum GoalStart {
     Plain,
     Autonomous,
     Resume,
+    Continue,
 }
 
 pub(super) fn goal_request(
@@ -103,6 +118,18 @@ pub(super) fn goal_request(
             "Goal {} is still active and cannot accept another Run",
             goal.id
         ));
+    }
+    if start == GoalStart::Continue {
+        return view
+            .continuable_goal()
+            .map(|source| {
+                arany::GoalRequest::continue_from(
+                    source.id,
+                    arany::GoalBudget::default(),
+                    arany::ToolResourceSettings::default(),
+                )
+            })
+            .ok_or_else(|| "No exhausted Goal is available to continue".into());
     }
     Ok(match start {
         GoalStart::Autonomous => arany::GoalRequest::autonomous(
@@ -267,8 +294,11 @@ pub(super) fn preflight_idle_run(
         );
     };
     goal_request(view, start).map_err(|error| format!("Error: {error}"))?;
-    if start == GoalStart::Resume && has_images {
-        return Err("Error: /goal resume takes no image attachments; clear them first".into());
+    if matches!(start, GoalStart::Resume | GoalStart::Continue) && has_images {
+        return Err(
+            "Error: /goal resume and /goal continue take no image attachments; clear them first"
+                .into(),
+        );
     }
     if has_images && profile.starts_with("custom:") {
         return Err("Error: Image input is not admitted for custom Providers; clear these attachments first".into());
@@ -281,7 +311,7 @@ pub(super) fn preflight_idle_run(
         account_id: view.defaults.account_id,
     })
     .map_err(|error| format!("Error: {error}"))?;
-    validate_objective_inputs(admission, draft).map_err(|error| {
+    validate_objective_inputs(admission, mention_source(view, start, draft)).map_err(|error| {
         format!(
             "Error: {error}; {}",
             if linear {
@@ -318,6 +348,9 @@ pub(super) async fn submit_objective(
             .interrupted_goal_id()
             .and_then(|id| view.goal(id))
             .is_some_and(|resumed| resumed.autonomous),
+        GoalStart::Continue => view
+            .continuable_goal()
+            .is_some_and(|source| source.autonomous),
         GoalStart::Plain | GoalStart::Autonomous => goal == GoalStart::Autonomous,
     };
     let cancellation = RunCancellation::new();
@@ -334,7 +367,7 @@ pub(super) async fn submit_objective(
     let mut approval_page = 0usize;
     let mut approval_choice = 0usize;
     let mut approval_answer = Composer::default();
-    let include_paths = objective_includes(admission, &objective)?;
+    let include_paths = objective_includes(admission, mention_source(view, goal, &objective))?;
     let execution_settings = super::controls::restore_settings(admission).await?;
     let mut goal = goal_request(view, goal)?;
     if goal.id.is_none() {
@@ -1131,6 +1164,7 @@ mod tests {
                 phase: arany::GoalPhase::Implementation,
                 autonomous: false,
                 resource_settings: arany::ToolResourceSettings::default(),
+                continues: None,
             },
         ]
         .into_iter()
@@ -1262,6 +1296,7 @@ mod goal_request_tests {
             phase: arany::GoalPhase::Implementation,
             autonomous,
             resource_settings: arany::ToolResourceSettings::default(),
+            continues: None,
         };
         let started = arany::Event::SessionStarted {
             title: "Goals".into(),
@@ -1302,6 +1337,53 @@ mod goal_request_tests {
             goal_request(&view, GoalStart::Resume),
             Err("No interrupted Goal is available to resume".into())
         );
+    }
+
+    #[test]
+    fn continuation_takes_its_file_mentions_from_the_source_objective() {
+        let mut view = session_with_goal(true);
+        view.goals[0].objective = "Fix @src/lib.rs".into();
+        view.goals[0].status = arany::GoalStatus::Failed;
+        view.goals[0].budget_closed = true;
+        let run = arany::RunView {
+            id: arany::RunId::new(),
+            objective: "Fix".into(),
+            images: Vec::new(),
+            config: None,
+            provider_fallbacks: Vec::new(),
+            agents: Vec::new(),
+            assistant_message: None,
+            status: arany::RunStatus::Finished,
+            accepted_sequence: 3,
+            finished_sequence: Some(4),
+            tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
+            display: Vec::new(),
+            steering_notes: Vec::new(),
+        };
+        view.goals[0].run_ids.push(run.id);
+        view.runs.push(run);
+        assert_eq!(
+            mention_source(&view, GoalStart::Continue, ""),
+            "Fix @src/lib.rs"
+        );
+        assert_eq!(mention_source(&view, GoalStart::Plain, ""), "");
+        assert_eq!(
+            arany::mention_paths(mention_source(&view, GoalStart::Continue, "")).unwrap(),
+            vec![std::path::PathBuf::from("src/lib.rs")]
+        );
+    }
+
+    #[test]
+    fn goal_continue_refuses_goals_that_were_not_closed_by_exhaustion() {
+        let mut view = session_with_goal(true);
+        let refusal = Err("No exhausted Goal is available to continue".to_owned());
+        view.goals[0].status = arany::GoalStatus::Interrupted;
+        assert_eq!(goal_request(&view, GoalStart::Continue), refusal);
+        view.goals[0].status = arany::GoalStatus::Failed;
+        view.goals[0].budget.max_runs = 0;
+        assert_eq!(goal_request(&view, GoalStart::Continue), refusal);
     }
 
     #[test]

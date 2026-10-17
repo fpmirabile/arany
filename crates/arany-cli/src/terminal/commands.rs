@@ -117,8 +117,8 @@ const COMMANDS: [CommandSpec; 19] = [
     spec(
         "goal",
         InteractiveCommand::Goal,
-        Some("[pause|resume|objective]"),
-        &["pause", "resume"],
+        Some("[pause|resume|continue|objective]"),
+        &["pause", "resume", "continue"],
     ),
     spec("fork", InteractiveCommand::Fork, Some("[session-id]"), &[]),
     spec("rename", InteractiveCommand::Rename, Some("<title>"), &[]),
@@ -175,7 +175,9 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Status => "Session status",
         InteractiveCommand::New => "New Session",
         InteractiveCommand::Resume => "Resume Session",
-        InteractiveCommand::Goal => "Goal status; pause during a Run; resume or start when idle",
+        InteractiveCommand::Goal => {
+            "Goal status; pause during a Run; resume, continue or start when idle"
+        }
         InteractiveCommand::Fork => "Fork Session",
         InteractiveCommand::Rename => "Rename Session",
         InteractiveCommand::Compact => "Compact context",
@@ -346,13 +348,19 @@ pub fn parse_submission(line: &str) -> Result<Submission<'_>, CommandParseError>
         if spec.argument.is_none() && argument.is_some() {
             return Err(CommandParseError::UnexpectedArgument { command: spec.name });
         }
-        // `/goal Resume` and `/goal PAUSE` are the same explicit words; only they are normalized.
+        // `/goal Resume`, `/goal CONTINUE` and `/goal PAUSE` are the same explicit words; only they are normalized.
         let argument = match argument {
             Some(word)
                 if spec.command == InteractiveCommand::Goal
                     && word.eq_ignore_ascii_case("resume") =>
             {
                 Some("resume")
+            }
+            Some(word)
+                if spec.command == InteractiveCommand::Goal
+                    && word.eq_ignore_ascii_case("continue") =>
+            {
+                Some("continue")
             }
             Some(word)
                 if spec.command == InteractiveCommand::Goal
@@ -800,6 +808,24 @@ mod tests {
             })
         );
         assert_eq!(
+            parse_submission("/goal  Continue "),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("continue"),
+            })
+        );
+        assert_eq!(
+            completion_suffix("/goal c", &CommandChoices::default()),
+            Some("ontinue".into())
+        );
+        assert_eq!(
+            parse_submission("/goal continue now"),
+            Ok(Submission::Command {
+                command: InteractiveCommand::Goal,
+                argument: Some("continue now"),
+            })
+        );
+        assert_eq!(
             parse_submission("/goal resume now"),
             Ok(Submission::Command {
                 command: InteractiveCommand::Goal,
@@ -829,9 +855,9 @@ mod tests {
                 preview.status.as_str()
             ),
             (
-                " [pause|resume|objective]",
+                " [pause|resume|continue|objective]",
                 true,
-                "Command: /goal [pause|resume|objective]; Tab: pause, resume",
+                "Command: /goal [pause|resume|continue|objective]; Tab: pause, resume, continue",
             )
         );
         assert_eq!(

@@ -1191,6 +1191,7 @@ fn goal_view() -> GoalView {
             phase: crate::session::GoalPhase::Implementation,
             autonomous: false,
             resource_settings: crate::tools::ToolResourceSettings::default(),
+            continues: None,
         },
     ]
     .into_iter()
