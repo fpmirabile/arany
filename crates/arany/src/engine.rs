@@ -1136,7 +1136,7 @@ impl Engine {
                     publisher.as_ref(),
                 )
                 .await?;
-                self.settle_turn(started, leases).await
+                self.settle_turn(started, &ledger, leases).await
             },
             end,
         );
@@ -1553,6 +1553,7 @@ impl Engine {
     async fn settle_turn(
         &self,
         started: StartedRun<'_>,
+        ledger: &GoalLedger,
         leases: &mut WorkspaceLeases,
     ) -> Result<RunTurn, EngineError> {
         let StartedRun {
@@ -1562,47 +1563,44 @@ impl Engine {
             finish_after_run,
             workspace_identity,
         } = started;
-        let view = self
-            .journal
-            .store()
-            .load_view(session_id)
-            .await?
-            .ok_or(EngineError::InvalidHistory)?;
-        let run = view
-            .runs
-            .last()
-            .filter(|run| run.id == run_id)
-            .ok_or(EngineError::InvalidHistory)?
-            .clone();
-        let goal_view = view.goal(goal.id).ok_or(EngineError::InvalidHistory)?;
-        // Only Run failure or a satisfied/exhausted Goal settles it; a cancelled Run leaves its Goal open to resume.
-        let terminal = match run.status {
-            crate::session::RunStatus::Finished if goal.autonomous => {
-                if goal_view.plan_contract.is_none() || goal_view.success_criterion_satisfied {
-                    Some(GoalStatus::Completed)
-                } else if !goal_view.admits_next_run() {
-                    // Decide the exhaustion before this segment closes, so the next admission cannot find it open.
-                    Some(GoalStatus::Failed)
-                } else {
-                    None
+        let (run, active_ms, terminal) = ledger.view(|view| -> Result<_, EngineError> {
+            let run = view
+                .runs
+                .last()
+                .filter(|run| run.id == run_id)
+                .ok_or(EngineError::InvalidHistory)?
+                .clone();
+            let goal_view = view.goal(goal.id).ok_or(EngineError::InvalidHistory)?;
+            // Only Run failure or a satisfied/exhausted Goal settles it; a cancelled Run leaves its Goal open to resume.
+            let terminal = match run.status {
+                crate::session::RunStatus::Finished if goal.autonomous => {
+                    if goal_view.plan_contract.is_none() || goal_view.success_criterion_satisfied {
+                        Some(GoalStatus::Completed)
+                    } else if !goal_view.admits_next_run() {
+                        // Decide the exhaustion before this segment closes, so the next admission cannot find it open.
+                        Some(GoalStatus::Failed)
+                    } else {
+                        None
+                    }
                 }
+                crate::session::RunStatus::Finished => {
+                    finish_after_run.then_some(GoalStatus::Completed)
+                }
+                crate::session::RunStatus::Failed => Some(GoalStatus::Failed),
+                _ => None,
             }
-            crate::session::RunStatus::Finished => {
-                finish_after_run.then_some(GoalStatus::Completed)
-            }
-            crate::session::RunStatus::Failed => Some(GoalStatus::Failed),
-            _ => None,
-        };
+            .map(|status| (status, goal_report(view, &run, goal_view)));
+            Ok((run, goal_view.active_ms, terminal))
+        })??;
         let mut goal_status = GoalStatus::Running;
-        if let Some(status) = terminal {
-            let report = goal_report(&view, &run, goal_view);
+        if let Some((status, report)) = terminal {
             self.journal
                 .append(
                     session_id,
                     Event::GoalFinished {
                         goal_id: goal.id,
                         status,
-                        active_ms: goal_view.active_ms,
+                        active_ms,
                         report,
                     },
                 )

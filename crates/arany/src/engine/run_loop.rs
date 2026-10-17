@@ -173,51 +173,61 @@ impl<'a> RunLoop<'a> {
     }
 
     async fn settle_stopped_primary(&self) -> Result<(), EngineError> {
-        let view = self
-            .journal
-            .store()
-            .load_open_view(self.session_id)
-            .await?
-            .ok_or(EngineError::InvalidHistory)?;
-        let goal = view.goal(self.goal_id).ok_or(EngineError::InvalidHistory)?;
-        let run = view
-            .runs
-            .iter()
-            .find(|run| run.id == self.run_id)
-            .ok_or(EngineError::InvalidHistory)?;
-        let primary_active = run.agents.iter().any(|agent| {
-            agent.id == self.primary_id && agent.status == crate::session::AgentStatus::Active
-        });
-        let other_agents_closed = run.agents.iter().all(|agent| {
-            agent.id == self.primary_id || agent.status != crate::session::AgentStatus::Active
-        });
-        let has_uncertain_tool = run.tools.iter().any(|tool| {
-            tool.observation.as_ref().is_some_and(|observation| {
-                observation.disposition == crate::tools::ToolDisposition::Uncertain
-            })
-        });
-        let action_cancelled = run.tools.iter().any(|tool| {
-            tool.observation.as_ref().is_some_and(|observation| {
-                observation.disposition == crate::tools::ToolDisposition::Cancelled
-            })
-        });
-        let actions_acknowledged = run.tools.iter().all(|tool| {
-            tool.observation.as_ref().is_some_and(|observation| {
-                observation.disposition != crate::tools::ToolDisposition::Uncertain
-            })
-        });
+        let active_reserved = self.ledger().active_reserved();
+        let (
+            goal_open,
+            has_uncertain_tool,
+            action_cancelled,
+            actions_acknowledged,
+            run_active,
+            primary_active,
+            other_agents_closed,
+        ) = self.ledger().view(|view| -> Result<_, EngineError> {
+            let goal = view.goal(self.goal_id).ok_or(EngineError::InvalidHistory)?;
+            let run = view
+                .runs
+                .iter()
+                .find(|run| run.id == self.run_id)
+                .ok_or(EngineError::InvalidHistory)?;
+            let primary_active = run.agents.iter().any(|agent| {
+                agent.id == self.primary_id && agent.status == crate::session::AgentStatus::Active
+            });
+            let other_agents_closed = run.agents.iter().all(|agent| {
+                agent.id == self.primary_id || agent.status != crate::session::AgentStatus::Active
+            });
+            let has_uncertain_tool = run.tools.iter().any(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Uncertain
+                })
+            });
+            let action_cancelled = run.tools.iter().any(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Cancelled
+                })
+            });
+            let actions_acknowledged = run.tools.iter().all(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition != crate::tools::ToolDisposition::Uncertain
+                })
+            });
+            let goal_open = goal.status == crate::session::GoalStatus::Running
+                && goal.active_run == Some(self.run_id)
+                && goal.unobserved_provider_calls.is_empty()
+                && goal.compaction_call_reserved.is_none();
+            Ok((
+                goal_open,
+                has_uncertain_tool,
+                action_cancelled,
+                actions_acknowledged,
+                run.status == crate::session::RunStatus::Active,
+                primary_active,
+                other_agents_closed,
+            ))
+        })??;
         if has_uncertain_tool {
             return Err(crate::tools::ToolError::Uncertain.into());
         }
-        if goal.status != crate::session::GoalStatus::Running
-            || goal.active_run != Some(self.run_id)
-            || self.ledger().active_reserved()
-            || !goal.unobserved_provider_calls.is_empty()
-            || goal.compaction_call_reserved.is_some()
-            || run.status != crate::session::RunStatus::Active
-            || !primary_active
-            || !other_agents_closed
-        {
+        if !goal_open || active_reserved || !run_active || !primary_active || !other_agents_closed {
             return Err(EngineError::GoalBudgetExhausted);
         }
         let cancelled = self.controls.cancellation.is_cancelled() || action_cancelled;

@@ -145,16 +145,18 @@ impl RunLoop<'_> {
         {
             return Ok(None);
         }
-        let (events, view) = self.journal.store().load_resolved(self.session_id).await?;
-        let view = view.ok_or(EngineError::InvalidHistory)?;
-        let run = view
-            .runs
-            .iter()
-            .find(|run| run.id == self.run_id)
-            .ok_or(EngineError::InvalidHistory)?;
-        let previously_covered = run.tool_compaction_covered_count;
-        let total_tools =
-            u32::try_from(run.tools.len()).map_err(|_| EngineError::InvalidHistory)?;
+        let events = self.journal.store().load_session(self.session_id).await?;
+        let (previously_covered, total_tools) = self.ledger().view(|view| {
+            let run = view
+                .runs
+                .iter()
+                .find(|run| run.id == self.run_id)
+                .ok_or(EngineError::InvalidHistory)?;
+            Ok::<_, EngineError>((
+                run.tool_compaction_covered_count,
+                u32::try_from(run.tools.len()).map_err(|_| EngineError::InvalidHistory)?,
+            ))
+        })??;
         if total_tools.saturating_sub(previously_covered) as usize != total_observations {
             return Err(EngineError::InvalidHistory);
         }
