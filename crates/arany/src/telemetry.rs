@@ -514,7 +514,7 @@ impl RunTrace {
             Event::GoalContextCompacted { record, .. } => {
                 let started = self.compaction_started.take().unwrap_or(at);
                 let requested = self.compaction_requested.take();
-                let Some((run_id, run)) = &self.run else {
+                let (Some((run_id, run)), Some(_)) = (&self.run, &self.routes) else {
                     return;
                 };
                 let (provider, model) = requested.as_ref().map_or(
