@@ -534,10 +534,9 @@ async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result
         // Recheck OS ownership immediately before acting on a potentially reused disk number.
         check.set(CleanupCheck::ListingUnavailable);
         let current = disk_command(root, &["info", "-plist"]).await?;
-        if !attachments(&current, root)?
-            .iter()
-            .any(|attachment| attachment.device == device)
-        {
+        let current = attachments(&current, root)?;
+        check.set(CleanupCheck::Inspection);
+        if !current.iter().any(|attachment| attachment.device == device) {
             return Err(ToolError::ChangedInput);
         }
         check.set(CleanupCheck::DetachFailed);
@@ -555,13 +554,24 @@ async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result
     if pending.is_some() && !admitted_image {
         return Err(ToolError::ProtectionUnavailable);
     }
+    confirm_detached(root, &directory, pending.is_some(), check).await
+}
+
+async fn confirm_detached(
+    root: &Path,
+    directory: &cap_std::fs::Dir,
+    pending: bool,
+    check: &Cell<CleanupCheck>,
+) -> Result<(), ToolError> {
     check.set(CleanupCheck::ListingUnavailable);
     let remaining = disk_command(root, &["info", "-plist"]).await?;
+    let remaining = attachments(&remaining, root)?;
     check.set(CleanupCheck::ImageStillListed);
-    if !attachments(&remaining, root)?.is_empty() {
+    if !remaining.is_empty() {
         return Err(ToolError::ProtectionUnavailable);
     }
-    if pending.is_some() {
+    if pending {
+        check.set(CleanupCheck::Inspection);
         directory
             .remove_file(STORAGE_PENDING)
             .map_err(|_| ToolError::Operation)?;
