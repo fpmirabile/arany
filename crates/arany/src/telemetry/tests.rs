@@ -5,7 +5,7 @@ use crate::provider::{
     Delegate, Finish, Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome,
     ProviderRequest, ProviderResponse,
 };
-use crate::session::{AgentStatus, CollaborationPolicy, RunStatus};
+use crate::session::{AgentStatus, CollaborationPolicy, RunStatus, WorkspaceIdentity};
 use crate::store::StateRoot;
 use opentelemetry::Value;
 use opentelemetry::trace::SpanId;
@@ -1175,12 +1175,18 @@ fn goal_view() -> GoalView {
     let events = [
         Event::SessionStarted {
             title: "trace".into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
         },
         Event::GoalStarted {
             goal_id: GoalId::new(),
             objective: "objective".into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
             budget: crate::session::GoalBudget::default(),
             phase: crate::session::GoalPhase::Implementation,
             autonomous: false,

@@ -1,6 +1,8 @@
 use super::EngineError;
 use crate::session::input::WorkspaceInputs;
-use crate::session::{Event, RunStatus, SessionDefaults, SessionId, SessionListItem, SessionView};
+use crate::session::{
+    Event, RunStatus, SessionDefaults, SessionId, SessionListItem, SessionView, WorkspaceIdentity,
+};
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError};
 use std::path::{Path, PathBuf};
 
@@ -77,8 +79,8 @@ async fn append_idle_event(
         {
             return Err(EngineError::SessionNotIdle);
         }
-        let (device, inode) = WorkspaceInputs::admit_identity(&workspace, &state)?;
-        ensure_session_workspace(&view, device, inode)?;
+        let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
+        ensure_session_workspace(&view, identity)?;
         store.append(session_id, event).await?;
         Ok(())
     }
@@ -103,8 +105,8 @@ pub async fn resume_session(
             .await?
             .ok_or(EngineError::MissingSession)?;
         session_lock.keep();
-        let (device, inode) = WorkspaceInputs::admit_identity(&workspace, &state)?;
-        ensure_session_workspace(&view, device, inode)?;
+        let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
+        ensure_session_workspace(&view, identity)?;
         Ok(view)
     }
     .await;
@@ -196,8 +198,8 @@ pub(super) async fn fork_with_store(
         .await?
         .ok_or(EngineError::MissingSession)?;
     source_lock.keep();
-    let (device, inode) = WorkspaceInputs::admit_identity(workspace, state)?;
-    ensure_session_workspace(&source, device, inode)?;
+    let identity = WorkspaceInputs::admit_identity(workspace, state)?;
+    ensure_session_workspace(&source, identity)?;
     if !source.runs.last().is_some_and(|run| {
         matches!(
             run.status,
@@ -226,12 +228,11 @@ fn validate_session_title(title: Option<&str>) -> Result<(), EngineError> {
 
 pub(super) fn ensure_session_workspace(
     view: &SessionView,
-    device: u64,
-    inode: u64,
+    identity: WorkspaceIdentity,
 ) -> Result<(), EngineError> {
     if view
         .workspace_identity
-        .is_some_and(|identity| identity != (device, inode))
+        .is_some_and(|expected| expected != identity)
     {
         return Err(EngineError::WorkspaceMismatch);
     }

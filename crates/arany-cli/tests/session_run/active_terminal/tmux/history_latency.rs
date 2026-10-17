@@ -3,6 +3,7 @@ use crate::loopback::{
     check_profile_with_binary, read_request, send_response, send_response_for, wait_product,
     write_profile,
 };
+use arany::WorkspaceIdentity;
 use arany::{
     AgentDisposition, AgentPhase, AgentRole, AgentRunId, CollaborationPolicy, Event, GoalBudget,
     GoalId, GoalPhase, GoalReport, GoalStatus, ProviderCallDisposition, ProviderCallRecord,
@@ -152,7 +153,10 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
             session_id,
             Event::SessionStarted {
                 title: "Near-cap fixture".into(),
-                workspace_identity: (metadata.dev(), metadata.ino()),
+                workspace_identity: WorkspaceIdentity {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                },
             },
         )
         .await
@@ -170,7 +174,10 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                 Event::GoalStarted {
                     goal_id,
                     objective: goal_objective.clone(),
-                    workspace_identity: (metadata.dev(), metadata.ino()),
+                    workspace_identity: WorkspaceIdentity {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    },
                     budget: GoalBudget {
                         max_provider_calls: Some(GOAL_RUNS as u32),
                         max_runs: GOAL_RUNS as u8,

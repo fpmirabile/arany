@@ -29,6 +29,7 @@ pub use events::{
     MAX_DISPLAY_TEXT_BYTES, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS,
     MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProviderCallDisposition,
     ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults, SessionId,
+    WorkspaceIdentity,
 };
 pub(crate) use events::{
     GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_GOAL_PLAN_CONTRACT_BYTES,

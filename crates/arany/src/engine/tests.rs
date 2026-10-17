@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::WorkspaceIdentity;
 
 #[cfg(unix)]
 mod goal_workspace_lease_tests {
@@ -49,7 +50,10 @@ mod goal_workspace_lease_tests {
         let engine = Engine::open(state, EngineConfig::default()).expect("Engine");
         let session_id = SessionId::new();
         let goal_id = GoalId::new();
-        let workspace_identity = (7, 11);
+        let workspace_identity = WorkspaceIdentity {
+            device: 7,
+            inode: 11,
+        };
         engine
             .journal
             .append(

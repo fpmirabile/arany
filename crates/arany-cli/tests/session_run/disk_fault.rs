@@ -1,4 +1,5 @@
 use crate::loopback::wait_product;
+use arany::WorkspaceIdentity;
 use arany::{Event, SessionId, StateRoot, Store, StoreError};
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 use std::{
@@ -14,7 +15,10 @@ mod product;
 fn started(title: String) -> Event {
     Event::SessionStarted {
         title,
-        workspace_identity: (1, 1),
+        workspace_identity: WorkspaceIdentity {
+            device: 1,
+            inode: 1,
+        },
     }
 }
 

@@ -64,7 +64,7 @@ pub use session::{
     GoalSuccessCriterion, GoalView, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS,
     MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS,
     ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, RunStatus,
-    RunView, SessionDefaults, SessionId, SessionListItem, SessionView, ToolView,
+    RunView, SessionDefaults, SessionId, SessionListItem, SessionView, ToolView, WorkspaceIdentity,
 };
 pub use store::{HistoryReset, Record, RecordKind, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};

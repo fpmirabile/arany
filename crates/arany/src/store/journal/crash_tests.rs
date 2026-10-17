@@ -1,7 +1,7 @@
 use super::*;
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, RunConfig, RunDisposition, RunId,
-    RunStatus,
+    RunStatus, WorkspaceIdentity,
 };
 use crate::store::Store;
 use std::{
@@ -75,7 +75,10 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
         for event in [
             Event::SessionStarted {
                 title: "Crash fixture".into(),
-                workspace_identity: (1, 1),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 1,
+                },
             },
             Event::MessageAccepted {
                 run_id,

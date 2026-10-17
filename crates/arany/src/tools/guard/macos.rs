@@ -2,6 +2,7 @@ use super::{
     BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, TASK_BYTES_CAP, Task,
     bootstrap_failure, drain_stderr, parse_ready, read_capped, read_line_capped, read_observation,
 };
+use crate::session::WorkspaceIdentity;
 use crate::tools::Cancellation;
 use crate::tools::executable::EXECUTABLES;
 use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES, digest};
@@ -900,7 +901,10 @@ impl Task {
             config: self.config,
             workspace: self.workspace,
             reads: None,
-            workspace_identity: (self.intent.workspace_device, self.intent.workspace_inode),
+            workspace_identity: WorkspaceIdentity {
+                device: self.intent.workspace_device,
+                inode: self.intent.workspace_inode,
+            },
             guard_executable: self.guard_executable,
             enforcement_digest: self.intent.enforcement_digest,
             process_enforcement_digest: self.intent.enforcement_digest,

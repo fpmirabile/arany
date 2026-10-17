@@ -20,7 +20,7 @@ mod workspace;
 #[cfg(test)]
 mod tests;
 
-use crate::session::{AgentRunId, RunId};
+use crate::session::{AgentRunId, RunId, WorkspaceIdentity};
 use crate::store::StateRoot;
 pub use approval::{ApprovalInbox, ApprovalMode, ToolApproval, ToolApprovals};
 pub use cancel::Cancellation;
@@ -74,9 +74,9 @@ pub fn list_workspace_entries(
     fs::workspace_entries(workspace, folder, prefix)
 }
 
-pub(crate) fn workspace_identity(workspace: &Path) -> Result<(u64, u64), ToolError> {
+pub(crate) fn workspace_identity(workspace: &Path) -> Result<WorkspaceIdentity, ToolError> {
     let root = fs::open_directory(workspace)?;
-    fs::identity(&root)
+    fs::workspace_identity(&root)
 }
 use catalog::Site;
 use std::path::{Path, PathBuf};
@@ -131,7 +131,7 @@ pub(crate) struct ToolRuntime {
     workspace: PathBuf,
     // Set at admission; `None` only in a runtime rebuilt inside a Guard unit, which never reads in process.
     reads: Option<InProcessReads>,
-    workspace_identity: (u64, u64),
+    workspace_identity: WorkspaceIdentity,
     guard_executable: PathBuf,
     enforcement_digest: [u8; 32],
     process_enforcement_digest: [u8; 32],
@@ -215,7 +215,7 @@ impl ToolRuntime {
             sender.send_replace(queued.then_some(id));
         }
     }
-    pub(crate) fn workspace_identity(&self) -> (u64, u64) {
+    pub(crate) fn workspace_identity(&self) -> WorkspaceIdentity {
         self.workspace_identity
     }
 
@@ -284,8 +284,8 @@ impl ToolRuntime {
         };
         let identity = crate::store::BuildCacheIdentity::new(
             &self.workspace,
-            self.workspace_identity.0,
-            self.workspace_identity.1,
+            self.workspace_identity.device,
+            self.workspace_identity.inode,
         )
         .map_err(|_| ToolError::Operation)?;
         match state.effective_build_cache_bytes(&identity, requested) {
@@ -339,9 +339,9 @@ impl ToolRuntime {
         for grant in &config.runtime_grants {
             grant.reject_overlap(&[workspace, state.path(), account.as_path()])?;
         }
-        let workspace_identity = fs::identity(&root)?;
+        let workspace_identity = fs::workspace_identity(&root)?;
         config.discover_skills(workspace)?;
-        if fs::identity(&fs::open_directory(workspace)?)? != workspace_identity {
+        if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
             return Err(ToolError::ChangedInput);
         }
         for program in config
@@ -483,8 +483,8 @@ impl ToolRuntime {
             agent_run_id,
             policy_digest: self.config.digest(),
             enforcement_digest,
-            workspace_device: self.workspace_identity.0,
-            workspace_inode: self.workspace_identity.1,
+            workspace_device: self.workspace_identity.device,
+            workspace_inode: self.workspace_identity.inode,
             call,
             limits: ToolLimits::default(),
             expires_at_ms: now_ms().saturating_add(60_000),

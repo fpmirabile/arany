@@ -1046,6 +1046,7 @@ fn upsert_goal(goals: &mut Vec<arany::GoalView>, goal: arany::GoalView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arany::WorkspaceIdentity;
 
     #[test]
     fn switches_shown_before_a_stale_view_do_not_skip_or_panic() {
@@ -1080,12 +1081,18 @@ mod tests {
         let events = [
             arany::Event::SessionStarted {
                 title: "Goals".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
             },
             arany::Event::GoalStarted {
                 goal_id: arany::GoalId::new(),
                 objective: "Ship the parser".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
                 budget: arany::GoalBudget::default(),
                 phase: arany::GoalPhase::Implementation,
                 autonomous: false,
@@ -1206,14 +1213,17 @@ mod tests {
 mod goal_request_tests {
     use super::*;
     use crate::cli::attached::{Admission, EntryMode};
-    use arany::SessionDefaults;
+    use arany::{SessionDefaults, WorkspaceIdentity};
 
     fn session_with_goal(autonomous: bool) -> SessionView {
         let session_id = arany::SessionId::new();
         let event = arany::Event::GoalStarted {
             goal_id: arany::GoalId::new(),
             objective: "Ship the parser".into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
             budget: arany::GoalBudget::default(),
             phase: arany::GoalPhase::Implementation,
             autonomous,
@@ -1221,7 +1231,10 @@ mod goal_request_tests {
         };
         let started = arany::Event::SessionStarted {
             title: "Goals".into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
         };
         let events = [started, event]
             .into_iter()

@@ -2,8 +2,8 @@ use super::{ResolvedSession, StoreError, event_payload_limit};
 use crate::session::ForkInheritance;
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, ForkLineage, RunConfig,
-    RunDisposition, RunId, SessionDefaults, SessionId, SessionListItem, SessionView, prefix_digest,
-    validate_compaction_references,
+    RunDisposition, RunId, SessionDefaults, SessionId, SessionListItem, SessionView,
+    WorkspaceIdentity, prefix_digest, validate_compaction_references,
 };
 use rusqlite::{Connection, types::ValueRef};
 use std::collections::HashMap;
@@ -15,7 +15,7 @@ const MAX_DISCOVERED_SESSIONS: usize = 65_536;
 
 struct SessionHead {
     title: String,
-    direct_identity: Option<(u64, u64)>,
+    direct_identity: Option<WorkspaceIdentity>,
     source_session_id: Option<SessionId>,
     source_sequence: Option<u64>,
     last_sequence: u64,
@@ -56,7 +56,7 @@ pub(super) fn session_for_run(
 
 pub(super) fn latest_session_id(
     connection: &Connection,
-    workspace_identity: (u64, u64),
+    workspace_identity: WorkspaceIdentity,
 ) -> Result<Option<SessionId>, StoreError> {
     let heads = scan_session_heads(connection)?;
     let mut latest = None::<(SessionId, u64)>;
@@ -81,7 +81,7 @@ pub(super) fn latest_session_id(
 
 pub(super) fn list_session_items(
     connection: &Connection,
-    workspace_identity: (u64, u64),
+    workspace_identity: WorkspaceIdentity,
 ) -> Result<Vec<SessionListItem>, StoreError> {
     let mut heads = scan_session_heads(connection)?;
     inherit_fork_metadata(connection, &mut heads)?;
@@ -138,7 +138,10 @@ fn scan_session_heads(
                 head.primary = None;
                 head.pending_title = None;
                 head.run_defaults = selection_from_run(config);
-                let identity = (config.workspace_device, config.workspace_inode);
+                let identity = WorkspaceIdentity {
+                    device: config.workspace_device,
+                    inode: config.workspace_inode,
+                };
                 if head
                     .direct_identity
                     .is_some_and(|pinned| pinned != identity)
@@ -321,7 +324,7 @@ fn discovered_identity(
     id: SessionId,
     heads: &HashMap<SessionId, SessionHead>,
     depth: usize,
-) -> Result<Option<(u64, u64)>, StoreError> {
+) -> Result<Option<WorkspaceIdentity>, StoreError> {
     if depth > MAX_FORK_DEPTH {
         return Err(StoreError::ReplayLimit);
     }

@@ -7,7 +7,7 @@ use crate::session::events::{
     AgentRole, AgentRunId, CompactionStatus, Event, GoalBudget, GoalId, GoalPhase,
     GoalPlanContract, GoalReport, GoalStatus, ProviderCallDisposition, ReplayError, RunId,
 };
-use crate::session::{MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES};
+use crate::session::{MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES, WorkspaceIdentity};
 
 impl SessionView {
     // The event's fields plus the replay prior; a struct would only forward them.
@@ -19,7 +19,7 @@ impl SessionView {
         &mut self,
         goal_id: &GoalId,
         objective: &str,
-        workspace_identity: &(u64, u64),
+        workspace_identity: WorkspaceIdentity,
         budget: &GoalBudget,
         resource_settings: &crate::tools::ToolResourceSettings,
         phase: &GoalPhase,
@@ -29,7 +29,7 @@ impl SessionView {
         if self.goals.iter().any(|goal| goal.id == *goal_id)
             || self
                 .workspace_identity
-                .is_some_and(|identity| identity != *workspace_identity)
+                .is_some_and(|identity| identity != workspace_identity)
         {
             return Err(ReplayError::InvalidTransition);
         }
@@ -41,11 +41,11 @@ impl SessionView {
         {
             seal_unfinished_goal(goal, &mut self.runs);
         }
-        self.workspace_identity = Some(*workspace_identity);
+        self.workspace_identity = Some(workspace_identity);
         self.goals.push(GoalView {
             id: *goal_id,
             objective: objective.to_owned(),
-            workspace_identity: *workspace_identity,
+            workspace_identity,
             budget: *budget,
             resource_settings: *resource_settings,
             phase: *phase,
@@ -528,7 +528,7 @@ pub(super) fn apply(
             current.start_goal(
                 goal_id,
                 objective,
-                workspace_identity,
+                *workspace_identity,
                 budget,
                 resource_settings,
                 phase,

@@ -5,6 +5,7 @@ use super::{
 use crate::provider::AgentPhase;
 use crate::session::events::{
     Event, GoalStatus, ProviderCallDisposition, ProviderCallRecord, ReplayError, RunDisposition,
+    WorkspaceIdentity,
 };
 
 pub(super) fn apply(
@@ -53,7 +54,10 @@ pub(super) fn apply(
             config,
             active_deadline_ms,
         } => {
-            let workspace_identity = (config.workspace_device, config.workspace_inode);
+            let workspace_identity = WorkspaceIdentity {
+                device: config.workspace_device,
+                inode: config.workspace_inode,
+            };
             if current
                 .workspace_identity
                 .is_some_and(|identity| identity != workspace_identity)

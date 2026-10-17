@@ -2,6 +2,7 @@ use super::catalog::{nullable, string};
 use super::config::Config;
 use super::types::*;
 use super::{ToolError, ToolRuntime};
+use crate::session::WorkspaceIdentity;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 use serde_json::{Value, json};
@@ -93,7 +94,7 @@ struct Entry {
 }
 
 pub(super) struct CommandSnapshot {
-    root_identity: (u64, u64),
+    root_identity: WorkspaceIdentity,
     entries: BTreeMap<String, Entry>,
 }
 
@@ -105,7 +106,7 @@ pub(super) fn command_snapshot(workspace: &Path) -> Result<CommandSnapshot, Tool
     let mut retained = 0usize;
     command_collect(&root, "", &mut entries, &mut budget, &mut retained)?;
     Ok(CommandSnapshot {
-        root_identity: identity(&root)?,
+        root_identity: workspace_identity(&root)?,
         entries,
     })
 }
@@ -278,6 +279,11 @@ pub(crate) fn identity(dir: &Dir) -> Result<(u64, u64), ToolError> {
         let _ = dir;
         Err(ToolError::ProtectionUnavailable)
     }
+}
+
+pub(crate) fn workspace_identity(dir: &Dir) -> Result<WorkspaceIdentity, ToolError> {
+    let (device, inode) = identity(dir)?;
+    Ok(WorkspaceIdentity { device, inode })
 }
 
 pub(crate) fn open_absolute(path: &str) -> Result<File, ToolError> {
@@ -1447,7 +1453,7 @@ fn replace_file(
 }
 
 pub(super) fn validate_workspace(runtime: &ToolRuntime) -> Result<(), ToolError> {
-    if identity(&open_directory(&runtime.workspace)?)? != runtime.workspace_identity {
+    if workspace_identity(&open_directory(&runtime.workspace)?)? != runtime.workspace_identity {
         return Err(ToolError::ChangedInput);
     }
     Ok(())

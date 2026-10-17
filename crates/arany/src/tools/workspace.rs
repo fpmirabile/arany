@@ -5,6 +5,7 @@ use super::toolchains::{
 };
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
 use super::{ToolError, fs};
+use crate::session::WorkspaceIdentity;
 use crate::store::RecordKind;
 use crate::store::{StateRoot, StoreError};
 use serde::{Deserialize, Serialize};
@@ -65,7 +66,7 @@ pub fn mention_paths(objective: &str) -> Result<Vec<PathBuf>, ToolError> {
 #[derive(Clone)]
 pub struct WorkspacePermissions {
     path: PathBuf,
-    identity: (u64, u64),
+    identity: WorkspaceIdentity,
     trusted: bool,
     mode: ApprovalMode,
     runtime_grants: Vec<RuntimeGrant>,
@@ -272,7 +273,7 @@ impl WorkspacePermissions {
             .collect()
     }
 
-    pub(crate) fn matches_identity(&self, identity: (u64, u64)) -> bool {
+    pub(crate) fn matches_identity(&self, identity: WorkspaceIdentity) -> bool {
         self.identity == identity
     }
 
@@ -284,7 +285,8 @@ impl WorkspacePermissions {
             Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 let directory =
                     fs::open_directory(path).map_err(|_| TrustRecordError::Workspace)?;
-                let identity = fs::identity(&directory).map_err(|_| TrustRecordError::Workspace)?;
+                let identity =
+                    fs::workspace_identity(&directory).map_err(|_| TrustRecordError::Workspace)?;
                 fs::reject_overlap(path, &account)
                     .map_err(|_| TrustRecordError::StateInsideWorkspace)?;
                 Ok(Self {
@@ -316,14 +318,18 @@ impl WorkspacePermissions {
 
     fn load(path: &Path, root: &StateRoot) -> Result<Self, TrustRecordError> {
         let directory = fs::open_directory(path).map_err(|_| TrustRecordError::Workspace)?;
-        let identity = fs::identity(&directory).map_err(|_| TrustRecordError::Workspace)?;
+        let identity =
+            fs::workspace_identity(&directory).map_err(|_| TrustRecordError::Workspace)?;
         root.ensure_outside_workspace(&directory)
             .map_err(|_| TrustRecordError::StateInsideWorkspace)?;
         let record = read(root)?;
-        let entry = record
-            .workspaces
-            .iter()
-            .find(|entry| entry.path == path && (entry.device, entry.inode) == identity);
+        let entry = record.workspaces.iter().find(|entry| {
+            entry.path == path
+                && WorkspaceIdentity {
+                    device: entry.device,
+                    inode: entry.inode,
+                } == identity
+        });
         let runtime_grants = entry.map_or_else(Vec::new, |entry| entry.runtime_grants.clone());
         let trusted = entry.is_some();
         Ok(Self {
@@ -410,8 +416,8 @@ impl WorkspacePermissions {
                 }
                 record.workspaces.push(Entry {
                     path: self.path.clone(),
-                    device: self.identity.0,
-                    inode: self.identity.1,
+                    device: self.identity.device,
+                    inode: self.identity.inode,
                     mode,
                     runtime_grants: if trusted {
                         runtime_grants.clone()
@@ -433,7 +439,8 @@ impl WorkspacePermissions {
     }
 
     pub(crate) fn verify(&self, path: &Path) -> Result<(), ToolError> {
-        if path != self.path || fs::identity(&fs::open_directory(path)?)? != self.identity {
+        if path != self.path || fs::workspace_identity(&fs::open_directory(path)?)? != self.identity
+        {
             return Err(ToolError::ChangedInput);
         }
         Ok(())

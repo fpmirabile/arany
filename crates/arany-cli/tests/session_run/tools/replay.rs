@@ -1,5 +1,6 @@
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 use crate::engine_support::run_with;
+use arany::WorkspaceIdentity;
 use arany::{
     AgentPhase, CollaborationPolicy, RunStatus, SessionView, StateRoot, ToolCall, ToolDisposition,
 };
@@ -113,12 +114,18 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let prefix = [
         Event::SessionStarted {
             title: "Historical tool facts".into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
         },
         Event::GoalStarted {
             goal_id: goal,
             objective: "Past work".into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
             budget: arany::GoalBudget::default(),
             phase: arany::GoalPhase::Implementation,
             autonomous: false,

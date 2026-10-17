@@ -979,7 +979,7 @@ mod tests {
     use super::*;
     use arany::{
         AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, Event, RunConfig,
-        RunDisposition, RunStatus, RunView, SessionDefaults,
+        RunDisposition, RunStatus, RunView, SessionDefaults, WorkspaceIdentity,
     };
     use arany::{StateRoot, Store};
     use std::time::Instant;
@@ -1708,7 +1708,10 @@ mod tests {
                     current_session_id,
                     Event::SessionStarted {
                         title: "Synthetic history".into(),
-                        workspace_identity: (1, 1),
+                        workspace_identity: WorkspaceIdentity {
+                            device: 1,
+                            inode: 1,
+                        },
                     },
                 )
                 .await

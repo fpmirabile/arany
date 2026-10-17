@@ -1,14 +1,17 @@
 use super::*;
 use crate::session::{
     GoalPhase, GoalStatus, GoalSuccessCriterion, GoalSuccessState, RunId, SessionDefaults,
-    SessionId,
+    SessionId, WorkspaceIdentity,
 };
 
 fn goal_view(goal_id: GoalId, budget: GoalBudget) -> GoalView {
     GoalView {
         id: goal_id,
         objective: String::new(),
-        workspace_identity: (1, 2),
+        workspace_identity: WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        },
         budget,
         resource_settings: crate::tools::ToolResourceSettings::default(),
         phase: GoalPhase::Implementation,
@@ -44,7 +47,10 @@ fn ledger(budget: GoalBudget) -> GoalLedger {
         title: String::new(),
         title_is_explicit: false,
         inherited_title: None,
-        workspace_identity: Some((1, 2)),
+        workspace_identity: Some(WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        }),
         defaults: SessionDefaults::default(),
         created_sequence: 0,
         last_sequence: 0,

@@ -60,8 +60,8 @@ impl Engine {
         let view = view.ok_or(EngineError::MissingSession)?;
         session_lock.keep();
         let _lineage_locks = self.lock_lineage(&view).await?;
-        let (device, inode) = WorkspaceInputs::admit_identity(&workspace, &self.state)?;
-        ensure_session_workspace(&view, device, inode)?;
+        let workspace_identity = WorkspaceInputs::admit_identity(&workspace, &self.state)?;
+        ensure_session_workspace(&view, workspace_identity)?;
         let last_run = view.runs.last().ok_or(EngineError::CompactionInputEmpty)?;
         if expected_run_id.is_some_and(|run_id| run_id != last_run.id) {
             return Ok(None);

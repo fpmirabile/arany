@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::WorkspaceIdentity;
 
 mod goal_recovery_tests {
     use super::*;
@@ -48,7 +49,10 @@ mod goal_recovery_tests {
             title: "Interrupted Goal".into(),
             title_is_explicit: false,
             inherited_title: None,
-            workspace_identity: Some((1, 2)),
+            workspace_identity: Some(WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            }),
             defaults: SessionDefaults::default(),
             created_sequence: 0,
             last_sequence: 1,
@@ -74,7 +78,10 @@ mod goal_recovery_tests {
             goals: vec![GoalView {
                 id: goal_id,
                 objective: "Inspect before planning".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
                 budget: GoalBudget::default(),
                 resource_settings: crate::tools::ToolResourceSettings::default(),
                 phase: GoalPhase::Research,
@@ -206,7 +213,10 @@ mod goal_replay_tests {
         Event::GoalStarted {
             goal_id,
             objective: GOAL_OBJECTIVE.into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
             budget,
             resource_settings: crate::tools::ToolResourceSettings::default(),
             phase: GoalPhase::Implementation,
@@ -654,7 +664,10 @@ mod goal_replay_tests {
     fn session_with(session_id: SessionId, events: Vec<Event>) -> Vec<EventEnvelope> {
         let mut all = vec![Event::SessionStarted {
             title: "Goal".into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
         }];
         all.extend(events);
         journal(session_id, all)
@@ -1388,7 +1401,10 @@ mod goal_replay_tests {
         let mut events = vec![Event::GoalStarted {
             goal_id,
             objective: GOAL_OBJECTIVE.into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
             budget,
             resource_settings: crate::tools::ToolResourceSettings::default(),
             phase: GoalPhase::Implementation,
@@ -1468,7 +1484,10 @@ mod goal_replay_tests {
         let mut events = vec![
             Event::SessionStarted {
                 title: "Goal".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
             },
             goal_started(goal_id, GoalBudget::default()),
         ];
@@ -1505,7 +1524,10 @@ mod goal_replay_tests {
         let mut events = vec![
             Event::SessionStarted {
                 title: "Goal".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
             },
             goal_started(goal_id, budget),
         ];
@@ -1563,12 +1585,18 @@ mod goal_replay_tests {
             let mut events = vec![
                 Event::SessionStarted {
                     title: "Goal".into(),
-                    workspace_identity: (1, 2),
+                    workspace_identity: WorkspaceIdentity {
+                        device: 1,
+                        inode: 2,
+                    },
                 },
                 Event::GoalStarted {
                     goal_id,
                     objective: GOAL_OBJECTIVE.into(),
-                    workspace_identity: (1, 2),
+                    workspace_identity: WorkspaceIdentity {
+                        device: 1,
+                        inode: 2,
+                    },
                     budget,
                     resource_settings: crate::tools::ToolResourceSettings::default(),
                     phase: GoalPhase::Implementation,
@@ -1665,7 +1693,10 @@ mod goal_replay_tests {
         let mut events = vec![
             Event::SessionStarted {
                 title: "Goal".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
             },
             goal_started(goal_id, GoalBudget::default()),
         ];
@@ -1732,7 +1763,10 @@ mod goal_replay_tests {
         let mut events = vec![
             Event::SessionStarted {
                 title: "Goal".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
             },
             goal_started(goal_id, GoalBudget::default()),
         ];
@@ -1795,7 +1829,10 @@ mod goal_replay_tests {
         let mut events = vec![
             Event::SessionStarted {
                 title: "Goal".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
             },
             goal_started(goal_id, GoalBudget::default()),
         ];
@@ -1892,7 +1929,10 @@ mod goal_replay_tests {
             title: "Goal".into(),
             title_is_explicit: false,
             inherited_title: None,
-            workspace_identity: Some((1, 2)),
+            workspace_identity: Some(WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            }),
             defaults: SessionDefaults::default(),
             created_sequence: 0,
             last_sequence: 1,
@@ -1938,7 +1978,10 @@ mod goal_replay_tests {
             goals: vec![GoalView {
                 id: goal_id,
                 objective: GOAL_OBJECTIVE.into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
                 budget: GoalBudget::default(),
                 phase: GoalPhase::Implementation,
                 autonomous: false,
@@ -2503,7 +2546,10 @@ mod goal_replay_tests {
             title: "Goal".into(),
             title_is_explicit: false,
             inherited_title: None,
-            workspace_identity: Some((1, 2)),
+            workspace_identity: Some(WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            }),
             defaults: SessionDefaults::default(),
             created_sequence: 0,
             last_sequence: 1,
@@ -2557,7 +2603,10 @@ mod goal_replay_tests {
             goals: vec![GoalView {
                 id: goal_id,
                 objective: GOAL_OBJECTIVE.into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
                 budget: GoalBudget::default(),
                 resource_settings: crate::tools::ToolResourceSettings::default(),
                 phase: GoalPhase::Research,
@@ -2633,7 +2682,10 @@ mod goal_replay_tests {
             title: "Goal".into(),
             title_is_explicit: false,
             inherited_title: None,
-            workspace_identity: Some((1, 2)),
+            workspace_identity: Some(WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            }),
             defaults: SessionDefaults::default(),
             created_sequence: 0,
             last_sequence: 2,
@@ -2699,7 +2751,10 @@ mod goal_replay_tests {
             goals: vec![GoalView {
                 id: goal_id,
                 objective: GOAL_OBJECTIVE.into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
                 budget: GoalBudget::default(),
                 resource_settings: crate::tools::ToolResourceSettings::default(),
                 phase: GoalPhase::Research,

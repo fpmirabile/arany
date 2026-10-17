@@ -935,7 +935,10 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
         .expect("pinned Session start");
         use std::os::unix::fs::MetadataExt;
         let workspace_metadata = std::fs::metadata(&workspace).expect("Workspace metadata");
-        let workspace_identity = (workspace_metadata.dev(), workspace_metadata.ino());
+        let workspace_identity = arany::WorkspaceIdentity {
+            device: workspace_metadata.dev(),
+            inode: workspace_metadata.ino(),
+        };
         let goal_id = arany::GoalId::new();
         let interrupted_run_id = arany::RunId::new();
         let store =

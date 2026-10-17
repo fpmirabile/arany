@@ -1,4 +1,5 @@
 use super::*;
+use arany::WorkspaceIdentity;
 use arany::test_support::goals::*;
 
 #[tokio::test]
@@ -1117,7 +1118,10 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
                 session_id,
                 Event::SessionStarted {
                     title: "Interrupted before acceptance".into(),
-                    workspace_identity: (metadata.dev(), metadata.ino()),
+                    workspace_identity: WorkspaceIdentity {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    },
                 },
             )
             .await
@@ -1130,7 +1134,10 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
                     phase: arany::GoalPhase::Implementation,
                     autonomous: false,
                     objective: "Resume an unaccepted task".into(),
-                    workspace_identity: (metadata.dev(), metadata.ino()),
+                    workspace_identity: WorkspaceIdentity {
+                        device: metadata.dev(),
+                        inode: metadata.ino(),
+                    },
                     budget: arany::GoalBudget {
                         max_runs: 1,
                         ..arany::GoalBudget::default()
@@ -1218,7 +1225,10 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let metadata = std::fs::metadata(&workspace).expect("Workspace identity");
-    let identity = (metadata.dev(), metadata.ino());
+    let identity = WorkspaceIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
     let state_path = temp.path().join("state");
     let session_id = SessionId::new();
     let (goal_id, run_id, agent_run_id) =
@@ -1266,8 +1276,8 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
                 policy: CollaborationPolicy::Single,
                 output_token_cap: 4096,
                 provider_concurrency: 1,
-                workspace_device: identity.0,
-                workspace_inode: identity.1,
+                workspace_device: identity.device,
+                workspace_inode: identity.inode,
                 instruction_digest: None,
                 include_digests: Vec::new(),
                 history_run_ids: Vec::new(),
@@ -4460,7 +4470,10 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let metadata = std::fs::metadata(&workspace).expect("Workspace identity");
-    let identity = (metadata.dev(), metadata.ino());
+    let identity = WorkspaceIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
     let state_path = temp.path().join("state");
     let session_id = SessionId::new();
     let (goal_id, run_id, agent_run_id) =
@@ -4507,8 +4520,8 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
                 policy: CollaborationPolicy::Single,
                 output_token_cap: 4096,
                 provider_concurrency: 1,
-                workspace_device: identity.0,
-                workspace_inode: identity.1,
+                workspace_device: identity.device,
+                workspace_inode: identity.inode,
                 instruction_digest: None,
                 include_digests: Vec::new(),
                 history_run_ids: Vec::new(),

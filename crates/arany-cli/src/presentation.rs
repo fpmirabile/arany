@@ -692,7 +692,9 @@ pub fn render_exec(
 #[cfg(test)]
 mod exec_jsonl_tests {
     use super::*;
-    use arany::{GoalBudget, GoalId, GoalPhase, GoalReport, GoalStatus, SessionId};
+    use arany::{
+        GoalBudget, GoalId, GoalPhase, GoalReport, GoalStatus, SessionId, WorkspaceIdentity,
+    };
 
     fn envelope(
         sequence: u64,
@@ -714,7 +716,10 @@ mod exec_jsonl_tests {
         Event::GoalStarted {
             goal_id,
             objective: objective.into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
             budget: GoalBudget::default(),
             phase: GoalPhase::Implementation,
             autonomous: false,
@@ -1141,19 +1146,25 @@ mod tests {
 #[cfg(test)]
 mod goal_status_tests {
     use super::*;
-    use arany::{GoalBudget, GoalId, GoalPhase, GoalStatus};
+    use arany::{GoalBudget, GoalId, GoalPhase, GoalStatus, WorkspaceIdentity};
 
     fn session_with_goal(autonomous: bool) -> SessionView {
         let session_id = arany::SessionId::new();
         let events = [
             Event::SessionStarted {
                 title: "Goals".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
             },
             Event::GoalStarted {
                 goal_id: GoalId::new(),
                 objective: "Ship the parser".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
                 budget: GoalBudget::default(),
                 phase: GoalPhase::Implementation,
                 autonomous,

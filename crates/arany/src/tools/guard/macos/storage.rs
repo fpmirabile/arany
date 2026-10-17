@@ -292,7 +292,7 @@ pub(super) async fn prepare_command_storage(
 
     runtime.config.validate()?;
     let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
-    if crate::tools::fs::identity(&workspace)? != runtime.workspace_identity {
+    if crate::tools::fs::workspace_identity(&workspace)? != runtime.workspace_identity {
         return Err(ToolError::ChangedInput);
     }
     for grant in &runtime.config.runtime_grants {
