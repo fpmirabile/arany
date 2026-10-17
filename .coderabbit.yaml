@@ -4,6 +4,8 @@ reviews:
   profile: assertive
   # Approve once every CodeRabbit comment is resolved; request changes otherwise.
   request_changes_workflow: true
+  # Authors cannot bypass the gate with `@coderabbitai approve` or `resolve` on their own PRs.
+  allow_author_approval: false
   high_level_summary: true
   poem: false
   review_status: true
@@ -11,6 +13,8 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+    # Never pause: the approval gate needs a review of the latest commit.
+    auto_pause_after_reviewed_commits: 0
     base_branches:
       - main
       - chore/.*
@@ -99,12 +103,14 @@ reviews:
 knowledge_base:
   code_guidelines:
     enabled: true
+    # String entries apply only under their own directory, so guides outside the code use applyTo.
     filePatterns:
       - "AGENTS.md"
-      - "agents/*.md"
-      - "agents/references/**/*.md"
-      - "agents/skills/rust-clean-code/**/*.md"
-      - "agents/skills/clean-architecture-review/SKILL.md"
-      - "agents/skills/arany-terminal-design/SKILL.md"
+      - files: "agents/*.md,agents/references/**/*.md"
+        applyTo: "**"
+      - files: "agents/skills/rust-clean-code/**/*.md,agents/skills/clean-architecture-review/SKILL.md"
+        applyTo: "crates/**/*.rs"
+      - files: "agents/skills/arany-terminal-design/SKILL.md"
+        applyTo: "crates/arany-cli/src/**/*.rs"
 chat:
   auto_reply: true
