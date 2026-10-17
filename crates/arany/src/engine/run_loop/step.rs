@@ -558,6 +558,13 @@ impl RunLoop<'_> {
             }
         };
         if let Some(config) = config {
+            let approved = matches!(&verdict, Verdict::Dispatch { .. });
+            // An approving review that did not lead to dispatch is not an AI approval.
+            let source = if !approved && source == PermissionSource::AiReview {
+                PermissionSource::UnavailableApproval
+            } else {
+                source
+            };
             self.append(Event::ToolPermissionDecided {
                 run_id: self.run_id,
                 agent_run_id: match &verdict {
@@ -570,7 +577,7 @@ impl RunLoop<'_> {
                     mode: config.mode(),
                     basis,
                     source,
-                    approved: matches!(&verdict, Verdict::Dispatch { .. }),
+                    approved,
                 },
             })
             .await?;

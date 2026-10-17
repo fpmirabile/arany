@@ -4971,6 +4971,76 @@ async fn reviewed_tool_step_at_the_event_cap_closes_its_tool_and_leaves_no_tool_
 }
 
 #[tokio::test]
+async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    for (name, bytes) in [
+        (
+            "tools.json",
+            &br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#[..],
+        ),
+        (
+            "permissions.json",
+            &br#"{"permissions":{"defaultMode":"auto"}}"#[..],
+        ),
+    ] {
+        let path = state_path.join(name);
+        std::fs::write(&path, bytes).expect("settings");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
+    }
+    let steering = RunSteering::new();
+    let pause = steering.clone();
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+            crate::tool_outcome(
+                arany::ToolCall::Write {
+                    path: "notes/facts.txt".into(),
+                    expected_digest: None,
+                    content: "v2".into(),
+                },
+                None,
+            ),
+            finish_with("approve"),
+            finish_with("never reached"),
+        ])
+        .with_before_call(2, move || assert!(pause.pause(), "first pause")),
+    );
+    let outcome = run_with(
+        &engine,
+        &provider,
+        request(&workspace, "Write after review"),
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("paused Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("facts"),
+        "v1"
+    );
+    let (events, _) = replayed(&state_path, outcome.session_id).await;
+    let verdicts: Vec<_> = events
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            Event::ToolPermissionDecided { verdict, .. } => Some(verdict),
+            _ => None,
+        })
+        .collect();
+    let write = verdicts.last().expect("Write verdict");
+    assert!(!write.approved);
+    assert_eq!(format!("{:?}", write.source), "UnavailableApproval");
+}
+
+#[tokio::test]
 async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = paged_read_workspace(temp.path());
