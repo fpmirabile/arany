@@ -3,6 +3,7 @@ use super::{
     bootstrap_failure, drain_stderr, parse_ready, read_capped, read_line_capped, read_observation,
 };
 use crate::tools::Cancellation;
+use crate::tools::executable::EXECUTABLES;
 use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES, digest};
 use crate::tools::{EffectIntent, ToolCall, ToolError, ToolObservation, ToolRuntime};
 
@@ -381,7 +382,7 @@ fn system_program_metadata(path: &str) -> Result<Option<std::fs::Metadata>, Tool
         return Err(ToolError::Path);
     }
     let path = Path::new(path);
-    if !matches!(path.parent(), Some(parent) if [Path::new("/bin"), Path::new("/usr/bin")].contains(&parent))
+    if !matches!(path.parent(), Some(parent) if EXECUTABLES.system_directories.iter().any(|directory| parent == Path::new(directory)))
     {
         return Ok(None);
     }
@@ -652,7 +653,7 @@ impl SystemPrograms {
         let capture = fixture::Span::begin(fixture::Stage::Catalogue);
         let mut count = 0;
         let mut programs = Vec::new();
-        for directory in ["/bin", "/usr/bin"] {
+        for directory in EXECUTABLES.system_directories {
             let dir = crate::tools::fs::open_directory(Path::new(directory))?;
             let metadata = dir
                 .dir_metadata()
@@ -709,16 +710,14 @@ impl SystemPrograms {
         if self.programs.is_empty() || self.programs.len() > SYSTEM_PROGRAMS_CAP {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let directories = [
-            (
-                Path::new("/bin"),
-                system_program_directory(Path::new("/bin"))?,
-            ),
-            (
-                Path::new("/usr/bin"),
-                system_program_directory(Path::new("/usr/bin"))?,
-            ),
-        ];
+        let directories = EXECUTABLES
+            .system_directories
+            .iter()
+            .map(|directory| {
+                let path = Path::new(directory);
+                Ok((path, system_program_directory(path)?))
+            })
+            .collect::<Result<Vec<_>, ToolError>>()?;
         profile.push_str("(allow file-read* file-map-executable process-exec (require-any\n");
         for (path, expected) in &self.programs {
             if !crate::tools::config::valid_absolute(path) {
@@ -1290,7 +1289,7 @@ mod tests {
     #[test]
     fn native_git_profile_runs_pinned_git_and_denies_host_access() {
         let git = crate::tools::git::discover();
-        if !Path::new(crate::tools::git::GIT_CANDIDATE)
+        if !Path::new(EXECUTABLES.git[0].path)
             .try_exists()
             .expect("Command Line Tools Git availability")
         {

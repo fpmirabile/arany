@@ -5,6 +5,7 @@ mod cancel;
 pub(crate) mod catalog;
 pub(crate) mod config;
 mod dispatch;
+mod executable;
 mod fs;
 mod git;
 mod guard;

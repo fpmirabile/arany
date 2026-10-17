@@ -372,14 +372,10 @@ impl WorkspacePermissions {
             return Err(ToolError::Configuration);
         }
         let commands = {
-            let (shell, root) = if cfg!(target_os = "macos") {
-                ("/bin/sh", "/bin")
-            } else {
-                ("/usr/bin/sh", "/usr")
-            };
+            let shell = &super::executable::EXECUTABLES.shell;
             let executable =
-                std::fs::canonicalize(shell).map_err(|_| ToolError::ProtectionUnavailable)?;
-            if !executable.starts_with(root) {
+                std::fs::canonicalize(shell.path).map_err(|_| ToolError::ProtectionUnavailable)?;
+            if !executable.starts_with(shell.root) {
                 return Err(ToolError::ProtectionUnavailable);
             }
             let executable = executable.to_str().ok_or(ToolError::Path)?.to_owned();

@@ -1,5 +1,6 @@
 use super::ToolError;
 use super::config::Program;
+use super::executable::{EXECUTABLES, git_root, has_magic};
 use super::guard::GuardContext;
 use super::types::{
     FORBIDDEN_NAMES, MAX_GIT_LOG_COMMITS, MAX_SNAPSHOT_BYTES, ToolCall, forbidden, hex_digest,
@@ -81,23 +82,6 @@ const CONFIG_BYTES: usize = 64 * 1024;
 const MAX_GIT_RUNTIME: Duration = Duration::from_secs(20);
 pub(super) const VIEW: &str = "git-view";
 pub(super) const HOME: &str = "git-home";
-/// The root a pinned system Git must live under: Command Line Tools on macOS, `/usr` on Linux.
-pub(super) const GIT_ROOT: &str = if cfg!(target_os = "macos") {
-    "/Library/Developer/CommandLineTools"
-} else {
-    "/usr"
-};
-pub(super) const GIT_CANDIDATE: &str = if cfg!(target_os = "macos") {
-    "/Library/Developer/CommandLineTools/usr/bin/git"
-} else {
-    "/usr/bin/git"
-};
-/// Native executable magic: ELF on Linux, Mach-O (thin or fat) on macOS.
-const EXECUTABLE_MAGICS: &[&[u8]] = if cfg!(target_os = "macos") {
-    &[b"\xca\xfe\xba\xbe", b"\xcf\xfa\xed\xfe"]
-} else {
-    &[b"\x7fELF"]
-};
 const VIEW_CONFIG: &[u8] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\thooksPath = /dev/null\n\tuntrackedCache = false\n";
 /// Repository data the view links as `(entry, directory, required)`; nothing else in `.git` is read.
 const LINKED: [(&str, bool, bool); 5] = [
@@ -126,11 +110,7 @@ fn executable_bytes(executable: &str) -> Result<Vec<u8>, ToolError> {
     file.take(MAX_SNAPSHOT_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| ToolError::Operation)?;
-    if bytes.len() > MAX_SNAPSHOT_BYTES
-        || !EXECUTABLE_MAGICS
-            .iter()
-            .any(|magic| bytes.starts_with(magic))
-    {
+    if bytes.len() > MAX_SNAPSHOT_BYTES || !has_magic(&bytes, EXECUTABLES.git_magics) {
         return Err(ToolError::ChangedInput);
     }
     Ok(bytes)
@@ -156,21 +136,23 @@ pub(super) fn verify_host_executable(git: &Program) -> Result<(), ToolError> {
 
 /// The system Git that folder trust pins; `None` reports typed Git reads unavailable.
 pub(super) fn discover() -> Option<Program> {
-    let executable = std::fs::canonicalize(GIT_CANDIDATE).ok()?;
-    if !executable.starts_with(GIT_ROOT) {
-        return None;
-    }
-    let executable = executable.to_str()?.to_owned();
-    let sha256 = hex_digest(&executable_bytes(&executable).ok()?);
-    let program = Program {
-        name: "git".into(),
-        executable,
-        sha256,
-        interpreter: false,
-        inputs: Vec::new(),
-    };
-    verify_host_executable(&program).ok()?;
-    Some(program)
+    EXECUTABLES.git.iter().find_map(|candidate| {
+        let executable = std::fs::canonicalize(candidate.path).ok()?;
+        if !git_root(&executable) {
+            return None;
+        }
+        let executable = executable.to_str()?.to_owned();
+        let sha256 = hex_digest(&executable_bytes(&executable).ok()?);
+        let program = Program {
+            name: "git".into(),
+            executable,
+            sha256,
+            interpreter: false,
+            inputs: Vec::new(),
+        };
+        verify_host_executable(&program).ok()?;
+        Some(program)
+    })
 }
 
 enum Prepared {
@@ -975,7 +957,7 @@ mod tests {
     fn discover_pins_the_root_owned_system_git() {
         let git = discover().expect("pinned system git");
         assert_eq!(git.name, "git");
-        assert!(Path::new(&git.executable).starts_with(GIT_ROOT));
+        assert!(git_root(Path::new(&git.executable)));
         assert_eq!(
             git.sha256,
             hex_digest(&std::fs::read(&git.executable).unwrap())

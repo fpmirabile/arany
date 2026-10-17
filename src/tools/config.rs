@@ -112,7 +112,7 @@ impl Config {
             if git.name != "git"
                 || git.interpreter
                 || !git.inputs.is_empty()
-                || !std::path::Path::new(&git.executable).starts_with(super::git::GIT_ROOT)
+                || !super::executable::git_root(std::path::Path::new(&git.executable))
             {
                 return Err(ToolError::Configuration);
             }
@@ -297,23 +297,8 @@ impl Program {
     pub(super) fn verify(&self) -> Result<(), ToolError> {
         let file = open_absolute(&self.executable)?;
         let bytes = read_regular(file, MAX_SNAPSHOT_BYTES)?;
-        let native_binary = if cfg!(target_os = "macos") {
-            matches!(
-                bytes.get(..4),
-                Some(
-                    b"\xfe\xed\xfa\xce"
-                        | b"\xce\xfa\xed\xfe"
-                        | b"\xfe\xed\xfa\xcf"
-                        | b"\xcf\xfa\xed\xfe"
-                        | b"\xca\xfe\xba\xbe"
-                        | b"\xbe\xba\xfe\xca"
-                        | b"\xca\xfe\xba\xbf"
-                        | b"\xbf\xba\xfe\xca"
-                )
-            )
-        } else {
-            bytes.starts_with(b"\x7fELF")
-        };
+        let native_binary =
+            super::executable::has_magic(&bytes, super::executable::EXECUTABLES.program_magics);
         if hex_digest(&bytes) != self.sha256 || !native_binary {
             return Err(ToolError::ChangedInput);
         }
