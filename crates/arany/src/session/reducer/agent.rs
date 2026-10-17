@@ -202,11 +202,11 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             let valid_role = match fallback.role {
                 ProviderRole::Child => agent.role == AgentRole::Child,
                 ProviderRole::Review => {
-                    agent.role == AgentRole::Primary
-                        && run
-                            .tools
-                            .last()
-                            .is_some_and(|tool| tool.observation.is_none())
+                    let own_tool = match agent.role {
+                        AgentRole::Child => agent.tools.last(),
+                        AgentRole::Primary => run.tools.last(),
+                    };
+                    own_tool.is_some_and(|tool| tool.observation.is_none())
                 }
                 ProviderRole::Primary => {
                     agent.role == AgentRole::Primary

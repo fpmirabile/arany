@@ -511,6 +511,90 @@ mod goal_replay_tests {
         }
     }
 
+    #[test]
+    fn research_child_review_fallback_requires_its_own_pending_tool() {
+        use crate::provider::{ProviderFallback, ProviderRole, Providers};
+        let (mut view, goal, run, child) = research_session();
+        view.goals[0]
+            .plan_contract
+            .as_mut()
+            .unwrap()
+            .budget
+            .max_tokens = None;
+        let primary_agent = view.runs[0].primary().unwrap().id;
+        let config = view.runs[0].config.as_mut().unwrap();
+        let primary = config.identity().unwrap();
+        let mut alternate = primary.clone();
+        alternate.model = "alternate-model".into();
+        config.providers = Some(Providers::all(vec![primary.clone(), alternate.clone()]));
+        let fallback = Event::ProviderFallbackUsed {
+            run_id: run,
+            agent_run_id: child,
+            fallback: ProviderFallback {
+                role: ProviderRole::Review,
+                call_index: 1,
+                from: primary,
+                to: alternate,
+                failure: ProviderCallDisposition::Unavailable,
+            },
+        };
+        let read = child_intent(
+            run,
+            child,
+            ToolCall::Read {
+                path: "src/lib.rs".into(),
+                offset: 0,
+                limit: 1024,
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("child Tool request");
+        let mut elsewhere = view.clone();
+        elsewhere.runs[0].tools.push(ToolView {
+            intent: child_intent(
+                run,
+                primary_agent,
+                ToolCall::Read {
+                    path: "src/main.rs".into(),
+                    offset: 0,
+                    limit: 1024,
+                },
+            ),
+            observation: None,
+            review_call_index: None,
+            permission_verdict: None,
+            finished_sequence: None,
+        });
+        apply(&mut elsewhere, reserve_child_call(goal, run, child)).expect("review reservation");
+        assert!(rejected(&elsewhere, fallback.clone()));
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: read.clone(),
+                active_ceiling_ms: 0,
+            },
+        )
+        .expect("child Tool starts");
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("review reservation");
+        apply(&mut view, fallback).expect("child review fallback");
+        assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
+        apply(
+            &mut view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: child,
+                observation: observation_for(read, b"ok"),
+            },
+        )
+        .expect("child Tool finishes after the review switch");
+    }
+
     fn session_with(session_id: SessionId, events: Vec<Event>) -> Vec<EventEnvelope> {
         let mut all = vec![Event::SessionStarted {
             title: "Goal".into(),
