@@ -934,7 +934,12 @@ fn runtime_mount_diagnostics(root: &Path, mountpoint: &Path, image: &Path) -> St
             .bounded_output_for(Duration::from_secs(5), 2048)
     });
     match captured {
-        Ok(Ok(output)) => format!("{output:?}"),
+        Ok(Ok(output)) => format!(
+            "status={}; stdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
         Ok(Err(error)) => format!("lsof unavailable: {error}"),
         Err(_) => "lsof exceeded its 5-second deadline or 2048-byte per-stream bound".into(),
     }
@@ -1113,10 +1118,11 @@ async fn native_runtime_mount_journey_helper() {
     assert_eq!(replay.runs.len(), 1);
     assert_eq!(replay.runs[0], refused.run, "closed runtime refusal replay");
     assert_eq!(replay.runs[0].status, RunStatus::Failed);
-    let mountpoint = mounted.0.take().expect("mounted runtime fixture");
+    // One best-effort forced cleanup runs after diagnostics are captured; it is not a retry of the test.
+    let mountpoint = mounted.0.as_ref().expect("mounted runtime fixture");
     let detached = std::process::Command::new("/usr/bin/hdiutil")
         .args(["detach", "-force", "-quiet"])
-        .arg(&mountpoint)
+        .arg(mountpoint)
         .env_clear()
         .current_dir(root)
         .bounded_output_for(Duration::from_secs(20), 4096)
@@ -1124,8 +1130,9 @@ async fn native_runtime_mount_journey_helper() {
     assert!(
         detached.status.success(),
         "hdiutil detach: {detached:?}; mount and backing image references (current-user visibility only): {}",
-        runtime_mount_diagnostics(root, &mountpoint, &image)
+        runtime_mount_diagnostics(root, mountpoint, &image)
     );
+    let _ = mounted.0.take();
     drop(mounted);
 
     let host_cache = root.join("home/.cargo/registry/cache");
