@@ -2381,7 +2381,6 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
     assert!(footer.contains("Esc Up/Dn Pg"));
 }
 
-/// Explanation text can contain the choice words, so only a whole choice row counts.
 fn is_choice_row(row: &str) -> bool {
     matches!(
         row.trim_end().trim_start_matches(['›', ' ']),

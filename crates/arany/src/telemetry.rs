@@ -63,16 +63,12 @@ struct TraceSpan {
     context: Option<Context>,
 }
 
-/// One Goal segment's spans, projected from its committed Events at their commit times.
 pub(crate) struct RunTrace {
     tracer: SdkTracer,
     session_id: SessionId,
     goal_id: GoalId,
-    /// The Run's pinned role routes, from its committed `RunStarted`.
     routes: Option<ProviderRoutes>,
-    /// Each agent's current route per role after its committed `ProviderFallbackUsed` switches.
     switched: HashMap<(AgentRunId, ProviderRole), ProviderIdentity>,
-    /// Context compilation precedes every Event, so it rides on the next committed marker.
     context: Option<(SystemTime, SystemTime)>,
     goal: Option<TraceSpan>,
     run: Option<(RunId, TraceSpan)>,
@@ -88,7 +84,6 @@ pub(crate) struct RunTrace {
 struct AgentSpan {
     span: TraceSpan,
     call_started: Option<SystemTime>,
-    /// The route a call requested before its first fallback switch.
     requested: Option<ProviderIdentity>,
 }
 
@@ -132,7 +127,6 @@ pub(crate) enum TraceFailure {
     TaskPanic,
 }
 
-/// Which span marks a committed Event: Goal lifecycle markers go to the segment span.
 #[derive(Clone, Copy)]
 pub(crate) enum TraceEventKind {
     Goal(&'static str),
@@ -194,7 +188,6 @@ impl Telemetry {
         }
     }
 
-    /// `None` when telemetry is disabled, so a disabled Run has no subscriber.
     pub(crate) fn trace_run(
         &self,
         session_id: SessionId,
@@ -314,7 +307,6 @@ impl Default for Telemetry {
 }
 
 impl RunTrace {
-    /// Projects the segment's committed Events until `end`; `goal` then reads the Goal's view.
     pub(crate) async fn follow(
         mut self,
         subscription: Subscription,
@@ -645,8 +637,6 @@ impl RunTrace {
         }
     }
 
-    /// A segment ends with its Run; a Goal still open stays open for a later segment, so only the
-    /// Goal's own terminal status overrides the Run outcome.
     fn finish(mut self, goal: Option<&GoalView>) {
         let (Some((run, run_ended)), Some(span)) = (self.run_end, self.goal.take()) else {
             return;

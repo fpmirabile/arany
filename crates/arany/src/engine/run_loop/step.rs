@@ -23,13 +23,11 @@ use crate::tools::{
 use std::time::Duration;
 use tokio::time::Instant;
 
-/// The agent a Tool step runs for, with the state its rules read.
 pub(super) enum Grant<'s> {
     Primary {
         request: &'s mut ProviderRequest,
         review_allowed: bool,
     },
-    /// A read-only child inside its delegation's active segment, which ends at `deadline`.
     Researcher {
         child: &'s mut ChildWork,
         deadline: Instant,
@@ -64,9 +62,7 @@ impl Grant<'_> {
     }
 }
 
-/// What `before_dispatch` decided for one journaled intent.
 enum Verdict {
-    /// Run the intent; a primary Guard call carries the pause covering its capacity wait.
     Dispatch {
         intent: EffectIntent,
         queue_pause: Option<ActivePause>,
@@ -102,12 +98,9 @@ impl Permission {
     }
 }
 
-/// An intent's observation and what the step settles once it is journaled.
 struct Answer {
     observation: ToolObservation,
-    /// Not approved to dispatch: the agent stops.
     refused: bool,
-    /// The primary's active-time segment and exhaustion; `None` settles nothing.
     active_time: Option<ActiveTime>,
 }
 
@@ -117,8 +110,6 @@ struct ActiveTime {
 }
 
 impl RunLoop<'_> {
-    /// Runs one Tool request and any changeset integration it produces, then records the step;
-    /// `false` stops the agent.
     pub(super) async fn execute_step(
         &self,
         mut grant: Grant<'_>,
@@ -194,7 +185,6 @@ impl RunLoop<'_> {
         Ok(grant.context()?.rendered_len() <= runtime.context_limit_bytes())
     }
 
-    /// The intent with its runtime and result bounds; `None` when no bound leaves room to run it.
     fn sized_intent(
         &self,
         grant: &Grant<'_>,
@@ -336,8 +326,6 @@ impl RunLoop<'_> {
         Some(intent)
     }
 
-    /// Asks the ledger, then journals the intent and its observation around the dispatch
-    /// decision; `None` stops the agent.
     async fn run_intent(
         &self,
         grant: &Grant<'_>,
@@ -398,7 +386,6 @@ impl RunLoop<'_> {
         Ok((!answer.refused).then_some(answer.observation))
     }
 
-    /// Admits the step's Event tail; `false` stops the agent before anything is journaled.
     async fn admit_tool(
         &self,
         grant: &Grant<'_>,
@@ -484,8 +471,6 @@ impl RunLoop<'_> {
         }
     }
 
-    /// The single point that decides whether a journaled intent runs: timeout denial, the Goal
-    /// plan, AI review, human approval and pauses.
     async fn before_dispatch(
         &self,
         grant: &Grant<'_>,
@@ -734,7 +719,6 @@ impl RunLoop<'_> {
         ))
     }
 
-    /// Runs an approved primary intent inside its own active-time segment.
     async fn dispatch_primary(
         &self,
         runtime: &ToolRuntime,
@@ -768,8 +752,6 @@ impl RunLoop<'_> {
         })
     }
 
-    /// Runs a Guard intent; its active-time segment starts when the Guard admits it, which ends
-    /// the pause covering the capacity wait.
     async fn dispatch_guard(
         &self,
         runtime: &ToolRuntime,
@@ -1011,7 +993,6 @@ impl RunLoop<'_> {
     }
 }
 
-/// The active interval a Tool reserves once dispatched: setup, cache transfers, payload and cleanup.
 fn tool_action_bound(runtime: &ToolRuntime, intent: &EffectIntent) -> Duration {
     runtime
         .reservation_overhead(&intent.call)
@@ -1022,12 +1003,10 @@ fn tool_action_bound(runtime: &ToolRuntime, intent: &EffectIntent) -> Duration {
         .saturating_add(TOOL_CLEANUP_OVERHEAD)
 }
 
-/// A Tool's reservation with its Store tail, as an action-start ceiling counts it.
 fn tool_action_ms(runtime: &ToolRuntime, intent: &EffectIntent) -> u64 {
     duration_ms(tool_action_bound(runtime, intent).saturating_add(STORE_ACTION_OVERHEAD))
 }
 
-/// The deadlines the Guard must meet inside `segment`; a passed deadline refuses the action.
 fn active_window(
     segment: &ActiveSegment,
     cache_transfer: Duration,
@@ -1067,7 +1046,6 @@ fn active_window(
         .ok_or(ToolError::Limit)
 }
 
-/// Runs the intent; a Run cancellation cancels the worker and still waits for its observation.
 async fn execute_cancellable(
     runtime: &ToolRuntime,
     intent: EffectIntent,

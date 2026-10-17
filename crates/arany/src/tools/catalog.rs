@@ -81,8 +81,6 @@ const fn write_row(name: &'static str, order: u8, description: &'static str) -> 
     }
 }
 
-/// Every operation in `ToolCall` declaration order; `order` is the model-facing position, identical
-/// for every request so the Tool prefix stays byte-stable.
 pub(crate) static ALL: [OperationFacts; 14] = [
     read_row(
         "list",
@@ -210,7 +208,6 @@ pub(crate) fn by_name(name: &str) -> Option<&'static OperationFacts> {
     ALL.iter().find(|facts| facts.name == name)
 }
 
-/// The facts of a compiled call schema, found through its `operation` constant.
 pub(crate) fn facts_of(call: &Value) -> Option<&'static OperationFacts> {
     by_name(call["properties"]["operation"]["enum"][0].as_str()?)
 }
@@ -275,7 +272,6 @@ pub(crate) fn call_schemas() -> Vec<Value> {
         .collect()
 }
 
-/// Typed call schemas the catalog admits, in the fixed order every request offers them.
 pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
     let mut calls = call_schemas();
     calls.retain_mut(|call| {
@@ -307,13 +303,10 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
     calls
 }
 
-/// Schema of the optional Goal plan contract that Primary Tools carry; `null` when no contract is proposed.
 pub(crate) fn plan_contract_property(calls: &[Value]) -> Value {
     json!({"anyOf":[plan_contract_schema(goal_success_call_schema(calls).as_ref()), {"type":"null"}]})
 }
 
-/// Calls that can satisfy a Goal success criterion, taken from the catalog-restricted set.
-/// `None` when the catalog admits none, because JSON Schema `anyOf` must not be empty.
 fn goal_success_call_schema(calls: &[Value]) -> Option<Value> {
     let calls: Vec<_> = calls
         .iter()

@@ -30,7 +30,6 @@ pub(super) struct PermissionFrameState<'a> {
     pub profile_selection_enabled: Option<bool>,
     pub footer: Option<&'a str>,
     pub palette: Palette,
-    /// Tool approvals keep the transcript visible behind a centered panel.
     pub boxed: bool,
 }
 

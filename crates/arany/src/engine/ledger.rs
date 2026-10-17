@@ -91,7 +91,6 @@ impl Action {
         })
     }
 
-    /// `ToolFinished` Events among `max_events`, which Store admission sizes at their larger bound.
     pub(super) fn tool_observations(self) -> usize {
         match self {
             // A Tool step, and the review inside it, ends with its observation and any integration
@@ -117,7 +116,6 @@ impl Action {
         }
     }
 
-    /// What is left of the bound once `appended` of the action's Events are committed.
     pub(super) fn remaining<T>(self, appended: usize, providers: &Providers<Vec<T>>) -> usize {
         self.max_events_for(providers).saturating_sub(appended)
     }
@@ -127,7 +125,6 @@ pub(super) fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
-/// Goal bookkeeping read from the reducer's view. Only what has no Event yet lives outside it.
 pub(super) struct GoalLedger {
     goal_id: Option<GoalId>,
     state: Mutex<State>,
@@ -161,14 +158,12 @@ impl InFlight {
         })
     }
 
-    /// The Goal's active time with this Run's settled and carried time, excluding an open reservation.
     fn spent_ms(&self, goal: &GoalView) -> u64 {
         goal.active_ms
             .saturating_add(self.run_active_ms)
             .saturating_add(self.pending_ms())
     }
 
-    /// Active time spent or held, counting an open reservation as spent.
     fn consumed_ms(&self, goal: &GoalView) -> u64 {
         self.spent_ms(goal)
             .saturating_add(self.reserved_ms.unwrap_or_default())
@@ -182,7 +177,6 @@ pub(super) struct Reservation<'a> {
 }
 
 impl Reservation<'_> {
-    /// Call after the reservation Event is appended.
     pub(super) fn commit(self) -> Result<(), EngineError> {
         if self.child {
             self.ledger.in_flight(|in_flight| {
@@ -213,8 +207,6 @@ impl GoalLedger {
         Ok(read(&state.view))
     }
 
-    /// Appends a Run's Event and feeds it to the ledger before any subscriber can see it, so budget
-    /// decisions never wait on an observer.
     pub(super) async fn append(
         &self,
         journal: &Journal,
@@ -296,7 +288,6 @@ impl GoalLedger {
         self.read(|_, in_flight| in_flight.children).unwrap_or(0)
     }
 
-    /// Whether the action may begin under the Goal's effective budget.
     pub(super) fn admits(&self, action: Action) -> bool {
         match action {
             Action::ProviderCall { .. } | Action::Child { .. } | Action::Tool => {
@@ -315,7 +306,6 @@ impl GoalLedger {
         }
     }
 
-    /// Serializes Provider-call admission; the guard is held until the reservation Event is appended.
     pub(super) async fn reserve(&self, action: Action) -> Result<Reservation<'_>, EngineError> {
         let admission = self.admission.lock().await;
         if !(self.can_start_provider_call() && self.remaining_calls() != Some(0)) {
@@ -328,7 +318,6 @@ impl GoalLedger {
         })
     }
 
-    /// Charges a settled Provider result until its call record is appended.
     pub(super) fn settle(&self, input: Option<u32>, output: Option<u32>) {
         let _ = self.in_flight(|in_flight| {
             in_flight.unrecorded_tokens = in_flight
@@ -361,7 +350,6 @@ impl GoalLedger {
         self.read(|goal, _| goal.plan_contract.clone())
     }
 
-    /// The pinned budget, narrowed to the recorded plan contract.
     pub(super) fn effective_budget(&self) -> Result<GoalBudget, EngineError> {
         self.read(|goal, _| goal.effective_budget())
     }
@@ -412,7 +400,6 @@ impl GoalLedger {
         Ok((requested > maximum).then_some((requested, maximum)))
     }
 
-    /// Whether an autonomous Goal can admit another Run after this unsatisfied Run.
     pub(super) fn allows_next_run(&self) -> bool {
         self.read(|goal, in_flight| {
             goal.autonomous
@@ -430,8 +417,6 @@ impl GoalLedger {
             .unwrap_or(false)
     }
 
-    /// Whether the contract admits this Run along with the earlier ones. The in-segment check is
-    /// provisional; the reducer rechecks after settlement.
     pub(super) fn can_narrow(&self, contract: &GoalPlanContract) -> bool {
         self.read(|goal, in_flight| {
             let usage = admission_usage(goal, in_flight, goal.run_ids.len().saturating_sub(1));
@@ -443,7 +428,6 @@ impl GoalLedger {
         .unwrap_or(false)
     }
 
-    /// The active time a starting Run may spend: what remains of the effective budget.
     pub(super) fn run_active_deadline(&self) -> Result<Option<u64>, EngineError> {
         self.read(|goal, _| {
             goal.effective_budget()
@@ -452,7 +436,6 @@ impl GoalLedger {
         })
     }
 
-    /// Reserves an action's active interval in memory, with the time carried since the last settlement.
     pub(super) fn reserve_active(&self, action_ms: u64) -> Result<(Instant, u64), EngineError> {
         self.update(|goal, in_flight| {
             let now = Instant::now();
@@ -488,7 +471,6 @@ impl GoalLedger {
         })?
     }
 
-    /// Settles the open reservation; `origin` starts the next carried time.
     pub(super) fn settle_active(
         &self,
         active_ms: u64,
@@ -511,7 +493,6 @@ impl GoalLedger {
         })
     }
 
-    /// The Run's active-time bound through the open reservation, or carried time, plus `pending_ms`.
     pub(super) fn active_ceiling(&self, pending_ms: u64) -> Result<u64, EngineError> {
         self.in_flight(|in_flight| {
             // With no reservation open, the Store tail allows for work before the next one starts.
@@ -532,7 +513,6 @@ impl GoalLedger {
             .unwrap_or(true)
     }
 
-    /// This Run's active time so far, carried time included, as RunFinished records it.
     pub(super) fn run_active_ms(&self) -> Result<u64, EngineError> {
         self.in_flight(|in_flight| {
             in_flight
@@ -625,7 +605,6 @@ fn usage_unknown(goal: &GoalView, in_flight: &InFlight) -> bool {
     goal.token_usage_unknown || in_flight.unrecorded_unknown > 0
 }
 
-/// Usage the admission rule judges, with the unsettled active segment counted as spent.
 fn admission_usage(goal: &GoalView, in_flight: &InFlight, runs: usize) -> GoalUsage {
     GoalUsage {
         runs,
