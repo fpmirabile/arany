@@ -544,6 +544,8 @@ async fn goal_failure_and_cancellation_have_distinct_terminal_receipts() {
             }
         );
         assert_eq!(view.goals[0].report.is_some(), !cancel);
+        assert!(!view.goals[0].budget_closed);
+        assert!(view.continuable_goal().is_none());
         store.close().await.expect("Store shutdown");
     }
 }
@@ -865,6 +867,213 @@ async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
     store.close().await.expect("Store shutdown");
 }
 
+#[tokio::test]
+async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after_restart() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let first_provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
+        Finish {
+            summary: "first Run complete".into(),
+            result: "continue later".into(),
+        },
+    )]));
+    let first_engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("first engine");
+    let mut first = request(&workspace, "Ship the migration");
+    first.include_paths.clear();
+    first.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_provider_calls: Some(1),
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    first.goal.finish_after_run = false;
+    let initial = run_to_end(&first_engine, &first_provider, first)
+        .await
+        .expect("first Goal Run");
+    first_engine.close().await.expect("first engine shutdown");
+
+    let engine = Engine::open(
+        StateRoot::open_existing(&state_path).expect("reopened state"),
+        EngineConfig::default(),
+    )
+    .expect("second engine");
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
+        Finish {
+            summary: "second Run complete".into(),
+            result: "done".into(),
+        },
+    )]));
+    let continue_request = |source| {
+        let mut next = request(&workspace, "");
+        next.session_id = Some(initial.session_id);
+        next.title = None;
+        next.include_paths.clear();
+        next.goal = arany::GoalRequest::continue_from(
+            source,
+            arany::GoalBudget {
+                max_provider_calls: Some(4),
+                ..arany::GoalBudget::default()
+            },
+            arany::ToolResourceSettings::default(),
+        );
+        next
+    };
+
+    // The budget-paused Goal is not closed yet, so it is not an exhausted source.
+    assert!(matches!(
+        run_to_end(&engine, &provider, continue_request(initial.goal_id)).await,
+        Err(EngineError::GoalNotContinuable)
+    ));
+
+    let mut closing = request(&workspace, "");
+    closing.session_id = Some(initial.session_id);
+    closing.title = None;
+    closing.include_paths.clear();
+    closing.goal = arany::GoalRequest::resume(initial.goal_id, true);
+    assert!(matches!(
+        run_to_end(&engine, &provider, closing).await,
+        Err(EngineError::GoalBudgetExhausted)
+    ));
+
+    let unknown = arany::GoalId::new();
+    assert!(matches!(
+        run_to_end(&engine, &provider, continue_request(unknown)).await,
+        Err(EngineError::GoalNotContinuable)
+    ));
+    let mut with_text = continue_request(initial.goal_id);
+    with_text.objective = "another objective".into();
+    assert!(matches!(
+        run_to_end(&engine, &provider, with_text).await,
+        Err(EngineError::GoalNotContinuable)
+    ));
+
+    let continued = run_to_end(&engine, &provider, continue_request(initial.goal_id))
+        .await
+        .expect("continued Goal Run");
+    assert_ne!(continued.goal_id, initial.goal_id);
+    assert!(matches!(
+        run_to_end(&engine, &provider, continue_request(initial.goal_id)).await,
+        Err(EngineError::GoalNotContinuable)
+    ));
+    engine.close().await.expect("engine shutdown");
+
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let events = store
+        .load_session(initial.session_id)
+        .await
+        .expect("Events");
+    let view = SessionView::replay(initial.session_id, &events)
+        .expect("strict replay")
+        .expect("Session");
+    let old = view.goal(initial.goal_id).expect("source Goal");
+    let new = view.goal(continued.goal_id).expect("continued Goal");
+    assert_eq!(old.status, arany::GoalStatus::Failed);
+    assert_eq!(old.run_ids.len(), 1);
+    assert_eq!(new.continues, Some(initial.goal_id));
+    assert_eq!(new.objective, "Ship the migration");
+    assert_eq!(new.budget.max_provider_calls, Some(4));
+    assert_eq!(new.status, arany::GoalStatus::Completed);
+    assert_eq!(new.run_ids.len(), 1);
+    assert_eq!(new.provider_calls, 1);
+    assert!(!events.iter().any(|event| matches!(
+        &event.event,
+        Event::GoalResumed { goal_id } if *goal_id == initial.goal_id
+    )));
+    store.close().await.expect("Store shutdown");
+}
+
+#[tokio::test]
+async fn invalid_response_on_the_last_allowed_call_is_a_failure_not_a_budget_close() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
+        Finish {
+            summary: String::new(),
+            result: "invalid finish".into(),
+        },
+    )]));
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
+    let mut input = request(&workspace, "Fail on the last call");
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_provider_calls: Some(1),
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    let outcome = run_to_end(&engine, &provider, input)
+        .await
+        .expect("failed Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Failed);
+    assert_eq!(goal.provider_calls, 1);
+    assert!(!goal.budget_closed);
+    assert!(view.continuable_goal().is_none());
+}
+
+#[tokio::test]
+async fn tool_request_refused_on_the_last_allowed_call_is_a_budget_close() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_provider_calls: Some(1),
+        ..arany::GoalBudget::default()
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![crate::tool_outcome(
+        arany::ToolCall::Search {
+            path: "notes/facts.txt".into(),
+            query: "v".into(),
+        },
+        None,
+    )]));
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, "Read after the budget");
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::new(budget, arany::GoalPhase::Implementation);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("budget-stopped Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Failed);
+    assert!(goal.budget_closed);
+    assert_eq!(
+        view.continuable_goal().map(|source| source.id),
+        Some(goal.id)
+    );
+}
+
 struct FiniteTokenTeam {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
@@ -1143,6 +1352,7 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
                         ..arany::GoalBudget::default()
                     },
                     resource_settings: arany::ToolResourceSettings::default(),
+                    continues: None,
                 },
             )
             .await
@@ -1251,6 +1461,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
                 max_provider_calls: Some(1),
                 ..arany::GoalBudget::default()
             },
+            continues: None,
         },
         Event::GoalRunLinked {
             goal_id,
@@ -1837,6 +2048,14 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert!(
+        goal.budget_closed,
+        "a budget close is journaled as exhausted"
+    );
+    assert_eq!(
+        view.continuable_goal().map(|source| source.id),
+        Some(goal.id)
+    );
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert_eq!(goal.run_ids.len(), 2);
     assert!(goal.report.is_some(), "exhausted Goal keeps its report");
@@ -1886,6 +2105,14 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert!(
+        goal.budget_closed,
+        "a budget close is journaled as exhausted"
+    );
+    assert_eq!(
+        view.continuable_goal().map(|source| source.id),
+        Some(goal.id)
+    );
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert_eq!(goal.provider_calls, 3);
     assert!(goal.report.is_some(), "exhausted Goal keeps its report");
@@ -1976,6 +2203,14 @@ async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report(
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert!(
+        goal.budget_closed,
+        "a budget close is journaled as exhausted"
+    );
+    assert_eq!(
+        view.continuable_goal().map(|source| source.id),
+        Some(goal.id)
+    );
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert_eq!(goal.provider_calls, 2, "no third Provider call is reserved");
     assert_eq!(goal.known_tokens, 10);
@@ -2255,6 +2490,14 @@ async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_r
     .id;
     let (events, view) = replayed(&state_path, session_id).await;
     let goal = view.goals.last().expect("Goal");
+    assert!(
+        goal.budget_closed,
+        "a budget close is journaled as exhausted"
+    );
+    assert_eq!(
+        view.continuable_goal().map(|source| source.id),
+        Some(goal.id)
+    );
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert!(goal.report.is_some());
     assert_eq!(
@@ -3935,6 +4178,8 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
     let goal = view.goal(outcome.goal_id).expect("Goal");
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert!(goal.report.is_some());
+    assert!(goal.budget_closed);
+    assert_eq!(view.continuable_goal().map(|goal| goal.id), Some(goal.id));
     assert_action_bounds(&events, false, false);
 }
 
@@ -4495,6 +4740,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
                 max_runs: 2,
                 ..arany::GoalBudget::default()
             },
+            continues: None,
         },
         Event::GoalRunLinked {
             goal_id,

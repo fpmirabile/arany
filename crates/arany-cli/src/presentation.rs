@@ -725,6 +725,7 @@ mod exec_jsonl_tests {
             phase: GoalPhase::Implementation,
             autonomous: false,
             resource_settings: arany::ToolResourceSettings::default(),
+            continues: None,
         }
     }
 
@@ -740,6 +741,7 @@ mod exec_jsonl_tests {
                 unresolved: Vec::new(),
                 cached_input_tokens: 0,
             },
+            exhausted: false,
         }
     }
 
@@ -1170,6 +1172,7 @@ mod goal_status_tests {
                 phase: GoalPhase::Implementation,
                 autonomous,
                 resource_settings: arany::ToolResourceSettings::default(),
+                continues: None,
             },
         ]
         .into_iter()

@@ -954,6 +954,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
                     phase: arany::GoalPhase::Implementation,
                     autonomous: false,
                     resource_settings: arany::ToolResourceSettings::default(),
+                    continues: None,
                 },
             )
             .await
