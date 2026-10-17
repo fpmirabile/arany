@@ -3094,6 +3094,61 @@ fn collaboration_capacity_corpus_rejects_invalid_delegation() {
 
 #[cfg(unix)]
 #[test]
+fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Delegate(Delegate {
+                children: vec!["Check fact".into()],
+            }),
+            ProviderOutcome::Finish(Finish {
+                summary: "checked".into(),
+                result: "Fact is true".into(),
+            }),
+            ProviderOutcome::Delegate(Delegate {
+                children: vec!["Second round".into()],
+            }),
+        ]);
+        let requests = provider.requests.clone();
+        let provider = Arc::new(provider);
+        let engine = Engine::open(
+            StateRoot::admit(&temp.path().join("state")).expect("private state"),
+            EngineConfig::default(),
+        )
+        .expect("engine");
+        let mut run_request = request(&workspace, "Question");
+        run_request.policy = CollaborationPolicy::Team {
+            max_active_children: 1,
+        };
+        let outcome = run_to_end(&engine, &provider, run_request)
+            .await
+            .expect("durable failed Run");
+        assert_eq!(outcome.run.status, RunStatus::Failed);
+        assert!(outcome.run.assistant_message.is_none());
+        assert_eq!(outcome.run.agents.len(), 2);
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 3, "no second delegation round starts");
+            assert_eq!(requests[2].phase, AgentPhase::RootSynthesis);
+        }
+        let calls = &outcome.run.agents[0].provider_calls;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[1].disposition,
+            ProviderCallDisposition::InvalidResponse
+        );
+        engine.close().await.expect("engine shutdown");
+    });
+}
+
+#[test]
 fn workspace_paths_fail_closed_before_a_run_is_accepted() {
     use std::os::unix::fs::symlink;
 
