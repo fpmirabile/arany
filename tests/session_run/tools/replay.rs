@@ -15,10 +15,10 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let run = RunId::new();
     let primary = AgentRunId::new();
     const AGENT_SPAWNED: usize = 5;
-    const TOOL_STARTED: usize = 11;
-    const TOOL_FINISHED: usize = 12;
-    const NEXT_CALL_RESERVED: usize = 14;
-    const NEXT_CALL_RECORDED: usize = 15;
+    const TOOL_STARTED: usize = 9;
+    const TOOL_FINISHED: usize = 10;
+    const NEXT_CALL_RESERVED: usize = 11;
+    const NEXT_CALL_RECORDED: usize = 12;
     const COMMAND_STARTED: usize = TOOL_STARTED;
     const COMMAND_FINISHED: usize = TOOL_STARTED + 1;
     const INTEGRATION_STARTED: usize = TOOL_STARTED + 2;
@@ -131,6 +131,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunStarted {
             run_id: run,
             config,
+            active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
         },
         Event::AgentSpawned {
             run_id: run,
@@ -140,22 +141,13 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             objective: None,
             grant: None,
         },
-        Event::GoalActiveTimeReserved {
-            goal_id: goal,
-            run_id: run,
-            reserved_ms: 30_000,
-        },
         Event::GoalProviderCallReserved {
             goal_id: goal,
             run_id: run,
             agent_run_id: primary,
+            active_ceiling_ms: 0,
         },
         record(ProviderCallDisposition::ToolRequested),
-        Event::GoalActiveTimeSettled {
-            goal_id: goal,
-            run_id: run,
-            active_ms: 1_000,
-        },
         Event::GoalPlanContractRecorded {
             goal_id: goal,
             run_id: run,
@@ -178,6 +170,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             run_id: run,
             agent_run_id: primary,
             intent,
+            active_ceiling_ms: 0,
         },
         Event::ToolFinished {
             run_id: run,
@@ -186,22 +179,13 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
     ];
     let suffix = vec![
-        Event::GoalActiveTimeReserved {
-            goal_id: goal,
-            run_id: run,
-            reserved_ms: 30_000,
-        },
         Event::GoalProviderCallReserved {
             goal_id: goal,
             run_id: run,
             agent_run_id: primary,
+            active_ceiling_ms: 0,
         },
         record(ProviderCallDisposition::Finished),
-        Event::GoalActiveTimeSettled {
-            goal_id: goal,
-            run_id: run,
-            active_ms: 1_000,
-        },
         Event::AgentFinished {
             run_id: run,
             agent_run_id: primary,
@@ -216,6 +200,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Finished,
+            active_ms: 0,
         },
     ];
     let replay = |events: Vec<Event>| {
@@ -229,8 +214,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     | Event::GoalResumed { .. }
                     | Event::GoalFinished { .. } => (None, None),
                     Event::GoalRunLinked { run_id, .. }
-                    | Event::GoalActiveTimeReserved { run_id, .. }
-                    | Event::GoalActiveTimeSettled { run_id, .. }
                     | Event::GoalPlanContractRecorded { run_id, .. } => (Some(*run_id), None),
                     Event::MessageAccepted { run_id, .. }
                     | Event::RunStarted { run_id, .. }
@@ -371,6 +354,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 goal_id: goal,
                 run_id: run,
                 agent_run_id: primary,
+                active_ceiling_ms: 0,
             },
             review.clone(),
         ],
@@ -397,6 +381,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                             goal_id: goal,
                             run_id: run,
                             agent_run_id: primary,
+                            active_ceiling_ms: 0,
                         },
                         review.clone(),
                     ],
@@ -410,6 +395,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                             goal_id: goal,
                             run_id: run,
                             agent_run_id: primary,
+                            active_ceiling_ms: 0,
                         },
                         review.clone(),
                     ],
@@ -521,6 +507,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 goal_id: goal,
                 run_id: run,
                 agent_run_id: primary,
+                active_ceiling_ms: 0,
             });
             denied.push(failure);
         }
@@ -535,6 +522,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             Event::RunFinished {
                 run_id: run,
                 disposition: RunDisposition::Failed,
+                active_ms: 0,
             },
         ]);
         let view = replay(denied).unwrap().unwrap();
@@ -612,6 +600,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             run_id: run,
             agent_run_id: primary,
             intent: command_intent.clone(),
+            active_ceiling_ms: 0,
         },
         observed(
             command_intent.clone(),
@@ -622,6 +611,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             run_id: run,
             agent_run_id: primary,
             intent: integration_intent.clone(),
+            active_ceiling_ms: 0,
         },
         observed(
             integration_intent.clone(),
@@ -642,6 +632,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 goal_id: goal,
                 run_id: run,
                 agent_run_id: primary,
+                active_ceiling_ms: 0,
             },
             review.clone(),
         ],
@@ -653,6 +644,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 goal_id: goal,
                 run_id: run,
                 agent_run_id: primary,
+                active_ceiling_ms: 0,
             },
             review.clone(),
         ],
@@ -668,12 +660,14 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 goal_id: goal,
                 run_id: run,
                 agent_run_id: primary,
+                active_ceiling_ms: 0,
             },
             review.clone(),
             Event::GoalProviderCallReserved {
                 goal_id: goal,
                 run_id: run,
                 agent_run_id: primary,
+                active_ceiling_ms: 0,
             },
             review.clone(),
         ],
@@ -699,6 +693,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
+            active_ms: 0,
         },
     ]);
     let view = replay(unpublished).unwrap().unwrap();
@@ -743,6 +738,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
+            active_ms: 0,
         },
     ]);
     let view = replay(uncertain_cache).unwrap().unwrap();
@@ -843,6 +839,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                             goal_id: goal,
                             run_id: run,
                             agent_run_id: primary,
+                            active_ceiling_ms: 0,
                         },
                         record(ProviderCallDisposition::ToolRequested),
                     ],
@@ -856,6 +853,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                             goal_id: goal,
                             run_id: run,
                             agent_run_id: primary,
+                            active_ceiling_ms: 0,
                         },
                         record(ProviderCallDisposition::Finished),
                     ],
@@ -904,6 +902,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             goal_id: goal,
             run_id: run,
             agent_run_id: primary,
+            active_ceiling_ms: 0,
         },
         record(ProviderCallDisposition::Finished),
         Event::AgentFinished {
@@ -916,6 +915,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
+            active_ms: 0,
         },
     ]);
     let view = replay(out_of_plan_integration.clone()).unwrap().unwrap();
@@ -970,6 +970,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     goal_id: goal,
                     run_id: run,
                     agent_run_id: primary,
+                    active_ceiling_ms: 0,
                 },
                 record(ProviderCallDisposition::ToolRequested),
             ]);

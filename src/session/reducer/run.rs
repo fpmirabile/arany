@@ -1,6 +1,6 @@
 use super::{
-    AgentStatus, RunStatus, RunView, SessionView, active_run, active_run_goal, current_run,
-    is_delegated_synthesis, is_tool_continuation,
+    AgentStatus, RunStatus, RunView, SessionView, active_run, active_run_goal, current_goal_mut,
+    current_run, is_delegated_synthesis, is_tool_continuation,
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{
@@ -47,7 +47,11 @@ pub(super) fn apply(
                 steering_notes: Vec::new(),
             });
         }
-        Event::RunStarted { run_id, config } => {
+        Event::RunStarted {
+            run_id,
+            config,
+            active_deadline_ms,
+        } => {
             let workspace_identity = (config.workspace_device, config.workspace_inode);
             if current
                 .workspace_identity
@@ -56,9 +60,19 @@ pub(super) fn apply(
                 return Err(ReplayError::InvalidTransition);
             }
             let goal = active_run_goal(current, *run_id).ok_or(ReplayError::InvalidTransition)?;
-            if goal.status != GoalStatus::Running || goal.workspace_identity != workspace_identity {
+            let deadline_fits = match goal.effective_budget().max_active_ms {
+                Some(limit) => active_deadline_ms
+                    .is_some_and(|deadline| deadline <= limit.saturating_sub(goal.active_ms)),
+                None => active_deadline_ms.is_none(),
+            };
+            if goal.status != GoalStatus::Running
+                || goal.workspace_identity != workspace_identity
+                || goal.active_deadline.is_some()
+                || !deadline_fits
+            {
                 return Err(ReplayError::InvalidTransition);
             }
+            let goal_id = goal.id;
             let run = current_run(current, *run_id)?;
             if run.status != RunStatus::Pending || run.config.is_some() {
                 return Err(ReplayError::InvalidTransition);
@@ -66,6 +80,9 @@ pub(super) fn apply(
             run.config = Some(config.clone());
             run.status = RunStatus::Active;
             current.workspace_identity = Some(workspace_identity);
+            let goal = current_goal_mut(current, goal_id)?;
+            goal.active_deadline = Some((*run_id, *active_deadline_ms));
+            goal.active_ceiling_ms = 0;
         }
         Event::AssistantDisplayRecorded {
             run_id,
@@ -155,6 +172,7 @@ pub(super) fn apply(
         Event::RunFinished {
             run_id,
             disposition,
+            active_ms,
         } => {
             let run = active_run(current, *run_id)?;
             if run.agents.is_empty()
@@ -187,6 +205,15 @@ pub(super) fn apply(
                 .iter_mut()
                 .find(|goal| goal.active_run == Some(*run_id))
             {
+                if goal.active_deadline.map(|(deadline_run, _)| deadline_run) != Some(*run_id) {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                goal.active_ms = goal
+                    .active_ms
+                    .checked_add(*active_ms)
+                    .ok_or(ReplayError::InvalidTransition)?;
+                goal.active_deadline = None;
+                goal.active_ceiling_ms = 0;
                 goal.active_run = None;
                 goal.awaiting_plan_contract = false;
             }

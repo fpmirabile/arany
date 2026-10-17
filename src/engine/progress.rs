@@ -240,8 +240,6 @@ pub(super) async fn append_observed(
         Event::GoalStarted { .. } => Some(TraceEventKind::GoalStarted),
         Event::GoalRunLinked { .. } => Some(TraceEventKind::GoalRunLinked),
         Event::GoalResumed { .. } => Some(TraceEventKind::GoalResumed),
-        Event::GoalActiveTimeReserved { .. } => Some(TraceEventKind::GoalActiveTimeReserved),
-        Event::GoalActiveTimeSettled { .. } => Some(TraceEventKind::GoalActiveTimeSettled),
         Event::GoalPlanContractRecorded { .. } => Some(TraceEventKind::GoalPlanContractRecorded),
         Event::GoalFinished { .. } => Some(TraceEventKind::GoalFinished),
         Event::GoalProviderCallReserved { .. } => Some(TraceEventKind::GoalProviderCallReserved),

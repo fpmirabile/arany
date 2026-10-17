@@ -135,8 +135,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         awaiting_plan_contract: false,
         active_ms: 0,
         uncertain_active_ms: 0,
-        reserved_active_run: None,
-        reserved_active_ms: None,
+        active_deadline: None,
         compaction_call_reserved: None,
         uncertain_compaction_calls: 0,
         provider_calls: 1,
@@ -147,6 +146,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         started_sequence: 0,
         finished_sequence: None,
         known_cached_tokens: 0,
+        active_ceiling_ms: 0,
     };
     let view = crate::session::SessionView {
         id: session_id,

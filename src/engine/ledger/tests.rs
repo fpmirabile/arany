@@ -22,8 +22,7 @@ fn goal_view(goal_id: GoalId, budget: GoalBudget) -> GoalView {
         awaiting_plan_contract: false,
         active_ms: 0,
         uncertain_active_ms: 0,
-        reserved_active_run: None,
-        reserved_active_ms: None,
+        active_deadline: None,
         provider_calls: 0,
         unobserved_provider_calls: Vec::new(),
         compaction_call_reserved: None,
@@ -34,6 +33,7 @@ fn goal_view(goal_id: GoalId, budget: GoalBudget) -> GoalView {
         report: None,
         started_sequence: 0,
         finished_sequence: None,
+        active_ceiling_ms: 0,
     }
 }
 
@@ -113,12 +113,22 @@ fn poisoned_state_fails_closed() {
 #[test]
 fn active_plan_narrowing_uses_settled_action_usage() {
     let ledger = ledger(unlimited_time());
-    edit(&ledger, |goal, _| goal.active_ms = 100);
     let narrowing = contract(GoalBudget {
         max_active_ms: Some(10_000),
         ..GoalBudget::default()
     });
-    assert!(ledger.can_narrow(&narrowing));
+    // The live Run's settled actions count although no Event has recorded them yet.
+    edit(&ledger, |_, in_flight| in_flight.run_active_ms = 10_000);
+    assert!(!ledger.can_narrow(&narrowing));
+    edit(&ledger, |_, in_flight| {
+        in_flight.run_active_ms = 100;
+        in_flight.reserved_ms = Some(20_000);
+    });
+    assert!(
+        ledger.can_narrow(&narrowing),
+        "an open reservation is not yet spent"
+    );
+    edit(&ledger, |_, in_flight| in_flight.reserved_ms = None);
     edit(&ledger, |goal, _| goal.plan_contract = Some(narrowing));
     assert!(
         ledger
@@ -131,33 +141,31 @@ fn active_plan_narrowing_uses_settled_action_usage() {
 fn unlimited_goal_admits_a_finite_build_action_above_the_default_usage_ceiling() {
     let ledger = ledger(unlimited_time());
     let (_, reserved_ms) = ledger
-        .active_reservation(1_845_000)
+        .reserve_active(1_845_000)
         .expect("maximum macOS Build action plus Store tail");
     assert_eq!(reserved_ms, 1_850_000);
 }
 
 #[test]
-fn unlimited_goal_checkpoints_carried_time_before_a_maximum_build_action() {
+fn carried_time_joins_the_next_reservation_and_the_runs_active_time() {
     let ledger = ledger(unlimited_time());
     edit(&ledger, |_, in_flight| {
         in_flight.origin = Some(Instant::now() - Duration::from_secs(11));
     });
-    assert!(ledger.needs_carried_time_checkpoint(1_845_000).unwrap());
-
-    let (_, carried_ms) = ledger
-        .pending_active_reservation()
-        .unwrap()
-        .expect("carried active time before the Build action");
-    edit(&ledger, |goal, in_flight| {
-        goal.active_ms += carried_ms;
-        in_flight.origin = None;
-    });
-
-    assert!(!ledger.needs_carried_time_checkpoint(1_845_000).unwrap());
-    let (_, build_reservation) = ledger
-        .active_reservation(1_845_000)
-        .expect("maximum Build interval after the carried checkpoint");
-    assert_eq!(build_reservation, 1_850_000);
+    let (_, reserved_ms) = ledger
+        .reserve_active(1_845_000)
+        .expect("Build action after carried time");
+    assert!(reserved_ms >= 1_861_000, "{reserved_ms}");
+    assert!(
+        matches!(
+            ledger.reserve_active(1),
+            Err(EngineError::CoordinatorFailed)
+        ),
+        "one open reservation at a time"
+    );
+    ledger.settle_active(20_000, None).expect("settled");
+    assert!(!ledger.active_reserved());
+    assert_eq!(ledger.run_active_ms().expect("Run time"), 20_000);
 }
 
 #[tokio::test]
@@ -210,18 +218,18 @@ fn acknowledged_active_time_overrun_is_recorded_within_the_action_bound() {
         max_active_ms: Some(100),
         ..GoalBudget::default()
     });
-    edit(&ledger, |goal, _| goal.reserved_active_ms = Some(100));
+    edit(&ledger, |_, in_flight| in_flight.reserved_ms = Some(100));
     assert!(ledger.active_time_exhausted());
     edit(&ledger, |goal, in_flight| {
         goal.active_ms = 101;
-        goal.reserved_active_ms = None;
+        in_flight.reserved_ms = None;
         in_flight.origin = Some(Instant::now());
     });
     assert!(ledger.active_time_exhausted());
 }
 
 #[test]
-fn carried_acknowledgment_time_is_checkpointed_before_active_exhaustion() {
+fn carried_acknowledgment_time_counts_toward_active_exhaustion() {
     let ledger = ledger(GoalBudget {
         max_active_ms: Some(100),
         ..GoalBudget::default()
@@ -232,11 +240,11 @@ fn carried_acknowledgment_time_is_checkpointed_before_active_exhaustion() {
     });
 
     assert!(ledger.active_time_exhausted());
-    let (_, reserved_ms) = ledger
-        .pending_active_reservation()
-        .expect("bounded checkpoint")
-        .expect("carried active segment");
-    assert_eq!(reserved_ms, 2);
+    assert!(
+        ledger
+            .run_active_ms()
+            .is_ok_and(|active_ms| active_ms >= 10)
+    );
 }
 
 #[test]
@@ -245,9 +253,8 @@ fn staged_bounds_never_exceed_the_first_admission() {
         previews: true,
         steering: true,
     };
-    assert_eq!(call.max_events(), 8 + 1 + MAX_DISPLAY_CHUNKS);
+    assert_eq!(call.max_events(), 6 + 1 + MAX_DISPLAY_CHUNKS);
     assert_eq!(call.remaining(1), call.max_events() - 1);
-    assert_eq!(call.checkpointed_events(), call.max_events() + 2);
     assert_eq!(Action::Tool.remaining(usize::MAX), 0);
 }
 
@@ -263,8 +270,6 @@ fn tool_observation_slots_fit_within_each_action_bound() {
         Action::Review,
         Action::Compaction,
         Action::BoundaryCompaction { goal: true },
-        Action::Pause,
-        Action::Stop,
         Action::Delegation {
             children: 8,
             research: true,

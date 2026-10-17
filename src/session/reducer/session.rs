@@ -14,7 +14,7 @@ pub(super) fn apply(
         Event::SessionDefaultChanged { defaults } => {
             current.defaults = defaults.clone();
         }
-        Event::ContextCompacted { record } => {
+        Event::ContextCompacted { record, active_ms } => {
             let boundary = if let Some(run) = current.runs.last() {
                 run.finished_sequence.map(|sequence| (run.id, sequence))
             } else {
@@ -25,13 +25,22 @@ pub(super) fn apply(
             if boundary != Some((record.covered_run_id, record.covered_sequence)) {
                 return Err(ReplayError::InvalidSnapshot);
             }
-            if let Some(goal) = current.goals.iter_mut().find(|goal| {
+            let goal = current.goals.iter_mut().find(|goal| {
                 goal.status == GoalStatus::Running
                     && goal.run_ids.last() == Some(&record.covered_run_id)
-            }) {
+            });
+            if goal.is_some() != active_ms.is_some() {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if let (Some(goal), Some(active_ms)) = (goal, active_ms) {
                 if goal.compaction_call_reserved != Some(record.covered_run_id) {
                     return Err(ReplayError::InvalidTransition);
                 }
+                goal.active_ms = goal
+                    .active_ms
+                    .checked_add(*active_ms)
+                    .ok_or(ReplayError::InvalidTransition)?;
+                goal.active_ceiling_ms = 0;
                 let tokens = u64::from(record.input_tokens.unwrap_or_default())
                     .checked_add(u64::from(record.output_tokens.unwrap_or_default()))
                     .and_then(|tokens| goal.known_tokens.checked_add(tokens))

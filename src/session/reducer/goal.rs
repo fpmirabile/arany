@@ -56,8 +56,8 @@ impl SessionView {
             awaiting_plan_contract: false,
             active_ms: 0,
             uncertain_active_ms: 0,
-            reserved_active_run: None,
-            reserved_active_ms: None,
+            active_deadline: None,
+            active_ceiling_ms: 0,
             provider_calls: 0,
             unobserved_provider_calls: Vec::new(),
             compaction_call_reserved: None,
@@ -84,7 +84,7 @@ impl SessionView {
         let goal = current_goal_mut(self, *goal_id)?;
         if goal.status != GoalStatus::Running
             || goal.active_run.is_some()
-            || goal.reserved_active_ms.is_some()
+            || goal.active_deadline.is_some()
             || !goal.admits_next_run()
         {
             return Err(ReplayError::InvalidTransition);
@@ -122,74 +122,6 @@ impl SessionView {
         }
         goal.awaiting_plan_contract = false;
         goal.status = GoalStatus::Running;
-        Ok(())
-    }
-
-    pub(super) fn reserve_goal_active_time(
-        &mut self,
-        goal_id: &GoalId,
-        run_id: &RunId,
-        reserved_ms: &u64,
-    ) -> Result<(), ReplayError> {
-        let run_status = current_run(self, *run_id)?.status;
-        let goal = current_goal_mut(self, *goal_id)?;
-        let consumed = goal
-            .active_ms
-            .checked_add(*reserved_ms)
-            .ok_or(ReplayError::InvalidTransition)?;
-        let active_limit = goal.effective_budget().max_active_ms;
-        // A compaction call runs after its Run has ended, so its reservation follows the Run's terminal status.
-        let active_run_matches = goal.active_run == Some(*run_id)
-            || goal.active_run.is_none()
-                && run_status.is_terminal()
-                && goal.run_ids.last() == Some(run_id)
-                && goal.compaction_call_reserved == Some(*run_id);
-        if goal.status != GoalStatus::Running
-            || !active_run_matches
-            || goal.reserved_active_ms.is_some()
-            || active_limit.is_some_and(|limit| consumed > limit)
-        {
-            return Err(ReplayError::InvalidTransition);
-        }
-        goal.reserved_active_run = Some(*run_id);
-        goal.reserved_active_ms = Some(*reserved_ms);
-        Ok(())
-    }
-
-    pub(super) fn settle_goal_active_time(
-        &mut self,
-        goal_id: &GoalId,
-        run_id: &RunId,
-        active_ms: &u64,
-    ) -> Result<(), ReplayError> {
-        let run_status = current_run(self, *run_id)?.status;
-        let compaction_committed = self
-            .compactions
-            .last()
-            .is_some_and(|compaction| compaction.record.covered_run_id == *run_id);
-        let goal = current_goal_mut(self, *goal_id)?;
-        goal.reserved_active_ms
-            .ok_or(ReplayError::InvalidTransition)?;
-        let total = goal
-            .active_ms
-            .checked_add(*active_ms)
-            .ok_or(ReplayError::InvalidTransition)?;
-        let settles_active_run =
-            goal.active_run == Some(*run_id) && run_status == RunStatus::Active;
-        let settles_finished_run = goal.active_run.is_none()
-            && run_status.is_terminal()
-            && goal.run_ids.last() == Some(run_id)
-            && (goal.compaction_call_reserved == Some(*run_id)
-                || goal.compaction_call_reserved.is_none() && compaction_committed);
-        if goal.status != GoalStatus::Running
-            || !(settles_active_run || settles_finished_run)
-            || goal.reserved_active_run != Some(*run_id)
-        {
-            return Err(ReplayError::InvalidTransition);
-        }
-        goal.active_ms = total;
-        goal.reserved_active_run = None;
-        goal.reserved_active_ms = None;
         Ok(())
     }
 
@@ -240,7 +172,6 @@ impl SessionView {
         let goal = current_goal_mut(self, *goal_id)?;
         if goal.status != GoalStatus::Running
             || goal.active_run != Some(*run_id)
-            || goal.reserved_active_ms.is_some()
             || goal.plan_contract.is_some()
             || !goal.awaiting_plan_contract
             || !valid_contract_call
@@ -451,7 +382,7 @@ impl SessionView {
         let terminal = goal.status == GoalStatus::Running
             && goal.active_run.is_none()
             && disposition_matches
-            && goal.reserved_active_ms.is_none()
+            && goal.active_deadline.is_none()
             && goal.compaction_call_reserved.is_none()
             && *active_ms == goal.active_ms
             && (*status != GoalStatus::Completed
@@ -525,7 +456,7 @@ impl SessionView {
 }
 
 /// Settles the facts an unfinished Goal leaves open when it pauses: an unaccepted trailing link is not a
-/// Run, a reserved active-time segment counts as uncertain time, and crashed or orphaned provider calls
+/// Run, unsettled active time is charged as uncertain time, and crashed or orphaned provider calls
 /// leave usage unknown.
 fn settle_unfinished_facts(
     goal: &mut GoalView,
@@ -534,21 +465,24 @@ fn settle_unfinished_facts(
     if has_unaccepted_run {
         goal.run_ids.pop();
     }
-    match (goal.reserved_active_run, goal.reserved_active_ms) {
-        (Some(run_id), Some(reserved_ms)) if goal.run_ids.last() == Some(&run_id) => {
-            goal.active_ms = goal
-                .active_ms
-                .checked_add(reserved_ms)
-                .ok_or(ReplayError::InvalidTransition)?;
-            goal.uncertain_active_ms = goal
-                .uncertain_active_ms
-                .checked_add(reserved_ms)
-                .ok_or(ReplayError::InvalidTransition)?;
-            goal.reserved_active_run = None;
-            goal.reserved_active_ms = None;
-        }
-        (None, None) => {}
-        _ => return Err(ReplayError::InvalidTransition),
+    if goal
+        .active_deadline
+        .is_some_and(|(run_id, _)| goal.run_ids.last() != Some(&run_id))
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if goal.active_deadline.is_some() || goal.active_ceiling_ms > 0 {
+        let charge_ms = goal.unsettled_active_charge_ms();
+        goal.active_ms = goal
+            .active_ms
+            .checked_add(charge_ms)
+            .ok_or(ReplayError::InvalidTransition)?;
+        goal.uncertain_active_ms = goal
+            .uncertain_active_ms
+            .checked_add(charge_ms)
+            .ok_or(ReplayError::InvalidTransition)?;
+        goal.active_deadline = None;
+        goal.active_ceiling_ms = 0;
     }
     if let Some(run_id) = goal.compaction_call_reserved.take() {
         if goal.run_ids.last() != Some(&run_id) {
@@ -565,6 +499,11 @@ fn settle_unfinished_facts(
         goal.token_usage_unknown = true;
     }
     Ok(())
+}
+
+/// The latest started action's ceiling covers the Run's settled time and that action.
+pub(super) fn record_active_ceiling(goal: &mut GoalView, ceiling_ms: u64) {
+    goal.active_ceiling_ms = ceiling_ms;
 }
 
 /// Projects an unfinished Goal as paused: its live Run is interrupted and no later event may retry its calls or effects.
@@ -616,20 +555,6 @@ pub(super) fn apply(
         Event::GoalResumed { goal_id } => {
             current.resume_goal(goal_id)?;
         }
-        Event::GoalActiveTimeReserved {
-            goal_id,
-            run_id,
-            reserved_ms,
-        } => {
-            current.reserve_goal_active_time(goal_id, run_id, reserved_ms)?;
-        }
-        Event::GoalActiveTimeSettled {
-            goal_id,
-            run_id,
-            active_ms,
-        } => {
-            current.settle_goal_active_time(goal_id, run_id, active_ms)?;
-        }
         Event::GoalPlanContractRecorded {
             goal_id,
             run_id,
@@ -641,11 +566,18 @@ pub(super) fn apply(
             goal_id,
             run_id,
             agent_run_id,
+            active_ceiling_ms,
         } => {
             current.reserve_goal_provider_call(goal_id, run_id, agent_run_id)?;
+            record_active_ceiling(current_goal_mut(current, *goal_id)?, *active_ceiling_ms);
         }
-        Event::GoalCompactionCallReserved { goal_id, run_id } => {
+        Event::GoalCompactionCallReserved {
+            goal_id,
+            run_id,
+            active_ceiling_ms,
+        } => {
             current.reserve_goal_compaction_call(goal_id, run_id)?;
+            record_active_ceiling(current_goal_mut(current, *goal_id)?, *active_ceiling_ms);
         }
         Event::GoalContextCompacted {
             goal_id,

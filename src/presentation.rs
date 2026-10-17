@@ -1178,7 +1178,7 @@ mod goal_status_tests {
         let spent = goal_status(&view);
         assert!(spent.ends_with(" · out of budget"), "{spent}");
 
-        // An unsettled active-time reservation that resume would settle as spent is counted.
+        // A started Run that never settled charges its deadline, which resume counts as spent.
         let mut view = session_with_goal(true);
         view.goals[0].status = GoalStatus::Interrupted;
         let limit = view.goals[0]
@@ -1186,8 +1186,8 @@ mod goal_status_tests {
             .max_active_ms
             .expect("finite active limit");
         view.goals[0].active_ms = limit - 1;
-        view.goals[0].reserved_active_run = Some(crate::session::RunId::new());
-        view.goals[0].reserved_active_ms = Some(1);
+        view.goals[0].active_deadline = Some((crate::session::RunId::new(), None));
+        view.goals[0].active_ceiling_ms = 1;
         let reserved = goal_status(&view);
         assert!(reserved.ends_with(" · out of budget"), "{reserved}");
     }
