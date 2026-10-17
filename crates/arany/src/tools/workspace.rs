@@ -78,7 +78,44 @@ pub struct RuntimeProfileOption {
     pub token: String,
     pub label: String,
     pub group: &'static str,
+    pub version: Option<String>,
+    pub path: PathBuf,
+    pub detected: bool,
     pub selected: bool,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TrustRecordError {
+    #[error("workspace-permissions.json uses unsupported version {0}; this Arany reads version 2")]
+    UnsupportedVersion(u64),
+    #[error("workspace-permissions.json is malformed")]
+    Malformed,
+    #[error(
+        "workspace-permissions.json is not a private owner-only regular file within 64 KiB; fix or remove it"
+    )]
+    RecordNotPrivate,
+    #[error("the Arany state directory is not private; fix its permissions")]
+    StateNotPrivate,
+    #[error("the Arany state directory is inside this folder; move it or open another folder")]
+    StateInsideWorkspace,
+    #[error("the Arany state directory cannot be opened; check its permissions")]
+    StateUnavailable,
+    #[error("this folder cannot be opened by its absolute path")]
+    Workspace,
+    #[error("workspace-permissions.json changed during recovery; retry")]
+    Changed,
+}
+
+impl TrustRecordError {
+    pub fn is_resettable(&self) -> bool {
+        matches!(self, Self::UnsupportedVersion(_) | Self::Malformed)
+    }
+}
+
+impl From<TrustRecordError> for ToolError {
+    fn from(_: TrustRecordError) -> Self {
+        ToolError::Configuration
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,22 +135,50 @@ struct Entry {
     runtime_grants: Vec<RuntimeGrant>,
 }
 
-fn read(root: &StateRoot) -> Result<Permissions, ToolError> {
-    let Some(bytes) = root
-        .record(RecordKind::WorkspacePermissions)
+fn record_error(error: StoreError) -> TrustRecordError {
+    match error {
+        // Only a symlink fails to open; FIFOs and directories fail the privacy check instead.
+        StoreError::StateNotPrivate | StoreError::Io(_) => TrustRecordError::RecordNotPrivate,
+        _ => TrustRecordError::StateUnavailable,
+    }
+}
+
+fn state_error(error: StoreError) -> TrustRecordError {
+    match error {
+        StoreError::StateNotPrivate => TrustRecordError::StateNotPrivate,
+        _ => TrustRecordError::StateUnavailable,
+    }
+}
+
+fn read_bytes(root: &StateRoot) -> Result<Option<Vec<u8>>, TrustRecordError> {
+    root.record(RecordKind::WorkspacePermissions)
         .read()
-        .map_err(|_| ToolError::Configuration)?
-    else {
-        return Ok(Permissions {
+        .map_err(record_error)
+}
+
+fn read(root: &StateRoot) -> Result<Permissions, TrustRecordError> {
+    match read_bytes(root)? {
+        Some(bytes) => parse(&bytes),
+        None => Ok(Permissions {
             version: 2,
             workspaces: Vec::new(),
-        });
-    };
-    let value = super::skills::parse_json(&bytes, 64 * 1024)?;
+        }),
+    }
+}
+
+fn parse(bytes: &[u8]) -> Result<Permissions, TrustRecordError> {
+    let value =
+        super::skills::parse_json(bytes, 64 * 1024).map_err(|_| TrustRecordError::Malformed)?;
+    let version = value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(TrustRecordError::Malformed)?;
+    if version != 2 {
+        return Err(TrustRecordError::UnsupportedVersion(version));
+    }
     let record: Permissions =
-        serde_json::from_value(value).map_err(|_| ToolError::Configuration)?;
-    if record.version != 2
-        || record.workspaces.len() > 128
+        serde_json::from_value(value).map_err(|_| TrustRecordError::Malformed)?;
+    if record.workspaces.len() > 128
         || record.workspaces.iter().any(|entry| {
             !entry.path.is_absolute()
                 || entry.path.as_os_str().len() > 4096
@@ -121,7 +186,7 @@ fn read(root: &StateRoot) -> Result<Permissions, ToolError> {
                 || validate_selection(&entry.runtime_grants).is_err()
         })
     {
-        return Err(ToolError::Configuration);
+        return Err(TrustRecordError::Malformed);
     }
     Ok(record)
 }
@@ -157,6 +222,9 @@ impl WorkspacePermissions {
                 token: candidate.token.clone(),
                 label: candidate.label.clone(),
                 group: candidate.grant.kind.label(),
+                version: candidate.grant.version.clone(),
+                path: candidate.grant.path.clone(),
+                detected: true,
                 selected: selected.contains(&candidate.token),
             })
             .collect::<Vec<_>>();
@@ -167,10 +235,14 @@ impl WorkspacePermissions {
             if options.iter().any(|option| option.token == token) {
                 continue;
             }
+            let detected = grant.verify_host().is_ok();
             options.push(RuntimeProfileOption {
                 token,
-                label: saved_profile_label(grant),
+                label: saved_profile_label(grant, detected),
                 group: grant.kind.label(),
+                version: grant.version.clone(),
+                path: grant.path.clone(),
+                detected,
                 selected: true,
             });
         }
@@ -182,7 +254,7 @@ impl WorkspacePermissions {
     pub fn selected_runtime_profiles(&self) -> Vec<String> {
         self.runtime_grants
             .iter()
-            .map(saved_profile_label)
+            .map(|grant| saved_profile_label(grant, grant.verify_host().is_ok()))
             .collect()
     }
 
@@ -204,15 +276,17 @@ impl WorkspacePermissions {
         self.identity == identity
     }
 
-    pub fn open(path: &Path) -> Result<Self, ToolError> {
-        let account = StateRoot::account_path().map_err(|_| ToolError::Configuration)?;
+    pub fn open(path: &Path) -> Result<Self, TrustRecordError> {
+        let account = StateRoot::account_path().map_err(state_error)?;
         match StateRoot::open_existing(&account) {
             Ok(root) => Self::load(path, &root),
             // Reading never creates State; without a History database no trust can be remembered.
             Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                let directory = fs::open_directory(path)?;
-                let identity = fs::identity(&directory)?;
-                fs::reject_overlap(path, &account)?;
+                let directory =
+                    fs::open_directory(path).map_err(|_| TrustRecordError::Workspace)?;
+                let identity = fs::identity(&directory).map_err(|_| TrustRecordError::Workspace)?;
+                fs::reject_overlap(path, &account)
+                    .map_err(|_| TrustRecordError::StateInsideWorkspace)?;
                 Ok(Self {
                     path: path.to_owned(),
                     identity,
@@ -223,7 +297,7 @@ impl WorkspacePermissions {
                     discovery_error: None,
                 })
             }
-            Err(_) => Err(ToolError::Configuration),
+            Err(error) => Err(state_error(error)),
         }
     }
 
@@ -240,11 +314,11 @@ impl WorkspacePermissions {
         self
     }
 
-    fn load(path: &Path, root: &StateRoot) -> Result<Self, ToolError> {
-        let directory = fs::open_directory(path)?;
-        let identity = fs::identity(&directory)?;
+    fn load(path: &Path, root: &StateRoot) -> Result<Self, TrustRecordError> {
+        let directory = fs::open_directory(path).map_err(|_| TrustRecordError::Workspace)?;
+        let identity = fs::identity(&directory).map_err(|_| TrustRecordError::Workspace)?;
         root.ensure_outside_workspace(&directory)
-            .map_err(|_| ToolError::Configuration)?;
+            .map_err(|_| TrustRecordError::StateInsideWorkspace)?;
         let record = read(root)?;
         let entry = record
             .workspaces
@@ -403,8 +477,53 @@ impl WorkspacePermissions {
     }
 }
 
-fn saved_profile_label(grant: &RuntimeGrant) -> String {
-    if grant.verify_host().is_ok() {
+/// Pins the current unsupported or malformed record so a consented reset deletes exactly it.
+pub struct TrustReset {
+    root: StateRoot,
+    workspace: PathBuf,
+    bytes: Vec<u8>,
+}
+
+impl WorkspacePermissions {
+    pub fn prepare_reset(workspace: &Path) -> Result<TrustReset, TrustRecordError> {
+        let account = StateRoot::account_path().map_err(state_error)?;
+        let root = StateRoot::open_existing(&account).map_err(state_error)?;
+        prepare_reset_with(workspace, root)
+    }
+}
+
+fn prepare_reset_with(workspace: &Path, root: StateRoot) -> Result<TrustReset, TrustRecordError> {
+    let bytes = read_bytes(&root)?.ok_or(TrustRecordError::Changed)?;
+    match parse(&bytes) {
+        Err(error) if error.is_resettable() => Ok(TrustReset {
+            root,
+            workspace: workspace.to_owned(),
+            bytes,
+        }),
+        Err(error) => Err(error),
+        Ok(_) => Err(TrustRecordError::Changed),
+    }
+}
+
+impl TrustReset {
+    pub fn apply(self) -> Result<(), TrustRecordError> {
+        self.root
+            .with_account_replacement_lock(&self.workspace, || {
+                let current = read_bytes(&self.root)?;
+                if current.as_deref() != Some(self.bytes.as_slice()) {
+                    return Err(TrustRecordError::Changed);
+                }
+                self.root
+                    .record(RecordKind::WorkspacePermissions)
+                    .remove()
+                    .map_err(record_error)
+            })
+            .map_err(state_error)?
+    }
+}
+
+fn saved_profile_label(grant: &RuntimeGrant, detected: bool) -> String {
+    if detected {
         grant.profile_label()
     } else {
         format!("{} (no longer detected)", grant.profile_label())
@@ -764,7 +883,7 @@ mod tests {
                     kind: RuntimeKind::CargoCache,
                     manager: RuntimeManager::HostCache,
                     version: None,
-                    path: cache,
+                    path: cache.clone(),
                     device,
                     inode,
                 }],
@@ -779,6 +898,9 @@ mod tests {
         let choices = access.runtime_profile_choices();
         assert_eq!(choices.len(), 1);
         assert!(choices[0].selected);
+        assert!(choices[0].detected);
+        assert_eq!(choices[0].path, cache);
+        assert_eq!(choices[0].version, None);
         assert!(!choices[0].label.contains("no longer detected"));
     }
 
@@ -941,9 +1063,18 @@ mod tests {
                 .unwrap()
                 .is_trusted()
         );
-        for record in [br#"{"version":1,"workspaces":[]}"#.as_slice(), br#"{"version":2,"workspaces":[{"path":"/project","device":1,"inode":1,"mode":"bypass","runtime_grants":[]}] }"#.as_slice()] {
+        for (record, cause) in [
+            (
+                br#"{"version":1,"workspaces":[]}"#.as_slice(),
+                TrustRecordError::UnsupportedVersion(1),
+            ),
+            (
+                br#"{"version":2,"workspaces":[{"path":"/project","device":1,"inode":1,"mode":"bypass","runtime_grants":[]}] }"#.as_slice(),
+                TrustRecordError::Malformed,
+            ),
+        ] {
             root.record(RecordKind::WorkspacePermissions).replace(record).unwrap();
-            assert!(WorkspacePermissions::load(&path, &root).is_err());
+            assert_eq!(WorkspacePermissions::load(&path, &root).err(), Some(cause));
         }
         #[cfg(unix)]
         {
@@ -953,7 +1084,95 @@ mod tests {
                 root.path().join("workspace-permissions.json"),
             )
             .unwrap();
-            assert!(WorkspacePermissions::load(&path, &root).is_err());
+            assert_eq!(
+                WorkspacePermissions::load(&path, &root).err(),
+                Some(TrustRecordError::RecordNotPrivate)
+            );
         }
+    }
+
+    #[test]
+    fn unsupported_trust_record_resets_only_with_the_pinned_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let root = StateRoot::admit(&state).unwrap();
+        let path = temp.path().join("project");
+        std::fs::create_dir(&path).unwrap();
+        let file = state.join("workspace-permissions.json");
+        let version_one = br#"{"version":1,"workspaces":[]}"#;
+        root.record(RecordKind::WorkspacePermissions)
+            .replace(version_one)
+            .unwrap();
+
+        let reset = prepare_reset_with(&path, root.try_clone().unwrap()).unwrap();
+        root.record(RecordKind::WorkspacePermissions)
+            .replace(br#"{"version":1,"workspaces":[] }"#)
+            .unwrap();
+        assert_eq!(reset.apply(), Err(TrustRecordError::Changed));
+        assert!(file.exists());
+
+        let reset = prepare_reset_with(&path, root.try_clone().unwrap()).unwrap();
+        reset.apply().unwrap();
+        assert!(!file.exists());
+        assert!(
+            !WorkspacePermissions::load(&path, &root)
+                .unwrap()
+                .is_trusted()
+        );
+
+        let mut access = WorkspacePermissions::load(&path, &root).unwrap();
+        access
+            .save(&root, true, ApprovalMode::AutoEdits, Vec::new())
+            .unwrap();
+        let before = std::fs::read(&file).unwrap();
+        assert_eq!(
+            prepare_reset_with(&path, root.try_clone().unwrap()).err(),
+            Some(TrustRecordError::Changed)
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+
+        assert!(TrustRecordError::UnsupportedVersion(1).is_resettable());
+        assert!(TrustRecordError::Malformed.is_resettable());
+        assert!(!TrustRecordError::RecordNotPrivate.is_resettable());
+        assert!(!TrustRecordError::StateNotPrivate.is_resettable());
+        assert!(!TrustRecordError::StateInsideWorkspace.is_resettable());
+        assert!(!TrustRecordError::StateUnavailable.is_resettable());
+        assert!(!TrustRecordError::Workspace.is_resettable());
+        assert!(!TrustRecordError::Changed.is_resettable());
+    }
+
+    #[test]
+    fn malformed_trust_record_is_named_without_echoing_its_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let path = temp.path().join("project");
+        std::fs::create_dir(&path).unwrap();
+        root.record(RecordKind::WorkspacePermissions)
+            .replace(b"{not json")
+            .unwrap();
+        let error = WorkspacePermissions::load(&path, &root).err().unwrap();
+        assert_eq!(error, TrustRecordError::Malformed);
+        assert_eq!(error.to_string(), "workspace-permissions.json is malformed");
+        assert!(!error.to_string().contains("not json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversize_trust_record_is_named_as_not_private_and_never_reset() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let path = temp.path().join("project");
+        std::fs::create_dir(&path).unwrap();
+        let record = root.path().join("workspace-permissions.json");
+        std::fs::write(&record, vec![b' '; 64 * 1024 + 1]).unwrap();
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let error = WorkspacePermissions::load(&path, &root).err().unwrap();
+        assert_eq!(error, TrustRecordError::RecordNotPrivate);
+        assert!(error.to_string().contains("within 64 KiB"));
+        assert!(!error.is_resettable());
+        assert!(prepare_reset_with(&path, root.try_clone().unwrap()).is_err());
+        assert!(record.exists());
     }
 }

@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::io;
 use unicode_segmentation::UnicodeSegmentation;
@@ -30,11 +30,55 @@ pub(super) struct PermissionFrameState<'a> {
     pub profile_selection_enabled: Option<bool>,
     pub footer: Option<&'a str>,
     pub palette: Palette,
+    /// Tool approvals keep the transcript visible behind a centered panel.
+    pub boxed: bool,
 }
 
 pub(super) struct PermissionFrameProgress {
     pub more: bool,
     pub page: usize,
+}
+
+const PROFILE_HANGING_INDENT: usize = 6;
+
+// Wraps at spaces; a token wider than the row hard-breaks at the row edge.
+fn wrap_cells(text: &str, width: usize, indent: usize) -> Vec<String> {
+    let indent = indent.min(width.saturating_sub(1));
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    let mut cells = 0;
+    let mut fresh = true;
+    for word in text.split(' ') {
+        let word_cells = UnicodeWidthStr::width(word);
+        if !fresh && cells + 1 + word_cells > width {
+            rows.push(std::mem::replace(&mut row, " ".repeat(indent)));
+            cells = indent;
+            fresh = true;
+        }
+        if cells + usize::from(!fresh) + word_cells <= width {
+            if !fresh {
+                row.push(' ');
+                cells += 1;
+            }
+            row.push_str(word);
+            cells += word_cells;
+            fresh = false;
+            continue;
+        }
+        for grapheme in word.graphemes(true) {
+            let count = UnicodeWidthStr::width(grapheme);
+            let base = if rows.is_empty() { 0 } else { indent };
+            if cells + count > width && cells > base {
+                rows.push(std::mem::replace(&mut row, " ".repeat(indent)));
+                cells = indent;
+            }
+            row.push_str(grapheme);
+            cells += count;
+        }
+        fresh = false;
+    }
+    rows.push(row);
+    rows
 }
 
 pub(super) fn draw_permission_frame(
@@ -52,12 +96,23 @@ pub(super) fn draw_permission_frame(
         profile_selection_enabled,
         footer,
         palette,
+        boxed,
     } = state;
     let full = frame.area();
-    let width = full
-        .width
-        .saturating_sub(if full.width >= 40 { 4 } else { 0 })
-        .min(76);
+    let gutter = if boxed {
+        0
+    } else if full.width >= 40 {
+        2
+    } else {
+        0
+    };
+    let width = if boxed {
+        full.width
+            .saturating_sub(if full.width >= 40 { 4 } else { 0 })
+            .min(76)
+    } else {
+        full.width.saturating_sub(gutter * 2)
+    };
     if width == 0 || full.height < 8 {
         return PermissionFrameProgress { more: true, page };
     }
@@ -68,49 +123,43 @@ pub(super) fn draw_permission_frame(
         let focused = profile_start
             .zip(focused_profile)
             .is_some_and(|(start, selected)| index == start + selected);
-        let mut current = String::new();
-        let mut cells = 0;
-        for grapheme in line.graphemes(true) {
-            let count = UnicodeWidthStr::width(grapheme);
-            if cells + count > usize::from(width) && !current.is_empty() {
-                rows.push(Line::styled(
-                    std::mem::take(&mut current),
-                    if index == 0 || focused {
-                        palette.selection()
-                    } else {
-                        Style::default()
-                    },
-                ));
-                cells = 0;
-            }
-            current.push_str(grapheme);
-            cells += count;
+        let profile_row =
+            profile_start.is_some_and(|start| (start..start + profile_count).contains(&index));
+        let indent = if profile_row {
+            PROFILE_HANGING_INDENT
+        } else {
+            0
+        };
+        let style = if index == 0 || focused {
+            palette.selection()
+        } else {
+            Style::default()
+        };
+        for text in wrap_cells(line, usize::from(width), indent) {
+            rows.push(Line::styled(text, style));
         }
-        rows.push(Line::styled(
-            current,
-            if index == 0 || focused {
-                palette.selection()
-            } else {
-                Style::default()
-            },
-        ));
         if let Some(start) = profile_start
-            && (start..start + profile_count).contains(&index)
+            && profile_row
         {
             profile_rows.push((index - start, row_start));
         }
     }
-    let height = full
-        .height
-        .min(u16::try_from(rows.len().saturating_add(5)).unwrap_or(u16::MAX))
-        .min(20);
-    let area = Rect::new(
-        full.x + (full.width - width) / 2,
-        full.y + (full.height - height) / 2,
-        width,
-        height,
-    );
-    let body_height = usize::from(height - 5);
+    let area = if boxed {
+        let height = full
+            .height
+            .min(u16::try_from(rows.len().saturating_add(5)).unwrap_or(u16::MAX))
+            .min(20);
+        Rect::new(
+            full.x + (full.width - width) / 2,
+            full.y + (full.height - height) / 2,
+            width,
+            height,
+        )
+    } else {
+        frame.render_widget(Clear, full);
+        Rect::new(full.x + gutter, full.y, width, full.height)
+    };
+    let body_height = usize::from(area.height - 5);
     let pages = rows.len().div_ceil(body_height).max(1);
     let page = profile_rows
         .iter()

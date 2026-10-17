@@ -27,7 +27,9 @@ pub use cancel::Cancellation;
 use config::Config;
 pub(crate) use skills::parse_json;
 pub use skills::{ProjectSkills, project_skills};
-pub use workspace::{RuntimeProfileOption, WorkspacePermissions, mention_paths};
+pub use workspace::{
+    RuntimeProfileOption, TrustRecordError, TrustReset, WorkspacePermissions, mention_paths,
+};
 /// Whether this OS implements native Guard protection for typed file Tools.
 pub const fn native_protection_supported() -> bool {
     cfg!(any(target_os = "linux", target_os = "macos"))

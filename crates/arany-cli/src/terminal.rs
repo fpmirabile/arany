@@ -444,11 +444,10 @@ impl AttachedTerminal {
             lines.push("No supported runtime profiles were detected.".into());
             profile_start = None;
         } else {
-            lines.push("Profiles are opt-in. Selected caches may contain private package data or embedded credential URLs. They are not loaded automatically, but commands can read and print them; bounded Tool output may be persisted and sent to the selected Provider.".into());
-            lines.push(
-                "Separate package-manager configuration and credential files stay excluded.".into(),
-            );
+            lines.extend(crate::presentation::RUNTIME_PROFILE_LINES.map(String::from));
             profile_start = Some(lines.len());
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let linear = self.linear.is_some();
             lines.extend(options.iter().enumerate().map(|(index, option)| {
                 let marker = if focused_profile == Some(index) {
                     "›"
@@ -460,10 +459,25 @@ impl AttachedTerminal {
                     .copied()
                     .unwrap_or(option.selected);
                 let number = index + 3;
+                let body = if linear {
+                    option.label.clone()
+                } else {
+                    let head = match &option.version {
+                        Some(version) => format!("{} {version}", option.group),
+                        None => option.group.to_owned(),
+                    };
+                    let path = crate::presentation::abbreviate_home(&option.path, home.as_deref());
+                    let suffix = if option.detected {
+                        ""
+                    } else {
+                        " · no longer detected"
+                    };
+                    format!("{head} · {path}{suffix}")
+                };
                 format!(
                     "{marker} [{}] {number}. {}",
                     if checked { "x" } else { " " },
-                    crate::presentation::escape_terminal(&option.label)
+                    crate::presentation::escape_terminal(&body)
                 )
             }));
         }
@@ -509,6 +523,7 @@ impl AttachedTerminal {
                             profile_selection_enabled: Some(profile_selection_enabled),
                             footer: None,
                             palette,
+                            boxed: false,
                         },
                     );
                 } else {
@@ -559,6 +574,7 @@ impl AttachedTerminal {
                                 "↑↓ choose · Enter confirm · Esc denies"
                             }),
                             palette,
+                            boxed: true,
                         },
                     )
                     .more;

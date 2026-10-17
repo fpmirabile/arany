@@ -1251,11 +1251,16 @@ mod tests {
                 Duration::from_secs(30),
                 64 * 1024,
                 |bytes| {
-                    if !cancelled
-                        && String::from_utf8_lossy(bytes)
-                            .replace("\r\n", "\n")
-                            .contains(crate::test_process::READ_ONLY_CONSENT_PROMPT)
-                    {
+                    if cancelled {
+                        return;
+                    }
+                    let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+                    // Release builds reject the account override, so startup offers recovery instead of consent.
+                    if text.contains(crate::test_process::READ_ONLY_CONSENT_PROMPT) {
+                        input.write_all(b"\x04").unwrap();
+                        cancelled = true;
+                    } else if text.contains("Folder trust recovery") {
+                        // Linear mode reads whole lines, so a lone Escape never arrives.
                         input.write_all(b"\x04").unwrap();
                         cancelled = true;
                     }
@@ -1271,7 +1276,7 @@ mod tests {
                 &output.stdout,
                 "native chat regression",
             );
-            assert_eq!(cancelled, cfg!(debug_assertions));
+            assert!(cancelled, "startup must reach consent or recovery and exit");
             return;
         };
         let root = std::path::PathBuf::from(root);
@@ -1304,9 +1309,9 @@ mod tests {
         assert!(
             matches!(
                 &choice,
-                Err(super::super::setup::SetupError::Recoverable(_))
+                Ok(super::super::permissions::PermissionChoice::Exit)
             ),
-            "optimized account override must reject before host access"
+            "optimized account override must end at recovery before host access"
         );
         let permissions = match &choice {
             Ok(super::super::permissions::PermissionChoice::Selected(access)) => Some(access),

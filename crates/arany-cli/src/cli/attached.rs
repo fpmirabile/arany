@@ -938,14 +938,21 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 .await?,
                             ));
                         } else if command == InteractiveCommand::Permissions {
-                            let permissions = match arany::WorkspacePermissions::open(
+                            let permissions = match permissions::open_or_recover(
+                                &mut terminal,
                                 &admission.workspace,
-                            ) {
-                                Ok(permissions) => permissions.prepare_profile_selection(),
-                                Err(error) => {
-                                    notice = Some(Feedback::History(format!(
-                                        "Error: Could not load folder trust: {error}; existing permissions unchanged"
-                                    )));
+                                "Cancel",
+                            )
+                            .await?
+                            {
+                                permissions::TrustAdmission::Loaded(access) => {
+                                    access.prepare_profile_selection()
+                                }
+                                permissions::TrustAdmission::Exit => {
+                                    notice = Some(Feedback::History(
+                                        "Folder trust could not be loaded; existing permissions unchanged"
+                                            .into(),
+                                    ));
                                     continue;
                                 }
                             };
@@ -1734,11 +1741,7 @@ async fn admit_startup(
             admission.workspace_permissions = Some(access);
         }
         Ok(permissions::PermissionChoice::Exit) => return Ok(ControlFlow::Break(())),
-        Err(setup::SetupError::Recoverable(error)) => {
-            return Err(format!(
-                "{error}; restore private folder trust state and retry"
-            ));
-        }
+        Err(setup::SetupError::Recoverable(error)) => return Err(error),
         Err(error) => return Err(error.into()),
     }
     match setup::admit_history(terminal, &admission.state_dir, &admission.workspace).await {

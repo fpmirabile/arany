@@ -2381,6 +2381,194 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
     assert!(footer.contains("Esc Up/Dn Pg"));
 }
 
+/// Explanation text can contain the choice words, so only a whole choice row counts.
+fn is_choice_row(row: &str) -> bool {
+    matches!(
+        row.trim_end().trim_start_matches(['›', ' ']),
+        "Read only" | "Trust folder"
+    )
+}
+
+fn profile_frame_lines() -> Vec<String> {
+    let mut lines =
+        crate::presentation::workspace_permission_lines(std::path::Path::new("/projects/example"));
+    lines.extend(crate::presentation::RUNTIME_PROFILE_LINES.map(String::from));
+    lines
+}
+
+#[test]
+fn permission_profile_rows_wrap_at_spaces_with_a_hanging_indent() {
+    let lines = vec![
+        "Do you trust this folder?".to_owned(),
+        "/p".to_owned(),
+        String::new(),
+        "  [ ] 3. Node v20.19.2 · ~/.local/share/fnm/node-versions/v20.19.2/installation"
+            .to_owned(),
+    ];
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw_permission_frame(
+                frame,
+                &lines,
+                PermissionFrameState {
+                    choices: ("Read only", "Trust folder"),
+                    page: 0,
+                    allow: false,
+                    profile_start: Some(3),
+                    profile_count: 1,
+                    focused_profile: None,
+                    profile_selection_enabled: Some(true),
+                    footer: None,
+                    palette: Palette { color: false },
+                    boxed: false,
+                },
+            );
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let content = (0..12)
+        .map(|y| buffer_row(buffer, y).chars().skip(2).collect::<String>())
+        .map(|row| row.trim_end().to_owned())
+        .collect::<Vec<_>>();
+    let first = content
+        .iter()
+        .position(|row| row == "  [ ] 3. Node v20.19.2 ·")
+        .expect("profile label row");
+    assert!(content[first + 1].starts_with("      ~/.local/share/fnm/"));
+    let tail = content[first + 1..]
+        .iter()
+        .take_while(|row| row.starts_with("      "))
+        .map(|row| row.trim())
+        .collect::<String>();
+    assert!(tail.contains("~/.local/share/fnm/node-versions/v20.19.2/installation"));
+}
+
+#[test]
+fn permission_long_path_hard_breaks_only_at_the_row_edge() {
+    let line = "  [ ] 3. Node v20.19.2 · ~/.local/share/fnm/node-versions/v20.19.2/installation";
+    let lines = vec![
+        "Do you trust this folder?".to_owned(),
+        "/p".to_owned(),
+        String::new(),
+        line.to_owned(),
+    ];
+    let mut terminal = Terminal::new(TestBackend::new(16, 8)).unwrap();
+    let mut rows = Vec::new();
+    for page in 0..100 {
+        let mut progress = PermissionFrameProgress { more: true, page };
+        terminal
+            .draw(|frame| {
+                progress = draw_permission_frame(
+                    frame,
+                    &lines,
+                    PermissionFrameState {
+                        choices: ("Read only", "Trust folder"),
+                        page,
+                        allow: false,
+                        profile_start: Some(3),
+                        profile_count: 1,
+                        focused_profile: None,
+                        profile_selection_enabled: Some(true),
+                        footer: None,
+                        palette: Palette { color: false },
+                        boxed: false,
+                    },
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        rows.extend((0..3).map(|y| buffer_row(buffer, y).trim_end().to_owned()));
+        if !progress.more {
+            break;
+        }
+    }
+    let first = rows
+        .iter()
+        .position(|row| row.contains("[ ] 3."))
+        .expect("profile row");
+    let profile = rows[first..]
+        .iter()
+        .take_while(|row| row.starts_with("  [") || row.starts_with("      "))
+        .collect::<Vec<_>>();
+    assert!(profile.len() > 1);
+    assert!(profile[1..].iter().all(|row| row.starts_with("      ")));
+    let joined = profile
+        .iter()
+        .flat_map(|row| row.chars())
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    assert_eq!(
+        joined,
+        line.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>()
+    );
+}
+
+#[test]
+fn permission_frame_fills_the_terminal_like_chat() {
+    let mut lines = profile_frame_lines();
+    let profile_start = lines.len();
+    lines.extend((3..9).map(|index| {
+        format!(
+            "    [ ] {index}. Node v20.19.2 · ~/.local/share/fnm/node-versions/v20.19.2/installation"
+        )
+    }));
+    for (width, height, expect_more) in [(100, 30, false), (60, 20, true)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut progress = None;
+        terminal
+            .draw(|frame| {
+                progress = Some(draw_permission_frame(
+                    frame,
+                    &lines,
+                    PermissionFrameState {
+                        choices: ("Read only", "Trust this folder"),
+                        page: 0,
+                        allow: false,
+                        profile_start: Some(profile_start),
+                        profile_count: 6,
+                        focused_profile: None,
+                        profile_selection_enabled: Some(true),
+                        footer: None,
+                        palette: Palette { color: false },
+                        boxed: false,
+                    },
+                ));
+            })
+            .unwrap();
+        let progress = progress.unwrap();
+        assert_eq!(progress.more, expect_more);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(2, 0)].symbol(), "D");
+        for y in 0..height {
+            assert_eq!(buffer[(0, y)].symbol(), " ");
+            if width >= 40 {
+                assert_eq!(buffer[(1, y)].symbol(), " ");
+            }
+        }
+        if expect_more {
+            let rows = (0..height)
+                .map(|y| buffer_row(buffer, y))
+                .collect::<Vec<_>>();
+            let page = rows.iter().position(|row| row.contains("Page 1/")).unwrap();
+            assert_eq!(page, usize::from(height) - 4);
+        } else {
+            assert!(buffer_row(buffer, 26).contains("› Read only"));
+            assert!(buffer_row(buffer, 29).contains("Ctrl+C exit"));
+        }
+    }
+}
+
+#[test]
+fn wrap_cells_keeps_words_and_indents_continuations() {
+    assert_eq!(wrap_cells("aaa bbb ccc", 7, 2), ["aaa bbb", "  ccc"]);
+    assert_eq!(wrap_cells("abcdefghij", 4, 1), ["abcd", " efg", " hij"]);
+    assert_eq!(wrap_cells("", 5, 0), [""]);
+    assert_eq!(wrap_cells("日本語", 5, 0), ["日本", "語"]);
+}
+
 #[test]
 fn permission_choices_are_vertical_and_complete_before_selection() {
     let lines =
@@ -2405,16 +2593,15 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                             profile_selection_enabled: None,
                             footer: Some("↑↓ Enter ^C exit"),
                             palette: Palette { color: false },
+                            boxed: false,
                         },
                     );
                 })
                 .unwrap();
             assert_eq!(progress.page, page);
             let buffer = terminal.backend().buffer();
-            let panel_width = width
-                .saturating_sub(if width >= 40 { 4 } else { 0 })
-                .min(76);
-            let left = (width - panel_width) / 2;
+            let left = if width >= 40 { 2 } else { 0 };
+            let panel_width = width - left * 2;
             let rows = (0..height)
                 .map(|y| {
                     (left..left + panel_width)
@@ -2423,11 +2610,7 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                 })
                 .collect::<Vec<_>>();
             if progress.more {
-                assert!(
-                    !rows
-                        .iter()
-                        .any(|row| row.contains("Read only") || row.contains("Trust folder"))
-                );
+                assert!(!rows.iter().any(|row| is_choice_row(row)));
             } else {
                 let deny = rows
                     .iter()
@@ -2437,11 +2620,7 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                 assert!(rows.iter().any(|row| row.contains("^C exit")));
             }
             for row in &rows {
-                if row.contains("Page ")
-                    || row.contains("Read only")
-                    || row.contains("Trust folder")
-                    || row.contains("^C exit")
-                {
+                if row.contains("Page ") || is_choice_row(row) || row.contains("^C exit") {
                     continue;
                 }
                 rendered.push_str(row);
@@ -2534,4 +2713,34 @@ fn pausing_status_names_the_step_boundary_and_the_cancel_key() {
                 .contains("Pausing at the next step... Ctrl+C cancels now"))
     );
     assert!((0..6).all(|y| !buffer_row(buffer, y).contains("Run in progress")));
+}
+
+#[test]
+fn tool_approval_panel_stays_centered_and_boxed() {
+    let lines = vec!["Approve tool".to_owned(), "/p".to_owned()];
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw_permission_frame(
+                frame,
+                &lines,
+                PermissionFrameState {
+                    choices: ("Deny", "Allow once"),
+                    page: 0,
+                    allow: false,
+                    profile_start: None,
+                    profile_count: 0,
+                    focused_profile: None,
+                    profile_selection_enabled: None,
+                    footer: None,
+                    palette: Palette { color: false },
+                    boxed: true,
+                },
+            );
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(12, 11)].symbol(), "A");
+    assert_eq!(buffer[(11, 11)].symbol(), " ");
+    assert_eq!(buffer[(0, 0)].symbol(), " ");
 }
