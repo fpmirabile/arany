@@ -108,6 +108,7 @@ mod goal_recovery_tests {
                 finished_sequence: None,
                 active_ceiling_ms: 0,
                 continues: None,
+                budget_closed: false,
             }],
         }
     }
@@ -318,6 +319,7 @@ mod goal_replay_tests {
                     unresolved: Vec::new(),
                     cached_input_tokens: 0,
                 },
+                exhausted: false,
             },
         ]
     }
@@ -1227,6 +1229,7 @@ mod goal_replay_tests {
                 unresolved: Vec::new(),
                 cached_input_tokens: 0,
             },
+            exhausted: true,
         };
         let mut events = vec![goal_started(goal, budget)];
         events.extend(start_run(
@@ -1276,6 +1279,7 @@ mod goal_replay_tests {
             status: GoalStatus::Failed,
             active_ms: 0,
             report,
+            exhausted: true,
         };
         let budget = GoalBudget {
             max_provider_calls: Some(1),
@@ -1390,6 +1394,7 @@ mod goal_replay_tests {
                 unresolved: Vec::new(),
                 cached_input_tokens: 0,
             },
+            exhausted: true,
         });
 
         let session = SessionId::new();
@@ -1468,6 +1473,7 @@ mod goal_replay_tests {
                     unresolved: Vec::new(),
                     cached_input_tokens: 0,
                 },
+                exhausted: true,
             },
         ]);
         let session = SessionId::new();
@@ -1486,11 +1492,11 @@ mod goal_replay_tests {
             .expect("source replays")
             .expect("Session");
         assert_eq!(base.continuable_goal().map(|goal| goal.id), Some(source));
-        let mut failed_run = base.clone();
-        failed_run.runs[0].status = RunStatus::Failed;
+        let mut failed = base.clone();
+        failed.goals[0].budget_closed = false;
         assert!(
-            failed_run.continuable_goal().is_none(),
-            "a failed Run is not exhaustion"
+            failed.continuable_goal().is_none(),
+            "a Goal not closed by exhaustion is not continuable"
         );
 
         let target = GoalId::new();
@@ -1615,6 +1621,7 @@ mod goal_replay_tests {
                 unresolved: Vec::new(),
                 cached_input_tokens: 0,
             },
+            exhausted: true,
         });
 
         let session = SessionId::new();
@@ -1827,7 +1834,8 @@ mod goal_replay_tests {
                 unresolved: Vec::new(),
                 cached_input_tokens: 0,
             };
-            let receipt = view.finish_goal(&goal_id, &GoalStatus::Failed, &settled, &report, 0);
+            let receipt =
+                view.finish_goal(&goal_id, &GoalStatus::Failed, &settled, &report, false, 0);
             assert_eq!(
                 receipt.is_ok(),
                 accepted,
@@ -1895,6 +1903,7 @@ mod goal_replay_tests {
                 unresolved: Vec::new(),
                 cached_input_tokens: 0,
             },
+            exhausted: false,
         });
 
         let view = SessionView::replay_open(session_id, &journal(session_id, events))
@@ -2158,6 +2167,7 @@ mod goal_replay_tests {
                 known_cached_tokens: 0,
                 active_ceiling_ms: 0,
                 continues: None,
+                budget_closed: false,
             }],
         }
     }
@@ -2784,6 +2794,7 @@ mod goal_replay_tests {
                 finished_sequence: None,
                 active_ceiling_ms: 0,
                 continues: None,
+                budget_closed: false,
             }],
         };
         view.apply_committed(&EventEnvelope {
@@ -2933,6 +2944,7 @@ mod goal_replay_tests {
                 finished_sequence: None,
                 active_ceiling_ms: 0,
                 continues: None,
+                budget_closed: false,
             }],
         };
         view.apply_committed(&EventEnvelope {
@@ -3387,6 +3399,7 @@ mod goal_replay_tests {
                         unresolved: Vec::new(),
                         cached_input_tokens,
                     },
+                    exhausted: false,
                 },
             ]);
             SessionView::replay(session_id, &session_with(session_id, events))

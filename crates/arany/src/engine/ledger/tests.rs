@@ -38,6 +38,7 @@ fn goal_view(goal_id: GoalId, budget: GoalBudget) -> GoalView {
         finished_sequence: None,
         active_ceiling_ms: 0,
         continues: None,
+        budget_closed: false,
     }
 }
 

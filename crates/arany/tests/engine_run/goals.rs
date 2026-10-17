@@ -544,6 +544,8 @@ async fn goal_failure_and_cancellation_have_distinct_terminal_receipts() {
             }
         );
         assert_eq!(view.goals[0].report.is_some(), !cancel);
+        assert!(!view.goals[0].budget_closed);
+        assert!(view.continuable_goal().is_none());
         store.close().await.expect("Store shutdown");
     }
 }
@@ -4060,6 +4062,8 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
     let goal = view.goal(outcome.goal_id).expect("Goal");
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert!(goal.report.is_some());
+    assert!(goal.budget_closed);
+    assert_eq!(view.continuable_goal().map(|goal| goal.id), Some(goal.id));
     assert_action_bounds(&events, false, false);
 }
 

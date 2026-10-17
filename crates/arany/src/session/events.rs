@@ -144,10 +144,9 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "GoalContextCompacted"
         | "GoalSteeringNoteRecorded"
         | "AssistantDisplayRecorded"
-        | "GoalFinished"
         | "AgentFinished"
         | "MessageCommitted" => Some(6),
-        "GoalStarted" => Some(7),
+        "GoalStarted" | "GoalFinished" => Some(7),
         "ProviderFallbackUsed" => Some(1),
         "ToolPermissionDecided" => Some(1),
         "ToolFinished" => Some(8),
@@ -244,6 +243,8 @@ pub enum Event {
         status: GoalStatus,
         active_ms: u64,
         report: GoalReport,
+        /// A Failed Goal closed because its budget ran out, not because a Run failed for another reason.
+        exhausted: bool,
     },
     MessageAccepted {
         run_id: RunId,
@@ -437,6 +438,7 @@ struct GoalFinishedPayload {
     status: GoalStatus,
     active_ms: u64,
     report: GoalReport,
+    exhausted: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -691,10 +693,12 @@ impl Event {
                 status,
                 active_ms,
                 report,
+                exhausted,
             } => serialize(&GoalFinishedPayload {
                 goal_id: *goal_id,
                 status: *status,
                 active_ms: *active_ms,
+                exhausted: *exhausted,
                 report: report.clone(),
             }),
             Self::MessageAccepted { text, images, .. } => serialize(&MessagePayload {
@@ -875,6 +879,7 @@ impl Event {
                     status: data.status,
                     active_ms: data.active_ms,
                     report: data.report,
+                    exhausted: data.exhausted,
                 }
             }
             "MessageAccepted" if run_id.is_some() && agent_run_id.is_none() => {

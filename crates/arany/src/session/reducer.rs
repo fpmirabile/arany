@@ -77,6 +77,8 @@ pub struct GoalView {
     pub finished_sequence: Option<u64>,
     /// The exhausted Goal this one continues.
     pub continues: Option<GoalId>,
+    /// Failed because the budget ran out (`GoalFinished.exhausted`).
+    pub budget_closed: bool,
 }
 
 impl GoalView {
@@ -643,26 +645,22 @@ impl SessionView {
             .map(|goal| goal.id)
     }
 
-    /// The most recent Goal closed by budget exhaustion that no later Goal continues yet.
-    /// A Failed Goal whose last accepted Run failed, or left a Tool without a known outcome,
-    /// is a failure, not an exhaustion.
+    /// The most recent Goal closed by budget exhaustion that no later Goal continues yet,
+    /// unless its last Run left a Tool without a known outcome.
     pub fn continuable_goal(&self) -> Option<&GoalView> {
         self.goals.iter().rev().find(|goal| {
-            goal.status == GoalStatus::Failed
-                && !goal.admits_next_run()
+            goal.budget_closed
                 && goal
                     .run_ids
                     .iter()
                     .rev()
                     .find_map(|run_id| self.runs.iter().find(|run| run.id == *run_id))
                     .is_some_and(|run| {
-                        run.status != RunStatus::Failed
-                            && run.tools.iter().all(|tool| {
-                                tool.observation.as_ref().is_some_and(|observation| {
-                                    observation.disposition
-                                        != crate::tools::ToolDisposition::Uncertain
-                                })
+                        run.tools.iter().all(|tool| {
+                            tool.observation.as_ref().is_some_and(|observation| {
+                                observation.disposition != crate::tools::ToolDisposition::Uncertain
                             })
+                        })
                     })
                 && !self
                     .goals

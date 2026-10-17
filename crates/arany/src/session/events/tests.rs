@@ -1463,18 +1463,6 @@ mod payload_version_tests {
             ));
         }
         let unbumped = [
-            Event::GoalFinished {
-                goal_id,
-                status: GoalStatus::Completed,
-                active_ms: 1_234,
-                report: GoalReport {
-                    summary: "done".into(),
-                    changes: Vec::new(),
-                    evidence: Vec::new(),
-                    unresolved: Vec::new(),
-                    cached_input_tokens: 0,
-                },
-            },
             Event::SessionRenamed {
                 title: "renamed".into(),
             },
@@ -1492,6 +1480,25 @@ mod payload_version_tests {
                 event
             );
         }
+        let finished = Event::GoalFinished {
+            goal_id,
+            status: GoalStatus::Completed,
+            active_ms: 1_234,
+            report: GoalReport {
+                summary: "done".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+                cached_input_tokens: 0,
+            },
+            exhausted: false,
+        };
+        let (run_id, agent_run_id) = finished.scope();
+        let payload = finished.payload().expect("payload");
+        assert_eq!(
+            Event::decode("GoalFinished", 7, &payload, run_id, agent_run_id).expect("bumped"),
+            finished
+        );
         for deleted in ["GoalActiveTimeReserved", "GoalActiveTimeSettled"] {
             assert_eq!(payload_version(deleted), None);
             let payload = format!(r#"{{"goal_id":"{goal_id}","active_ms":1}}"#);

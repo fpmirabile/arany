@@ -237,6 +237,7 @@ impl<'a> RunLoop<'a> {
         if cancelled {
             self.cancel_primary().await
         } else {
+            self.ledger().mark_budget_stopped();
             self.fail_primary().await
         }
     }

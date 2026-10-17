@@ -822,6 +822,7 @@ impl Engine {
                 status: GoalStatus::Failed,
                 active_ms: goal.usage.active_ms,
                 report,
+                exhausted: true,
             },
         )
         .await?;
@@ -1616,6 +1617,7 @@ impl Engine {
             finish_after_run,
             workspace_identity,
         } = started;
+        let budget_stopped = ledger.budget_stopped();
         let (run, active_ms, terminal) = ledger.view(|view| -> Result<_, EngineError> {
             let run = view
                 .runs
@@ -1628,25 +1630,28 @@ impl Engine {
             let terminal = match run.status {
                 crate::session::RunStatus::Finished if goal.autonomous => {
                     if goal_view.plan_contract.is_none() || goal_view.success_criterion_satisfied {
-                        Some(GoalStatus::Completed)
+                        Some((GoalStatus::Completed, false))
                     } else if !goal_view.admits_next_run() {
                         // Decide the exhaustion before this segment closes, so the next admission cannot find it open.
-                        Some(GoalStatus::Failed)
+                        Some((GoalStatus::Failed, true))
                     } else {
                         None
                     }
                 }
                 crate::session::RunStatus::Finished => {
-                    finish_after_run.then_some(GoalStatus::Completed)
+                    finish_after_run.then_some((GoalStatus::Completed, false))
                 }
-                crate::session::RunStatus::Failed => Some(GoalStatus::Failed),
+                crate::session::RunStatus::Failed => Some((
+                    GoalStatus::Failed,
+                    budget_stopped && !goal_view.admits_next_run(),
+                )),
                 _ => None,
             }
-            .map(|status| (status, goal_report(view, &run, goal_view)));
+            .map(|(status, exhausted)| (status, goal_report(view, &run, goal_view), exhausted));
             Ok((run, goal_view.active_ms, terminal))
         })??;
         let mut goal_status = GoalStatus::Running;
-        if let Some((status, report)) = terminal {
+        if let Some((status, report, exhausted)) = terminal {
             self.journal
                 .append(
                     session_id,
@@ -1655,6 +1660,7 @@ impl Engine {
                         status,
                         active_ms,
                         report,
+                        exhausted,
                     },
                 )
                 .await?;

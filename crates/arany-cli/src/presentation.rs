@@ -740,6 +740,7 @@ mod exec_jsonl_tests {
                 unresolved: Vec::new(),
                 cached_input_tokens: 0,
             },
+            exhausted: false,
         }
     }
 

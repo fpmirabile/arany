@@ -84,6 +84,7 @@ impl SessionView {
             finished_sequence: None,
             known_cached_tokens: 0,
             continues,
+            budget_closed: false,
         });
         Ok(())
     }
@@ -361,6 +362,7 @@ impl SessionView {
         status: &GoalStatus,
         active_ms: &u64,
         report: &GoalReport,
+        exhausted: bool,
         prior: u64,
     ) -> Result<(), ReplayError> {
         // The report's cache-read total must be exactly what the Goal accumulated from its Provider calls.
@@ -404,11 +406,19 @@ impl SessionView {
                 && goal.plan_contract.is_some()
                 && !goal.success_criterion_satisfied);
         if !terminal {
-            return self
-                .close_exhausted_goal(goal_id, *status, run_status, *active_ms, report, prior);
+            if !exhausted {
+                return Err(ReplayError::InvalidTransition);
+            }
+            self.close_exhausted_goal(goal_id, *status, run_status, *active_ms, report, prior)?;
+            current_goal_mut(self, *goal_id)?.budget_closed = true;
+            return Ok(());
         }
         let goal = current_goal_mut(self, *goal_id)?;
         goal.active_ms = *active_ms;
+        if exhausted && (*status != GoalStatus::Failed || goal.admits_next_run()) {
+            return Err(ReplayError::InvalidTransition);
+        }
+        goal.budget_closed = exhausted;
         goal.status = *status;
         goal.report = Some(report.clone());
         goal.finished_sequence = Some(prior);
@@ -648,8 +658,9 @@ pub(super) fn apply(
             status,
             active_ms,
             report,
+            exhausted,
         } => {
-            current.finish_goal(goal_id, status, active_ms, report, prior)?;
+            current.finish_goal(goal_id, status, active_ms, report, *exhausted, prior)?;
         }
         Event::GoalSteeringNoteRecorded {
             goal_id,
