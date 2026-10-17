@@ -59,21 +59,24 @@ impl RunLoop<'_> {
         previous_summary: Option<String>,
         assistant: String,
     ) -> Result<CompactionRequest, EngineError> {
-        let provider = self
-            .routing
-            .provider(crate::provider::ProviderRole::Compaction, self.primary_id)?;
-        Ok(CompactionRequest {
+        let mut request = CompactionRequest {
             session_id: self.session_id,
             covered_run_id: self.run_id,
-            model: provider.identity().model.clone(),
+            model: String::new(),
             previous_summary,
             items: vec![CompactionItem::Completed(HistoryTurn {
                 user: COMPACTION_USER.to_owned(),
                 assistant,
             })],
-            max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS
-                .min(provider.identity().limits.max_output_tokens),
-        })
+            max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS,
+        };
+        self.routing.bind(
+            crate::provider::ProviderRole::Compaction,
+            self.primary_id,
+            &mut request.model,
+            &mut request.max_output_tokens,
+        )?;
+        Ok(request)
     }
 
     pub(super) async fn compact_tool_context_if_needed(

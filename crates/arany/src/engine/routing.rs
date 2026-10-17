@@ -1,18 +1,15 @@
 use super::ledger::{Action, GoalLedger};
 use super::progress::ProgressPublisher;
-use super::run_loop::{CallResult, invoke_bounded_with_preview};
+use super::run_loop::{CallFailure, CallResult, invoke_bounded_with_preview};
 use super::{EngineError, RunCancellation};
 use crate::journal::Journal;
 use crate::provider::{
     AdmittedProviders, MAX_PROVIDER_SWITCHES, Provider, ProviderError, ProviderFallback,
-    ProviderIdentity, ProviderRequest, ProviderResponse, ProviderRole, ResponsePreview,
+    ProviderIdentity, ProviderRequest, ProviderRole, ResponsePreview,
 };
 use crate::session::{AgentRunId, Event, RunId, SessionId};
 use crate::store::StoreError;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 use tokio::time::Instant;
 
 pub(super) struct CompactionOutcome {
@@ -69,6 +66,20 @@ impl CallRouter<'_> {
         Ok(Arc::clone(&chain[index]))
     }
 
+    pub(super) fn bind(
+        &self,
+        role: ProviderRole,
+        actor: AgentRunId,
+        model: &mut String,
+        max_output_tokens: &mut u32,
+    ) -> Result<Arc<dyn Provider>, EngineError> {
+        let provider = self.provider(role, actor)?;
+        let identity = provider.identity();
+        *model = identity.model.clone();
+        *max_output_tokens = (*max_output_tokens).min(identity.limits.max_output_tokens);
+        Ok(provider)
+    }
+
     pub(super) async fn invoke(
         &self,
         mut request: ProviderRequest,
@@ -78,11 +89,12 @@ impl CallRouter<'_> {
     ) -> Result<CallResult, EngineError> {
         let role = ProviderRole::for_phase(request.phase);
         if self.providers.get(role).len() == 1 {
-            let provider = self.provider(role, request.agent_run_id)?;
-            request.model = provider.identity().model.clone();
-            request.max_output_tokens = request
-                .max_output_tokens
-                .min(provider.identity().limits.max_output_tokens);
+            let provider = self.bind(
+                role,
+                request.agent_run_id,
+                &mut request.model,
+                &mut request.max_output_tokens,
+            )?;
             return Ok(invoke_bounded_with_preview(
                 provider.as_ref(),
                 request,
@@ -94,11 +106,12 @@ impl CallRouter<'_> {
         }
         let preview = preview.unwrap_or_else(|| ResponsePreview::new().0);
         loop {
-            let provider = self.provider(role, request.agent_run_id)?;
-            request.model = provider.identity().model.clone();
-            request.max_output_tokens = request
-                .max_output_tokens
-                .min(provider.identity().limits.max_output_tokens);
+            let provider = self.bind(
+                role,
+                request.agent_run_id,
+                &mut request.model,
+                &mut request.max_output_tokens,
+            )?;
             let attempt = invoke_attempt(
                 provider.as_ref(),
                 request.clone(),
@@ -138,11 +151,12 @@ impl CallRouter<'_> {
         mut cancellation: RunCancellation,
     ) -> Result<Option<CompactionOutcome>, EngineError> {
         loop {
-            let provider = self.provider(ProviderRole::Compaction, actor)?;
-            request.model = provider.identity().model.clone();
-            request.max_output_tokens = request
-                .max_output_tokens
-                .min(provider.identity().limits.max_output_tokens);
+            let provider = self.bind(
+                ProviderRole::Compaction,
+                actor,
+                &mut request.model,
+                &mut request.max_output_tokens,
+            )?;
             if cancellation.is_cancelled() {
                 return Ok(None);
             }
@@ -322,40 +336,6 @@ impl CallRouter<'_> {
     }
 }
 
-struct Attempt<'a> {
-    provider: &'a dyn Provider,
-    retryable: AtomicBool,
-}
-
-#[async_trait::async_trait]
-impl Provider for Attempt<'_> {
-    fn identity(&self) -> &ProviderIdentity {
-        self.provider.identity()
-    }
-
-    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        let result = self.provider.invoke(request).await;
-        self.retryable.store(
-            result.as_ref().is_err_and(ProviderError::allows_fallback),
-            Ordering::Relaxed,
-        );
-        result
-    }
-
-    async fn invoke_with_preview(
-        &self,
-        request: ProviderRequest,
-        preview: ResponsePreview,
-    ) -> Result<ProviderResponse, ProviderError> {
-        let result = self.provider.invoke_with_preview(request, preview).await;
-        self.retryable.store(
-            result.as_ref().is_err_and(|error| error.allows_fallback()),
-            Ordering::Relaxed,
-        );
-        result
-    }
-}
-
 pub(super) struct AttemptResult {
     pub(super) result: CallResult,
     pub(super) eligible: bool,
@@ -368,12 +348,8 @@ pub(super) async fn invoke_attempt(
     cancellation: RunCancellation,
     preview: Option<ResponsePreview>,
 ) -> AttemptResult {
-    let attempt = Attempt {
-        provider,
-        retryable: AtomicBool::new(false),
-    };
     let result = invoke_bounded_with_preview(
-        &attempt,
+        provider,
         request,
         deadline,
         cancellation.clone(),
@@ -381,10 +357,12 @@ pub(super) async fn invoke_attempt(
     )
     .await;
     AttemptResult {
-        result,
-        eligible: attempt.retryable.load(Ordering::Relaxed)
-            && preview.as_ref().is_none_or(|preview| !preview.has_output())
+        eligible: matches!(
+            result,
+            CallResult::Failed(CallFailure::Unavailable { fallback: true, .. })
+        ) && preview.as_ref().is_none_or(|preview| !preview.has_output())
             && !cancellation.is_cancelled()
             && Instant::now() < deadline,
+        result,
     }
 }
