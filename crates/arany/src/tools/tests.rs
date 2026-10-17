@@ -2188,6 +2188,67 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
 }
 
 #[tokio::test]
+async fn listing_without_a_fitting_row_is_a_limit_and_empty_results_succeed() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    let long_name = format!("{}.txt", "a".repeat(160));
+    std::fs::write(workspace.join("src").join(&long_name), "quoted").unwrap();
+    let runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    for (call, result_bytes) in [
+        (
+            ToolCall::Search {
+                path: "src".into(),
+                query: "quoted".into(),
+            },
+            128,
+        ),
+        (ToolCall::List { path: "src".into() }, 128),
+    ] {
+        let mut intent = runtime.intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            call.clone(),
+        );
+        intent.limits.result_bytes = result_bytes;
+        let observation = runtime.execute(intent, super::Cancellation::new()).await;
+        assert_eq!(
+            observation.disposition,
+            ToolDisposition::Limit,
+            "{call:?} with one unfit row"
+        );
+    }
+    for call in [
+        ToolCall::Search {
+            path: "src".into(),
+            query: "absent".into(),
+        },
+        ToolCall::List {
+            path: "empty".into(),
+        },
+    ] {
+        std::fs::create_dir_all(workspace.join("empty")).unwrap();
+        let mut intent = runtime.intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            call.clone(),
+        );
+        intent.limits.result_bytes = 1024;
+        let observation = runtime.execute(intent, super::Cancellation::new()).await;
+        assert_eq!(
+            observation.disposition,
+            ToolDisposition::Succeeded,
+            "{call:?} with no matches"
+        );
+        let rows: Value = serde_json::from_str(&observation.output).unwrap();
+        assert_eq!(rows["entries"], json!([]));
+    }
+}
+
+#[tokio::test]
 async fn in_process_results_fit_their_budget_before_serialization() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");

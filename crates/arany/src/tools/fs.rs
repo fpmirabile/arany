@@ -1014,15 +1014,20 @@ fn escaped_len(character: char) -> usize {
     }
 }
 
-/// Drops trailing rows until the listing fits `result_bytes`, marking it possibly truncated.
+/// Drops trailing rows until the listing fits `result_bytes`, marking it possibly truncated; a
+/// listing with matches that keeps no row is a Limit, not an empty success.
 fn fit_rows(
     mut rows: Vec<Value>,
     mut truncated: bool,
     result_bytes: usize,
 ) -> Result<String, ToolError> {
+    let had_rows = !rows.is_empty();
     loop {
         let output = json!({"entries":rows,"limit":64,"may_be_truncated":truncated}).to_string();
         if output.len() <= result_bytes {
+            if had_rows && rows.is_empty() {
+                return Err(ToolError::Limit);
+            }
             return Ok(output);
         }
         rows.pop().ok_or(ToolError::Limit)?;
