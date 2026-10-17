@@ -36,9 +36,15 @@ cargo test --locked --offline <filter>
 Choose `<filter>` from the owning corpus or journey of the changed code, for
 example `-p arany --test engine_run goals::`, `-p arany-cli --test session_run tools::` or
 `-p arany --lib store::` for a module's own `tests.rs`; add `--release` when the change
-touches an optimized-profile gate. The complete workspace suite in both
-profiles runs in [CI](../.github/workflows/ci.yml) on pull requests with code
-changes, whatever their base branch; watch that run and fix a red result before handoff.
+touches an optimized-profile gate. On both Linux and macOS, [CI](../.github/workflows/ci.yml)
+runs the complete workspace suite in release and the unit, binary and
+`session_run` tests in debug. Release owns the shared Engine and Guard integration
+suites and release-script tests. Debug retains development diagnostics, account
+fixtures, Keychain and terminal journeys that release excludes or exercises
+differently, plus unit assertions. The same [test action](../.github/actions/ci-tests/action.yml)
+owns standard and focused lanes. Watch the complete CI run and fix a red result
+before handoff. A new integration target with debug-only coverage must also be
+included in the debug selection.
 Run the full suite locally only when CI is unavailable or the change is
 cross-cutting:
 
@@ -47,19 +53,28 @@ cargo test --workspace --locked --offline
 cargo test --workspace --locked --offline --release
 ```
 
-CI skips Rust steps only when every changed path is on the workflow's non-code
-allowlist. Unknown paths, an empty diff or failed detection run the standard
-checks. Renames include both the old and new paths. The workflow stays enabled
-for all pull requests, and `Clippy`, `Linux Tests (debug)`, `Linux Tests (release)`,
-`macOS Tests (debug)` and `macOS Tests (release)` still complete when their Rust
-steps are skipped.
-Pushes to `main` and manual dispatch run all standard checks; dispatch inputs
-enable the additional native lanes and history measurement. When changing this
-policy, audit Rust includes and file reads before widening the allowlist, then run:
+CI marks the Rust jobs `skipped` without allocating their runners only when every
+changed path is on the [detector's non-code allowlist](../scripts/ci-changes.py).
+Code, tests, fixtures, embedded assets, dependencies, build settings, scripts and
+Actions definitions run the checks; unknown paths, an empty diff, an unavailable
+base or failed detection also run them. Renames include both old and new paths.
+Pull requests on any base compare the merge result with its first parent; pushes
+to `main` compare the complete pushed range with the event's `before` commit,
+including code changes followed by documentation commits.
+
+The workflow stays enabled, and the five required check names remain present:
+`Clippy`, `Linux Tests (debug)`, `Linux Tests (release)`, `macOS Tests (debug)` and
+`macOS Tests (release)`. They are separate jobs so skipping does not leave an
+unexpanded matrix name in place of a required check. A job-level skip satisfies
+GitHub's required-check policy; skipping the whole workflow with path filters can
+leave checks pending. Manual dispatch always runs the standard lanes; its inputs
+enable the additional native lanes and history measurement. The optional Linux
+ARM64 lane retains the complete suite in both profiles. When changing this policy,
+audit Rust includes and file reads before widening the allowlist, then run:
 
 ```sh
 python3 scripts/test-ci-changes.py
-actionlint .github/workflows/ci.yml
+actionlint .github/workflows/ci.yml .github/workflows/ci-focused.yml
 ```
 
 Linux terminal tests need Bubblewrap and util-linux `script`, with user and
