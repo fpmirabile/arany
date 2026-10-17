@@ -295,6 +295,7 @@ impl<'a> IntoFuture for RunHandle<'a> {
 struct ToolAdmission {
     config: crate::tools::config::Config,
     permissions: Option<crate::tools::PermissionSnapshot>,
+    unguarded_rules: Option<crate::tools::unguarded_rules::ExactCommandRules>,
     guard_executable: PathBuf,
 }
 
@@ -849,18 +850,24 @@ impl Engine {
             ToolGrant::Configured => {
                 let guard = guard()?;
                 let snapshot = crate::tools::ToolRuntime::load_permissions(&self.state)?;
+                let unguarded_rules =
+                    crate::tools::ToolRuntime::load_exact_command_rules(&self.state)?;
                 Some(ToolAdmission {
                     config: crate::tools::config::Config::load(&self.state)?,
                     permissions: snapshot,
+                    unguarded_rules,
                     guard_executable: guard,
                 })
             }
             ToolGrant::Trusted(permissions) => {
                 let guard = guard()?;
                 let snapshot = crate::tools::ToolRuntime::load_permissions(&self.state)?;
+                let unguarded_rules =
+                    crate::tools::ToolRuntime::load_exact_command_rules(&self.state)?;
                 Some(ToolAdmission {
                     config: permissions.config(&request.workspace)?,
                     permissions: snapshot,
+                    unguarded_rules,
                     guard_executable: guard,
                 })
             }
@@ -1418,6 +1425,7 @@ impl Engine {
                 crate::tools::ToolRuntime::admit(
                     tools.config.clone(),
                     tools.permissions.clone(),
+                    tools.unguarded_rules.clone(),
                     &request.workspace,
                     &self.state,
                     tools.guard_executable.clone(),
