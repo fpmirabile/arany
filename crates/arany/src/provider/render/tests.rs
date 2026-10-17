@@ -323,6 +323,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 intent: observed.intent.clone(),
                 observation: Some(observed),
                 review_call_index: None,
+                permission_verdict: None,
                 finished_sequence: Some(3),
             },
             ToolView {
@@ -336,6 +337,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 .intent,
                 observation: None,
                 review_call_index: None,
+                permission_verdict: None,
                 finished_sequence: None,
             },
         ],

@@ -29,6 +29,9 @@ mod goals;
 #[path = "engine_run/routing.rs"]
 mod routing;
 
+#[path = "engine_run/permissions.rs"]
+mod permissions;
+
 #[cfg(unix)]
 pub use arany::test_support::process;
 

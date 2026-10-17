@@ -119,6 +119,7 @@ pub enum ToolError {
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
     config: Config,
+    permissions: Option<(std::sync::Arc<permissions::PermissionConfig>, [u8; 32])>,
     workspace: PathBuf,
     // Set at admission; `None` only in a runtime rebuilt inside a Guard unit, which never reads in process.
     reads: Option<InProcessReads>,
@@ -303,6 +304,16 @@ impl ToolRuntime {
             .ensure_outside_workspace(&root)
             .map_err(|_| ToolError::Path)?;
         fs::reject_overlap(workspace, state.path())?;
+        let permissions = state
+            .record(crate::store::RecordKind::Permissions)
+            .read()
+            .map_err(|_| ToolError::Configuration)?
+            .map(|bytes| {
+                permissions::PermissionConfig::parse(&bytes)
+                    .map(|config| (std::sync::Arc::new(config), types::digest(&bytes)))
+                    .map_err(|_| ToolError::Configuration)
+            })
+            .transpose()?;
         let account = StateRoot::account_path().map_err(|_| ToolError::Path)?;
         fs::reject_overlap(workspace, &account)?;
         for protected in [workspace, state.path(), account.as_path()] {
@@ -349,6 +360,7 @@ impl ToolRuntime {
         capture.complete();
         Ok(Self {
             config,
+            permissions,
             queue_progress: None,
             active_action_gate: None,
             cache_state: Some(std::sync::Arc::new(
@@ -374,7 +386,12 @@ impl ToolRuntime {
     pub(crate) fn receipt(&self) -> ToolPolicyReceipt {
         let mut receipt = self.config.receipt();
         receipt.max_context_bytes = self.context_limit_bytes as u32;
+        receipt.permissions_digest = self.permissions.as_ref().map(|(_, digest)| *digest);
         receipt
+    }
+
+    pub(crate) fn permissions(&self) -> Option<&permissions::PermissionConfig> {
+        self.permissions.as_ref().map(|(config, _)| config.as_ref())
     }
 
     fn skill_rows(&self) -> Vec<serde_json::Value> {

@@ -11,7 +11,79 @@ pub(super) fn apply(
     event: &Event,
     prior: u64,
 ) -> Result<(), ReplayError> {
+    if let Event::ToolFinished {
+        run_id,
+        agent_run_id,
+        observation,
+    } = event
+    {
+        let run = active_run(current, *run_id)?;
+        let configured = run
+            .config
+            .as_ref()
+            .and_then(|config| config.tool_policy.as_ref())
+            .is_some_and(|policy| policy.permissions_digest.is_some());
+        if configured {
+            let tool = pending_tool(run, *agent_run_id)?;
+            let verdict = tool
+                .permission_verdict
+                .as_ref()
+                .ok_or(ReplayError::InvalidTransition)?;
+            if !verdict.approved
+                && (observation.attestation.is_some()
+                    || observation.cache_update != crate::tools::CacheUpdate::NotApplicable
+                    || !matches!(
+                        observation.disposition,
+                        crate::tools::ToolDisposition::Denied
+                            | crate::tools::ToolDisposition::Limit
+                    ))
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+    }
     match event {
+        Event::ToolPermissionDecided {
+            run_id,
+            agent_run_id,
+            verdict,
+        } => {
+            let run = active_run(current, *run_id)?;
+            if run
+                .config
+                .as_ref()
+                .and_then(|config| config.tool_policy.as_ref())
+                .is_none_or(|policy| policy.permissions_digest.is_none())
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if verdict.source == crate::tools::permissions::PermissionSource::AiReview
+                && verdict.approved
+            {
+                let index = pending_tool(run, *agent_run_id)?
+                    .review_call_index
+                    .ok_or(ReplayError::InvalidTransition)?;
+                let reviewed = run
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == *agent_run_id)
+                    .and_then(|agent| agent.provider_calls.get(index as usize));
+                if reviewed.is_none_or(|call| {
+                    call.phase != AgentPhase::ToolReview
+                        || call.disposition != ProviderCallDisposition::Finished
+                }) {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
+            let tool = pending_tool(run, *agent_run_id)?;
+            if tool.intent.digest() != verdict.intent_digest
+                || tool.permission_verdict.is_some()
+                || tool.observation.is_some()
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            tool.permission_verdict = Some(verdict.clone());
+        }
         Event::ToolStarted {
             run_id,
             agent_run_id,
@@ -83,6 +155,7 @@ pub(super) fn apply(
                 intent: intent.clone(),
                 observation: None,
                 review_call_index: None,
+                permission_verdict: None,
                 finished_sequence: None,
             });
             record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
@@ -195,6 +268,24 @@ pub(super) fn apply(
         _ => return Err(ReplayError::InvalidTransition),
     }
     Ok(())
+}
+
+fn pending_tool(
+    run: &mut RunView,
+    actor: crate::session::AgentRunId,
+) -> Result<&mut ToolView, ReplayError> {
+    if run
+        .primary()
+        .is_some_and(|primary| primary.id == actor && primary.status == AgentStatus::Active)
+    {
+        run.tools.last_mut()
+    } else {
+        run.agents
+            .iter_mut()
+            .find(|agent| agent.id == actor && agent.status == AgentStatus::Active)
+            .and_then(|agent| agent.tools.last_mut())
+    }
+    .ok_or(ReplayError::InvalidTransition)
 }
 
 fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {

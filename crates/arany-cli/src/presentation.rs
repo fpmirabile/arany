@@ -73,6 +73,15 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         summary.push_str(" · ");
         summary.push_str(cause.diagnostic());
     }
+    if let Some(verdict) = &tool.permission_verdict
+        && verdict.decision == arany::permissions::Decision::Deny
+    {
+        summary.push_str(match verdict.source {
+            arany::permissions::PermissionSource::Rule => " · permission deny rule",
+            arany::permissions::PermissionSource::PinnedGrant => " · pinned grant denial",
+            _ => " · permission mode denial",
+        });
+    }
     summary
 }
 
@@ -1241,6 +1250,7 @@ mod git_summary_tests {
                 },
                 observation: None,
                 review_call_index: None,
+                permission_verdict: None,
                 finished_sequence: None,
             };
             assert_eq!(tool_summary(&tool), expected);
@@ -1279,6 +1289,7 @@ mod enforcement_tests {
                 cache_update: arany::CacheUpdate::NotApplicable,
                 enforcement_cause: Some(arany::EnforcementCause::FilesystemDenied),
             }),
+            permission_verdict: None,
             review_call_index: None,
             finished_sequence: Some(1),
         };

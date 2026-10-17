@@ -44,16 +44,38 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
             _ => None,
         })
         .collect();
+    let mut call_phases = vec![None; events.len()];
+    let mut next_phase = std::collections::HashMap::new();
+    for (index, envelope) in events.iter().enumerate().rev() {
+        match &envelope.event {
+            Event::ProviderCallRecorded {
+                agent_run_id,
+                record,
+                ..
+            } => {
+                next_phase.insert(*agent_run_id, record.phase);
+            }
+            Event::GoalProviderCallReserved { agent_run_id, .. } => {
+                call_phases[index] = next_phase.get(agent_run_id).copied();
+            }
+            _ => {}
+        }
+    }
     let in_flight = |at: usize| -> u32 {
         let mut open: std::collections::HashMap<crate::AgentRunId, i32> = Default::default();
-        for envelope in &events[..at] {
+        for (index, envelope) in events[..at].iter().enumerate() {
             match &envelope.event {
                 Event::GoalProviderCallReserved { agent_run_id, .. }
-                    if !primaries.contains(agent_run_id) =>
+                    if !primaries.contains(agent_run_id)
+                        && call_phases[index] != Some(AgentPhase::ToolReview) =>
                 {
                     *open.entry(*agent_run_id).or_default() += 1;
                 }
-                Event::ProviderCallRecorded { agent_run_id, .. } => {
+                Event::ProviderCallRecorded {
+                    agent_run_id,
+                    record,
+                    ..
+                } if record.phase != AgentPhase::ToolReview => {
                     if let Some(count) = open.get_mut(agent_run_id) {
                         *count -= 1;
                     }
@@ -63,6 +85,17 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
         }
         open.values().filter(|count| **count > 0).count() as u32
     };
+    let researchers: std::collections::HashSet<_> = events
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            Event::AgentSpawned {
+                agent_run_id,
+                grant: Some(crate::ChildGrant::ReadOnly),
+                ..
+            } => Some(*agent_run_id),
+            _ => None,
+        })
+        .collect();
     let primary_call = |index: usize| {
         matches!(
             &events[index].event,
@@ -79,31 +112,19 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
             | Event::GoalResumed { .. }
             | Event::GoalRunLinked { .. }
             | Event::SessionStarted { .. } => markers.push(index),
-            Event::GoalProviderCallReserved { agent_run_id, .. }
-                if primaries.contains(agent_run_id) =>
-            {
-                let phase = events[index..].iter().find_map(|later| match &later.event {
-                    Event::ProviderCallRecorded {
-                        agent_run_id: recorded,
-                        record,
-                        ..
-                    } if recorded == agent_run_id => Some(record.phase),
-                    _ => None,
-                });
-                let action = if phase == Some(AgentPhase::ToolReview) {
+            Event::GoalProviderCallReserved { agent_run_id, .. } => {
+                let action = if call_phases[index] == Some(AgentPhase::ToolReview) {
                     Action::Review
-                } else {
+                } else if primaries.contains(agent_run_id) {
                     Action::ProviderCall { previews, steering }
+                } else {
+                    Action::Child {
+                        in_flight: in_flight(index),
+                        research: researchers.contains(agent_run_id),
+                    }
                 };
                 points.push((index, action, None));
             }
-            Event::GoalProviderCallReserved { .. } => points.push((
-                index,
-                Action::Child {
-                    in_flight: in_flight(index),
-                },
-                None,
-            )),
             Event::AgentSpawned { grant: Some(_), .. }
                 if !matches!(previous, Some(Event::AgentSpawned { .. })) =>
             {
@@ -133,11 +154,16 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                     Some(end),
                 ));
             }
-            Event::ProviderFallbackUsed { fallback, .. } => {
+            Event::ProviderFallbackUsed {
+                agent_run_id,
+                fallback,
+                ..
+            } => {
                 let action = match fallback.role {
                     crate::ProviderRole::Primary => Action::ProviderCall { previews, steering },
                     crate::ProviderRole::Child => Action::Child {
                         in_flight: in_flight(index),
+                        research: researchers.contains(agent_run_id),
                     },
                     crate::ProviderRole::Review => Action::Review,
                     crate::ProviderRole::Compaction => Action::Compaction,
@@ -172,6 +198,7 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 } else {
                     Action::Child {
                         in_flight: in_flight(index),
+                        research: researchers.contains(agent_run_id),
                     }
                 };
                 points.push((index, action, None));

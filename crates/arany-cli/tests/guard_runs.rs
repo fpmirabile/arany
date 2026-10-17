@@ -20,6 +20,9 @@ pub use arany::test_support::process;
 use arany::test_support::{engine as engine_support, scenario::*};
 use engine_support::{run_to_end, run_with};
 
+#[path = "guard_runs/permissions.rs"]
+mod permissions;
+
 async fn wait_for_child_finish(store: &Store, session_id: SessionId, objective: &str) {
     loop {
         // The Engine's journal commit can briefly lock this observer's separate connection.

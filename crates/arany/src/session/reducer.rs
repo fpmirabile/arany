@@ -208,6 +208,7 @@ pub struct ToolView {
     pub intent: crate::tools::EffectIntent,
     pub observation: Option<crate::tools::ToolObservation>,
     pub review_call_index: Option<u32>,
+    pub permission_verdict: Option<crate::tools::permissions::PermissionVerdict>,
     pub finished_sequence: Option<u64>,
 }
 
@@ -558,6 +559,7 @@ impl SessionView {
                 Event::ToolFinished { observation, .. }
                     if observation.intent.call.is_goal_plan_prelude()
             )
+            && !matches!(&envelope.event, Event::ToolPermissionDecided { .. })
             && !matches!(
                 &envelope.event,
                 Event::GoalResumed { goal_id } if *goal_id == awaiting
@@ -601,9 +603,9 @@ impl SessionView {
             | Event::ProviderFallbackUsed { .. }
             | Event::ProviderCallRecorded { .. }
             | Event::AgentFinished { .. } => agent::apply(current, &envelope.event)?,
-            Event::ToolStarted { .. } | Event::ToolFinished { .. } => {
-                tool::apply(current, &envelope.event, prior)?
-            }
+            Event::ToolStarted { .. }
+            | Event::ToolFinished { .. }
+            | Event::ToolPermissionDecided { .. } => tool::apply(current, &envelope.event, prior)?,
         }
         current.last_sequence = prior;
         Ok(())

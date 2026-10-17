@@ -893,6 +893,7 @@ impl Task {
     fn into_runtime(self) -> (ToolRuntime, EffectIntent, Option<super::BuildCacheTransfer>) {
         let cache = self.cache;
         let runtime = ToolRuntime {
+            permissions: None,
             context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
             queue_progress: None,
             active_action_gate: None,

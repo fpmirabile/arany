@@ -358,6 +358,8 @@ pub(crate) fn hex_digest(bytes: &[u8]) -> String {
 pub struct ToolPolicyReceipt {
     pub contract_version: u32,
     pub config_digest: [u8; 32],
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub permissions_digest: Option<[u8; 32]>,
     pub max_context_bytes: u32,
 }
 
@@ -373,6 +375,7 @@ impl ToolPolicyReceipt {
     pub(crate) fn valid(&self) -> bool {
         self.contract_version == 1
             && self.config_digest != [0; 32]
+            && self.permissions_digest != Some([0; 32])
             && (MIN_TOOL_CONTEXT_BYTES as u32..=MAX_TOOL_CONTEXT_BYTES as u32)
                 .contains(&self.max_context_bytes)
     }

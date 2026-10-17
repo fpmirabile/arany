@@ -500,6 +500,7 @@ mod tests {
             intent: intent.clone(),
             observation: None,
             review_call_index: None,
+            permission_verdict: None,
             finished_sequence: None,
         });
         assert!(
@@ -682,6 +683,7 @@ mod tests {
             intent: child_read,
             observation: None,
             review_call_index: None,
+            permission_verdict: None,
             finished_sequence: None,
         });
         let model = PresentationModel::from_session(&view, 80);

@@ -26,6 +26,7 @@ mod goal_recovery_tests {
             use_count: 1,
         };
         let tool = ToolView {
+            permission_verdict: None,
             intent: intent.clone(),
             observation: disposition.map(|disposition| ToolObservation {
                 enforcement_cause: None,
@@ -156,6 +157,7 @@ mod goal_replay_tests {
             compaction_event_sequence: None,
             compaction_content_digest: None,
             tool_policy: tools.then_some(ToolPolicyReceipt {
+                permissions_digest: None,
                 contract_version: 1,
                 config_digest: [1; 32],
                 max_context_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES as u32,
@@ -710,6 +712,7 @@ mod goal_replay_tests {
             use_count: 1,
         };
         review.runs[0].tools.push(ToolView {
+            permission_verdict: None,
             intent,
             observation: None,
             review_call_index: None,
@@ -2398,6 +2401,7 @@ mod goal_replay_tests {
                 accepted_sequence: 1,
                 finished_sequence: None,
                 tools: vec![ToolView {
+                    permission_verdict: None,
                     intent: read_intent,
                     observation: Some(read),
                     review_call_index: None,
@@ -2506,6 +2510,7 @@ mod goal_replay_tests {
                     accepted_sequence: 1,
                     finished_sequence: Some(1),
                     tools: vec![ToolView {
+                        permission_verdict: None,
                         intent: write.intent.clone(),
                         observation: Some(write),
                         review_call_index: None,
@@ -2626,6 +2631,103 @@ mod goal_replay_tests {
                 limit: 1024,
             },
         )
+    }
+
+    #[test]
+    fn permission_verdict_replay_requires_pending_intent_and_blocks_denied_effects() {
+        use crate::tools::permissions::{
+            Decision, PermissionMode, PermissionSource, PermissionVerdict,
+        };
+        for researcher in [false, true] {
+            let (mut view, goal, run, agent) = if researcher {
+                research_session()
+            } else {
+                primary_tool_session(true)
+            };
+            view.runs[0]
+                .config
+                .as_mut()
+                .unwrap()
+                .tool_policy
+                .as_mut()
+                .unwrap()
+                .permissions_digest = Some([3; 32]);
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(
+                &mut view,
+                if researcher {
+                    child_record(run, agent, ProviderCallDisposition::ToolRequested)
+                } else {
+                    requesting_step(run, agent, 1)
+                },
+            )
+            .unwrap();
+            let intent = read_intent(run, agent, "src/lib.rs");
+            let verdict = Event::ToolPermissionDecided {
+                run_id: run,
+                agent_run_id: agent,
+                verdict: PermissionVerdict {
+                    intent_digest: intent.digest(),
+                    decision: Decision::Deny,
+                    mode: PermissionMode::Default,
+                    basis: PermissionSource::Rule,
+                    source: PermissionSource::Rule,
+                    approved: false,
+                },
+            };
+            assert_eq!(
+                Event::decode(
+                    "ToolPermissionDecided",
+                    1,
+                    &verdict.payload().unwrap(),
+                    Some(run),
+                    Some(agent)
+                )
+                .unwrap(),
+                verdict
+            );
+            assert!(rejected(&view, verdict.clone()));
+            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            let succeeded = tool_finished(run, agent, &intent, b"ok");
+            assert!(rejected(&view, succeeded.clone()));
+            let mut wrong_intent = verdict.clone();
+            if let Event::ToolPermissionDecided { verdict, .. } = &mut wrong_intent {
+                verdict.intent_digest = [4; 32];
+            }
+            assert!(rejected(&view, wrong_intent));
+            for mode in [PermissionMode::Auto, PermissionMode::Default] {
+                let mut unreviewed = verdict.clone();
+                if let Event::ToolPermissionDecided { verdict, .. } = &mut unreviewed {
+                    verdict.decision = Decision::Ask;
+                    verdict.mode = mode;
+                    verdict.basis = PermissionSource::Mode;
+                    verdict.source = PermissionSource::AiReview;
+                    verdict.approved = true;
+                }
+                assert!(unreviewed.payload().is_ok());
+                assert!(rejected(&view, unreviewed.clone()));
+                if let Event::ToolPermissionDecided { verdict, .. } = &mut unreviewed {
+                    verdict.basis = PermissionSource::Rule;
+                }
+                assert!(unreviewed.payload().is_err());
+            }
+            apply(&mut view, verdict.clone()).unwrap();
+            assert!(rejected(&view, verdict));
+            assert!(rejected(&view, succeeded));
+            let mut denied = observation_for(intent, b"unused");
+            denied.disposition = ToolDisposition::Denied;
+            denied.attestation = None;
+            denied.output = "Permission deny rule blocked this Tool".into();
+            apply(
+                &mut view,
+                Event::ToolFinished {
+                    run_id: run,
+                    agent_run_id: agent,
+                    observation: denied,
+                },
+            )
+            .unwrap();
+        }
     }
 
     fn tool_started(run: RunId, agent: AgentRunId, intent: &EffectIntent) -> Event {

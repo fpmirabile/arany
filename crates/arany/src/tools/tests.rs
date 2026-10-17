@@ -35,6 +35,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         git: None,
     };
     let runtime = ToolRuntime {
+        permissions: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
         config,
@@ -1901,6 +1902,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
     use std::path::PathBuf;
 
     let runtime = |config: Config| ToolRuntime {
+        permissions: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
         config,
@@ -2003,6 +2005,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         "git": program,
     });
     let runtime = ToolRuntime {
+        permissions: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
         config: serde_json::from_value(value).unwrap(),
@@ -2054,6 +2057,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
 fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::ToolRuntime {
     let root = super::fs::open_directory(workspace).unwrap();
     super::ToolRuntime {
+        permissions: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
         config: serde_json::from_value(config).unwrap(),

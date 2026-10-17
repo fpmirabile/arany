@@ -119,8 +119,9 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "AgentFinished"
         | "MessageCommitted" => Some(6),
         "ProviderFallbackUsed" => Some(1),
+        "ToolPermissionDecided" => Some(1),
         "ToolFinished" => Some(8),
-        "RunStarted" => Some(8),
+        "RunStarted" => Some(9),
         "RunFinished" => Some(7),
         "GoalProviderCallReserved" => Some(7),
         "GoalCompactionCallReserved" => Some(7),
@@ -1450,7 +1451,7 @@ mod account_default_tests {
             event.payload().unwrap(),
             r#"{"config":{"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
         );
-        assert_eq!(payload_version("RunStarted"), Some(8));
+        assert_eq!(payload_version("RunStarted"), Some(9));
         assert_eq!(payload_version("ProviderCallRecorded"), Some(6));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
@@ -2527,6 +2528,11 @@ pub enum Event {
         agent_run_id: AgentRunId,
         observation: crate::tools::ToolObservation,
     },
+    ToolPermissionDecided {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        verdict: crate::tools::permissions::PermissionVerdict,
+    },
     AgentFinished {
         run_id: RunId,
         agent_run_id: AgentRunId,
@@ -2748,6 +2754,7 @@ impl Event {
             Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
             Self::ToolStarted { .. } => "ToolStarted",
             Self::ToolFinished { .. } => "ToolFinished",
+            Self::ToolPermissionDecided { .. } => "ToolPermissionDecided",
             Self::AgentFinished { .. } => "AgentFinished",
             Self::MessageCommitted { .. } => "MessageCommitted",
             Self::RunFinished { .. } => "RunFinished",
@@ -2799,6 +2806,11 @@ impl Event {
                 ..
             }
             | Self::ToolStarted {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::ToolPermissionDecided {
                 run_id,
                 agent_run_id,
                 ..
@@ -2954,6 +2966,7 @@ impl Event {
                 active_ceiling_ms: *active_ceiling_ms,
             }),
             Self::ToolFinished { observation, .. } => serialize(observation),
+            Self::ToolPermissionDecided { verdict, .. } => serialize(verdict),
             Self::AgentFinished {
                 disposition,
                 summary,
@@ -3166,6 +3179,13 @@ impl Event {
                 agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
                 observation: parse(payload)?,
             },
+            "ToolPermissionDecided" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::ToolPermissionDecided {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    verdict: parse(payload)?,
+                }
+            }
             "MessageCommitted" if run_id.is_some() && agent_run_id.is_none() => {
                 Self::MessageCommitted {
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
@@ -3200,6 +3220,7 @@ impl Event {
             | "AssistantDisplayRecorded"
             | "ToolStarted"
             | "ToolFinished"
+            | "ToolPermissionDecided"
             | "AgentFinished"
             | "MessageCommitted"
             | "RunFinished" => {
@@ -3363,6 +3384,36 @@ impl Event {
                         && observation.disposition == crate::tools::ToolDisposition::Succeeded)
                     && observation.intent.run_id == *run_id
                     && observation.intent.agent_run_id == *agent_run_id
+                {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
+            Self::ToolPermissionDecided { verdict, .. } => {
+                use crate::tools::permissions::{Decision, PermissionSource};
+                if verdict.intent_digest != [0; 32]
+                    && matches!(
+                        verdict.basis,
+                        PermissionSource::Rule
+                            | PermissionSource::Mode
+                            | PermissionSource::PinnedGrant
+                    )
+                    && (verdict.decision != Decision::Deny || !verdict.approved)
+                    && match verdict.decision {
+                        Decision::Ask => matches!(
+                            verdict.source,
+                            PermissionSource::Human
+                                | PermissionSource::AiReview
+                                | PermissionSource::UnavailableApproval
+                        ),
+                        Decision::Allow | Decision::Deny => verdict.source == verdict.basis,
+                    }
+                    && (verdict.source != PermissionSource::UnavailableApproval
+                        || !verdict.approved)
+                    && (verdict.source != PermissionSource::PinnedGrant || !verdict.approved)
+                    && (verdict.source != PermissionSource::AiReview
+                        || verdict.basis == PermissionSource::Mode)
                 {
                     Ok(())
                 } else {
@@ -3678,7 +3729,7 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = if matches!(event, Event::RunStarted { .. }) {
-                8
+                9
             } else {
                 7
             };

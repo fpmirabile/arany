@@ -1650,6 +1650,7 @@ done
         )
         .unwrap();
         ToolRuntime {
+            permissions: None,
             context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
             queue_progress: None,
             active_action_gate: None,

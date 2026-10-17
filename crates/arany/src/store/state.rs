@@ -77,6 +77,7 @@ pub enum RecordKind {
     WorkspacePermissions,
     ProviderProfiles,
     ProviderRouting,
+    Permissions,
     SavedAccount,
     UiPreferences,
     ModelPreferences,
@@ -95,6 +96,7 @@ impl RecordKind {
                 64 * 1024,
             ),
             Self::ProviderRouting => ("provider-routing.json", None, 16 * 1024),
+            Self::Permissions => ("permissions.json", None, 64 * 1024),
             Self::ProviderProfiles => ("provider-profiles.json", None, 64 * 1024),
             Self::SavedAccount => (
                 "account-credentials.json",
@@ -743,7 +745,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("test root");
         let path = temp.path().join("state");
         let state = StateRoot::admit(&path).expect("private state");
-        for kind in [RecordKind::ToolsConfig, RecordKind::ProviderProfiles] {
+        for kind in [
+            RecordKind::ToolsConfig,
+            RecordKind::ProviderProfiles,
+            RecordKind::Permissions,
+        ] {
             assert!(matches!(
                 state.record(kind).replace(b"synthetic"),
                 Err(StoreError::ReadOnly)

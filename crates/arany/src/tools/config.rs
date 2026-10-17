@@ -211,6 +211,7 @@ impl Config {
         ToolPolicyReceipt {
             contract_version: 1,
             config_digest: self.digest(),
+            permissions_digest: None,
             max_context_bytes: MAX_TOOL_CONTEXT_BYTES as u32,
         }
     }

@@ -716,6 +716,7 @@ impl RunLoop<'_> {
                 children[index].agent_run_id,
                 Action::Child {
                     in_flight: self.ledger().in_flight_children(),
+                    research: researcher,
                 },
                 0,
             )

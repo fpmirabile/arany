@@ -968,6 +968,7 @@ impl From<&Event> for TraceEventKind {
             | Event::ProviderFallbackUsed { .. }
             | Event::ProviderCallRecorded { .. }
             | Event::ToolStarted { .. }
+            | Event::ToolPermissionDecided { .. }
             | Event::ToolFinished { .. }
             | Event::AgentFinished { .. }
             | Event::MessageCommitted { .. }

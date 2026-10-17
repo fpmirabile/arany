@@ -214,4 +214,9 @@ fn every_event_slot_admits_a_current_tool_observation() {
         event_payload_limit("ToolFinished", finished - 1),
         crate::store::MAX_EVENT_BYTES
     );
+    let verdict = payload_version("ToolPermissionDecided").expect("payload version");
+    assert_eq!(
+        event_payload_limit("ToolPermissionDecided", verdict),
+        crate::store::MAX_EVENT_BYTES
+    );
 }

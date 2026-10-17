@@ -24,7 +24,9 @@ pub(super) fn is_child_step(agent: &AgentView, record: &ProviderCallRecord) -> b
         && (agent.provider_calls.is_empty()
             || (agent
                 .provider_calls
-                .last()
+                .iter()
+                .rev()
+                .find(|call| call.phase != AgentPhase::ToolReview)
                 .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
                 && agent.tools.len() == child_tool_requests(agent)
                 && agent
@@ -103,6 +105,7 @@ impl SessionView {
             intent: intent.clone(),
             observation: None,
             review_call_index: None,
+            permission_verdict: None,
             finished_sequence: None,
         });
         Ok(())
@@ -449,13 +452,17 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 return Err(ReplayError::InvalidTransition);
             }
             if record.phase == AgentPhase::ToolReview {
-                run.tools
+                let review_index = u32::try_from(agent.provider_calls.len())
+                    .map_err(|_| ReplayError::InvalidTransition)?;
+                let tools = if run.agents[index].role == AgentRole::Primary {
+                    &mut run.tools
+                } else {
+                    &mut run.agents[index].tools
+                };
+                tools
                     .last_mut()
                     .ok_or(ReplayError::InvalidTransition)?
-                    .review_call_index = Some(
-                    u32::try_from(run.agents[index].provider_calls.len())
-                        .map_err(|_| ReplayError::InvalidTransition)?,
-                );
+                    .review_call_index = Some(review_index);
             }
             let primary_call = run.agents[index].role == AgentRole::Primary;
             run.agents[index].provider_calls.push(record.clone());
@@ -597,6 +604,19 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
 }
 
 fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
+    if agent.role == AgentRole::Child {
+        return record.phase == AgentPhase::ToolReview
+            && agent.grant == Some(ChildGrant::ReadOnly)
+            && agent
+                .provider_calls
+                .last()
+                .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
+            && agent.tools.last().is_some_and(|tool| {
+                tool.observation.is_none()
+                    && tool.review_call_index.is_none()
+                    && tool.permission_verdict.is_none()
+            });
+    }
     agent.role == AgentRole::Primary
         && record.phase == AgentPhase::ToolReview
         && agent.provider_calls.last().is_some_and(|call| {
@@ -609,8 +629,9 @@ fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord)
                         )
                     })
         })
-        && run
-            .tools
-            .last()
-            .is_some_and(|tool| tool.observation.is_none() && tool.review_call_index.is_none())
+        && run.tools.last().is_some_and(|tool| {
+            tool.observation.is_none()
+                && tool.review_call_index.is_none()
+                && tool.permission_verdict.is_none()
+        })
 }

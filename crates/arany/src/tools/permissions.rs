@@ -5,14 +5,14 @@ pub use hooks::{CommandHook, HookConfig, HookEvent, HookGroup};
 use super::catalog::Family;
 use super::{ApprovalMode, ToolCall};
 use regex::{Regex, RegexBuilder};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
 pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
 pub const MAX_RULES: usize = 128;
 pub const MAX_PATTERN_BYTES: usize = 1024;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
     #[default]
@@ -23,11 +23,34 @@ pub enum PermissionMode {
     DontAsk,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Decision {
     Allow,
     Deny,
     Ask,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionSource {
+    Rule,
+    Mode,
+    Human,
+    AiReview,
+    UnavailableApproval,
+    PinnedGrant,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionVerdict {
+    pub intent_digest: [u8; 32],
+    pub decision: Decision,
+    pub mode: PermissionMode,
+    pub basis: PermissionSource,
+    pub source: PermissionSource,
+    pub approved: bool,
 }
 
 impl Decision {
@@ -126,29 +149,37 @@ impl PermissionConfig {
     }
 
     pub fn approval_mode(&self, call: &ToolCall) -> Option<ApprovalMode> {
-        if self.decision(call) != Decision::Ask {
-            return None;
-        }
-        let explicit_ask = self
-            .rules
-            .iter()
-            .any(|(decision, rule)| *decision == Decision::Ask && rule.matches(call, *decision));
-        Some(if self.mode == PermissionMode::Auto && !explicit_ask {
-            ApprovalMode::Auto
-        } else {
-            ApprovalMode::Request
-        })
+        self.evaluate(call).2
     }
 
     pub fn decision(&self, call: &ToolCall) -> Decision {
+        self.decision_with_source(call).0
+    }
+
+    pub(crate) fn evaluate(
+        &self,
+        call: &ToolCall,
+    ) -> (Decision, PermissionSource, Option<ApprovalMode>) {
+        let (decision, source) = self.decision_with_source(call);
+        let approval = (decision == Decision::Ask).then_some(
+            if self.mode == PermissionMode::Auto && source != PermissionSource::Rule {
+                ApprovalMode::Auto
+            } else {
+                ApprovalMode::Request
+            },
+        );
+        (decision, source, approval)
+    }
+
+    fn decision_with_source(&self, call: &ToolCall) -> (Decision, PermissionSource) {
         if !valid_call(call) {
-            return Decision::Deny;
+            return (Decision::Deny, PermissionSource::Mode);
         }
         let facts = call.facts();
         if self.mode == PermissionMode::Plan
             && (facts.mutates || (facts.spawns_process && facts.family != Family::Git))
         {
-            return Decision::Deny;
+            return (Decision::Deny, PermissionSource::Mode);
         }
         let auto_review = self.mode == PermissionMode::Auto
             && (facts.asks_approval
@@ -156,31 +187,35 @@ impl PermissionConfig {
                 || matches!(facts.family, Family::Mcp | Family::Git));
         let allow_skips_approval = !auto_review
             && !(self.mode == PermissionMode::AcceptEdits && facts.asks_approval && !facts.mutates);
-        let decision = self
-            .rules
-            .iter()
-            .find_map(|(decision, rule)| {
-                if *decision == Decision::Allow && !allow_skips_approval {
-                    None
-                } else {
-                    rule.matches(call, *decision).then_some(*decision)
-                }
-            })
-            .unwrap_or_else(|| {
-                if auto_review {
-                    Decision::Ask
-                } else if !facts.asks_approval
-                    || (self.mode == PermissionMode::AcceptEdits && facts.mutates)
-                {
-                    Decision::Allow
-                } else {
-                    Decision::Ask
-                }
-            });
+        let matched = self.rules.iter().find_map(|(decision, rule)| {
+            if *decision == Decision::Allow && !allow_skips_approval {
+                None
+            } else {
+                rule.matches(call, *decision).then_some(*decision)
+            }
+        });
+        let decision = matched.unwrap_or_else(|| {
+            if auto_review {
+                Decision::Ask
+            } else if !facts.asks_approval
+                || (self.mode == PermissionMode::AcceptEdits && facts.mutates)
+            {
+                Decision::Allow
+            } else {
+                Decision::Ask
+            }
+        });
         if self.mode == PermissionMode::DontAsk && decision == Decision::Ask {
-            Decision::Deny
+            (Decision::Deny, PermissionSource::Mode)
         } else {
-            decision
+            (
+                decision,
+                if matched.is_some() {
+                    PermissionSource::Rule
+                } else {
+                    PermissionSource::Mode
+                },
+            )
         }
     }
 }

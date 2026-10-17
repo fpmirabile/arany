@@ -254,6 +254,7 @@ impl CallRouter<'_> {
             },
             ProviderRole::Child => Action::Child {
                 in_flight: self.ledger.in_flight_children(),
+                research: request.is_none_or(|request| request.input.tools.is_some()),
             },
             ProviderRole::Review => Action::Review,
             ProviderRole::Compaction => Action::Compaction,

@@ -15,7 +15,7 @@ mod tests;
 #[derive(Clone, Copy, Debug)]
 pub enum Action {
     ProviderCall { previews: bool, steering: bool },
-    Child { in_flight: u32 },
+    Child { in_flight: u32, research: bool },
     Tool,
     Review,
     Compaction,
@@ -32,16 +32,20 @@ impl Action {
             Self::ProviderCall { previews, steering } => {
                 6 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
             }
-            Self::Child { in_flight } => 9_usize.saturating_add(
+            Self::Child {
+                in_flight,
+                research,
+            } => (if research { 14_usize } else { 9_usize }).saturating_add(
                 usize::try_from(in_flight)
                     .unwrap_or(usize::MAX)
                     .saturating_mul(2),
             ),
-            Self::Tool | Self::Review | Self::Compaction => 6,
+            Self::Tool | Self::Review => 8,
+            Self::Compaction => 6,
             Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
             Self::Delegation { children, research } => {
                 if research {
-                    children * (4 * MAX_CHILD_TOOL_CALLS + 4) + 6
+                    children * (7 * MAX_CHILD_TOOL_CALLS + 4) + 8
                 } else {
                     4 * children + 6
                 }
@@ -53,10 +57,18 @@ impl Action {
         let switches = |role| providers.get(role).len().saturating_sub(1);
         self.max_events().saturating_add(match self {
             Self::ProviderCall { .. } => switches(ProviderRole::Primary),
-            Self::Child { in_flight } => usize::try_from(in_flight)
+            Self::Child {
+                in_flight,
+                research,
+            } => usize::try_from(in_flight)
                 .unwrap_or(usize::MAX)
                 .saturating_add(1)
-                .saturating_mul(switches(ProviderRole::Child)),
+                .saturating_mul(switches(ProviderRole::Child))
+                .saturating_add(if research {
+                    switches(ProviderRole::Review)
+                } else {
+                    0
+                }),
             Self::Tool | Self::Review => switches(ProviderRole::Review),
             Self::Compaction | Self::BoundaryCompaction { .. } => {
                 switches(ProviderRole::Compaction)
@@ -68,6 +80,13 @@ impl Action {
                     1
                 })
                 .saturating_mul(switches(ProviderRole::Child))
+                .saturating_add(if research {
+                    children
+                        .saturating_mul(MAX_CHILD_TOOL_CALLS)
+                        .saturating_mul(switches(ProviderRole::Review))
+                } else {
+                    0
+                })
                 .saturating_add(switches(ProviderRole::Primary)),
         })
     }
@@ -78,7 +97,10 @@ impl Action {
             // A Tool step, and the review inside it, ends with its observation and any integration
             // observation.
             Self::Tool | Self::Review => 2,
-            Self::Child { in_flight } => usize::try_from(in_flight)
+            Self::Child {
+                in_flight,
+                research: true,
+            } => usize::try_from(in_flight)
                 .unwrap_or(usize::MAX)
                 .saturating_add(1),
             Self::Delegation {
@@ -86,6 +108,9 @@ impl Action {
                 research: true,
             } => children.saturating_mul(MAX_CHILD_TOOL_CALLS),
             Self::ProviderCall { .. }
+            | Self::Child {
+                research: false, ..
+            }
             | Self::Compaction
             | Self::BoundaryCompaction { .. }
             | Self::Delegation { .. } => 0,
@@ -122,6 +147,7 @@ struct InFlight {
     unrecorded_unknown: u32,
     // This Run's settled active time, journaled once by RunFinished.
     run_active_ms: u64,
+    idle_approval_ms: u64,
     // The open action's active-time reservation.
     reserved_ms: Option<u64>,
     // Start of the active time since the last settlement.
@@ -214,6 +240,7 @@ impl GoalLedger {
         if let Event::RunFinished { .. } = &envelope.event {
             let in_flight = &mut state.in_flight;
             in_flight.run_active_ms = 0;
+            in_flight.idle_approval_ms = 0;
             in_flight.reserved_ms = None;
             in_flight.origin = None;
         }
@@ -465,9 +492,19 @@ impl GoalLedger {
         origin: Option<Instant>,
     ) -> Result<(), EngineError> {
         self.in_flight(|in_flight| {
-            in_flight.run_active_ms = in_flight.run_active_ms.saturating_add(active_ms);
+            in_flight.run_active_ms = in_flight.run_active_ms.saturating_add(
+                active_ms.saturating_sub(std::mem::take(&mut in_flight.idle_approval_ms)),
+            );
             in_flight.reserved_ms = None;
             in_flight.origin = origin;
+        })
+    }
+
+    pub(super) fn exclude_idle_approval(&self, elapsed: Duration) -> Result<(), EngineError> {
+        self.in_flight(|in_flight| {
+            in_flight.idle_approval_ms = in_flight
+                .idle_approval_ms
+                .saturating_add(duration_ms(elapsed));
         })
     }
 

@@ -11,6 +11,7 @@ use crate::provider::{
     RunInput,
 };
 use crate::session::{CollaborationPolicy, Event};
+use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
 use crate::tools::types::{
     CommandChangeset, CommandResult, MAX_TOOL_ARGUMENT_BYTES, MAX_TOOL_RESULT_BYTES,
 };
@@ -73,6 +74,34 @@ enum Verdict {
     Deny(Answer),
 }
 
+#[derive(Clone, Copy)]
+struct Permission {
+    decision: Decision,
+    basis: PermissionSource,
+    approval: Option<ApprovalMode>,
+}
+
+impl Permission {
+    fn narrow_terminal(mut self, mode: Option<ApprovalMode>, call: &ToolCall) -> Self {
+        if self.decision != Decision::Deny
+            && let Some(mode) = mode.filter(|mode| mode.asks(call))
+        {
+            if self.decision == Decision::Allow {
+                self.basis = PermissionSource::Mode;
+            }
+            self.decision = self.decision.narrow(Decision::Ask);
+            self.approval = Some(
+                if self.approval == Some(ApprovalMode::Request) || mode != ApprovalMode::Auto {
+                    ApprovalMode::Request
+                } else {
+                    ApprovalMode::Auto
+                },
+            );
+        }
+        self
+    }
+}
+
 /// An intent's observation and what the step settles once it is journaled.
 struct Answer {
     observation: ToolObservation,
@@ -116,7 +145,9 @@ impl RunLoop<'_> {
             };
             let command = matches!(intent.call, ToolCall::Command { .. });
             let source_intent_digest = intent.digest();
-            let Some(observation) = self.run_intent(&grant, runtime, intent).await? else {
+            // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
+            let Some(observation) = Box::pin(self.run_intent(&grant, runtime, intent)).await?
+            else {
                 return Ok(false);
             };
             if observation.stops_run() || self.controls.cancellation.is_cancelled() {
@@ -313,7 +344,8 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: EffectIntent,
     ) -> Result<Option<ToolObservation>, EngineError> {
-        if !self.admit_tool(grant, runtime, &intent).await? {
+        let permission = self.permission(grant, runtime, &intent.call);
+        if !self.admit_tool(grant, runtime, &intent, permission).await? {
             return Ok(None);
         }
         let agent_run_id = intent.agent_run_id;
@@ -329,7 +361,10 @@ impl RunLoop<'_> {
             active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
         })
         .await?;
-        let answer = match self.before_dispatch(grant, runtime, intent).await? {
+        let answer = match self
+            .before_dispatch(grant, runtime, intent, permission)
+            .await?
+        {
             Verdict::Deny(answer) => answer,
             Verdict::Dispatch {
                 intent,
@@ -369,11 +404,13 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
         intent: &EffectIntent,
+        permission: Permission,
     ) -> Result<bool, EngineError> {
         let (tail, observations) = match grant {
             Grant::Primary { review_allowed, .. } => {
                 // The primary keeps one Provider call for its next turn and one for a review.
-                let review = self.review_will_run(runtime, &intent.call, *review_allowed)?;
+                let review =
+                    self.review_will_run(runtime, &intent.call, *review_allowed, permission)?;
                 if self
                     .ledger()
                     .remaining_calls()
@@ -389,6 +426,7 @@ impl RunLoop<'_> {
             Grant::Researcher { .. } => {
                 let step = Action::Child {
                     in_flight: self.ledger().in_flight_children(),
+                    research: true,
                 };
                 (
                     step.max_events_for(&self.routing.providers),
@@ -407,17 +445,43 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         call: &ToolCall,
         review_allowed: bool,
+        permission: Permission,
     ) -> Result<bool, EngineError> {
         Ok(self.ledger().command_timeout_limit(call)?.is_none()
             && self.ledger().allows_tool(call)
             && runtime.allows(call)
-            && self.controls.approvals.is_some_and(|approvals| {
-                approvals.mode() == ApprovalMode::Auto
-                    && approvals.mode().asks(call)
-                    && self.ledger().can_start_provider_call()
-                    && review_allowed
-                    && self.ledger().admits(Action::Review)
-            }))
+            && permission
+                .narrow_terminal(self.terminal_mode(), call)
+                .approval
+                == Some(ApprovalMode::Auto)
+            && self.ledger().can_start_provider_call()
+            && review_allowed
+            && self.ledger().admits(Action::Review))
+    }
+
+    fn terminal_mode(&self) -> Option<ApprovalMode> {
+        self.controls.approvals.map(|approvals| approvals.mode())
+    }
+
+    fn permission(&self, grant: &Grant<'_>, runtime: &ToolRuntime, call: &ToolCall) -> Permission {
+        let (mut decision, mut basis, mut approval) = runtime
+            .permissions()
+            .map_or((Decision::Allow, PermissionSource::Mode, None), |config| {
+                config.evaluate(call)
+            });
+        if runtime.permissions().is_some()
+            && (!runtime.allows(call)
+                || matches!(grant, Grant::Researcher { .. }) && !call.is_child_research())
+        {
+            decision = decision.narrow(Decision::Deny);
+            basis = PermissionSource::PinnedGrant;
+            approval = None;
+        }
+        Permission {
+            decision,
+            basis,
+            approval,
+        }
     }
 
     /// The single point that decides whether a journaled intent runs: timeout denial, the Goal
@@ -427,33 +491,89 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
         intent: EffectIntent,
+        permission: Permission,
     ) -> Result<Verdict, EngineError> {
-        match grant {
-            Grant::Primary {
-                request,
-                review_allowed,
-            } => {
-                self.before_primary_dispatch(
-                    runtime,
-                    request,
-                    *review_allowed && self.ledger().admits(Action::Review),
-                    intent,
-                )
-                .await
-            }
-            Grant::Researcher { .. } => Ok(if self.ledger().allows_tool(&intent.call) {
-                Verdict::Dispatch {
-                    intent,
-                    queue_pause: None,
-                }
-            } else {
+        let config = runtime.permissions();
+        let permission = permission.narrow_terminal(self.terminal_mode(), &intent.call);
+        let Permission {
+            decision, basis, ..
+        } = permission;
+        let digest = intent.digest();
+        let source = if decision == Decision::Ask {
+            PermissionSource::UnavailableApproval
+        } else {
+            basis
+        };
+        let (verdict, source) = if decision == Decision::Deny {
+            (
                 Verdict::Deny(Answer {
-                    observation: outside_plan(intent),
+                    observation: not_dispatched(
+                        intent,
+                        ToolDisposition::Denied,
+                        match source {
+                            PermissionSource::Rule => "Permission deny rule blocked this Tool",
+                            PermissionSource::PinnedGrant => {
+                                "Tool operation is outside the pinned grant"
+                            }
+                            _ => "Permission mode denied this Tool",
+                        },
+                    ),
                     refused: false,
                     active_time: None,
-                })
-            }),
+                }),
+                source,
+            )
+        } else {
+            match grant {
+                Grant::Primary {
+                    request,
+                    review_allowed,
+                } => {
+                    self.before_primary_dispatch(
+                        runtime,
+                        request,
+                        *review_allowed && self.ledger().admits(Action::Review),
+                        intent,
+                        permission,
+                    )
+                    .await?
+                }
+                Grant::Researcher { deadline, .. } => {
+                    if !self.ledger().allows_tool(&intent.call) {
+                        (
+                            Verdict::Deny(Answer {
+                                observation: outside_plan(intent),
+                                refused: false,
+                                active_time: None,
+                            }),
+                            source,
+                        )
+                    } else {
+                        self.approve_researcher(intent, *deadline, permission)
+                            .await?
+                    }
+                }
+            }
+        };
+        if let Some(config) = config {
+            self.append(Event::ToolPermissionDecided {
+                run_id: self.run_id,
+                agent_run_id: match &verdict {
+                    Verdict::Dispatch { intent, .. } => intent.agent_run_id,
+                    Verdict::Deny(answer) => answer.observation.intent.agent_run_id,
+                },
+                verdict: PermissionVerdict {
+                    intent_digest: digest,
+                    decision,
+                    mode: config.mode(),
+                    basis,
+                    source,
+                    approved: matches!(&verdict, Verdict::Dispatch { .. }),
+                },
+            })
+            .await?;
         }
+        Ok(verdict)
     }
 
     async fn before_primary_dispatch(
@@ -462,29 +582,47 @@ impl RunLoop<'_> {
         request: &ProviderRequest,
         review_allowed: bool,
         intent: EffectIntent,
-    ) -> Result<Verdict, EngineError> {
+        permission: Permission,
+    ) -> Result<(Verdict, PermissionSource), EngineError> {
+        let mut source = if permission.decision == Decision::Ask {
+            PermissionSource::UnavailableApproval
+        } else {
+            permission.basis
+        };
         if let Some((requested, maximum)) = self.ledger().command_timeout_limit(&intent.call)? {
             let output = crate::tools::types::command_timeout_limit_message(requested, maximum);
-            return Ok(Verdict::Deny(Answer {
-                observation: not_dispatched(intent, ToolDisposition::Limit, output),
-                refused: false,
-                active_time: None,
-            }));
+            return Ok((
+                Verdict::Deny(Answer {
+                    observation: not_dispatched(intent, ToolDisposition::Limit, output),
+                    refused: false,
+                    active_time: None,
+                }),
+                source,
+            ));
         }
         let goal_allows = self.ledger().allows_tool(&intent.call);
         let mut approved = true;
         let mut active_time_exhausted = false;
         if goal_allows
             && runtime.allows(&intent.call)
-            && let Some(approvals) = self.controls.approvals
-            && approvals.mode().asks(&intent.call)
+            && let Some(mode) = permission.approval
             && self.ledger().can_start_provider_call()
         {
             approved = false;
-            if approvals.mode() == ApprovalMode::Auto && review_allowed {
-                match self.review_tool(request, &intent).await {
+            source = PermissionSource::UnavailableApproval;
+            let initial_mode = self.terminal_mode();
+            if mode == ApprovalMode::Auto && review_allowed {
+                match self
+                    .review_tool(&request.input.objective, &intent, None)
+                    .await
+                {
                     Ok(review_approved) => {
-                        approved = review_approved && approvals.mode() == ApprovalMode::Auto;
+                        approved = review_approved && self.terminal_mode() == initial_mode;
+                        source = if approved {
+                            PermissionSource::AiReview
+                        } else {
+                            PermissionSource::UnavailableApproval
+                        };
                         active_time_exhausted = self.ledger().active_time_exhausted();
                     }
                     Err(EngineError::GoalBudgetExhausted)
@@ -495,7 +633,12 @@ impl RunLoop<'_> {
                     Err(error) => return Err(error),
                 }
             }
-            if !approved && !active_time_exhausted && !self.pause_at_boundary() {
+            if !approved
+                && !active_time_exhausted
+                && !self.pause_at_boundary()
+                && let Some(approvals) = self.controls.approvals
+            {
+                source = PermissionSource::Human;
                 match self.reserve_active_pause() {
                     Ok(pause) => {
                         let mut cancellation = self.controls.cancellation.clone();
@@ -555,10 +698,13 @@ impl RunLoop<'_> {
                 "Goal token budget exhausted; no operation was dispatched",
             )
         } else if approved {
-            return Ok(Verdict::Dispatch {
-                intent,
-                queue_pause,
-            });
+            return Ok((
+                Verdict::Dispatch {
+                    intent,
+                    queue_pause,
+                },
+                source,
+            ));
         } else {
             not_dispatched(
                 intent,
@@ -567,14 +713,17 @@ impl RunLoop<'_> {
             )
         };
         self.clear_tool_queue();
-        Ok(Verdict::Deny(Answer {
-            observation,
-            refused: !approved,
-            active_time: Some(ActiveTime {
-                segment: None,
-                exhausted: active_time_exhausted,
+        Ok((
+            Verdict::Deny(Answer {
+                observation,
+                refused: !approved,
+                active_time: Some(ActiveTime {
+                    segment: None,
+                    exhausted: active_time_exhausted,
+                }),
             }),
-        }))
+            source,
+        ))
     }
 
     /// Runs an approved primary intent inside its own active-time segment.
@@ -679,18 +828,97 @@ impl RunLoop<'_> {
         }
     }
 
+    async fn approve_researcher(
+        &self,
+        intent: EffectIntent,
+        deadline: Instant,
+        permission: Permission,
+    ) -> Result<(Verdict, PermissionSource), EngineError> {
+        let (approved, source) = if let Some(mode) = permission.approval {
+            self.researcher_approval(&intent, deadline, mode).await?
+        } else {
+            (true, permission.basis)
+        };
+        let verdict = if approved {
+            Verdict::Dispatch {
+                intent,
+                queue_pause: None,
+            }
+        } else {
+            Verdict::Deny(Answer {
+                observation: not_dispatched(
+                    intent,
+                    ToolDisposition::Denied,
+                    "Approval was not granted; no operation was dispatched",
+                ),
+                refused: true,
+                active_time: None,
+            })
+        };
+        Ok((verdict, source))
+    }
+
+    async fn researcher_approval(
+        &self,
+        intent: &EffectIntent,
+        deadline: Instant,
+        mode: ApprovalMode,
+    ) -> Result<(bool, PermissionSource), EngineError> {
+        let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
+        if !runtime.allows(&intent.call) || !self.ledger().can_start_provider_call() {
+            return Ok((false, PermissionSource::UnavailableApproval));
+        }
+        let initial_mode = self.terminal_mode();
+        if mode == ApprovalMode::Auto && self.ledger().admits(Action::Review) {
+            let objective = self
+                .ledger()
+                .view(|view| view.goal(self.goal_id).map(|goal| goal.objective.clone()))?
+                .ok_or(EngineError::InvalidHistory)?;
+            if self.review_tool(&objective, intent, Some(deadline)).await?
+                && self.terminal_mode() == initial_mode
+            {
+                return Ok((
+                    !self.pause_requested() && !self.controls.cancellation.is_cancelled(),
+                    PermissionSource::AiReview,
+                ));
+            }
+        }
+        let Some(approvals) = self.controls.approvals else {
+            return Ok((false, PermissionSource::UnavailableApproval));
+        };
+        let mut cancellation = self.controls.cancellation.clone();
+        let expires =
+            Duration::from_millis(intent.expires_at_ms.saturating_sub(crate::tools::now_ms()));
+        // A sibling Provider call keeps the shared delegation interval active.
+        let idle = self.ledger().in_flight_children() == 0;
+        let started = Instant::now();
+        let approved = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => false,
+            result = tokio::time::timeout_at(deadline.min(Instant::now() + expires), approvals.ask(intent)) => result.unwrap_or(false),
+        };
+        if idle {
+            self.ledger().exclude_idle_approval(started.elapsed())?;
+        }
+        Ok((
+            approved && !self.pause_requested() && !self.controls.cancellation.is_cancelled(),
+            PermissionSource::Human,
+        ))
+    }
+
     async fn review_tool(
         &self,
-        request: &ProviderRequest,
+        objective: &str,
         intent: &EffectIntent,
+        delegation_deadline: Option<Instant>,
     ) -> Result<bool, EngineError> {
         let provider = self
             .routing
-            .provider(crate::provider::ProviderRole::Review, self.primary_id)?;
+            .provider(crate::provider::ProviderRole::Review, intent.agent_run_id)?;
         let mut review = ProviderRequest {
-            session_id: request.session_id,
-            run_id: request.run_id,
-            agent_run_id: request.agent_run_id,
+            session_id: self.session_id,
+            run_id: self.run_id,
+            agent_run_id: intent.agent_run_id,
             phase: AgentPhase::ToolReview,
             collaboration: CollaborationPolicy::Single,
             model: provider.identity().model.clone(),
@@ -700,16 +928,30 @@ impl RunLoop<'_> {
                 goal_plan_contract: self.ledger().plan_contract()?,
                 ..RunInput::new(
                     PromptRole::ToolReview,
-                    serde_json::json!({"user_request":request.input.objective,"proposed_action":intent})
+                    serde_json::json!({"user_request":objective,"proposed_action":intent})
                         .to_string(),
                 )
             },
         };
-        let active_segment =
-            self.reserve_active_segment(TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD)?;
+        let active_segment = if delegation_deadline.is_none() {
+            Some(self.reserve_active_segment(TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD)?)
+        } else {
+            None
+        };
+        let review_deadline = active_segment
+            .as_ref()
+            .map(|segment| {
+                segment
+                    .deadline()
+                    .checked_sub(STORE_ACTION_OVERHEAD)
+                    .unwrap_or(segment.started)
+            })
+            .or(delegation_deadline)
+            .ok_or(EngineError::CoordinatorFailed)?
+            .min(Instant::now() + TOOL_REVIEW_DEADLINE);
         if let Err(error) = self
             .reserve_provider_call(
-                self.primary_id,
+                intent.agent_run_id,
                 Action::Review,
                 self.controls
                     .tools
@@ -717,7 +959,9 @@ impl RunLoop<'_> {
             )
             .await
         {
-            if matches!(error, EngineError::GoalBudgetExhausted) {
+            if matches!(error, EngineError::GoalBudgetExhausted)
+                && let Some(active_segment) = active_segment
+            {
                 self.settle_active_segment(active_segment)?;
             }
             return Err(error);
@@ -727,11 +971,7 @@ impl RunLoop<'_> {
             .routing
             .invoke(
                 review,
-                active_segment
-                    .deadline()
-                    .checked_sub(STORE_ACTION_OVERHEAD)
-                    .unwrap_or(active_segment.started)
-                    .min(Instant::now() + TOOL_REVIEW_DEADLINE),
+                review_deadline,
                 self.controls.cancellation.clone(),
                 None,
             )
@@ -741,11 +981,13 @@ impl RunLoop<'_> {
         let valid = valid && self.ledger().tokens_within_limit();
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
-            agent_run_id: self.primary_id,
+            agent_run_id: intent.agent_run_id,
             record: call_record(AgentPhase::ToolReview, &result, valid),
         })
         .await?;
-        self.settle_active_segment(active_segment)?;
+        if let Some(active_segment) = active_segment {
+            self.settle_active_segment(active_segment)?;
+        }
         if self.ledger().active_time_exhausted() {
             return Ok(false);
         }
