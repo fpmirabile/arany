@@ -40,9 +40,10 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
         let provider = ScriptedProvider::new(vec![]);
         let requests = Arc::clone(&provider.requests);
         let state_path = temp.path().join("state");
-        let mut engine = Engine::open(
+        let provider = Arc::new(provider);
+        let engine = Engine::open(
             StateRoot::admit(&state_path).expect("private State"),
-            provider,
+            EngineConfig::default(),
         )
         .expect("Engine");
 
@@ -58,7 +59,7 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
         ] {
             let mut candidate = request(&workspace, "Question");
             candidate.include_paths = vec![path.into()];
-            let outcome = engine.run(candidate).await;
+            let outcome = run_to_end(&engine, &provider, candidate).await;
             assert!(
                 matches!(&outcome, Err(EngineError::InvalidWorkspacePath)),
                 "invalid include spelling {path:?}: expected InvalidWorkspacePath, observed {:?}",
@@ -69,7 +70,7 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
         for path in ["linked/secret.txt", "notes/linked.txt"] {
             let mut candidate = request(&workspace, "Question");
             candidate.include_paths = vec![path.into()];
-            let outcome = engine.run(candidate).await;
+            let outcome = run_to_end(&engine, &provider, candidate).await;
             assert!(
                 matches!(&outcome, Err(EngineError::WorkspaceUnavailable)),
                 "symlinked include {path}: expected WorkspaceUnavailable, observed {:?}",
@@ -79,7 +80,7 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
 
         let mut directory = request(&workspace, "Question");
         directory.include_paths = vec!["notes".into()];
-        let outcome = engine.run(directory).await;
+        let outcome = run_to_end(&engine, &provider, directory).await;
         assert!(
             matches!(&outcome, Err(EngineError::InputNotRegular)),
             "directory include: expected InputNotRegular, observed {:?}",
@@ -88,7 +89,7 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
 
         let mut special = request(&workspace, "Question");
         special.include_paths = vec!["notes/socket".into()];
-        let outcome = engine.run(special).await;
+        let outcome = run_to_end(&engine, &provider, special).await;
         assert!(
             matches!(
                 &outcome,
@@ -100,7 +101,7 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
 
         let mut linked_include = request(&workspace, "Question");
         linked_include.include_paths = vec!["notes/hardlink.txt".into()];
-        let outcome = engine.run(linked_include).await;
+        let outcome = run_to_end(&engine, &provider, linked_include).await;
         assert!(
             matches!(&outcome, Err(EngineError::WorkspaceUnavailable)),
             "hard-linked include: expected WorkspaceUnavailable, observed {:?}",
@@ -109,7 +110,7 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
 
         std::fs::hard_link(&outside, workspace.join("AGENTS.md"))
             .expect("outside file selected as root guidance");
-        let outcome = engine.run(request(&workspace, "Question")).await;
+        let outcome = run_to_end(&engine, &provider, request(&workspace, "Question")).await;
         assert!(
             matches!(&outcome, Err(EngineError::WorkspaceUnavailable)),
             "hard-linked root guidance: expected WorkspaceUnavailable, observed {:?}",
@@ -144,11 +145,15 @@ fn fifo_include_child() {
     runtime.block_on(async {
         let provider = ScriptedProvider::new(vec![]);
         let requests = Arc::clone(&provider.requests);
-        let mut engine = Engine::open(StateRoot::admit(&state).expect("private State"), provider)
-            .expect("helper Engine");
+        let provider = Arc::new(provider);
+        let engine = Engine::open(
+            StateRoot::admit(&state).expect("private State"),
+            EngineConfig::default(),
+        )
+        .expect("helper Engine");
         let mut candidate = request(&workspace, "Question");
         candidate.include_paths = vec!["notes/fifo".into()];
-        let outcome = engine.run(candidate).await;
+        let outcome = run_to_end(&engine, &provider, candidate).await;
         assert!(
             matches!(&outcome, Err(EngineError::InputNotRegular)),
             "FIFO include: expected InputNotRegular, observed {:?}",

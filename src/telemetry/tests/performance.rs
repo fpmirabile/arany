@@ -1,11 +1,11 @@
 use super::super::{
     MAX_EVENTS_PER_SPAN, MAX_EXPORT_BATCH_SPANS, MAX_QUEUED_SPANS, MAX_TRACE_BODY_BYTES,
-    SHUTDOWN_TIMEOUT, Telemetry, TraceEventKind, TraceOutcome, TraceProvider,
-    config::parse_endpoint,
+    SHUTDOWN_TIMEOUT, Telemetry, config::parse_endpoint,
 };
-use crate::session::{RunId, SessionId};
+use super::{Segment, unit_context};
+use crate::session::{Event, RunDisposition};
 use crate::{
-    engine::{Engine, RunRequest},
+    engine::{Engine, EngineConfig, RunControls, RunRequest},
     provider::{
         AgentPhase, Finish, Provider, ProviderError, ProviderOutcome, ProviderRequest,
         ProviderResponse,
@@ -164,7 +164,19 @@ impl Provider for FastProvider {
     }
 }
 
-async fn timed_direct_run(engine: &mut Engine, observer: &Store, workspace: &Path) -> Duration {
+/// A segment whose Run span holds its cap of committed markers.
+fn marked_segment(telemetry: &Telemetry) -> Segment {
+    let mut segment = Segment::begin(telemetry, unit_context());
+    for _ in 3..MAX_EVENTS_PER_SPAN {
+        segment.commit(Event::MessageCommitted {
+            run_id: segment.run_id,
+            text: String::new(),
+        });
+    }
+    segment
+}
+
+async fn timed_direct_run(engine: &Engine, observer: &Store, workspace: &Path) -> Duration {
     let request = RunRequest {
         session_id: None,
         title: None,
@@ -176,10 +188,18 @@ async fn timed_direct_run(engine: &mut Engine, observer: &Store, workspace: &Pat
         goal: crate::engine::GoalRequest::default(),
     };
     let started = Instant::now();
-    let outcome = tokio::time::timeout(Duration::from_secs(5), engine.run(request))
+    let run = engine
+        .submit(
+            crate::provider::AdmittedProviders::single(std::sync::Arc::new(FastProvider)),
+            request,
+            RunControls::default(),
+        )
+        .expect("idle Engine");
+    let outcome = tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .expect("bounded direct Run")
-        .expect("successful direct Run");
+        .expect("successful direct Run")
+        .run;
     let elapsed = started.elapsed();
     assert_eq!(outcome.run.status, RunStatus::Finished);
     assert_eq!(
@@ -214,14 +234,14 @@ fn healthy_collector_span_end_and_run_delta() {
         parse_endpoint(&format!("http://{hot_address}"), false).expect("local endpoint"),
     )
     .expect("healthy exporter");
-    let mut span_end_samples = Vec::with_capacity(HOT_SPANS);
-    for index in 0..HOT_SPANS {
-        let run =
-            hot_telemetry.begin_run(SessionId::new(), RunId::new(), TraceProvider::Other, None);
+    // Each segment ends a Run span and its Goal span.
+    let mut span_end_samples = Vec::with_capacity(HOT_SPANS / 2);
+    for index in 0..HOT_SPANS / 2 {
+        let segment = Segment::begin(&hot_telemetry, unit_context());
         let started = Instant::now();
-        run.finish(TraceOutcome::Finished);
+        segment.finish(RunDisposition::Finished, None);
         span_end_samples.push(started.elapsed());
-        if index % MAX_EXPORT_BATCH_SPANS == MAX_EXPORT_BATCH_SPANS - 1 {
+        if index % (MAX_EXPORT_BATCH_SPANS / 2) == MAX_EXPORT_BATCH_SPANS / 2 - 1 {
             hot_telemetry
                 .inner
                 .as_ref()
@@ -249,15 +269,17 @@ fn healthy_collector_span_end_and_run_delta() {
         .enable_time()
         .build()
         .expect("performance runtime");
-    let mut disabled = Engine::open(
+    let disabled = Engine::open(
         StateRoot::admit(&disabled_state).expect("private disabled State"),
-        FastProvider,
+        EngineConfig::default(),
     )
     .expect("disabled Engine");
-    let mut enabled = Engine::open_with_telemetry(
+    let enabled = Engine::open(
         StateRoot::admit(&enabled_state).expect("private enabled State"),
-        FastProvider,
-        run_telemetry.clone(),
+        EngineConfig {
+            telemetry: run_telemetry.clone(),
+            ..Default::default()
+        },
     )
     .expect("enabled Engine");
     let disabled_observer =
@@ -270,28 +292,15 @@ fn healthy_collector_span_end_and_run_delta() {
     let mut enabled_samples = Vec::with_capacity(SAMPLES);
     for index in 0..WARMUPS + SAMPLES {
         let (disabled_elapsed, enabled_elapsed) = if index % 2 == 0 {
-            let first = runtime.block_on(timed_direct_run(
-                &mut disabled,
-                &disabled_observer,
-                &workspace,
-            ));
-            let second = runtime.block_on(timed_direct_run(
-                &mut enabled,
-                &enabled_observer,
-                &workspace,
-            ));
+            let first =
+                runtime.block_on(timed_direct_run(&disabled, &disabled_observer, &workspace));
+            let second =
+                runtime.block_on(timed_direct_run(&enabled, &enabled_observer, &workspace));
             (first, second)
         } else {
-            let first = runtime.block_on(timed_direct_run(
-                &mut enabled,
-                &enabled_observer,
-                &workspace,
-            ));
-            let second = runtime.block_on(timed_direct_run(
-                &mut disabled,
-                &disabled_observer,
-                &workspace,
-            ));
+            let first = runtime.block_on(timed_direct_run(&enabled, &enabled_observer, &workspace));
+            let second =
+                runtime.block_on(timed_direct_run(&disabled, &disabled_observer, &workspace));
             (second, first)
         };
         if index >= WARMUPS {
@@ -384,12 +393,8 @@ fn saturated_collector_keeps_span_end_bounded() {
         parse_endpoint(&format!("http://{address}"), false).expect("numeric-loopback endpoint"),
     )
     .expect("bounded exporter");
-    for _ in 0..MAX_EXPORT_BATCH_SPANS {
-        let run = telemetry.begin_run(SessionId::new(), RunId::new(), TraceProvider::Other, None);
-        for sequence in 1..=MAX_EVENTS_PER_SPAN {
-            run.event_committed(u64::from(sequence), TraceEventKind::RunStarted);
-        }
-        run.finish(TraceOutcome::Finished);
+    for _ in 0..MAX_EXPORT_BATCH_SPANS / 2 {
+        marked_segment(&telemetry).finish(RunDisposition::Finished, None);
     }
     accepted_rx
         .recv_timeout(Duration::from_secs(5))
@@ -398,13 +403,10 @@ fn saturated_collector_keeps_span_end_bounded() {
     let mut peak_rss_kib = idle_rss_kib;
     let mut span_end_us = Vec::with_capacity(OFFERED_SPANS);
     let started = Instant::now();
-    for index in 0..OFFERED_SPANS {
-        let run = telemetry.begin_run(SessionId::new(), RunId::new(), TraceProvider::Other, None);
-        for sequence in 1..=MAX_EVENTS_PER_SPAN {
-            run.event_committed(u64::from(sequence), TraceEventKind::RunStarted);
-        }
+    for index in 0..OFFERED_SPANS / 2 {
+        let segment = marked_segment(&telemetry);
         let end_started = Instant::now();
-        run.finish(TraceOutcome::Finished);
+        segment.finish(RunDisposition::Finished, None);
         span_end_us.push(end_started.elapsed().as_micros());
         if index % 32 == 31 {
             peak_rss_kib = peak_rss_kib.max(rss_kib());
@@ -417,9 +419,9 @@ fn saturated_collector_keeps_span_end_bounded() {
     telemetry.shutdown();
     let shutdown_elapsed = shutdown_started.elapsed();
     span_end_us.sort_unstable();
-    let p50 = span_end_us[OFFERED_SPANS / 2];
-    let p95 = span_end_us[OFFERED_SPANS * 95 / 100];
-    let max = span_end_us[OFFERED_SPANS - 1];
+    let p50 = span_end_us[span_end_us.len() / 2];
+    let p95 = span_end_us[span_end_us.len() * 95 / 100];
+    let max = span_end_us[span_end_us.len() - 1];
     let rss_delta_kib = peak_rss_kib.saturating_sub(idle_rss_kib);
     println!(
         "OTLP saturation: offered {OFFERED_SPANS}, queue {MAX_QUEUED_SPANS}, batch {MAX_EXPORT_BATCH_SPANS}; span-end p50/p95/max {p50}/{p95}/{max} us; idle/peak/delta RSS {idle_rss_kib}/{peak_rss_kib}/{rss_delta_kib} KiB; offer {offer_elapsed:?}, shutdown {shutdown_elapsed:?}"

@@ -76,6 +76,7 @@ pub enum RecordKind {
     ToolsConfig,
     WorkspacePermissions,
     ProviderProfiles,
+    ProviderRouting,
     SavedAccount,
     UiPreferences,
     ModelPreferences,
@@ -93,6 +94,7 @@ impl RecordKind {
                 Some("workspace-permissions.pending"),
                 64 * 1024,
             ),
+            Self::ProviderRouting => ("provider-routing.json", None, 16 * 1024),
             Self::ProviderProfiles => ("provider-profiles.json", None, 64 * 1024),
             Self::SavedAccount => (
                 "account-credentials.json",
@@ -243,6 +245,17 @@ impl StateRoot {
 
     pub fn open_existing(path: &Path) -> Result<Self, StoreError> {
         Self::open(path, false)
+    }
+
+    /// Re-admits this root's path and requires it to still name the held directory, so a
+    /// renamed or swapped directory fails closed.
+    pub(crate) fn readmit(&self) -> Result<(), StoreError> {
+        let current = Self::open_existing(&self.path)?;
+        #[cfg(unix)]
+        if directory_identity(&current.dir)? == directory_identity(&self.dir)? {
+            return Ok(());
+        }
+        Err(StoreError::InvalidStateDirectory)
     }
 
     fn open(path: &Path, create: bool) -> Result<Self, StoreError> {
@@ -535,6 +548,25 @@ mod tests {
     use nix::{sys::stat::Mode, unistd::mkfifo};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::fs::{MetadataExt, symlink};
+
+    #[test]
+    fn readmission_rejects_a_renamed_or_unsafe_state_directory() {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let path = temp.path().join("state");
+        let state = StateRoot::admit(&path).expect("private State");
+        state.readmit().expect("unchanged State");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("widen State");
+        assert!(state.readmit().is_err(), "an unsafe State fails closed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("restore State");
+        std::fs::rename(&path, temp.path().join("held")).expect("move held State");
+        StateRoot::admit(&path).expect("replacement State");
+        assert!(
+            matches!(state.readmit(), Err(StoreError::InvalidStateDirectory)),
+            "a swapped directory at the State path fails closed"
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

@@ -1,6 +1,6 @@
 use super::{chatgpt, exec::ProviderArg};
 use arany::{
-    AttachedTerminal, CollaborationPolicy, Composer, ComposerEdit, Effort, EngineError,
+    AttachedTerminal, CollaborationPolicy, Composer, ComposerEdit, Effort, Engine, EngineError,
     InteractiveCommand, RunOutcome, RunStatus, SessionDefaults, SessionId, SessionView, StateRoot,
     Store, StoreError, Submission, Telemetry, TerminalInput, continue_session, create_session,
     fork_session, native_protection_supported, parse_submission, render_run_feedback,
@@ -21,7 +21,7 @@ mod controls;
 mod models;
 mod permissions;
 mod picker;
-mod run;
+pub(crate) mod run;
 mod setup;
 use active::{CompactionOutcome, GoalStart, RunSubmission, compact_current, submit_objective};
 use models::ModelBrowse;
@@ -507,6 +507,19 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     if let Ok(root) = StateRoot::open_existing(&admission.state_dir) {
         arany::enable_development_diagnostics(&root);
     }
+    // One Engine serves every submission and compaction until exit; each Run takes its own Session locks.
+    let engine = StateRoot::open_existing(&admission.state_dir)
+        .map_err(|_| "state directory unavailable or unsafe".to_owned())
+        .and_then(|root| {
+            Engine::open(
+                root,
+                arany::EngineConfig {
+                    telemetry: admission.telemetry.clone(),
+                    guard_executable: std::env::current_exe().ok(),
+                },
+            )
+            .map_err(|_| "state store unavailable".to_owned())
+        })?;
     permissions::refresh_mode(
         &mut composer,
         view.defaults.provider.as_deref(),
@@ -579,6 +592,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
             .draw_progress(&view, notice.as_deref().expect("startup notice exists"))
             .map_err(|error| error.to_string())?;
         match submit_objective(
+            &engine,
             &mut terminal,
             &admission,
             startup_goal,
@@ -590,6 +604,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         {
             RunSubmission::Completed(outcome, user_recorded, stop) => {
                 notice = finish_submission(
+                    &engine,
                     &mut terminal,
                     &admission,
                     &mut composer,
@@ -857,6 +872,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                 match submission {
                     Submission::Objective(objective) => {
                         notice = submit_idle_run(
+                            &engine,
                             &mut terminal,
                             &admission,
                             &mut composer,
@@ -877,6 +893,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             (GoalStart::Autonomous, argument.to_owned())
                         };
                         notice = submit_idle_run(
+                            &engine,
                             &mut terminal,
                             &admission,
                             &mut composer,
@@ -946,7 +963,9 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                     )));
                                     continue;
                                 }
-                                permissions::PermissionChoice::Exit => return Ok(()),
+                                permissions::PermissionChoice::Exit => {
+                                    return close_engine(engine).await;
+                                }
                             };
                             notice = Some(Feedback::History(if !native_protection_supported() {
                                 format!(
@@ -1007,6 +1026,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                                 continue;
                             }
                             let maintenance = match compact_current(
+                                &engine,
                                 &mut terminal,
                                 &admission,
                                 &view,
@@ -1115,6 +1135,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         }
     }
     drop(terminal);
+    let closed = close_engine(engine).await;
     if view.created_sequence != 0 {
         writeln!(std::io::stderr(), "Session: {session_id}")
             .map_err(|_| "output failed".to_owned())?;
@@ -1122,7 +1143,15 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         writeln!(std::io::stderr(), "No conversation saved.")
             .map_err(|_| "output failed".to_owned())?;
     }
-    Ok(())
+    closed
+}
+
+/// A failed exit drops the Engine instead, which still stops its Store thread.
+async fn close_engine(engine: Engine) -> Result<(), String> {
+    engine
+        .close()
+        .await
+        .map_err(|_| "store shutdown failed".to_owned())
 }
 
 async fn run_selector(
@@ -1270,7 +1299,9 @@ fn retained_draft_notice(composer: &Composer) -> Option<Feedback> {
 }
 
 /// Runs one idle submission, materializing an unsaved conversation first.
+#[allow(clippy::too_many_arguments)]
 async fn submit_idle_run(
+    engine: &Engine,
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     composer: &mut Composer,
@@ -1281,9 +1312,14 @@ async fn submit_idle_run(
 ) -> Result<Option<Feedback>, String> {
     materialize_session(admission, session_id, view).await?;
     let starting_sequence = view.last_sequence;
-    match submit_objective(terminal, admission, start, view, composer, objective).await {
+    match submit_objective(
+        engine, terminal, admission, start, view, composer, objective,
+    )
+    .await
+    {
         Ok(RunSubmission::Completed(outcome, user_recorded, stop)) => {
             finish_submission(
+                engine,
                 terminal,
                 admission,
                 composer,
@@ -1396,7 +1432,9 @@ async fn finish_interrupted_submission(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_submission(
+    engine: &Engine,
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     composer: &mut Composer,
@@ -1472,6 +1510,7 @@ async fn finish_submission(
     }
     if let Some(config) = automatic {
         let compaction_notice = match compact_current(
+            engine,
             terminal,
             admission,
             view,

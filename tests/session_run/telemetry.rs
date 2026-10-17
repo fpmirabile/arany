@@ -284,7 +284,7 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         );
     }
     let spans = trace_spans(&bodies);
-    assert_eq!(spans.len(), 5);
+    assert_eq!(spans.len(), 4);
     let goal = spans
         .iter()
         .find(|span| span.name == "invoke_workflow arany.goal")
@@ -320,18 +320,38 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         .find(|span| span.name == "chat arany.provider")
         .expect("Provider span");
     assert_eq!(provider_span.parent_span_id, primary.span_id);
-    let compilation = spans
-        .iter()
-        .find(|span| span.name == "compile_context arany.run")
-        .expect("context compilation span");
-    assert_eq!(compilation.parent_span_id, root.span_id);
     assert!(
         goal.start_time_unix_nano <= root.start_time_unix_nano,
         "Goal starts no later than its Run child"
     );
+    let first_marker = goal.events.first().expect("first Goal marker");
+    let context_time = |key: &str| {
+        first_marker
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == key)
+            .and_then(|attribute| attribute.value.as_ref())
+            .and_then(|value| match value.value {
+                Some(Value::IntValue(nanos)) => Some(nanos),
+                _ => None,
+            })
+    };
     assert!(
-        goal.start_time_unix_nano <= compilation.start_time_unix_nano,
-        "Goal starts no later than context compilation"
+        matches!(
+            (
+                context_time("arany.context.started_unix_nano"),
+                context_time("arany.context.ended_unix_nano"),
+            ),
+            (Some(started), Some(ended)) if 0 < started && started <= ended
+        ),
+        "context compilation rides on the first committed marker"
+    );
+    assert!(
+        root.events.iter().all(|event| event
+            .attributes
+            .iter()
+            .all(|attribute| !attribute.key.starts_with("arany.context."))),
+        "only the first marker carries context compilation"
     );
 
     let lines = String::from_utf8(result.stdout)
@@ -461,7 +481,7 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     let team_spans = trace_spans(&team_bodies);
     assert_eq!(
         team_spans.len(),
-        11,
+        10,
         "two admitted children produce dynamic topology"
     );
     let team_goal = team_spans

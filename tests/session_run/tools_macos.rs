@@ -1,3 +1,4 @@
+use crate::engine_support::run_with;
 use crate::process::BoundedOutput;
 use crate::{hash, private_file};
 use arany::{
@@ -5,6 +6,7 @@ use arany::{
     ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, RunRequest, RunStatus,
     SessionView, StateRoot, Store, ToolCall, ToolDisposition, ToolResourceProfile,
 };
+use arany::{EngineConfig, RunControls, ToolGrant};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -524,20 +526,23 @@ async fn native_file_journey_helper() {
         },
     ];
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = Engine::open(
+    let provider = Arc::new(Journey {
+        requests: requests.clone(),
+        calls: calls.clone(),
+        linked_file: Some((root.join("outside.txt"), workspace.join("src/linked.txt"))),
+    });
+    let engine = Engine::open(
         state,
-        Journey {
-            requests: requests.clone(),
-            calls: calls.clone(),
-            linked_file: Some((root.join("outside.txt"), workspace.join("src/linked.txt"))),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
-    let outcome = engine
-        .run(RunRequest {
+    let outcome = run_with(
+        &engine,
+        &provider,
+        RunRequest {
             session_id: None,
             title: Some("Native files".into()),
             objective: "Complete the synthetic native file journey".into(),
@@ -546,9 +551,14 @@ async fn native_file_journey_helper() {
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: arany::GoalRequest::default(),
-        })
-        .await
-        .unwrap();
+        },
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     engine.close().await.unwrap();
     assert_eq!(
         outcome.run.status,
@@ -698,9 +708,7 @@ async fn native_file_journey_helper() {
     }
     store.close().await.unwrap();
     std::fs::remove_file(workspace.join("src/linked.txt")).unwrap();
-    let mut fresh = Engine::open(
-        StateRoot::open_existing(&state_path).unwrap(),
-        Journey {
+    let fresh_provider = Arc::new(Journey {
             requests: Arc::new(Mutex::new(Vec::new())),
             calls: vec![ToolCall::Command {
                 program: "shell".into(),
@@ -708,13 +716,19 @@ async fn native_file_journey_helper() {
                 cwd: "".into(),
             }],
             linked_file: None,
+        });
+    let fresh = Engine::open(
+        StateRoot::open_existing(&state_path).unwrap(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
-    ).unwrap();
-    fresh
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
-    let fresh_outcome = fresh
-        .run(RunRequest {
+    )
+    .unwrap();
+    let fresh_outcome = run_with(
+        &fresh,
+        &fresh_provider,
+        RunRequest {
             session_id: Some(outcome.session_id),
             title: None,
             objective: "Verify a fresh native command snapshot".into(),
@@ -723,9 +737,14 @@ async fn native_file_journey_helper() {
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: arany::GoalRequest::default(),
-        })
-        .await
-        .unwrap();
+        },
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     fresh.close().await.unwrap();
     assert_eq!(fresh_outcome.run.status, RunStatus::Finished);
     let fresh_result: serde_json::Value = serde_json::from_str(
@@ -902,20 +921,46 @@ impl Provider for RuntimeJourney {
     }
 }
 
-struct MountedRuntimeImage(std::path::PathBuf);
+struct MountedRuntimeImage(Option<std::path::PathBuf>);
 
 impl Drop for MountedRuntimeImage {
     fn drop(&mut self) {
         use crate::process::BoundedOutput;
 
+        let Some(mountpoint) = self.0.take() else {
+            return;
+        };
         let _ = std::process::Command::new("/usr/bin/hdiutil")
             .args(["detach", "-force", "-quiet"])
-            .arg(&self.0)
+            .arg(mountpoint)
             .env_clear()
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .bounded_output_for(Duration::from_secs(20), 4096);
+    }
+}
+
+fn runtime_mount_diagnostics(root: &Path, mountpoint: &Path, image: &Path) -> String {
+    let captured = std::panic::catch_unwind(|| {
+        std::process::Command::new("/usr/sbin/lsof")
+            .args(["-nP", "+D"])
+            .arg(mountpoint)
+            .arg("--")
+            .arg(image)
+            .env_clear()
+            .current_dir(root)
+            .bounded_output_for(Duration::from_secs(5), 2048)
+    });
+    match captured {
+        Ok(Ok(output)) => format!(
+            "status={}; stdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Ok(Err(error)) => format!("lsof unavailable: {error}"),
+        Err(_) => "lsof exceeded its 5-second deadline or 2048-byte per-stream bound".into(),
     }
 }
 
@@ -975,7 +1020,7 @@ async fn native_runtime_mount_journey_helper() {
         .bounded_output_for(Duration::from_secs(30), 4096)
         .unwrap();
     assert!(attached.status.success(), "hdiutil attach: {attached:?}");
-    let mounted = MountedRuntimeImage(mountpoint.clone());
+    let mut mounted = MountedRuntimeImage(Some(mountpoint.clone()));
 
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
@@ -1009,37 +1054,43 @@ async fn native_runtime_mount_journey_helper() {
     };
     let refused_requests = Arc::new(Mutex::new(Vec::new()));
     let refused_state = root.join("state-mounted");
-    let mut engine = Engine::open(
+    let provider = Arc::new(RuntimeJourney {
+        requests: refused_requests.clone(),
+        calls: vec![runtime_call.clone()],
+        resource_class: arany::ToolResourceClass::Default,
+    });
+    let engine = Engine::open(
         StateRoot::admit(&refused_state).unwrap(),
-        RuntimeJourney {
-            requests: refused_requests.clone(),
-            calls: vec![runtime_call.clone()],
-            resource_class: arany::ToolResourceClass::Default,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
-    engine
-        .enable_trusted_workspace(
-            permissions.clone(),
-            &workspace,
-            env!("CARGO_BIN_EXE_arany").into(),
-            approvals,
-        )
-        .unwrap();
-    let run = engine.run(RunRequest {
-        session_id: None,
-        title: Some("Mounted runtime refusal".into()),
-        objective: "Check runtime mount topology".into(),
-        images: Vec::new(),
-        workspace: workspace.clone(),
-        include_paths: Vec::new(),
-        policy: CollaborationPolicy::Single,
-        goal: arany::GoalRequest::new(
-            arany::GoalBudget::default(),
-            arany::GoalPhase::Implementation,
-        ),
-    });
+    let engine_controls = RunControls {
+        tools: ToolGrant::Trusted(permissions.clone()),
+        approvals: Some(approvals.clone()),
+        ..Default::default()
+    };
+    let run = run_with(
+        &engine,
+        &provider,
+        RunRequest {
+            session_id: None,
+            title: Some("Mounted runtime refusal".into()),
+            objective: "Check runtime mount topology".into(),
+            images: Vec::new(),
+            workspace: workspace.clone(),
+            include_paths: Vec::new(),
+            policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::new(
+                arany::GoalBudget::default(),
+                arany::GoalPhase::Implementation,
+            ),
+        },
+        engine_controls,
+    );
     let approve = async {
         let approval = inbox
             .next()
@@ -1092,14 +1143,21 @@ async fn native_runtime_mount_journey_helper() {
     assert_eq!(replay.runs.len(), 1);
     assert_eq!(replay.runs[0], refused.run, "closed runtime refusal replay");
     assert_eq!(replay.runs[0].status, RunStatus::Failed);
+    // One best-effort forced cleanup runs after diagnostics are captured; it is not a retry of the test.
+    let mountpoint = mounted.0.as_ref().expect("mounted runtime fixture");
     let detached = std::process::Command::new("/usr/bin/hdiutil")
         .args(["detach", "-force", "-quiet"])
-        .arg(&mountpoint)
+        .arg(mountpoint)
         .env_clear()
         .current_dir(root)
         .bounded_output_for(Duration::from_secs(20), 4096)
         .unwrap();
-    assert!(detached.status.success(), "hdiutil detach: {detached:?}");
+    assert!(
+        detached.status.success(),
+        "hdiutil detach: {detached:?}; mount and backing image references (current-user visibility only): {}",
+        runtime_mount_diagnostics(root, mountpoint, &image)
+    );
+    let _ = mounted.0.take();
     drop(mounted);
 
     let host_cache = root.join("home/.cargo/registry/cache");
@@ -1115,34 +1173,40 @@ async fn native_runtime_mount_journey_helper() {
         cwd: String::new(),
     };
     let seed_requests = Arc::new(Mutex::new(Vec::new()));
-    let mut seed_engine = Engine::open(
+    let seed_engine_provider = Arc::new(RuntimeJourney {
+        requests: seed_requests,
+        calls: vec![cache_seed.clone()],
+        resource_class: arany::ToolResourceClass::Default,
+    });
+    let seed_engine = Engine::open(
         StateRoot::admit(&state_success).unwrap(),
-        RuntimeJourney {
-            requests: seed_requests,
-            calls: vec![cache_seed.clone()],
-            resource_class: arany::ToolResourceClass::Default,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
     let (seed_approvals, mut seed_inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
-    seed_engine
-        .enable_trusted_workspace(
-            permissions.clone(),
-            &workspace,
-            env!("CARGO_BIN_EXE_arany").into(),
-            seed_approvals,
-        )
-        .unwrap();
-    let seed_run = seed_engine.run(RunRequest {
-        session_id: None,
-        title: Some("Private cache seed".into()),
-        objective: "Seed a bounded private cache archive".into(),
-        images: Vec::new(),
-        workspace: workspace.clone(),
-        include_paths: Vec::new(),
-        policy: CollaborationPolicy::Single,
-        goal: arany::GoalRequest::default(),
-    });
+    let seed_engine_controls = RunControls {
+        tools: ToolGrant::Trusted(permissions.clone()),
+        approvals: Some(seed_approvals.clone()),
+        ..Default::default()
+    };
+    let seed_run = run_with(
+        &seed_engine,
+        &seed_engine_provider,
+        RunRequest {
+            session_id: None,
+            title: Some("Private cache seed".into()),
+            objective: "Seed a bounded private cache archive".into(),
+            images: Vec::new(),
+            workspace: workspace.clone(),
+            include_paths: Vec::new(),
+            policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::default(),
+        },
+        seed_engine_controls,
+    );
     let approve_seed = async {
         let approval = seed_inbox
             .next()
@@ -1258,24 +1322,25 @@ async fn native_runtime_mount_journey_helper() {
         cwd: String::new(),
     };
     let accepted_calls = vec![cache_write, cache_read, cache_overflow];
-    let mut engine = Engine::open(
+    let provider = Arc::new(RuntimeJourney {
+        requests: accepted_requests.clone(),
+        calls: accepted_calls.clone(),
+        resource_class: arany::ToolResourceClass::Build,
+    });
+    let engine = Engine::open(
         StateRoot::open_existing(&state_success).unwrap(),
-        RuntimeJourney {
-            requests: accepted_requests.clone(),
-            calls: accepted_calls.clone(),
-            resource_class: arany::ToolResourceClass::Build,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
-    engine
-        .enable_trusted_workspace(
-            permissions,
-            &workspace,
-            env!("CARGO_BIN_EXE_arany").into(),
-            approvals,
-        )
-        .unwrap();
+    let engine_controls = RunControls {
+        tools: ToolGrant::Trusted(permissions),
+        approvals: Some(approvals.clone()),
+        ..Default::default()
+    };
     for (project_bytes, cache_bytes) in [
         (128 * 1024 * 1024 + 1, 64 * 1024 * 1024),
         (128 * 1024 * 1024, 64 * 1024 * 1024 + 1),
@@ -1283,8 +1348,10 @@ async fn native_runtime_mount_journey_helper() {
         let mut goal = build_goal_request();
         goal.resource_settings.build_project_bytes = project_bytes;
         goal.resource_settings.build_cache_bytes = cache_bytes;
-        let invalid = engine
-            .run(RunRequest {
+        let invalid = run_with(
+            &engine,
+            &provider,
+            RunRequest {
                 session_id: None,
                 title: Some("Rejected native storage granularity".into()),
                 objective: "The unsupported resource values must not be dispatched".into(),
@@ -1293,22 +1360,30 @@ async fn native_runtime_mount_journey_helper() {
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal,
-            })
-            .await;
+            },
+            engine_controls.clone(),
+        )
+        .await;
         assert!(matches!(invalid, Err(arany::EngineError::InvalidRequest)));
         assert!(accepted_requests.lock().unwrap().is_empty());
     }
-    let run = engine.run(RunRequest {
-        session_id: None,
-        title: Some("Selected runtime success".into()),
-        objective: "Persist private build-cache data between commands using the selected runtime"
-            .into(),
-        images: Vec::new(),
-        workspace: workspace.clone(),
-        include_paths: Vec::new(),
-        policy: CollaborationPolicy::Single,
-        goal: build_goal_request(),
-    });
+    let run = run_with(
+        &engine,
+        &provider,
+        RunRequest {
+            session_id: None,
+            title: Some("Selected runtime success".into()),
+            objective:
+                "Persist private build-cache data between commands using the selected runtime"
+                    .into(),
+            images: Vec::new(),
+            workspace: workspace.clone(),
+            include_paths: Vec::new(),
+            policy: CollaborationPolicy::Single,
+            goal: build_goal_request(),
+        },
+        engine_controls,
+    );
     let approve = async {
         for call in &accepted_calls {
             let approval = inbox
@@ -1521,35 +1596,41 @@ async fn native_runtime_mount_journey_helper() {
         cwd: String::new(),
     };
     let verify_requests = Arc::new(Mutex::new(Vec::new()));
-    let mut verify_engine = Engine::open(
+    let verify_engine_provider = Arc::new(RuntimeJourney {
+        requests: verify_requests,
+        calls: vec![verify_cache.clone()],
+        resource_class: arany::ToolResourceClass::Default,
+    });
+    let verify_engine = Engine::open(
         StateRoot::open_existing(&state_success).unwrap(),
-        RuntimeJourney {
-            requests: verify_requests,
-            calls: vec![verify_cache.clone()],
-            resource_class: arany::ToolResourceClass::Default,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
     let (verify_approvals, mut verify_inbox) =
         arany::ToolApprovals::new(arany::ApprovalMode::Request);
-    verify_engine
-        .enable_trusted_workspace(
-            permissions,
-            &workspace,
-            env!("CARGO_BIN_EXE_arany").into(),
-            verify_approvals,
-        )
-        .unwrap();
-    let verify_run = verify_engine.run(RunRequest {
-        session_id: None,
-        title: Some("Cache overflow recovery".into()),
-        objective: "Verify the previous private cache survived a rejected update".into(),
-        images: Vec::new(),
-        workspace: workspace.clone(),
-        include_paths: Vec::new(),
-        policy: CollaborationPolicy::Single,
-        goal: arany::GoalRequest::default(),
-    });
+    let verify_engine_controls = RunControls {
+        tools: ToolGrant::Trusted(permissions),
+        approvals: Some(verify_approvals.clone()),
+        ..Default::default()
+    };
+    let verify_run = run_with(
+        &verify_engine,
+        &verify_engine_provider,
+        RunRequest {
+            session_id: None,
+            title: Some("Cache overflow recovery".into()),
+            objective: "Verify the previous private cache survived a rejected update".into(),
+            images: Vec::new(),
+            workspace: workspace.clone(),
+            include_paths: Vec::new(),
+            policy: CollaborationPolicy::Single,
+            goal: arany::GoalRequest::default(),
+        },
+        verify_engine_controls,
+    );
     let approve_verify = async {
         let approval = verify_inbox.next().await.expect("cache recovery approval");
         assert!(
@@ -1680,23 +1761,22 @@ int main(void) {
                 cwd: "".into(),
             }
         };
-        let mut engine = Engine::open(
+        let provider = Arc::new(Journey {
+            requests: requests.clone(),
+            calls: vec![call.clone()],
+            linked_file: None,
+        });
+        let engine = Engine::open(
             state,
-            Journey {
-                requests: requests.clone(),
-                calls: vec![call.clone()],
-                linked_file: None,
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
             },
         )
         .unwrap();
-        engine
-            .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-            .unwrap();
         let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
         let attested = matches!(case, "overflow" | "mcp-version");
-        if matches!(case, "denied" | "cancelled") {
-            engine.set_tool_approvals(approvals);
-        }
+        let granted = matches!(case, "denied" | "cancelled").then(|| approvals.clone());
         let cancellation = arany::RunCancellation::new();
         let pending = cancellation.clone();
         let decision = async {
@@ -1716,7 +1796,9 @@ int main(void) {
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(Duration::from_secs(30), async {
             tokio::join!(
-                engine.run_with_progress(
+                run_with(
+                    &engine,
+                    &provider,
                     RunRequest {
                         session_id: None,
                         title: Some(format!("Native {case}")),
@@ -1727,8 +1809,13 @@ int main(void) {
                         policy: CollaborationPolicy::Single,
                         goal: arany::GoalRequest::default(),
                     },
-                    cancellation,
-                    progress.clone()
+                    RunControls {
+                        tools: ToolGrant::Configured,
+                        approvals: granted,
+                        cancellation,
+                        progress: Some(progress.clone()),
+                        ..Default::default()
+                    }
                 ),
                 decision
             )

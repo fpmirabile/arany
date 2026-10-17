@@ -1,6 +1,6 @@
 use super::catalog::Family;
 use super::guard::GuardContext;
-use super::types::{EffectIntent, ToolCall, ToolDisposition};
+use super::types::{EffectIntent, EnforcementCause, ToolCall, ToolDisposition};
 use super::{ToolError, fs, git, mcp, process, skills};
 
 pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
@@ -38,8 +38,12 @@ pub(super) fn failed(call: &ToolCall, output: &str) -> bool {
 pub(super) fn outcome(
     intent: &EffectIntent,
     result: Result<String, ToolError>,
-) -> (ToolDisposition, String) {
-    match result {
+) -> (ToolDisposition, String, Option<EnforcementCause>) {
+    let cause = match &result {
+        Err(ToolError::FilesystemDenied) => Some(EnforcementCause::FilesystemDenied),
+        _ => None,
+    };
+    let (disposition, output) = match result {
         Ok(output) if output.len() <= intent.limits.result_bytes as usize => {
             let disposition = if failed(&intent.call, &output) {
                 ToolDisposition::Failed
@@ -56,7 +60,7 @@ pub(super) fn outcome(
             ToolDisposition::Conflict,
             "File changed or edit did not match exactly once; read it again".into(),
         ),
-        Err(ToolError::Path) => (
+        Err(ToolError::Path | ToolError::FilesystemDenied) => (
             ToolDisposition::Denied,
             "File path is unavailable or outside the admitted regular-file boundary".into(),
         ),
@@ -69,5 +73,6 @@ pub(super) fn outcome(
             ToolDisposition::Failed,
             "Tool operation failed; no automatic retry".into(),
         ),
-    }
+    };
+    (disposition, output, cause)
 }

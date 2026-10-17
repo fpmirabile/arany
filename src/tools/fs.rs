@@ -136,7 +136,11 @@ fn command_collect(
             format!("{path}/{name}")
         };
         if !valid_relative(&selected, false) {
-            return Err(ToolError::Path);
+            return Err(if selected.split('/').any(forbidden) {
+                ToolError::FilesystemDenied
+            } else {
+                ToolError::Path
+            });
         }
         if selected.split('/').count() > 16 {
             return Err(ToolError::Limit);
@@ -154,7 +158,7 @@ fn command_collect(
         {
             use std::os::unix::fs::MetadataExt;
             if metadata.mode() & 0o6000 != 0 {
-                return Err(ToolError::Path);
+                return Err(ToolError::FilesystemDenied);
             }
         }
         let entry = if metadata.is_dir() {

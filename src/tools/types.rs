@@ -651,11 +651,26 @@ impl Attestation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnforcementCause {
+    FilesystemDenied,
+}
+
+impl EnforcementCause {
+    pub(crate) fn diagnostic(self) -> &'static str {
+        match self {
+            Self::FilesystemDenied => "Guard enforcement: protected path or set-ID entry refused",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolObservation {
     pub intent: EffectIntent,
     pub disposition: ToolDisposition,
+    pub enforcement_cause: Option<EnforcementCause>,
     pub output: String,
     pub attestation: Option<Attestation>,
     pub cache_update: CacheUpdate,
@@ -682,6 +697,8 @@ impl ToolObservation {
                 .as_ref()
                 .is_none_or(|attestation| attestation.valid_for(&self.intent))
             && (self.disposition != ToolDisposition::Succeeded || self.attestation.is_some())
+            && (self.enforcement_cause.is_none()
+                || self.disposition == ToolDisposition::Denied && self.attestation.is_some())
             && match self.cache_update {
                 CacheUpdate::NotApplicable => true,
                 CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),
@@ -794,6 +811,29 @@ impl ToolContext {
                 .sum::<usize>()
     }
 
+    /// `rendered_len` with `step` appended and an attested, empty success of each of `calls`: the
+    /// bytes a step reserves before its results are known.
+    pub(crate) fn reserved_len(&self, step: &ToolStep, calls: &[&ToolCall]) -> usize {
+        self.rendered_len()
+            + step.rendered_len()
+            + calls
+                .iter()
+                .map(|call| {
+                    let effect = if call.mutates() { "applied" } else { "none" };
+                    model_projection(
+                        call,
+                        ToolDisposition::Succeeded,
+                        &json!(""),
+                        effect,
+                        CacheUpdate::NotApplicable,
+                    )
+                    .to_string()
+                    .len()
+                        + RESULT_ENVELOPE_BYTES
+                })
+                .sum::<usize>()
+    }
+
     /// Model projection of the observations of the first `steps` steps.
     pub(crate) fn model_observations(&self, steps: usize) -> Vec<Value> {
         self.steps[..steps]
@@ -833,8 +873,28 @@ pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
             _ => "not_confirmed",
         }
     };
-    let call = model_call(&observation.intent.call);
-    json!({"call":call,"disposition":observation.disposition,"output":output,"workspace_effect":effect,"cache_update":observation.cache_update})
+    let mut value = model_projection(
+        &observation.intent.call,
+        observation.disposition,
+        &output,
+        effect,
+        observation.cache_update,
+    );
+    if let Some(cause) = observation.enforcement_cause {
+        value["enforcement_cause"] = json!(cause.diagnostic());
+    }
+    value
+}
+
+fn model_projection(
+    call: &ToolCall,
+    disposition: ToolDisposition,
+    output: &Value,
+    effect: &str,
+    cache_update: CacheUpdate,
+) -> Value {
+    let call = model_call(call);
+    json!({"call":call,"disposition":disposition,"output":output,"workspace_effect":effect,"cache_update":cache_update})
 }
 
 #[cfg(test)]

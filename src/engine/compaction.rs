@@ -1,7 +1,8 @@
 use super::ledger::{Action, duration_ms};
 use super::{Engine, EngineError, STORE_ACTION_OVERHEAD, ensure_session_workspace};
 use crate::provider::{
-    CompactionRequest, CompactionResponse, MAX_REPORTED_INPUT_TOKENS, ProviderFailureClass, Usage,
+    AdmittedProviders, CompactionRequest, CompactionResponse, MAX_REPORTED_INPUT_TOKENS,
+    ProviderFailureClass, Usage,
 };
 use crate::session::input::WorkspaceInputs;
 use crate::session::{
@@ -9,7 +10,7 @@ use crate::session::{
     MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES, PreparedCompaction, RunStatus,
     SessionId, prefix_digest,
 };
-use crate::telemetry::{ProviderTraceOutcome, TraceFailure, TraceOutcome, TraceProvider};
+use crate::telemetry::{ProviderTraceOutcome, TraceProvider};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -19,11 +20,12 @@ pub(super) const COMPACTION_CALL_DEADLINE: Duration = Duration::from_secs(120);
 impl Engine {
     /// Returns a committed success or failure record; admission and storage errors remain errors.
     pub async fn compact_session(
-        &mut self,
+        &self,
+        providers: &AdmittedProviders,
         session_id: SessionId,
         workspace: PathBuf,
     ) -> Result<CompactionRecord, EngineError> {
-        self.compact_session_inner(session_id, workspace, None)
+        self.compact_session_inner(providers, session_id, workspace, None)
             .await
             .and_then(|record| record.ok_or(EngineError::CompactionInputEmpty))
             .inspect_err(crate::diagnostics::engine_failure)
@@ -31,26 +33,30 @@ impl Engine {
 
     /// Returns `None` when the expected Run is no longer latest or its boundary was already attempted.
     pub async fn auto_compact_session(
-        &mut self,
+        &self,
+        providers: &AdmittedProviders,
         session_id: SessionId,
         workspace: PathBuf,
         expected_run_id: crate::session::RunId,
     ) -> Result<Option<CompactionRecord>, EngineError> {
-        self.compact_session_inner(session_id, workspace, Some(expected_run_id))
+        self.compact_session_inner(providers, session_id, workspace, Some(expected_run_id))
             .await
             .inspect_err(crate::diagnostics::engine_failure)
     }
 
     async fn compact_session_inner(
-        &mut self,
+        &self,
+        providers: &AdmittedProviders,
         session_id: SessionId,
         workspace: PathBuf,
         expected_run_id: Option<crate::session::RunId>,
     ) -> Result<Option<CompactionRecord>, EngineError> {
-        let provider = std::sync::Arc::clone(&self.provider);
+        let _slot = self.claim()?;
+        super::admit_providers(providers)?;
+        let provider = std::sync::Arc::clone(&providers.compaction[0]);
         let identity = super::checked_identity(provider.as_ref())?;
         let mut session_lock = self.lock_session(session_id)?;
-        let (events, view) = self.store.load_resolved(session_id).await?;
+        let (events, view) = self.journal.store().load_resolved(session_id).await?;
         let view = view.ok_or(EngineError::MissingSession)?;
         session_lock.keep();
         let _lineage_locks = self.lock_lineage(&view).await?;
@@ -66,9 +72,21 @@ impl Engine {
         ) {
             return Err(EngineError::CompactionNotIdle);
         }
+        match last_run
+            .config
+            .as_ref()
+            .and_then(|config| config.providers.as_ref())
+        {
+            Some(routes) if routes.compaction != providers.identities().compaction => {
+                return Err(EngineError::InvalidRequest);
+            }
+            None if providers.compaction.len() > 1 => return Err(EngineError::InvalidRequest),
+            _ => {}
+        }
         let covered_run_id = last_run.id;
         let open_view = self
-            .store
+            .journal
+            .store()
             .load_open_view(session_id)
             .await?
             .ok_or(EngineError::MissingSession)?;
@@ -120,13 +138,13 @@ impl Engine {
         {
             return Ok(None);
         }
-        self.store
-            .admit_operation(
+        self.journal
+            .admit(
                 session_id,
                 Action::BoundaryCompaction {
                     goal: goal_id.is_some(),
                 }
-                .max_events(),
+                .max_events_for(providers),
                 0,
             )
             .await?;
@@ -137,7 +155,7 @@ impl Engine {
             CompactionInputError::TooLarge => EngineError::CompactionInputTooLarge,
         })?;
         let compiler_version = prepared.compiler_version;
-        let trace = self.telemetry.begin_compaction(
+        let trace = self.config.telemetry.begin_compaction(
             session_id,
             covered_run_id,
             TraceProvider::from_profile(&identity.profile),
@@ -182,7 +200,7 @@ impl Engine {
             model: identity.model.clone(),
             previous_summary: prepared.previous_summary,
             items,
-            max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS,
+            max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS.min(identity.limits.max_output_tokens),
         };
         let source_bytes = crate::provider::compaction_input_bytes(&request)
             .map_err(|_| EngineError::CompactionInputTooLarge)?;
@@ -193,8 +211,7 @@ impl Engine {
             u32::try_from(source_bytes).map_err(|_| EngineError::CompactionInputTooLarge)?;
         let active_started = Instant::now();
         if let (Some(goal_id), Some(active_ceiling_ms)) = (goal_id, active_reservation_ms) {
-            let reserved = self
-                .store
+            self.journal
                 .append(
                     session_id,
                     Event::GoalCompactionCallReserved {
@@ -204,28 +221,80 @@ impl Engine {
                     },
                 )
                 .await?;
-            crate::diagnostics::event_failure(&reserved.event);
         }
-        let provider_deadline =
-            active_reservation_ms.map_or(COMPACTION_CALL_DEADLINE, |reserved| {
+        let provider_deadline = active_reservation_ms
+            .map_or(COMPACTION_CALL_DEADLINE, |reserved| {
                 Duration::from_millis(
                     reserved
                         .saturating_sub(duration_ms(active_started.elapsed()))
                         .saturating_sub(duration_ms(STORE_ACTION_OVERHEAD)),
                 )
                 .min(COMPACTION_CALL_DEADLINE)
-            });
+            })
+            .min(identity.limits.deadline);
+        let actor = last_run.primary().map(|agent| agent.id);
+        let routing = if providers.compaction.len() > 1 {
+            let actor = actor.ok_or(EngineError::InvalidRequest)?;
+            let goal_id = open_view
+                .goals
+                .iter()
+                .find(|goal| goal.run_ids.contains(&covered_run_id))
+                .map(|goal| goal.id)
+                .ok_or(EngineError::InvalidHistory)?;
+            Some((
+                super::routing::CallRouter {
+                    providers: providers.clone(),
+                    journal: &self.journal,
+                    ledger: &super::ledger::GoalLedger::new(
+                        self.journal
+                            .store()
+                            .load_open_view(session_id)
+                            .await?
+                            .ok_or(EngineError::MissingSession)?,
+                        goal_id,
+                    ),
+                    publisher: None,
+                },
+                actor,
+            ))
+        } else {
+            None
+        };
         let provider_trace = trace.begin_provider(&identity.model);
-        let response =
-            tokio::time::timeout(provider_deadline, self.provider.compact(request)).await;
+        let response = tokio::time::timeout(provider_deadline, async {
+            match &routing {
+                Some((routing, actor)) => routing.compact(request, *actor).await,
+                None => Ok((
+                    provider.compact(request).await,
+                    std::sync::Arc::clone(&provider),
+                )),
+            }
+        })
+        .await;
+        let provider = match &routing {
+            Some((routing, actor)) => {
+                routing.provider(crate::provider::ProviderRole::Compaction, *actor)?
+            }
+            None => std::sync::Arc::clone(&provider),
+        };
+        let identity = provider.identity();
         let (status, response_id, usage, wire_provenance) = match response {
-            Ok(Ok(response)) => classify_response(response),
-            Ok(Err(error)) => (
+            Ok(Ok((Ok(response), _))) => classify_response(response),
+            Ok(Err(error)) => return Err(error),
+            Ok(Ok((Err(error), _))) => (
                 CompactionStatus::Failed {
-                    reason: match error.failure_class() {
-                        ProviderFailureClass::Unavailable => CompactionFailure::ProviderUnavailable,
-                        ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
-                        ProviderFailureClass::InvalidOutcome => CompactionFailure::InvalidOutcome,
+                    reason: if matches!(error, crate::provider::ProviderError::CallTimedOut) {
+                        CompactionFailure::TimedOut
+                    } else {
+                        match error.failure_class() {
+                            ProviderFailureClass::Unavailable => {
+                                CompactionFailure::ProviderUnavailable
+                            }
+                            ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
+                            ProviderFailureClass::InvalidOutcome => {
+                                CompactionFailure::InvalidOutcome
+                            }
+                        }
                     },
                 },
                 None,
@@ -241,26 +310,7 @@ impl Engine {
                 None,
             ),
         };
-        let trace_outcome = match &status {
-            CompactionStatus::Succeeded { .. } => TraceOutcome::Finished,
-            CompactionStatus::Failed {
-                reason: CompactionFailure::Cancelled,
-            } => TraceOutcome::Cancelled,
-            CompactionStatus::Failed { .. } => TraceOutcome::Failed,
-        };
-        let provider_outcome = match &status {
-            CompactionStatus::Succeeded { .. } => ProviderTraceOutcome::Finished,
-            CompactionStatus::Failed {
-                reason: CompactionFailure::Cancelled,
-            } => ProviderTraceOutcome::Cancelled,
-            CompactionStatus::Failed { reason } => ProviderTraceOutcome::Failed(match reason {
-                CompactionFailure::ProviderUnavailable => TraceFailure::Unavailable,
-                CompactionFailure::ProviderRejected => TraceFailure::Rejected,
-                CompactionFailure::InvalidOutcome => TraceFailure::InvalidResponse,
-                CompactionFailure::TimedOut => TraceFailure::Timeout,
-                CompactionFailure::Cancelled => unreachable!("handled above"),
-            }),
-        };
+        let provider_outcome = ProviderTraceOutcome::from(&status);
         provider_trace.finish_with_usage(provider_outcome, usage.input_tokens, usage.output_tokens);
         let record = CompactionRecord {
             covered_run_id,
@@ -284,7 +334,7 @@ impl Engine {
             status,
         };
         let committed = self
-            .store
+            .journal
             .append(
                 session_id,
                 Event::ContextCompacted {
@@ -293,9 +343,8 @@ impl Engine {
                 },
             )
             .await?;
-        crate::diagnostics::event_failure(&committed.event);
-        trace.event_committed(committed.sequence);
-        trace.finish(trace_outcome);
+        trace.event_committed(&committed);
+        trace.finish(provider_outcome.into());
         Ok(Some(record))
     }
 }

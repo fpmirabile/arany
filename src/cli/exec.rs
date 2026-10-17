@@ -1,13 +1,13 @@
 use super::{CommandOutput, OutputArg, chatgpt, native_run_key_from_env};
 use arany::{
-    AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine, EngineError,
-    GoalBudget, GoalId, GoalPhase, GoalRequest, GoalStatus, OpenAiProvider, Provider,
-    RunCancellation, RunOutcome, RunRequest, RunStatus, SessionId, StateRoot, Store, Telemetry,
-    native_protection_supported, render_exec, resolve_native_effort_for_run,
-    validate_native_model_id,
+    AdmittedProviders, AnthropicProvider, CollaborationPolicy, CustomProvider, Effort, Engine,
+    EngineConfig, EngineError, GoalBudget, GoalId, GoalPhase, GoalRequest, GoalStatus,
+    OpenAiProvider, Provider, RunCancellation, RunControls, RunRequest, RunResult, RunStatus,
+    SessionId, StateRoot, Store, Telemetry, ToolGrant, native_protection_supported, render_exec,
+    resolve_native_effort_for_run, validate_native_model_id,
 };
 use clap::{Args, ValueEnum};
-use std::{path::PathBuf, str::FromStr, time::Duration};
+use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderArg {
@@ -190,49 +190,49 @@ impl ExecArgs {
 
 pub(crate) async fn run(args: ExecArgs, telemetry: Telemetry) -> Result<CommandOutput, String> {
     let admission = args.admit().map_err(str::to_owned)?;
-    match &args.provider {
-        ProviderArg::Openai => {
-            let provider = native_run_key_from_env("openai", &args.model, args.effort)
+    let provider: Arc<dyn Provider> = match &args.provider {
+        ProviderArg::Openai => Arc::new(
+            native_run_key_from_env("openai", &args.model, args.effort)
                 .and_then(|key| {
                     OpenAiProvider::from_api_key_with_effort(args.model.clone(), args.effort, key)
                 })
-                .map_err(|_| "OPENAI_API_KEY unavailable".to_owned())?;
-            run_with_provider(args, admission, provider, telemetry).await
-        }
-        ProviderArg::Anthropic => {
-            let provider = AnthropicProvider::from_env_with_effort(args.model.clone(), args.effort)
-                .map_err(|error| match error {
+                .map_err(|_| "OPENAI_API_KEY unavailable".to_owned())?,
+        ),
+        ProviderArg::Anthropic => Arc::new(
+            AnthropicProvider::from_env_with_effort(args.model.clone(), args.effort).map_err(
+                |error| match error {
                     arany::ProviderError::Rejected => "invalid ANTHROPIC_WORKSPACE_ID".to_owned(),
                     _ => "ANTHROPIC_API_KEY unavailable".to_owned(),
-                })?;
-            run_with_provider(args, admission, provider, telemetry).await
-        }
-        ProviderArg::Chatgpt => {
-            let provider = chatgpt::provider_for_run(
+                },
+            )?,
+        ),
+        ProviderArg::Chatgpt => Arc::new(
+            chatgpt::provider_for_run(
                 admission.workspace.clone(),
                 None,
                 args.model.clone(),
                 args.effort.expect("validated ChatGPT effort"),
             )
             .await
-            .map_err(|error| error.to_string())?;
-            run_with_provider(args, admission, provider, telemetry).await
-        }
+            .map_err(|error| error.to_string())?,
+        ),
         ProviderArg::Custom(name) => {
             let root = StateRoot::open_existing(&admission.state_dir)
                 .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-            let provider = CustomProvider::admit(&root, name, &args.model, args.effort)
-                .await
-                .map_err(|error| error.to_string())?;
-            run_with_provider(args, admission, provider, telemetry).await
+            Arc::new(
+                CustomProvider::admit(&root, name, &args.model, args.effort)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            )
         }
-    }
+    };
+    run_with_provider(args, admission, provider, telemetry).await
 }
 
-async fn run_with_provider<P: Provider + 'static>(
+async fn run_with_provider(
     args: ExecArgs,
     admission: Admission,
-    provider: P,
+    provider: Arc<dyn Provider>,
     telemetry: Telemetry,
 ) -> Result<CommandOutput, String> {
     if provider.identity().profile != args.provider.profile_label()
@@ -240,25 +240,44 @@ async fn run_with_provider<P: Provider + 'static>(
     {
         return Err("selected Provider changed before Workspace admission".into());
     }
-    let new_session = admission.session_id.is_none();
     let state = StateRoot::admit(&admission.state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     arany::enable_development_diagnostics(&state);
-    let mut engine = Engine::open_with_telemetry(state, provider, telemetry)
-        .map_err(|_| "state store unavailable".to_owned())?;
-    if args.tools {
+    let providers = super::provider::routing::configured_providers(
+        &admission.state_dir,
+        &admission.workspace,
+        provider,
+    )
+    .await?;
+    let engine = Engine::open(
+        state,
+        EngineConfig {
+            telemetry,
+            guard_executable: std::env::current_exe().ok(),
+        },
+    )
+    .map_err(|_| "state store unavailable".to_owned())?;
+    run_on_engine(args, admission, providers, engine).await
+}
+
+async fn run_on_engine(
+    args: ExecArgs,
+    admission: Admission,
+    providers: AdmittedProviders,
+    engine: Engine,
+) -> Result<CommandOutput, String> {
+    let new_session = admission.session_id.is_none();
+    let tools = if args.tools {
         if !native_protection_supported() {
             return Err(
                 "Tools require native OS protection, unavailable on this host; rerun without --tools"
                     .to_owned(),
             );
         }
-        engine
-            .enable_tools(
-                std::env::current_exe().map_err(|_| "Guard executable unavailable".to_owned())?,
-            )
-            .map_err(|error| error.to_string())?;
-    }
+        ToolGrant::Configured
+    } else {
+        ToolGrant::None
+    };
     let (goal_budget, resource_settings) =
         crate::cli::attached::execution_limits(&admission.state_dir).await?;
     let mut goal = admission.goal;
@@ -267,7 +286,9 @@ async fn run_with_provider<P: Provider + 'static>(
     }
     goal.resource_settings = resource_settings;
     let end = run_signalled(
-        &mut engine,
+        &engine,
+        providers,
+        tools,
         RunRequest {
             session_id: admission.session_id,
             title: None,
@@ -289,15 +310,12 @@ async fn run_with_provider<P: Provider + 'static>(
         interrupted,
         forced,
     } = end?;
-    let stop = result
-        .as_ref()
-        .err()
-        .filter(|error| matches!(error, EngineError::StoppedAfterRun { .. }))
-        .map(ToString::to_string);
-    let outcome = match result {
-        Ok(outcome) => outcome,
+    let (outcome, stop) = match result {
         // The committed answer is still printed; the stop error makes the exit nonzero.
-        Err(EngineError::StoppedAfterRun { run, .. }) => *run,
+        Ok(RunResult { run, stopped }) => (
+            run,
+            stopped.map(|reason| format!("Goal stopped after a committed Run: {reason}")),
+        ),
         Err(EngineError::CancelledBeforeStart) if interrupted => {
             return Err("interrupted before a Run started; no Run was recorded".into());
         }
@@ -358,6 +376,25 @@ async fn run_with_provider<P: Provider + 'static>(
                     _ => "",
                 },
             );
+            if run.config.as_ref().is_some_and(|config| {
+                config.chatgpt_provenance.is_none()
+                    && config.providers.as_ref().is_some_and(|providers| {
+                        providers.values().iter().any(|chain| {
+                            chain.iter().any(|identity| {
+                                identity.limits.output_token_bound
+                                    == arany::OutputTokenBound::LocalAcceptanceOnly
+                            })
+                        })
+                    })
+            }) {
+                receipt.push_str(
+                    "Output bound: some role routes are local only; remote usage is not capped\n",
+                );
+            }
+            if let Some(notice) = arany::render_provider_fallbacks(run) {
+                receipt.push_str(&notice);
+                receipt.push('\n');
+            }
             if let Some(notice) = arany::render_cache_update_feedback(run) {
                 receipt.push_str(notice);
                 receipt.push('\n');
@@ -469,7 +506,7 @@ impl StopSignals {
 }
 
 struct SignalledRun {
-    result: Result<RunOutcome, EngineError>,
+    result: Result<RunResult, EngineError>,
     /// A stop signal requested cancellation before the Run's receipt.
     interrupted: bool,
     /// Set when a forced stop produced the receipt within the grace period.
@@ -477,12 +514,27 @@ struct SignalledRun {
 }
 
 /// Drives one Run with stop signals installed only while it is in flight.
-async fn run_signalled(engine: &mut Engine, request: RunRequest) -> Result<SignalledRun, String> {
+async fn run_signalled(
+    engine: &Engine,
+    providers: AdmittedProviders,
+    tools: ToolGrant,
+    request: RunRequest,
+) -> Result<SignalledRun, String> {
     let cancellation = RunCancellation::new();
+    let mut run = engine
+        .submit(
+            providers,
+            request,
+            RunControls {
+                tools,
+                cancellation: cancellation.clone(),
+                ..RunControls::default()
+            },
+        )
+        .map_err(|error| error.to_string())?
+        .result;
     let mut signals =
         StopSignals::install().map_err(|_| "signal handling unavailable".to_owned())?;
-    let run = engine.run_with_cancel(request, cancellation.clone());
-    tokio::pin!(run);
     let mut interrupted = false;
     let forced = loop {
         tokio::select! {
@@ -518,7 +570,7 @@ mod tests {
     use super::*;
     use arany::{
         AgentPhase, Finish, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
-        RunId, SessionView,
+        RunId, SessionView, Tapped,
     };
     use std::{
         collections::VecDeque,
@@ -760,17 +812,18 @@ mod tests {
         std::fs::create_dir(&workspace).expect("workspace");
         let state_dir = temp.path().join("state");
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let mut engine = Engine::open(
+        let engine = Engine::open(
             StateRoot::admit(&state_dir).expect("state"),
-            scripted(
-                Ok(Finish {
-                    summary: "first summary".into(),
-                    result: "first".into(),
-                }),
-                &observed,
-            ),
+            EngineConfig::default(),
         )
         .expect("engine");
+        let provider = Arc::new(scripted(
+            Ok(Finish {
+                summary: "first summary".into(),
+                result: "first".into(),
+            }),
+            &observed,
+        ));
         let mut goal = GoalRequest::new(
             GoalBudget {
                 max_provider_calls: Some(1),
@@ -780,18 +833,24 @@ mod tests {
         );
         goal.finish_after_run = false;
         let paused = engine
-            .run(RunRequest {
-                session_id: None,
-                title: Some("Exhausted".into()),
-                objective: "Use the only Provider call".into(),
-                images: Vec::new(),
-                workspace: workspace.clone(),
-                include_paths: Vec::new(),
-                policy: CollaborationPolicy::Single,
-                goal,
-            })
+            .submit(
+                AdmittedProviders::single(provider),
+                RunRequest {
+                    session_id: None,
+                    title: Some("Exhausted".into()),
+                    objective: "Use the only Provider call".into(),
+                    images: Vec::new(),
+                    workspace: workspace.clone(),
+                    include_paths: Vec::new(),
+                    policy: CollaborationPolicy::Single,
+                    goal,
+                },
+                RunControls::default(),
+            )
+            .expect("idle Engine")
             .await
-            .expect("paused Goal Run");
+            .expect("paused Goal Run")
+            .run;
         engine.close().await.expect("engine shutdown");
 
         let mut resume = args(state_dir.clone(), workspace.clone(), "unused");
@@ -802,7 +861,7 @@ mod tests {
         let error = run_with_provider(
             resume,
             admission,
-            scripted(Err(ProviderError::Unavailable), &observed),
+            Arc::new(scripted(Err(ProviderError::Unavailable), &observed)),
             Telemetry::disabled(),
         )
         .await
@@ -819,13 +878,94 @@ mod tests {
         let error = run_with_provider(
             again,
             admission,
-            scripted(Err(ProviderError::Unavailable), &observed),
+            Arc::new(scripted(Err(ProviderError::Unavailable), &observed)),
             Telemetry::disabled(),
         )
         .await
         .err()
         .expect("a closed Goal is not resumable");
         assert_eq!(error, "Goal is not available for explicit resume");
+    }
+
+    #[tokio::test]
+    async fn exec_jsonl_equals_the_event_stream() {
+        let temp = tempfile::tempdir().expect("private test root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state_dir = temp.path().join("state");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::open(
+            StateRoot::admit(&state_dir).expect("state"),
+            EngineConfig::default(),
+        )
+        .expect("engine");
+        let provider = Arc::new(scripted(
+            Ok(Finish {
+                summary: "stream summary".into(),
+                result: "stream answer".into(),
+            }),
+            &observed,
+        ));
+        let mut stream = engine.subscribe();
+        let mut command = args(state_dir.clone(), workspace, "Stream the Run");
+        command.output = OutputArg::Jsonl;
+        let admission = command.admit().expect("valid JSONL command");
+        // The stream ends when exec closes its Engine.
+        let collect = async {
+            let mut streamed = Vec::new();
+            while let Some(tapped) = stream.next().await {
+                match tapped {
+                    Tapped::Committed(envelope) => streamed.push((*envelope).clone()),
+                    Tapped::Resync { .. } => panic!("one Run stays within the tap ring"),
+                }
+            }
+            streamed
+        };
+        let (report, streamed) = tokio::join!(
+            run_on_engine(
+                command,
+                admission,
+                AdmittedProviders::single(provider),
+                engine
+            ),
+            collect
+        );
+        let report = report.expect("JSONL exec");
+        assert!(report.success);
+        let lines: Vec<serde_json::Value> = report
+            .stdout
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("JSONL Event"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            streamed.len(),
+            "each streamed Event is one line"
+        );
+        for (line, envelope) in lines.iter().zip(&streamed) {
+            assert_eq!(line["sequence"], envelope.sequence);
+            assert_eq!(line["created_at_ms"], envelope.created_at_ms);
+        }
+        let session_id = SessionId::from_str(lines[0]["session_id"].as_str().expect("Session ID"))
+            .expect("typed Session ID");
+        let store = Store::open_read_only(StateRoot::open_existing(&state_dir).expect("state"))
+            .expect("read-only reopen");
+        let view = store
+            .load_view(session_id)
+            .await
+            .expect("resolved Session")
+            .expect("Session exists");
+        store.close().await.expect("closed store");
+        assert_eq!(
+            report.stdout,
+            render_exec(
+                view.runs.last().expect("streamed Run"),
+                &streamed,
+                arany::Output::Jsonl,
+                true
+            ),
+            "exec JSONL renders exactly the committed stream"
+        );
     }
 
     #[tokio::test]
@@ -840,13 +980,13 @@ mod tests {
         let first_report = run_with_provider(
             first,
             first_admission,
-            scripted(
+            Arc::new(scripted(
                 Ok(Finish {
                     summary: "first summary".into(),
                     result: "first\u{1b}[31m\nSession: forged".into(),
                 }),
                 &observed,
-            ),
+            )),
             Telemetry::disabled(),
         )
         .await
@@ -890,13 +1030,13 @@ mod tests {
         let second_report = run_with_provider(
             second,
             second_admission,
-            scripted(
+            Arc::new(scripted(
                 Ok(Finish {
                     summary: "second summary".into(),
                     result: "second answer".into(),
                 }),
                 &observed,
-            ),
+            )),
             Telemetry::disabled(),
         )
         .await
@@ -981,11 +1121,12 @@ mod tests {
         for (line, event) in run_lines.into_iter().zip(run_events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
-            let bumped = matches!(
-                line["kind"].as_str(),
-                Some("RunStarted" | "GoalProviderCallReserved" | "RunFinished")
-            );
-            assert_eq!(line["event_version"], if bumped { 7 } else { 6 });
+            let version = match line["kind"].as_str() {
+                Some("RunStarted") => 8,
+                Some("GoalProviderCallReserved" | "RunFinished") => 7,
+                _ => 6,
+            };
+            assert_eq!(line["event_version"], version);
         }
         store.close().await.expect("closed store");
 
@@ -996,7 +1137,7 @@ mod tests {
         let failure = run_with_provider(
             third,
             third_admission,
-            scripted(Err(ProviderError::Unavailable), &observed),
+            Arc::new(scripted(Err(ProviderError::Unavailable), &observed)),
             Telemetry::disabled(),
         )
         .await
@@ -1064,13 +1205,13 @@ mod tests {
         let jsonl_report = run_with_provider(
             new_jsonl,
             jsonl_admission,
-            scripted(
+            Arc::new(scripted(
                 Ok(Finish {
                     summary: "JSONL summary".into(),
                     result: "JSONL answer".into(),
                 }),
                 &separate_observed,
-            ),
+            )),
             Telemetry::disabled(),
         )
         .await

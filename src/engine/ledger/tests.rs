@@ -248,14 +248,77 @@ fn carried_acknowledgment_time_counts_toward_active_exhaustion() {
 }
 
 #[test]
+fn default_provider_action_retains_its_original_event_admission() {
+    assert_eq!(
+        Action::ProviderCall {
+            previews: false,
+            steering: false
+        }
+        .max_events(),
+        6
+    );
+    assert_eq!(Action::Child { in_flight: 2 }.max_events(), 13);
+    assert_eq!(Action::Tool.max_events(), 6);
+    assert_eq!(Action::Review.max_events(), 6);
+    assert_eq!(Action::Compaction.max_events(), 6);
+    assert_eq!(Action::BoundaryCompaction { goal: true }.max_events(), 2);
+}
+
+#[test]
+fn action_bounds_reserve_only_the_selected_roles_switches() {
+    let inherited = Providers::all(vec![()]);
+    let configured = Providers {
+        primary: vec![(); 3],
+        child: vec![(); 2],
+        review: vec![(); 3],
+        compaction: vec![()],
+    };
+    for (action, extra) in [
+        (
+            Action::ProviderCall {
+                previews: false,
+                steering: false,
+            },
+            2,
+        ),
+        (Action::Child { in_flight: 2 }, 3),
+        (Action::Tool, 2),
+        (Action::Review, 2),
+        (Action::Compaction, 0),
+        (Action::BoundaryCompaction { goal: true }, 0),
+        (
+            Action::Delegation {
+                children: 2,
+                research: false,
+            },
+            4,
+        ),
+        (
+            Action::Delegation {
+                children: 2,
+                research: true,
+            },
+            2 * (MAX_CHILD_TOOL_CALLS + 1) + 2,
+        ),
+    ] {
+        assert_eq!(action.max_events_for(&inherited), action.max_events());
+        assert_eq!(
+            action.max_events_for(&configured),
+            action.max_events() + extra
+        );
+    }
+}
+
+#[test]
 fn staged_bounds_never_exceed_the_first_admission() {
     let call = Action::ProviderCall {
         previews: true,
         steering: true,
     };
     assert_eq!(call.max_events(), 6 + 1 + MAX_DISPLAY_CHUNKS);
-    assert_eq!(call.remaining(1), call.max_events() - 1);
-    assert_eq!(Action::Tool.remaining(usize::MAX), 0);
+    let providers = Providers::all(vec![()]);
+    assert_eq!(call.remaining(1, &providers), call.max_events() - 1);
+    assert_eq!(Action::Tool.remaining(usize::MAX, &providers), 0);
 }
 
 #[test]

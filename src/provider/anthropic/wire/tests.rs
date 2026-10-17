@@ -625,6 +625,32 @@ fn inbound_end_turn_requires_exactly_one_text_block_as_finish_or_delegate() {
 
 #[test]
 fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
+    for (phase, role, model) in [
+        (
+            AgentPhase::RootPlan,
+            crate::provider::PromptRole::ReadOnly,
+            "primary-model",
+        ),
+        (
+            AgentPhase::ChildWork,
+            crate::provider::PromptRole::ReadOnly,
+            "child-model",
+        ),
+        (
+            AgentPhase::ToolReview,
+            crate::provider::PromptRole::ToolReview,
+            "review-model",
+        ),
+    ] {
+        let mut role_request = read_only_request(model);
+        role_request.phase = phase;
+        role_request.collaboration = CollaborationPolicy::Single;
+        role_request.input.role = role;
+        if phase != AgentPhase::RootPlan {
+            role_request.input.goal_context_facts = None;
+        }
+        assert_eq!(body(&role_request, Effort::Low)["model"], model);
+    }
     let request = read_only_request(MODEL);
     let rendered = body(&request, Effort::Max);
     assert_eq!(rendered["model"], MODEL);
@@ -834,6 +860,20 @@ fn run_stream(
 
 fn message_start() -> Value {
     json!({"type":"message_start","message":{"id":"msg_stream","type":"message","role":"assistant","model":"model-1","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"cache_read_input_tokens":4,"cache_creation_input_tokens":3,"output_tokens":0}}})
+}
+
+#[test]
+fn overloaded_stream_after_tool_input_never_allows_fallback() {
+    let (preview, _) = crate::provider::ResponsePreview::new();
+    let wire = sse(&[
+        message_start(),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-1","name":"read","input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}),
+        json!({"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}),
+    ]);
+    let error = run_stream(&wire, preview.clone()).unwrap_err();
+    assert!(!preview.has_output());
+    assert!(!error.allows_fallback());
 }
 
 #[test]

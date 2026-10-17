@@ -171,7 +171,7 @@ impl OpenAiProvider {
             .map_err(|_| ProviderError::Unavailable)?;
         if !response.status().is_success() {
             return Err(if response.status().is_server_error() {
-                ProviderError::Unavailable
+                ProviderError::HttpServerUnavailable
             } else {
                 ProviderError::Rejected
             });
@@ -270,7 +270,7 @@ impl Provider for OpenAiProvider {
             .map_err(|_| ProviderError::Unavailable)?;
         if !response.status().is_success() {
             return Err(if response.status().is_server_error() {
-                ProviderError::Unavailable
+                ProviderError::HttpServerUnavailable
             } else {
                 ProviderError::Rejected
             });

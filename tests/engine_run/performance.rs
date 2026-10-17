@@ -51,8 +51,12 @@ fn team_two_core_latency_on_named_host() {
         }
         let provider = ScriptedProvider::new(responses);
         let requests = Arc::clone(&provider.requests);
-        let mut engine = Engine::open(StateRoot::admit(&state).expect("private state"), provider)
-            .expect("benchmark Engine");
+        let provider = Arc::new(provider);
+        let engine = Engine::open(
+            StateRoot::admit(&state).expect("private state"),
+            EngineConfig::default(),
+        )
+        .expect("benchmark Engine");
         let observer = Store::open_read_only(StateRoot::open_existing(&state).expect("state"))
             .expect("read-only observer");
         let mut expected_sequence = None;
@@ -64,10 +68,13 @@ fn team_two_core_latency_on_named_host() {
                 max_active_children: 2,
             };
             let started = Instant::now();
-            let outcome = tokio::time::timeout(Duration::from_secs(5), engine.run(run_request))
-                .await
-                .expect("bounded team Run")
-                .expect("successful team Run");
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(5),
+                run_to_end(&engine, &provider, run_request),
+            )
+            .await
+            .expect("bounded team Run")
+            .expect("successful team Run");
             let elapsed = started.elapsed();
             if index >= WARMUPS {
                 samples.push(elapsed);

@@ -35,8 +35,12 @@ fn team_cancellation_latency_on_named_host() {
             fail_child: None,
             identity: crate::gated_identity(CHILDREN as u8),
         };
-        let mut engine = Engine::open(StateRoot::admit(&state).expect("private state"), provider)
-            .expect("benchmark Engine");
+        let provider = Arc::new(provider);
+        let mut engine = Engine::open(
+            StateRoot::admit(&state).expect("private state"),
+            EngineConfig::default(),
+        )
+        .expect("benchmark Engine");
         let observer = Store::open_read_only(StateRoot::open_existing(&state).expect("state"))
             .expect("read-only observer");
         let mut samples = Vec::with_capacity(SAMPLES);
@@ -48,8 +52,18 @@ fn team_cancellation_latency_on_named_host() {
             run_request.policy = CollaborationPolicy::Team {
                 max_active_children: CHILDREN as u8,
             };
+            let provider = Arc::clone(&provider);
             let mut run_task = tokio::spawn(async move {
-                let outcome = engine.run_with_cancel(run_request, run_cancellation).await;
+                let outcome = run_with(
+                    &engine,
+                    &provider,
+                    run_request,
+                    RunControls {
+                        cancellation: run_cancellation,
+                        ..Default::default()
+                    },
+                )
+                .await;
                 (engine, outcome)
             });
             let gates = tokio::time::timeout(Duration::from_secs(5), async {

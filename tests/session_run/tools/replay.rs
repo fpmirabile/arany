@@ -1,6 +1,8 @@
+use crate::engine_support::run_with;
 use arany::{
     AgentPhase, CollaborationPolicy, RunStatus, SessionView, StateRoot, ToolCall, ToolDisposition,
 };
+use arany::{EngineConfig, RunControls, ToolGrant};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 
@@ -30,6 +32,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         max_context_bytes: 65536,
     };
     let config = RunConfig {
+        providers: None,
         provider: "scripted".into(),
         model: "replay-model".into(),
         effort: None,
@@ -70,6 +73,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         use_count: 1,
     };
     let observation = arany::ToolObservation {
+        enforcement_cause: None,
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         output: serde_json::json!({
@@ -576,6 +580,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         run_id: run,
         agent_run_id: primary,
         observation: arany::ToolObservation {
+            enforcement_cause: None,
             disposition,
             output,
             attestation: Some(arany::Attestation::Guard(arany::GuardReceipt {
@@ -1256,23 +1261,24 @@ pub(super) async fn native_command_changeset_corpus(
                 cwd: "".into(),
             });
         }
-        let mut engine = Engine::open(
+        let provider = Arc::new(CommandJourney {
+            calls,
+            requests: requests.clone(),
+            review: matches!(case, "ai-approve" | "scope-auto"),
+            goal_paths: matches!(case, "scope" | "scope-auto").then(|| vec!["src".into()]),
+            #[cfg(target_os = "macos")]
+            trace_root: root.to_path_buf(),
+        });
+        let engine = Engine::open(
             state,
-            CommandJourney {
-                calls,
-                requests: requests.clone(),
-                review: matches!(case, "ai-approve" | "scope-auto"),
-                goal_paths: matches!(case, "scope" | "scope-auto").then(|| vec!["src".into()]),
-                #[cfg(target_os = "macos")]
-                trace_root: root.to_path_buf(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
             },
         )
         .unwrap();
         #[cfg(target_os = "macos")]
         crate::tools::trace_case(root, case);
-        engine
-            .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-            .unwrap();
         let interactive = matches!(case, "deny" | "drop" | "cancel" | "conflict");
         let (approvals, mut inbox) =
             ToolApprovals::new(if matches!(case, "ai-approve" | "scope-auto") {
@@ -1280,9 +1286,9 @@ pub(super) async fn native_command_changeset_corpus(
             } else {
                 ApprovalMode::Request
             });
-        if interactive || matches!(case, "ai-approve" | "scope" | "scope-auto") {
-            engine.set_tool_approvals(approvals);
-        }
+        // The test keeps the sender, as the Engine kept it before, so the inbox stays open after the Run.
+        let granted = (interactive || matches!(case, "ai-approve" | "scope" | "scope-auto"))
+            .then(|| approvals.clone());
         let cancellation = RunCancellation::new();
         let pending = cancellation.clone();
         let (run_done, run_done_rx) = tokio::sync::oneshot::channel();
@@ -1355,22 +1361,28 @@ pub(super) async fn native_command_changeset_corpus(
         let (outcome, ()) = tokio::time::timeout(timeout, async {
             tokio::join!(
                 async {
-                    let outcome = engine
-                        .run_with_progress(
-                            RunRequest {
-                                session_id: None,
-                                title: Some(format!("Changeset {case}")),
-                                objective: "Exercise native changeset integration".into(),
-                                images: Vec::new(),
-                                workspace: workspace.clone(),
-                                include_paths: Vec::new(),
-                                policy: CollaborationPolicy::Single,
-                                goal: arany::GoalRequest::default(),
-                            },
+                    let outcome = run_with(
+                        &engine,
+                        &provider,
+                        RunRequest {
+                            session_id: None,
+                            title: Some(format!("Changeset {case}")),
+                            objective: "Exercise native changeset integration".into(),
+                            images: Vec::new(),
+                            workspace: workspace.clone(),
+                            include_paths: Vec::new(),
+                            policy: CollaborationPolicy::Single,
+                            goal: arany::GoalRequest::default(),
+                        },
+                        RunControls {
+                            tools: ToolGrant::Configured,
+                            approvals: granted,
                             cancellation,
-                            RunProgress::new(),
-                        )
-                        .await;
+                            progress: Some(RunProgress::new()),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
                     let _ = run_done.send(());
                     outcome
                 },

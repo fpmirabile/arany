@@ -190,6 +190,7 @@ pub struct RunView {
     pub objective: String,
     pub images: Vec<crate::provider::ImageAttachment>,
     pub config: Option<RunConfig>,
+    pub provider_fallbacks: Vec<(AgentRunId, crate::provider::ProviderFallback)>,
     pub agents: Vec<AgentView>,
     pub assistant_message: Option<String>,
     pub status: RunStatus,
@@ -337,6 +338,33 @@ impl RunView {
         self.agents
             .first()
             .filter(|agent| agent.role == AgentRole::Primary)
+    }
+
+    pub(crate) fn compaction_matches(&self, record: &CompactionRecord) -> bool {
+        let Some(routes) = self
+            .config
+            .as_ref()
+            .and_then(|config| config.providers.as_ref())
+        else {
+            return true;
+        };
+        let identity = self
+            .provider_fallbacks
+            .iter()
+            .rev()
+            .find(|(_, fallback)| fallback.role == crate::provider::ProviderRole::Compaction)
+            .map(|(_, fallback)| &fallback.to)
+            .unwrap_or(&routes.compaction[0]);
+        record.output_tokens.is_none_or(|tokens| {
+            tokens
+                <= identity
+                    .limits
+                    .max_output_tokens
+                    .min(super::MAX_COMPACTION_OUTPUT_TOKENS)
+        }) && identity.profile == record.provider
+            && identity.model == record.model
+            && identity.chatgpt_provenance() == record.chatgpt_provenance.as_ref()
+            && identity.limits.output_token_bound == record.output_token_bound
     }
 
     fn interrupt(&mut self) {
@@ -570,6 +598,7 @@ impl SessionView {
             | Event::MessageCommitted { .. }
             | Event::RunFinished { .. } => run::apply(current, &envelope.event, prior)?,
             Event::AgentSpawned { .. }
+            | Event::ProviderFallbackUsed { .. }
             | Event::ProviderCallRecorded { .. }
             | Event::AgentFinished { .. } => agent::apply(current, &envelope.event)?,
             Event::ToolStarted { .. } | Event::ToolFinished { .. } => {

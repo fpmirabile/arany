@@ -343,6 +343,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
         tool_compaction_covered_count: 0,
         display: Vec::new(),
         steering_notes: Vec::new(),
+        provider_fallbacks: Vec::new(),
     };
     let block = history_tool_block(&run);
     let parsed: Value = serde_json::from_str(&block).unwrap();

@@ -22,6 +22,11 @@ impl ResponsePreview {
         (Self { sender }, receiver)
     }
 
+    pub(crate) fn has_output(&self) -> bool {
+        let text = self.sender.borrow();
+        !text.answer.is_empty() || !text.commentary.is_empty() || text.commentary_limited
+    }
+
     pub fn publish(&self, text: PreviewText) -> Result<(), ProviderError> {
         let prior = self.sender.borrow();
         if text.answer.len() > MAX_DISPLAY_TEXT_BYTES

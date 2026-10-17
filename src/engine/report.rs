@@ -98,6 +98,25 @@ pub(super) fn goal_report(
             &mut omitted_facts,
         );
     }
+    for (index, (_, fallback)) in view
+        .runs
+        .iter()
+        .filter(|run| goal.run_ids.contains(&run.id))
+        .flat_map(|run| &run.provider_fallbacks)
+        .take(9)
+        .enumerate()
+    {
+        if index == 8 {
+            omitted_facts = true;
+            break;
+        }
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            &fallback.notice(),
+            &mut omitted_facts,
+        );
+    }
     // The serialized-size loop below is the only truncation; it starts from the full summary.
     let mut summary_bytes = raw_summary.len();
     let mut summary_notice_added = false;

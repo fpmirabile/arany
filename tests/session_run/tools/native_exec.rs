@@ -398,29 +398,32 @@ async fn selected_cache_canary_helper_inner() {
         cwd: ".".into(),
     };
     let seed_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut seed_engine = Engine::open(
+    let seed_engine_provider = Arc::new(CacheCanary {
+        requests: seed_requests.clone(),
+        calls: vec![seed_cache.clone()],
+        stage: "seed",
+        resource_class: arany::ToolResourceClass::Default,
+    });
+    let seed_engine = Engine::open(
         StateRoot::admit(&state_path).unwrap(),
-        CacheCanary {
-            requests: seed_requests.clone(),
-            calls: vec![seed_cache.clone()],
-            stage: "seed",
-            resource_class: arany::ToolResourceClass::Default,
+        EngineConfig {
+            guard_executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_arany"))),
+            ..Default::default()
         },
     )
     .unwrap();
     let (seed_approvals, mut seed_inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
-    seed_engine
-        .enable_trusted_workspace(
-            permissions.clone(),
-            &workspace,
-            PathBuf::from(env!("CARGO_BIN_EXE_arany")),
-            seed_approvals,
-        )
-        .unwrap();
+    let seed_engine_controls = RunControls {
+        tools: ToolGrant::Trusted(permissions.clone()),
+        approvals: Some(seed_approvals.clone()),
+        ..Default::default()
+    };
     let mut seed_run = Box::pin(async {
         cache_progress("seed-run-start");
-        let outcome = seed_engine
-            .run(RunRequest {
+        let outcome = run_with(
+            &seed_engine,
+            &seed_engine_provider,
+            RunRequest {
                 session_id: None,
                 title: Some("Private cache seed".into()),
                 objective: "Seed a bounded private cache archive".into(),
@@ -429,8 +432,10 @@ async fn selected_cache_canary_helper_inner() {
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal: arany::GoalRequest::default(),
-            })
-            .await;
+            },
+            seed_engine_controls,
+        )
+        .await;
         cache_progress("seed-run-returned");
         outcome
     });
@@ -538,29 +543,30 @@ async fn selected_cache_canary_helper_inner() {
     };
     let calls = vec![write_cache, read_caches, overflow_cache];
     let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut engine = Engine::open(
+    let provider = Arc::new(CacheCanary {
+        requests: requests.clone(),
+        calls: calls.clone(),
+        stage: "selected",
+        resource_class: arany::ToolResourceClass::Build,
+    });
+    let engine = Engine::open(
         state,
-        CacheCanary {
-            requests: requests.clone(),
-            calls: calls.clone(),
-            stage: "selected",
-            resource_class: arany::ToolResourceClass::Build,
+        EngineConfig {
+            guard_executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_arany"))),
+            ..Default::default()
         },
     )
     .unwrap();
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
-    engine
-        .enable_trusted_workspace(
-            permissions,
-            &workspace,
-            PathBuf::from(env!("CARGO_BIN_EXE_arany")),
-            approvals,
-        )
-        .unwrap();
-    let mut run = Box::pin(async {
-        cache_progress("selected-run-start");
-        let outcome = engine
-            .run(RunRequest {
+    let engine_controls = RunControls {
+        tools: ToolGrant::Trusted(permissions),
+        approvals: Some(approvals.clone()),
+        ..Default::default()
+    };
+    let mut run =
+        Box::pin(async {
+            cache_progress("selected-run-start");
+            let outcome = run_with(&engine, &provider, RunRequest {
                 session_id: None,
                 title: Some("Selected cache canary".into()),
                 objective:
@@ -571,11 +577,11 @@ async fn selected_cache_canary_helper_inner() {
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal: build_goal_request(),
-            })
+            }, engine_controls)
             .await;
-        cache_progress("selected-run-returned");
-        outcome
-    });
+            cache_progress("selected-run-returned");
+            outcome
+        });
     let outcome = tokio::time::timeout(Duration::from_secs(90), async {
         for (index, call) in calls.iter().enumerate() {
             cache_progress(&format!("selected-approval-waiting-{index}"));
@@ -770,30 +776,33 @@ async fn selected_cache_canary_helper_inner() {
         cwd: ".".into(),
     };
     let verify_requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut verify_engine = Engine::open(
+    let verify_engine_provider = Arc::new(CacheCanary {
+        requests: verify_requests,
+        calls: vec![verify_cache.clone()],
+        stage: "verify",
+        resource_class: arany::ToolResourceClass::Default,
+    });
+    let verify_engine = Engine::open(
         StateRoot::open_existing(&state_path).unwrap(),
-        CacheCanary {
-            requests: verify_requests,
-            calls: vec![verify_cache.clone()],
-            stage: "verify",
-            resource_class: arany::ToolResourceClass::Default,
+        EngineConfig {
+            guard_executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_arany"))),
+            ..Default::default()
         },
     )
     .unwrap();
     let (verify_approvals, mut verify_inbox) =
         arany::ToolApprovals::new(arany::ApprovalMode::Request);
-    verify_engine
-        .enable_trusted_workspace(
-            permissions,
-            &workspace,
-            PathBuf::from(env!("CARGO_BIN_EXE_arany")),
-            verify_approvals,
-        )
-        .unwrap();
+    let verify_engine_controls = RunControls {
+        tools: ToolGrant::Trusted(permissions),
+        approvals: Some(verify_approvals.clone()),
+        ..Default::default()
+    };
     let mut verify_run = Box::pin(async {
         cache_progress("verify-run-start");
-        let outcome = verify_engine
-            .run(RunRequest {
+        let outcome = run_with(
+            &verify_engine,
+            &verify_engine_provider,
+            RunRequest {
                 session_id: None,
                 title: Some("Cache overflow recovery".into()),
                 objective: "Verify the previous private cache survived a rejected update".into(),
@@ -802,8 +811,10 @@ async fn selected_cache_canary_helper_inner() {
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal: arany::GoalRequest::default(),
-            })
-            .await;
+            },
+            verify_engine_controls,
+        )
+        .await;
         cache_progress("verify-run-returned");
         outcome
     });

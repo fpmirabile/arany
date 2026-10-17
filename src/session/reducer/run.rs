@@ -45,6 +45,7 @@ pub(super) fn apply(
                 tool_compaction_covered_count: 0,
                 display: Vec::new(),
                 steering_notes: Vec::new(),
+                provider_fallbacks: Vec::new(),
             });
         }
         Event::RunStarted {

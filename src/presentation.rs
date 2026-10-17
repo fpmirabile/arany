@@ -84,13 +84,22 @@ pub(crate) fn tool_summary(tool: &crate::session::ToolView) -> String {
         .observation
         .as_ref()
         .and_then(|observation| cache_update_label(observation.cache_update));
-    match cache_update {
+    let mut summary = match cache_update {
         Some(cache_update) => format!(
             "Tool · {} · {state} · {cache_update}",
             safe_truncate(&operation, 160)
         ),
         None => format!("Tool · {} · {state}", safe_truncate(&operation, 160)),
+    };
+    if let Some(cause) = tool
+        .observation
+        .as_ref()
+        .and_then(|value| value.enforcement_cause)
+    {
+        summary.push_str(" · ");
+        summary.push_str(cause.diagnostic());
     }
+    summary
 }
 
 fn cache_update_label(update: crate::tools::CacheUpdate) -> Option<&'static str> {
@@ -360,7 +369,27 @@ pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> 
     ]
 }
 
+pub fn render_provider_fallbacks(run: &RunView) -> Option<String> {
+    let notices: Vec<_> = run
+        .provider_fallbacks
+        .iter()
+        .map(|(_, fallback)| escape_terminal(&fallback.notice()))
+        .collect();
+    (!notices.is_empty()).then(|| notices.join("\n"))
+}
+
 pub fn render_run_feedback(run: &RunView) -> Option<String> {
+    let feedback = run_feedback(run);
+    match render_provider_fallbacks(run) {
+        None => feedback,
+        Some(notices) => Some(match feedback {
+            Some(feedback) => format!("{notices}\n{feedback}"),
+            None => notices,
+        }),
+    }
+}
+
+fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {
@@ -800,6 +829,7 @@ mod exec_jsonl_tests {
             tool_compaction_covered_count: 0,
             display: Vec::new(),
             steering_notes: Vec::new(),
+            provider_fallbacks: Vec::new(),
         };
 
         let output = render_exec(&run, &events, Output::Jsonl, false);

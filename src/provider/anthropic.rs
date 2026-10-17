@@ -15,6 +15,16 @@ pub(super) mod wire;
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const DEADLINE: Duration = Duration::from_secs(600);
 
+pub(super) fn http_failure(status: reqwest::StatusCode) -> ProviderError {
+    if status.is_server_error() {
+        ProviderError::HttpServerUnavailable
+    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        ProviderError::Unavailable
+    } else {
+        ProviderError::Rejected
+    }
+}
+
 pub struct AnthropicProvider {
     client: Client,
     identity: ProviderIdentity,
@@ -216,15 +226,7 @@ impl AnthropicProvider {
             .await
             .map_err(|_| ProviderError::Unavailable)?;
         if !response.status().is_success() {
-            return Err(
-                if response.status().is_server_error()
-                    || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-                {
-                    ProviderError::Unavailable
-                } else {
-                    ProviderError::Rejected
-                },
-            );
+            return Err(http_failure(response.status()));
         }
         let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
         if raw_reflects_secret(&bytes, &self.key) {
@@ -309,22 +311,14 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|_| ProviderError::Unavailable)?;
         if !response.status().is_success() {
-            return Err(
-                if response.status().is_server_error()
-                    || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-                {
-                    ProviderError::Unavailable
-                } else {
-                    ProviderError::Rejected
-                },
-            );
+            return Err(http_failure(response.status()));
         }
         super::streaming::validate_stream_response(&response)?;
         let mut decoder = wire::MessageStream::new(&self.key, &self.identity.model, preview);
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|_| ProviderError::Unavailable)?
+            .map_err(|_| ProviderError::PartialTransport)?
         {
             if let Some(bytes) = decoder.feed(&chunk)? {
                 return self.decode_run(&bytes, &request, &conversation);

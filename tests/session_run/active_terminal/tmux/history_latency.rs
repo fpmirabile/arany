@@ -209,6 +209,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                 Event::RunStarted {
                     run_id,
                     config: RunConfig {
+                        providers: None,
                         provider: "scripted".into(),
                         model: "test-model".into(),
                         effort: None,

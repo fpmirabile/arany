@@ -1248,12 +1248,14 @@ mod tests {
             tool_compaction_covered_count: 0,
             display: Vec::new(),
             steering_notes: Vec::new(),
+            provider_fallbacks: Vec::new(),
         });
         assert_eq!(
             active_command_notice(&view, InteractiveCommand::Status, starting_sequence),
             "Task: working · 1 agent · details: /agents"
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
+            providers: None,
             provider: "openai".into(),
             model: "gpt-5.4".into(),
             effort: None,

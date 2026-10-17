@@ -1,3 +1,5 @@
+pub(crate) mod routing;
+
 use super::{CommandOutput, chatgpt, credentials, state_dir};
 use arany::{
     CustomProfile, Effort, ModelEntry, NativeApiCredentials, StateRoot, check_custom_profile,

@@ -11,11 +11,17 @@ async fn goal_lifecycle_bounds_report_and_requires_goal_replay_linkage() {
         summary: "\u{1}".repeat(2000),
         result: "accepted result".into(),
     })]);
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
     let mut input = request(&workspace, "Complete a Goal");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("Goal Run");
+    let outcome = run_to_end(&engine, &provider, input)
+        .await
+        .expect("Goal Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -80,11 +86,17 @@ async fn goal_report_counts_cached_input_tokens() {
         result: "accepted result".into(),
     })])
     .with_cached_input_tokens(7);
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
     let mut input = request(&workspace, "Complete a Goal");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("Goal Run");
+    let outcome = run_to_end(&engine, &provider, input)
+        .await
+        .expect("Goal Run");
     engine.close().await.expect("engine shutdown");
 
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
@@ -111,11 +123,17 @@ async fn summary_within_the_serialized_report_budget_is_kept_whole() {
         summary: summary.clone(),
         result: "accepted result".into(),
     })]);
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
     let mut input = request(&workspace, "Complete a Goal");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("Goal Run");
+    let outcome = run_to_end(&engine, &provider, input)
+        .await
+        .expect("Goal Run");
     engine.close().await.expect("engine shutdown");
 
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
@@ -208,9 +226,13 @@ async fn compact_read_only_goal_prefix(objective: &str) {
     );
     let requests = Arc::clone(&provider.requests);
     let compaction_requests = Arc::clone(&provider.compact_requests);
-    let mut engine = Engine::open(
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
         StateRoot::admit(&state_path).expect("private state"),
-        provider,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
     )
     .expect("engine");
     {
@@ -224,9 +246,6 @@ async fn compact_read_only_goal_prefix(objective: &str) {
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
             .expect("private Tool configuration");
     }
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .expect("admit read-only Tools");
     let mut input = request(&workspace, objective);
     input.include_paths.clear();
     input.goal.budget = Some(arany::GoalBudget {
@@ -235,7 +254,17 @@ async fn compact_read_only_goal_prefix(objective: &str) {
         max_active_ms: Some(30 * 60 * 1000),
         max_runs: 1,
     });
-    let outcome = engine.run(input).await.expect("read-only Goal");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("read-only Goal");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -458,14 +487,25 @@ async fn goal_failure_and_cancellation_have_distinct_terminal_receipts() {
         if cancel {
             provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
         }
-        let mut engine =
-            Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+        let provider = Arc::new(provider);
+        let engine = Engine::open(
+            StateRoot::admit(&state_path).expect("state"),
+            EngineConfig::default(),
+        )
+        .expect("engine");
         let mut input = request(&workspace, "Finish or cancel");
         input.include_paths.clear();
-        let outcome = engine
-            .run_with_cancel(input, cancellation)
-            .await
-            .expect("terminal Run");
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                cancellation,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("terminal Run");
         assert_eq!(
             outcome.run.status,
             if cancel {
@@ -519,8 +559,12 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
     })]);
     let requests = Arc::clone(&provider.requests);
     let compact_requests = Arc::clone(&provider.compact_requests);
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
     let mut first = request(&workspace, "Use one Provider call");
     first.include_paths.clear();
     first.goal = arany::GoalRequest::new(
@@ -531,9 +575,15 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
         arany::GoalPhase::Implementation,
     );
     first.goal.finish_after_run = false;
-    let initial = engine.run(first).await.expect("first Goal Run");
+    let initial = run_to_end(&engine, &provider, first)
+        .await
+        .expect("first Goal Run");
     let compaction = engine
-        .compact_session(initial.session_id, workspace.clone())
+        .compact_session(
+            &AdmittedProviders::single(provider.clone()),
+            initial.session_id,
+            workspace.clone(),
+        )
         .await
         .expect("in-Goal compaction between Runs");
     assert!(matches!(
@@ -581,7 +631,7 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
     second.title = None;
     second.include_paths.clear();
     second.goal = arany::GoalRequest::resume(initial.goal_id, true);
-    let result = engine.run(second).await;
+    let result = run_to_end(&engine, &provider, second).await;
     assert!(
         matches!(&result, Err(EngineError::GoalBudgetExhausted)),
         "unexpected second-Run result: {}",
@@ -662,8 +712,12 @@ async fn known_active_time_exhaustion_closes_without_provider_dispatch() {
         result: "must not run".into(),
     })]);
     let requests = Arc::clone(&provider.requests);
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
     let mut input = request(&workspace, "Exhaust the tiny active-time budget");
     input.include_paths.clear();
     input.goal = arany::GoalRequest::new(
@@ -674,8 +728,7 @@ async fn known_active_time_exhaustion_closes_without_provider_dispatch() {
         arany::GoalPhase::Implementation,
     );
 
-    let outcome = engine
-        .run(input)
+    let outcome = run_to_end(&engine, &provider, input)
         .await
         .expect("known active-time exhaustion has a durable terminal result");
     assert_eq!(outcome.run.status, RunStatus::Failed);
@@ -706,9 +759,10 @@ async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
         summary: "first Run complete".into(),
         result: "continue later".into(),
     })]);
-    let mut first_engine = Engine::open(
+    let first_engine_provider = Arc::new(first_provider);
+    let first_engine = Engine::open(
         StateRoot::admit(&state_path).expect("state"),
-        first_provider,
+        EngineConfig::default(),
     )
     .expect("first engine");
     let mut first = request(&workspace, "Use the only Provider call");
@@ -721,14 +775,17 @@ async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
         arany::GoalPhase::Implementation,
     );
     first.goal.finish_after_run = false;
-    let initial = first_engine.run(first).await.expect("first Goal Run");
+    let initial = run_to_end(&first_engine, &first_engine_provider, first)
+        .await
+        .expect("first Goal Run");
     first_engine.close().await.expect("first engine shutdown");
 
     let second_provider = ScriptedProvider::new(Vec::new());
     let second_requests = Arc::clone(&second_provider.requests);
-    let mut second_engine = Engine::open(
+    let second_engine_provider = Arc::new(second_provider);
+    let second_engine = Engine::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
-        second_provider,
+        EngineConfig::default(),
     )
     .expect("second engine");
     let mut resumed = request(&workspace, "Try the exhausted Goal");
@@ -736,7 +793,7 @@ async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
     resumed.title = None;
     resumed.include_paths.clear();
     resumed.goal = arany::GoalRequest::resume(initial.goal_id, true);
-    let result = second_engine.run(resumed).await;
+    let result = run_to_end(&second_engine, &second_engine_provider, resumed).await;
     assert!(
         matches!(&result, Err(EngineError::GoalBudgetExhausted)),
         "unexpected exhausted-resume result: {}",
@@ -759,7 +816,7 @@ async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
     again.goal = arany::GoalRequest::resume(initial.goal_id, true);
     assert!(
         matches!(
-            second_engine.run(again).await,
+            run_to_end(&second_engine, &second_engine_provider, again).await,
             Err(EngineError::GoalUnavailable)
         ),
         "a closed Goal is not resumable"
@@ -876,8 +933,12 @@ async fn finite_goal_token_budget_observes_a_child_before_filling_another_slot()
         requests: Arc::new(Mutex::new(Vec::new())),
     };
     let requests = Arc::clone(&provider.requests);
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
     let mut input = request(&workspace, "Review the task with a finite token budget");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Team {
@@ -890,7 +951,9 @@ async fn finite_goal_token_budget_observes_a_child_before_filling_another_slot()
         },
         arany::GoalPhase::Implementation,
     );
-    let outcome = engine.run(input).await.expect("bounded team Run");
+    let outcome = run_to_end(&engine, &provider, input)
+        .await
+        .expect("bounded team Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     {
         let requests = requests.lock().expect("Provider requests");
@@ -933,9 +996,10 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
         result: "continue after review".into(),
     })]);
     let first_requests = Arc::clone(&first_provider.requests);
-    let mut first_engine = Engine::open(
+    let first_engine_provider = Arc::new(first_provider);
+    let first_engine = Engine::open(
         StateRoot::admit(&state_path).expect("state"),
-        first_provider,
+        EngineConfig::default(),
     )
     .expect("first engine");
     let mut first = request(&workspace, "Inspect current state");
@@ -948,7 +1012,9 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
         arany::GoalPhase::Research,
     );
     first.goal.finish_after_run = false;
-    let initial = first_engine.run(first).await.expect("first Goal Run");
+    let initial = run_to_end(&first_engine, &first_engine_provider, first)
+        .await
+        .expect("first Goal Run");
     assert_eq!(first_requests.lock().expect("Provider requests").len(), 1);
     first_engine.close().await.expect("first engine shutdown");
 
@@ -957,9 +1023,10 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
         result: "the Goal is complete".into(),
     })]);
     let second_requests = Arc::clone(&second_provider.requests);
-    let mut second_engine = Engine::open(
+    let second_engine_provider = Arc::new(second_provider);
+    let second_engine = Engine::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
-        second_provider,
+        EngineConfig::default(),
     )
     .expect("second engine");
     let mut mismatched = request(&workspace, "Must not select a different Goal");
@@ -967,7 +1034,7 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
     mismatched.title = None;
     mismatched.include_paths.clear();
     mismatched.goal = arany::GoalRequest::resume(arany::GoalId::new(), true);
-    let result = second_engine.run(mismatched).await;
+    let result = run_to_end(&second_engine, &second_engine_provider, mismatched).await;
     assert!(
         matches!(&result, Err(EngineError::GoalUnavailable)),
         "unexpected mismatched-resume result: {}",
@@ -988,7 +1055,9 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
     resumed.title = None;
     resumed.include_paths.clear();
     resumed.goal = arany::GoalRequest::resume(initial.goal_id, true);
-    let final_run = second_engine.run(resumed).await.expect("exact Goal resume");
+    let final_run = run_to_end(&second_engine, &second_engine_provider, resumed)
+        .await
+        .expect("exact Goal resume");
     assert_eq!(second_requests.lock().expect("Provider requests").len(), 1);
     second_engine.close().await.expect("second engine shutdown");
 
@@ -1087,9 +1156,10 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
             result: "Only the new Run was dispatched".into(),
         })]);
         let requests = Arc::clone(&provider.requests);
-        let mut engine = Engine::open(
+        let provider = Arc::new(provider);
+        let engine = Engine::open(
             StateRoot::open_existing(&state_path).expect("reopened state"),
-            provider,
+            EngineConfig::default(),
         )
         .expect("Engine");
         let mut mismatched = request(&workspace, "A different initial objective");
@@ -1098,7 +1168,7 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
         mismatched.include_paths.clear();
         mismatched.goal = arany::GoalRequest::resume(goal_id, true);
         assert!(matches!(
-            engine.run(mismatched).await,
+            run_to_end(&engine, &provider, mismatched).await,
             Err(EngineError::GoalUnavailable)
         ));
         assert!(requests.lock().expect("Provider requests").is_empty());
@@ -1108,7 +1178,9 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
         resumed.title = None;
         resumed.include_paths.clear();
         resumed.goal = arany::GoalRequest::resume(goal_id, true);
-        let outcome = engine.run(resumed).await.expect("explicit recovery");
+        let outcome = run_to_end(&engine, &provider, resumed)
+            .await
+            .expect("explicit recovery");
         assert_ne!(outcome.run.id, orphan_run_id);
         assert_eq!(outcome.run.status, RunStatus::Finished);
         assert_eq!(requests.lock().expect("Provider requests").len(), 1);
@@ -1173,6 +1245,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                providers: None,
                 provider: "scripted".into(),
                 model: "scripted-model".into(),
                 effort: None,
@@ -1221,9 +1294,10 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
 
     let provider = ScriptedProvider::new(Vec::new());
     let requests = Arc::clone(&provider.requests);
-    let mut engine = Engine::open(
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
-        provider,
+        EngineConfig::default(),
     )
     .expect("Engine");
     let mut resumed = request(&workspace, "Resume the crashed Goal");
@@ -1233,7 +1307,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
     resumed.goal = arany::GoalRequest::resume(goal_id, true);
     assert!(
         matches!(
-            engine.run(resumed).await,
+            run_to_end(&engine, &provider, resumed).await,
             Err(EngineError::GoalBudgetExhausted)
         ),
         "the exhausted crash-left Goal reports its budget, not a store or replay error"
@@ -1246,7 +1320,10 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
     again.include_paths.clear();
     again.goal = arany::GoalRequest::resume(goal_id, true);
     assert!(
-        matches!(engine.run(again).await, Err(EngineError::GoalUnavailable)),
+        matches!(
+            run_to_end(&engine, &provider, again).await,
+            Err(EngineError::GoalUnavailable)
+        ),
         "a closed Goal is not resumable"
     );
     engine.close().await.expect("Engine shutdown");
@@ -1340,9 +1417,13 @@ async fn exact_token_cap_after_tool_review_settles_the_goal_as_failed() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     let state_path = temp.path().join("state");
-    let mut engine = Engine::open(
+    let provider = Arc::new(ExactCapToolReview);
+    let engine = Engine::open(
         StateRoot::admit(&state_path).expect("state"),
-        ExactCapToolReview,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
     )
     .expect("engine");
     {
@@ -1356,11 +1437,7 @@ async fn exact_token_cap_after_tool_review_settles_the_goal_as_failed() {
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
             .expect("tool config mode");
     }
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .expect("tools");
     let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
-    engine.set_tool_approvals(approvals);
     let mut input = request(&workspace, "Write one note at the exact token cap");
     input.include_paths.clear();
     input.goal = arany::GoalRequest::new(
@@ -1370,10 +1447,18 @@ async fn exact_token_cap_after_tool_review_settles_the_goal_as_failed() {
         },
         arany::GoalPhase::Implementation,
     );
-    let outcome = engine
-        .run(input)
-        .await
-        .expect("exhaustion ends the Run as a durable failure");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("exhaustion ends the Run as a durable failure");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     assert!(
         !workspace.join("notes/a.txt").exists(),
@@ -1467,11 +1552,12 @@ async fn store_failure_while_admitting_a_child_drains_active_calls_before_return
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
     let in_flight = Arc::new(AtomicUsize::new(0));
-    let mut engine = Engine::open(
+    let provider = Arc::new(PendingChildren {
+        in_flight: Arc::clone(&in_flight),
+    });
+    let engine = Engine::open(
         StateRoot::admit(&state_path).expect("state"),
-        PendingChildren {
-            in_flight: Arc::clone(&in_flight),
-        },
+        EngineConfig::default(),
     )
     .expect("engine");
     {
@@ -1491,7 +1577,7 @@ async fn store_failure_while_admitting_a_child_drains_active_calls_before_return
     input.policy = CollaborationPolicy::Team {
         max_active_children: 2,
     };
-    let result = engine.run(input).await;
+    let result = run_to_end(&engine, &provider, input).await;
     assert!(matches!(result, Err(EngineError::Store(_))));
     assert_eq!(
         in_flight.load(Ordering::Acquire),
@@ -1511,9 +1597,10 @@ async fn resumed_goal_keeps_its_stored_phase() {
         summary: "first Run complete".into(),
         result: "continue after review".into(),
     })]);
-    let mut first_engine = Engine::open(
+    let first_engine_provider = Arc::new(first_provider);
+    let first_engine = Engine::open(
         StateRoot::admit(&state_path).expect("state"),
-        first_provider,
+        EngineConfig::default(),
     )
     .expect("first engine");
     let mut first = request(&workspace, "Inspect current state");
@@ -1526,16 +1613,19 @@ async fn resumed_goal_keeps_its_stored_phase() {
         arany::GoalPhase::Research,
     );
     first.goal.finish_after_run = false;
-    let initial = first_engine.run(first).await.expect("first Goal Run");
+    let initial = run_to_end(&first_engine, &first_engine_provider, first)
+        .await
+        .expect("first Goal Run");
     first_engine.close().await.expect("first engine shutdown");
 
     let second_provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
         summary: "resumed Run complete".into(),
         result: "the Goal is complete".into(),
     })]);
-    let mut second_engine = Engine::open(
+    let second_engine_provider = Arc::new(second_provider);
+    let second_engine = Engine::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
-        second_provider,
+        EngineConfig::default(),
     )
     .expect("second engine");
     let mut resumed = request(&workspace, "Complete the reviewed Goal");
@@ -1543,7 +1633,9 @@ async fn resumed_goal_keeps_its_stored_phase() {
     resumed.title = None;
     resumed.include_paths.clear();
     resumed.goal = arany::GoalRequest::resume(initial.goal_id, true);
-    let final_run = second_engine.run(resumed).await.expect("exact Goal resume");
+    let final_run = run_to_end(&second_engine, &second_engine_provider, resumed)
+        .await
+        .expect("exact Goal resume");
     second_engine.close().await.expect("second engine shutdown");
 
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
@@ -1640,7 +1732,7 @@ fn facts_plan(sha256: String) -> arany::GoalPlanContract {
     }
 }
 
-fn facts_workspace(root: &Path, text: &str) -> std::path::PathBuf {
+pub(super) fn facts_workspace(root: &Path, text: &str) -> std::path::PathBuf {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(workspace.join("notes/facts.txt"), text).expect("facts file");
@@ -1652,19 +1744,25 @@ fn write_facts(workspace: &Path, text: &'static str) -> impl Fn() + Send + Sync 
     move || std::fs::write(&path, text).expect("updated facts file")
 }
 
-/// Opens the Engine with Guard-backed Read access to `notes/facts.txt`.
-fn facts_engine<P: Provider + 'static>(state: StateRoot, state_path: &Path, provider: P) -> Engine {
-    facts_engine_with_telemetry(state, state_path, provider, arany::Telemetry::disabled())
+/// Opens the Engine whose `ToolGrant::Configured` submissions Read `notes/facts.txt` through the Guard.
+pub(super) fn facts_engine(state: StateRoot, state_path: &Path) -> Engine {
+    facts_engine_with_telemetry(state, state_path, arany::Telemetry::disabled())
 }
 
-fn facts_engine_with_telemetry<P: Provider + 'static>(
+fn facts_engine_with_telemetry(
     state: StateRoot,
     state_path: &Path,
-    provider: P,
     telemetry: arany::Telemetry,
 ) -> Engine {
     use std::os::unix::fs::PermissionsExt;
-    let mut engine = Engine::open_with_telemetry(state, provider, telemetry).expect("engine");
+    let engine = Engine::open(
+        state,
+        EngineConfig {
+            telemetry,
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+        },
+    )
+    .expect("engine");
     let config = state_path.join("tools.json");
     std::fs::write(
         &config,
@@ -1673,9 +1771,6 @@ fn facts_engine_with_telemetry<P: Provider + 'static>(
     .expect("tool configuration");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
         .expect("tool configuration mode");
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .expect("Guard enabled");
     engine
 }
 
@@ -1716,15 +1811,20 @@ async fn interrupted_autonomous_goal(
         finish_with("interrupted pass"),
     ])
     .with_before_call(2, move || assert!(cancel.cancel(), "first cancellation"));
-    let mut engine = facts_engine(
-        StateRoot::admit(state_path).expect("state"),
-        state_path,
-        provider,
-    );
-    let outcome = engine
-        .run_with_cancel(autonomous_input(workspace), cancellation)
-        .await
-        .expect("cancelled Run");
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(state_path).expect("state"), state_path);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        autonomous_input(workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            cancellation,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("cancelled Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
     (outcome.session_id, outcome.goal_id)
@@ -1743,15 +1843,19 @@ async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
     ])
     .with_before_call(2, write_facts(&workspace, "v2"));
     let requests = Arc::clone(&provider.requests);
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    let outcome = engine
-        .run(autonomous_input(&workspace))
-        .await
-        .expect("autonomous Goal");
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        autonomous_input(&workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("autonomous Goal");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     {
         let calls = requests.lock().expect("Provider requests");
@@ -1789,11 +1893,8 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
         finish_with("never requested"),
     ]);
     let requests = Arc::clone(&provider.requests);
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = autonomous_input(&workspace);
     input.goal = arany::GoalRequest::autonomous(
         arany::GoalBudget {
@@ -1802,7 +1903,17 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
         },
         arany::GoalPhase::Implementation,
     );
-    let outcome = engine.run(input).await.expect("terminal Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("terminal Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     assert_eq!(
         requests.lock().expect("Provider requests").len(),
@@ -1836,15 +1947,22 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
         finish_with("never requested"),
     ]);
     let requests = Arc::clone(&provider.requests);
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = autonomous_input(&workspace);
     input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
     // The second Run's Finish is the third and last admissible call.
-    let outcome = engine.run(input).await.expect("terminal Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("terminal Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     assert_eq!(
         requests.lock().expect("Provider requests").len(),
@@ -1925,14 +2043,21 @@ async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report(
             finish_with("never requested"),
         ])),
     };
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = autonomous_input(&workspace);
     input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
-    let outcome = engine.run(input).await.expect("terminal Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("terminal Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     engine.close().await.expect("engine shutdown");
 
@@ -1983,17 +2108,27 @@ async fn resumed_autonomous_goal_continues_with_its_pinned_objective_and_no_new_
     ])
     .with_before_call(2, write_facts(&workspace, "v2"));
     let requests = Arc::clone(&provider.requests);
-    let mut engine = facts_engine(
+    let provider = Arc::new(provider);
+    let engine = facts_engine(
         StateRoot::open_existing(&state_path).expect("state"),
         &state_path,
-        provider,
     );
     let mut input = request(&workspace, "");
     input.session_id = Some(session_id);
     input.title = None;
     input.include_paths.clear();
     input.goal = arany::GoalRequest::resume(goal_id, true);
-    let outcome = engine.run(input).await.expect("explicit resume");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("explicit resume");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     {
         let calls = requests.lock().expect("Provider requests");
@@ -2036,14 +2171,21 @@ async fn plain_prompt_is_one_run_even_when_its_criterion_is_unsatisfied() {
         finish_with("never requested"),
     ]);
     let requests = Arc::clone(&provider.requests);
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, AUTONOMOUS_OBJECTIVE);
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("terminal Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("terminal Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     assert_eq!(requests.lock().expect("Provider requests").len(), 2);
     engine.close().await.expect("engine shutdown");
@@ -2061,7 +2203,8 @@ enum AfterFinish {
 
 /// Drives an admitted Run and applies `after` as soon as its Finished Run becomes visible.
 async fn run_observing_finish(
-    engine: &mut Engine,
+    engine: &Engine,
+    provider: &Arc<ScriptedProvider>,
     input: RunRequest,
     after: AfterFinish,
 ) -> Result<arany::RunOutcome, EngineError> {
@@ -2070,7 +2213,17 @@ async fn run_observing_finish(
     };
     let progress = RunProgress::new();
     let mut observer = progress.clone();
-    let run = engine.run_with_progress(input, cancellation, progress);
+    let run = run_with(
+        engine,
+        provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            cancellation,
+            progress: Some(progress),
+            ..Default::default()
+        },
+    );
     tokio::pin!(run);
     let mut after = Some(after);
     loop {
@@ -2100,13 +2253,11 @@ async fn autonomous_goal_cancelled_after_a_finished_run_keeps_that_outcome_and_s
         finish_with("never requested"),
     ]);
     let requests = Arc::clone(&provider.requests);
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let outcome = run_observing_finish(
-        &mut engine,
+        &engine,
+        &provider,
         autonomous_input(&workspace),
         AfterFinish::Cancel(RunCancellation::new()),
     )
@@ -2153,14 +2304,21 @@ async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_r
     // Advanced in the Finish call, after the Read Tool's Guard I/O (a paused clock would auto-advance that I/O's timeouts).
     .with_clock_advance_before_call(1, Duration::from_secs(60));
     let requests = Arc::clone(&provider.requests);
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = autonomous_input(&workspace);
     input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
-    let result = engine.run_with_cancel(input, RunCancellation::new()).await;
+    let result = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            cancellation: RunCancellation::new(),
+            ..Default::default()
+        },
+    )
+    .await;
     assert!(
         matches!(&result, Ok(outcome) if outcome.run.status == RunStatus::Failed),
         "the exhausted Finish fails its Run: {:?}",
@@ -2311,15 +2469,25 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let collector = collect_trace_bodies(listener, Arc::clone(&done));
     let telemetry = arany::Telemetry::from_process(Some(&endpoint)).expect("loopback telemetry");
-    let mut engine = facts_engine_with_telemetry(
+    let provider = Arc::new(provider);
+    let engine = facts_engine_with_telemetry(
         StateRoot::admit(&state_path).expect("state"),
         &state_path,
-        provider,
         telemetry.clone(),
     );
     let mut input = autonomous_input(&workspace);
     input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
-    let result = engine.run_with_cancel(input, RunCancellation::new()).await;
+    let result = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            cancellation: RunCancellation::new(),
+            ..Default::default()
+        },
+    )
+    .await;
     assert!(
         matches!(&result, Ok(outcome) if outcome.run.status == RunStatus::Failed),
         "the exhausted Finish fails its Run: {:?}",
@@ -2348,19 +2516,22 @@ async fn progress_snapshots_carry_the_goal_through_each_iteration() {
         finish_with("verified"),
     ])
     .with_before_call(2, write_facts(&workspace, "v2"));
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let progress = RunProgress::new();
     let mut observer = progress.clone();
     let mut observed_runs = Vec::new();
     let outcome = {
-        let run = engine.run_with_progress(
+        let run = run_with(
+            &engine,
+            &provider,
             autonomous_input(&workspace),
-            RunCancellation::new(),
-            progress,
+            RunControls {
+                tools: ToolGrant::Configured,
+                cancellation: RunCancellation::new(),
+                progress: Some(progress),
+                ..Default::default()
+            },
         );
         tokio::pin!(run);
         loop {
@@ -2395,15 +2566,20 @@ async fn plan_with_fewer_runs_than_linked_is_refused_as_an_invalid_plan() {
     let cancel = cancellation.clone();
     let provider = ScriptedProvider::new(vec![finish_with("never requested")])
         .with_before_call(0, move || assert!(cancel.cancel(), "first cancellation"));
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    let cancelled = engine
-        .run_with_cancel(autonomous_input(&workspace), cancellation)
-        .await
-        .expect("cancelled Run");
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let cancelled = run_with(
+        &engine,
+        &provider,
+        autonomous_input(&workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            cancellation,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("cancelled Run");
     assert_eq!(cancelled.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
 
@@ -2414,20 +2590,27 @@ async fn plan_with_fewer_runs_than_linked_is_refused_as_an_invalid_plan() {
         facts_read(),
         Some(Box::new(plan)),
     )]);
-    let mut engine = facts_engine(
+    let provider = Arc::new(provider);
+    let engine = facts_engine(
         StateRoot::open_existing(&state_path).expect("state"),
         &state_path,
-        provider,
     );
     let mut input = request(&workspace, "");
     input.session_id = Some(cancelled.session_id);
     input.title = None;
     input.include_paths.clear();
     input.goal = arany::GoalRequest::resume(cancelled.goal_id, true);
-    let outcome = engine
-        .run(input)
-        .await
-        .expect("an invalid plan is a model-visible Run failure, not a Store error");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("an invalid plan is a model-visible Run failure, not a Store error");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     engine.close().await.expect("engine shutdown");
 
@@ -2455,15 +2638,19 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
     .with_before_call(0, || {
         std::thread::sleep(std::time::Duration::from_millis(20))
     });
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    let outcome = engine
-        .run(autonomous_input(&workspace))
-        .await
-        .expect("an unnarrowable plan is a Failed Run, not a Store error");
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        autonomous_input(&workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("an unnarrowable plan is a Failed Run, not a Store error");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     engine.close().await.expect("engine shutdown");
 
@@ -2510,16 +2697,24 @@ async fn cancelled_autonomous_segment_exports_its_run_outcome() {
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let collector = collect_trace_bodies(listener, Arc::clone(&done));
     let telemetry = arany::Telemetry::from_process(Some(&endpoint)).expect("loopback telemetry");
-    let mut engine = facts_engine_with_telemetry(
+    let provider = Arc::new(provider);
+    let engine = facts_engine_with_telemetry(
         StateRoot::admit(&state_path).expect("state"),
         &state_path,
-        provider,
         telemetry.clone(),
     );
-    let outcome = engine
-        .run_with_cancel(autonomous_input(&workspace), cancellation)
-        .await
-        .expect("cancelled Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        autonomous_input(&workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            cancellation,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("cancelled Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
     telemetry.shutdown();
@@ -2551,13 +2746,24 @@ async fn autonomous_goal_stopped_by_a_failed_admission_returns_the_committed_run
     .with_before_call(1, move || {
         std::fs::remove_dir_all(&removed).expect("Workspace removed")
     });
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    let (committed, reason) = match engine.run(autonomous_input(&workspace)).await {
-        Err(EngineError::StoppedAfterRun { run, reason }) => (run, reason),
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let result = engine
+        .submit(
+            AdmittedProviders::single(provider),
+            autonomous_input(&workspace),
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .expect("idle Engine")
+        .await;
+    let (committed, reason) = match result {
+        Ok(RunResult {
+            run,
+            stopped: Some(reason),
+        }) => (run, reason),
         Err(error) => panic!("the committed Run must be returned with its stop reason: {error}"),
         Ok(_) => panic!("a failed continuation admission must stop the loop"),
     };
@@ -2567,7 +2773,7 @@ async fn autonomous_goal_stopped_by_a_failed_admission_returns_the_committed_run
         Some("first pass"),
         "the committed answer is the first Run's"
     );
-    assert!(!matches!(*reason, EngineError::GoalBudgetExhausted));
+    assert!(!matches!(reason, EngineError::GoalBudgetExhausted));
     engine.close().await.expect("engine shutdown");
 
     let (_, view) = replayed(&state_path, committed.session_id).await;
@@ -2592,18 +2798,26 @@ async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_object
         result: "cancelled answer".into(),
     })]);
     paused_provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
-    let mut engine = Engine::open(
+    let provider = Arc::new(paused_provider);
+    let engine = Engine::open(
         StateRoot::admit(&state_path).expect("state"),
-        paused_provider,
+        EngineConfig::default(),
     )
     .expect("engine");
     // A cancelled plain Run pauses its one-Run Goal like an autonomous one: no terminal receipt, resumable.
     let mut paused = request(&workspace, "Pinned objective of the paused Goal");
     paused.include_paths.clear();
-    let cancelled = engine
-        .run_with_cancel(paused, cancellation)
-        .await
-        .expect("cancelled Run");
+    let cancelled = run_with(
+        &engine,
+        &provider,
+        paused,
+        RunControls {
+            cancellation,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("cancelled Run");
     assert_eq!(cancelled.run.status, RunStatus::Cancelled);
     let session_id = cancelled.session_id;
     engine.close().await.expect("first engine shutdown");
@@ -2632,9 +2846,10 @@ async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_object
         }),
     ]);
     let requests = Arc::clone(&provider.requests);
-    let mut engine = Engine::open(
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
-        provider,
+        EngineConfig::default(),
     )
     .expect("second engine");
 
@@ -2642,8 +2857,7 @@ async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_object
     second.session_id = Some(session_id);
     second.title = None;
     second.include_paths.clear();
-    let second_run = engine
-        .run(second)
+    let second_run = run_to_end(&engine, &provider, second)
         .await
         .expect("a new Goal starts while the earlier Goal is paused");
     assert_eq!(second_run.run.status, RunStatus::Finished);
@@ -2655,8 +2869,7 @@ async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_object
     resumed.include_paths.clear();
     resumed.objective = String::new();
     resumed.goal = arany::GoalRequest::resume(cancelled.goal_id, true);
-    let resumed_run = engine
-        .run(resumed)
+    let resumed_run = run_to_end(&engine, &provider, resumed)
         .await
         .expect("the most recent paused Goal resumes after a newer Goal finished");
     assert_eq!(resumed_run.goal_id, cancelled.goal_id);
@@ -2706,17 +2919,28 @@ async fn older_paused_goal_is_refused_once_a_newer_goal_is_paused() {
             result: "cancelled answer".into(),
         })]);
         provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
-        let mut engine =
-            Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+        let provider = Arc::new(provider);
+        let engine = Engine::open(
+            StateRoot::admit(&state_path).expect("state"),
+            EngineConfig::default(),
+        )
+        .expect("engine");
         let mut input = request(&workspace, objective);
         input.include_paths.clear();
         input.session_id = session_id;
         input.title = None;
         input.goal = autonomous();
-        let cancelled = engine
-            .run_with_cancel(input, cancellation)
-            .await
-            .expect("cancelled Run");
+        let cancelled = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                cancellation,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("cancelled Run");
         assert_eq!(cancelled.run.status, RunStatus::Cancelled);
         session_id = Some(cancelled.session_id);
         paused_goals.push(cancelled.goal_id);
@@ -2730,9 +2954,10 @@ async fn older_paused_goal_is_refused_once_a_newer_goal_is_paused() {
         result: "resumed answer".into(),
     })]);
     let requests = Arc::clone(&provider.requests);
-    let mut engine = Engine::open(
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
-        provider,
+        EngineConfig::default(),
     )
     .expect("engine");
     let mut stale = request(&workspace, "");
@@ -2742,7 +2967,7 @@ async fn older_paused_goal_is_refused_once_a_newer_goal_is_paused() {
     stale.objective = String::new();
     stale.goal = arany::GoalRequest::resume(first, true);
     assert!(matches!(
-        engine.run(stale).await,
+        run_to_end(&engine, &provider, stale).await,
         Err(EngineError::GoalUnavailable)
     ));
     assert!(requests.lock().expect("Provider requests").is_empty());
@@ -2753,8 +2978,7 @@ async fn older_paused_goal_is_refused_once_a_newer_goal_is_paused() {
     resumed.include_paths.clear();
     resumed.objective = String::new();
     resumed.goal = arany::GoalRequest::resume(second, true);
-    let outcome = engine
-        .run(resumed)
+    let outcome = run_to_end(&engine, &provider, resumed)
         .await
         .expect("the most recent paused Goal resumes");
     assert_eq!(outcome.goal_id, second);
@@ -2783,15 +3007,22 @@ async fn steering_note_reaches_the_next_primary_call_and_is_journaled_once() {
         steering_note_at(&offer, "use the smaller fixture")
     });
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering.clone());
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Read the facts");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -2828,15 +3059,22 @@ async fn steering_notes_offered_before_delivery_reach_one_primary_call_as_one_no
         steering_note_at(&offer, "and keep the old name");
     });
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering.clone());
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Read the facts");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -2878,18 +3116,25 @@ async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
         steering_note_at(&offer, "keep this for synthesis")
     });
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering);
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Check the facts");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
         max_active_children: 1,
     };
-    let outcome = engine.run(input).await.expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -2910,15 +3155,22 @@ async fn undelivered_steering_note_stays_with_the_caller_when_the_run_finishes()
     let offer = steering.clone();
     let provider = ScriptedProvider::new(vec![finish_with("done")])
         .with_before_call(0, move || steering_note_at(&offer, "too late"));
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering.clone());
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Answer quickly");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -2953,21 +3205,39 @@ async fn steering_note_is_history_for_a_later_run_and_never_redelivered() {
         steering_note_at(&offer, "use the smaller fixture")
     });
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering.clone());
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut first = request(&workspace, "Read the facts");
     first.include_paths.clear();
-    let first_outcome = engine.run(first).await.expect("first Run");
+    let first_outcome = run_with(
+        &engine,
+        &provider,
+        first,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("first Run");
 
     let mut second = request(&workspace, "Second question");
     second.session_id = Some(first_outcome.session_id);
     second.title = None;
     second.include_paths.clear();
-    let second_outcome = engine.run(second).await.expect("second Run");
+    let second_outcome = run_with(
+        &engine,
+        &provider,
+        second,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("second Run");
     assert_eq!(second_outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -3002,15 +3272,22 @@ async fn pause_waits_for_the_in_flight_call_and_pauses_before_its_tool() {
     ])
     .with_before_call(0, move || assert!(pause.pause(), "first pause"));
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering);
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Read the facts");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("paused Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("paused Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
 
@@ -3049,15 +3326,22 @@ async fn pause_keeps_a_finish_returned_by_the_in_flight_call() {
     let pause = steering.clone();
     let provider = ScriptedProvider::new(vec![finish_with("finished before pause")])
         .with_before_call(0, move || assert!(pause.pause(), "first pause"));
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering);
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Answer quickly");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 }
@@ -3077,16 +3361,20 @@ async fn pause_between_autonomous_runs_starts_no_next_run() {
     ])
     .with_before_call(1, move || assert!(pause.pause(), "first pause"));
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering);
-    let outcome = engine
-        .run(autonomous_input(&workspace))
-        .await
-        .expect("first pass returns without a next Run");
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        autonomous_input(&workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("first pass returns without a next Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -3128,8 +3416,15 @@ async fn approval_wait_is_not_charged_to_the_runs_active_time() {
             budget: arany::GoalBudget::default(),
         })),
     )]);
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .expect("engine");
     let config = state_path.join("tools.json");
     std::fs::write(
         &config,
@@ -3138,11 +3433,7 @@ async fn approval_wait_is_not_charged_to_the_runs_active_time() {
     .expect("tool configuration");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
         .expect("tool configuration mode");
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .expect("Guard enabled");
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
-    engine.set_tool_approvals(approvals);
     let mut input = request(&workspace, "Change the facts");
     input.include_paths.clear();
 
@@ -3154,7 +3445,19 @@ async fn approval_wait_is_not_charged_to_the_runs_active_time() {
         tokio::time::resume();
         approval.decide(false);
     };
-    let (run, ()) = tokio::join!(engine.run(input), decide);
+    let (run, ()) = tokio::join!(
+        run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                approvals: Some(approvals.clone()),
+                ..Default::default()
+            }
+        ),
+        decide
+    );
     let outcome = run.expect("denied Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     engine.close().await.expect("engine shutdown");
@@ -3206,8 +3509,15 @@ async fn pause_during_approval_wait_dispatches_no_tool() {
         finish_with("never reached"),
     ]);
     let requests = provider.requests.clone();
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .expect("engine");
     let config = state_path.join("tools.json");
     std::fs::write(
         &config,
@@ -3216,12 +3526,7 @@ async fn pause_during_approval_wait_dispatches_no_tool() {
     .expect("tool configuration");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
         .expect("tool configuration mode");
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .expect("Guard enabled");
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
-    engine.set_tool_approvals(approvals);
-    engine.set_steering(steering);
     let mut input = request(&workspace, "Change the facts");
     input.include_paths.clear();
 
@@ -3231,7 +3536,20 @@ async fn pause_during_approval_wait_dispatches_no_tool() {
         assert!(pause.pause(), "first pause");
         approval.decide(true);
     };
-    let (run, ()) = tokio::join!(engine.run(input), decide);
+    let (run, ()) = tokio::join!(
+        run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                approvals: Some(approvals.clone()),
+                steering: Some(steering.clone()),
+                ..Default::default()
+            }
+        ),
+        decide
+    );
     let outcome = run.expect("paused Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
@@ -3297,8 +3615,15 @@ async fn pause_during_tool_review_skips_the_prompt_and_dispatches_no_tool() {
     // Zero-based call 1 is the Tool review that follows the proposed Tool.
     .with_before_call(1, move || assert!(pause.pause(), "first pause"));
     let requests = provider.requests.clone();
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .expect("engine");
     let config = state_path.join("tools.json");
     std::fs::write(
         &config,
@@ -3307,15 +3632,22 @@ async fn pause_during_tool_review_skips_the_prompt_and_dispatches_no_tool() {
     .expect("tool configuration");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
         .expect("tool configuration mode");
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .expect("Guard enabled");
     let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
-    engine.set_tool_approvals(approvals);
-    engine.set_steering(steering);
     let mut input = request(&workspace, "Change the facts");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("paused Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals.clone()),
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("paused Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
 
@@ -3355,18 +3687,25 @@ async fn pause_at_the_delegate_boundary_spawns_no_child() {
     ])
     .with_before_call(0, move || assert!(pause.pause(), "first pause"));
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering);
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Check the facts");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
         max_active_children: 1,
     };
-    let outcome = engine.run(input).await.expect("paused Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("paused Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
 
@@ -3404,18 +3743,25 @@ async fn pause_before_synthesis_starts_no_synthesis_call() {
     ])
     .with_before_call(1, move || assert!(pause.pause(), "first pause"));
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering);
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Check the facts");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
         max_active_children: 1,
     };
-    let outcome = engine.run(input).await.expect("paused Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("paused Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
 
@@ -3454,12 +3800,8 @@ async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
         steering_note_at(&offer, "carry this into the next Run")
     });
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering.clone());
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let budget = arany::GoalBudget {
         max_runs: 2,
         ..arany::GoalBudget::default()
@@ -3467,7 +3809,18 @@ async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
     let mut input = request(&workspace, AUTONOMOUS_OBJECTIVE);
     input.include_paths.clear();
     input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
-    let outcome = engine.run(input).await.expect("terminal Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("terminal Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     engine.close().await.expect("engine shutdown");
 
@@ -3521,11 +3874,8 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
         finish_with("synthesized"),
     ]);
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Check the facts");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
@@ -3535,7 +3885,17 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
         max_provider_calls: Some(8),
         ..arany::GoalBudget::default()
     });
-    let outcome = engine.run(input).await.expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -3620,17 +3980,24 @@ async fn child_mcp_call_or_write_is_rejected_before_dispatch() {
             finish_with("never reached"),
         ]);
         let requests = provider.requests.clone();
-        let mut engine = facts_engine(
-            StateRoot::admit(&state_path).expect("state"),
-            &state_path,
-            provider,
-        );
+        let provider = Arc::new(provider);
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
         let mut input = request(&workspace, "Check the facts");
         input.include_paths.clear();
         input.policy = CollaborationPolicy::Auto {
             max_active_children: 1,
         };
-        let outcome = engine.run(input).await.expect("Run");
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Run");
         assert_eq!(outcome.run.status, RunStatus::Failed);
         engine.close().await.expect("engine shutdown");
         assert_eq!(requests.lock().expect("requests").len(), 2);
@@ -3686,17 +4053,24 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
         finish_with("done"),
     ]);
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Check the facts");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
         max_active_children: 1,
     };
-    let outcome = engine.run(input).await.expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     engine.close().await.expect("engine shutdown");
 
@@ -3751,17 +4125,24 @@ async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
         outcomes.push(finish_with("done"));
         let provider = ScriptedProvider::new(outcomes);
         let requests = provider.requests.clone();
-        let mut engine = facts_engine(
-            StateRoot::admit(&state_path).expect("state"),
-            &state_path,
-            provider,
-        );
+        let provider = Arc::new(provider);
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
         let mut input = request(&workspace, "Check the facts");
         input.include_paths.clear();
         input.policy = CollaborationPolicy::Auto {
             max_active_children: 1,
         };
-        let outcome = engine.run(input).await.expect("Run");
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Run");
         engine.close().await.expect("engine shutdown");
 
         let calls = requests.lock().expect("requests").clone();
@@ -3808,18 +4189,25 @@ async fn pause_during_research_finishes_the_child_call_and_dispatches_no_child_t
     ])
     .with_before_call(1, move || assert!(pause.pause(), "first pause"));
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering);
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Check the facts");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
         max_active_children: 1,
     };
-    let outcome = engine.run(input).await.expect("paused Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("paused Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
     assert_eq!(requests.lock().expect("requests").len(), 2);
@@ -3841,20 +4229,25 @@ async fn cancellation_after_a_child_tool_request_dispatches_no_child_tool() {
     ]);
     provider.cancel_at_completion = Some((AgentPhase::ChildWork, cancellation.clone()));
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Check the facts");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
         max_active_children: 1,
     };
-    let outcome = engine
-        .run_with_cancel(input, cancellation)
-        .await
-        .expect("cancelled Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            cancellation,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("cancelled Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
     assert_eq!(requests.lock().expect("requests").len(), 2);
@@ -3875,11 +4268,8 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
     ])
     .with_known_input_tokens();
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Check the facts");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
@@ -3890,7 +4280,17 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
         max_tokens: Some(16),
         ..arany::GoalBudget::default()
     });
-    let outcome = engine.run(input).await.expect("budget-exhausted Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("budget-exhausted Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     engine.close().await.expect("engine shutdown");
     assert_eq!(requests.lock().expect("requests").len(), 2);
@@ -3948,11 +4348,8 @@ async fn near_deadline_child_tool_stops_before_tool_started() {
         finish_with("never reached"),
     ]);
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Check the facts");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
@@ -3962,7 +4359,17 @@ async fn near_deadline_child_tool_stops_before_tool_started() {
         max_active_ms: Some(15_000),
         ..arany::GoalBudget::default()
     });
-    let outcome = engine.run(input).await.expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
     engine.close().await.expect("engine shutdown");
     assert_eq!(requests.lock().expect("requests").len(), 2);
@@ -4001,18 +4408,25 @@ async fn pause_before_queued_children_start_cancels_them_without_failing_the_run
     // One call at a time: the second child stays queued when the pause lands.
     provider.identity.limits.concurrency = 1;
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering);
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Check the facts");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
         max_active_children: 2,
     };
-    let outcome = engine.run(input).await.expect("paused Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("paused Run");
     assert_eq!(outcome.run.status, RunStatus::Cancelled);
     engine.close().await.expect("engine shutdown");
     assert_eq!(requests.lock().expect("requests").len(), 2);
@@ -4050,14 +4464,21 @@ async fn tool_step_journals_requested_tools_one_and_replays() {
         finish_with("done"),
     ]);
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Read twice");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -4098,17 +4519,24 @@ async fn delegation_turn_is_replayed_before_synthesis() {
         finish_with("synthesized"),
     ]);
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Check the facts");
     input.include_paths.clear();
     input.policy = CollaborationPolicy::Auto {
         max_active_children: 1,
     };
-    let outcome = engine.run(input).await.expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -4147,14 +4575,21 @@ async fn interrupted_prefix_replays_and_a_new_run_starts_without_steps() {
         finish_with("retry"),
     ]);
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Read once");
     input.include_paths.clear();
-    let first = engine.run(input).await.expect("Run");
+    let first = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
 
     let (events, _) = replayed(&state_path, first.session_id).await;
     let started = events
@@ -4174,7 +4609,17 @@ async fn interrupted_prefix_replays_and_a_new_run_starts_without_steps() {
     retry.include_paths.clear();
     retry.session_id = Some(first.session_id);
     retry.title = None;
-    engine.run(retry).await.expect("retry Run");
+    run_with(
+        &engine,
+        &provider,
+        retry,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("retry Run");
     engine.close().await.expect("engine shutdown");
     let calls = requests.lock().expect("requests").clone();
     let steps = &calls[2].input.tools.as_ref().expect("Tool context").steps;
@@ -4195,15 +4640,22 @@ async fn step_facts_and_notes_are_written_before_render() {
     ])
     .with_before_call(1, move || steering_note_at(&offer, "mid-run note"));
     let requests = provider.requests.clone();
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
-    engine.set_steering(steering);
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Read twice");
     input.include_paths.clear();
-    engine.run(input).await.expect("Run");
+    run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     engine.close().await.expect("engine shutdown");
 
     let calls = requests.lock().expect("requests").clone();
@@ -4257,14 +4709,21 @@ async fn restating_the_recorded_plan_contract_is_a_no_op_and_a_different_one_is_
             crate::tool_outcome(facts_read(), Some(Box::new(restated_plan))),
             finish_with("done"),
         ]);
-        let mut engine = facts_engine(
-            StateRoot::admit(&state_path).expect("state"),
-            &state_path,
-            provider,
-        );
+        let provider = Arc::new(provider);
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
         let mut input = request(&workspace, "Read twice");
         input.include_paths.clear();
-        let outcome = engine.run(input).await.expect("Run");
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Run");
         assert_eq!(outcome.run.status, expected);
         engine.close().await.expect("engine shutdown");
         let (events, _) = replayed(&state_path, outcome.session_id).await;
@@ -4335,15 +4794,22 @@ async fn plan_contract_recorded_mid_run_survives_compaction() {
     let provider =
         ScriptedProvider::new(outcomes).with_compactions((0..16).map(|_| compaction()).collect());
     let requests = Arc::clone(&provider.requests);
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        provider,
-    );
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Inspect the bounded file in pages");
     input.include_paths.clear();
     input.goal.budget = Some(budget);
-    let outcome = engine.run(input).await.expect("Goal");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Goal");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
@@ -4369,7 +4835,11 @@ async fn plan_contract_recorded_mid_run_survives_compaction() {
 
 /// Splits a journal at each action's first admission and asserts that the action's bound covers the
 /// Events up to the next admission, or up to the end of the journal (the terminal Events).
-fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steering: bool) {
+pub(super) fn assert_action_bounds(
+    events: &[arany::EventEnvelope],
+    previews: bool,
+    steering: bool,
+) {
     use arany::Action;
     let primaries: std::collections::HashSet<_> = events
         .iter()
@@ -4471,6 +4941,17 @@ fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steerin
                     Some(end),
                 ));
             }
+            Event::ProviderFallbackUsed { fallback, .. } => {
+                let action = match fallback.role {
+                    arany::ProviderRole::Primary => Action::ProviderCall { previews, steering },
+                    arany::ProviderRole::Child => Action::Child {
+                        in_flight: in_flight(index),
+                    },
+                    arany::ProviderRole::Review => Action::Review,
+                    arany::ProviderRole::Compaction => Action::Compaction,
+                };
+                points.push((index, action, None));
+            }
             Event::GoalCompactionCallReserved { .. } => {
                 let between_runs = events[index..]
                     .iter()
@@ -4522,10 +5003,21 @@ fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steerin
                 .unwrap_or(events.len())
         });
         let observed = end - index;
+        let providers = events[..=*index]
+            .iter()
+            .rev()
+            .find_map(|event| match &event.event {
+                Event::RunStarted { config, .. } => Some(config),
+                _ => None,
+            })
+            .and_then(|config| config.providers.as_ref());
+        let bound = providers.map_or_else(
+            || action.max_events(),
+            |providers| action.max_events_for(providers),
+        );
         assert!(
-            action.max_events() >= observed,
-            "{action:?} at {index} bounds {} Events but appends {observed}",
-            action.max_events()
+            bound >= observed,
+            "{action:?} at {index} bounds {bound} Events but appends {observed}",
         );
     }
 }
@@ -4574,6 +5066,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                providers: None,
                 provider: "scripted".into(),
                 model: "scripted-model".into(),
                 effort: None,
@@ -4622,9 +5115,10 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
 
     let provider = ScriptedProvider::new(vec![finish_with("recovered")]);
     let requests = Arc::clone(&provider.requests);
-    let mut engine = Engine::open(
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
-        provider,
+        EngineConfig::default(),
     )
     .expect("Engine");
     let mut resumed = request(&workspace, "Resume the crashed Goal");
@@ -4632,7 +5126,9 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
     resumed.title = None;
     resumed.include_paths.clear();
     resumed.goal = arany::GoalRequest::resume(goal_id, true);
-    let outcome = engine.run(resumed).await.expect("explicit recovery");
+    let outcome = run_to_end(&engine, &provider, resumed)
+        .await
+        .expect("explicit recovery");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("Engine shutdown");
 
@@ -4663,14 +5159,26 @@ async fn previews_chunk_a_finishing_call_within_its_bound() {
             result: answer,
         })),
     };
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
     let mut input = request(&workspace, "question");
     input.include_paths.clear();
-    let outcome = engine
-        .run_with_progress(input, RunCancellation::new(), RunProgress::with_previews())
-        .await
-        .expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            cancellation: RunCancellation::new(),
+            progress: Some(RunProgress::with_previews()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
     let (events, _) = replayed(&state_path, outcome.session_id).await;
@@ -4700,14 +5208,24 @@ async fn between_run_goal_compaction_stays_within_its_bound() {
             wire_provenance: None,
         },
     )]);
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
     let mut first = request(&workspace, "Use one Provider call");
     first.include_paths.clear();
     first.goal.finish_after_run = false;
-    let initial = engine.run(first).await.expect("Goal Run");
+    let initial = run_to_end(&engine, &provider, first)
+        .await
+        .expect("Goal Run");
     engine
-        .compact_session(initial.session_id, workspace.clone())
+        .compact_session(
+            &AdmittedProviders::single(provider.clone()),
+            initial.session_id,
+            workspace.clone(),
+        )
         .await
         .expect("in-Goal compaction between Runs");
     engine.close().await.expect("engine shutdown");
@@ -4746,8 +5264,15 @@ async fn reviewed_write_stays_within_each_action_bound() {
         finish_with("approve"),
         finish_with("x"),
     ]);
-    let mut engine =
-        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let provider = Arc::new(provider);
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .expect("engine");
     let config = state_path.join("tools.json");
     std::fs::write(
         &config,
@@ -4756,14 +5281,21 @@ async fn reviewed_write_stays_within_each_action_bound() {
     .expect("tool configuration");
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
         .expect("tool configuration mode");
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .expect("Guard enabled");
     let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
-    engine.set_tool_approvals(approvals);
     let mut input = request(&workspace, "Change the facts");
     input.include_paths.clear();
-    let outcome = engine.run(input).await.expect("Run");
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
     let (events, _) = replayed(&state_path, outcome.session_id).await;
@@ -4790,14 +5322,22 @@ async fn steered_run(
     let workspace = facts_workspace(&root.join(tag), "v1");
     let state_path = root.join(tag).join("state");
     let engine_provider = ScriptedProvider::new(vec![finish_with("initial")]);
-    let mut engine = facts_engine(
-        StateRoot::admit(&state_path).expect("state"),
-        &state_path,
-        engine_provider,
-    );
+    let provider = Arc::new(engine_provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut first = request(&workspace, "Initial");
     first.include_paths.clear();
-    let session_id = engine.run(first).await.expect("initial Run").session_id;
+    let session_id = run_with(
+        &engine,
+        &provider,
+        first,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("initial Run")
+    .session_id;
     engine.close().await.expect("initial shutdown");
     if let Some(free) = free_at_second_call {
         let prefix = 10_000 - run_offset - free;
@@ -4830,17 +5370,26 @@ async fn steered_run(
     .with_before_call(0, move || {
         steering_note_at(&offer, "use the smaller fixture")
     });
-    let mut engine = facts_engine(
+    let provider = Arc::new(provider);
+    let engine = facts_engine(
         StateRoot::open_existing(&state_path).expect("state"),
         &state_path,
-        provider,
     );
-    engine.set_steering(steering);
     let mut second = request(&workspace, "Steered");
     second.session_id = Some(session_id);
     second.title = None;
     second.include_paths.clear();
-    let result = engine.run(second).await;
+    let result = run_with(
+        &engine,
+        &provider,
+        second,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
     engine.close().await.expect("shutdown");
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
         .expect("read-only Store");

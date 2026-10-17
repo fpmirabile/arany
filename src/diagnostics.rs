@@ -20,6 +20,10 @@ pub fn enable_development_diagnostics(root: &StateRoot) {
     }
 }
 
+pub(crate) fn enabled() -> bool {
+    cfg!(debug_assertions) && ROOT.get().is_some()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SubscriptionFailureStage {
     RequestTransport,
@@ -308,6 +312,16 @@ pub(crate) fn event_failure(event: &crate::session::Event) {
     record_local(record);
 }
 
+/// The diagnostics subscriber fell behind the Journal tap and skipped `missed` Events.
+pub(crate) fn tap_resync(missed: u64) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let mut record = BoundedRecord(String::new());
+    let _ = writeln!(record, "journal resync missed={missed}");
+    record_local(record);
+}
+
 pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
     use crate::engine::EngineError;
     if !cfg!(debug_assertions) {
@@ -315,6 +329,7 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
     }
     let cause = match error {
         EngineError::InvalidRequest => "InvalidRequest",
+        EngineError::IncompatibleProviderChain => "IncompatibleProviderChain",
         EngineError::MissingSession => "MissingSession",
         EngineError::NoSessionForWorkspace => "NoSessionForWorkspace",
         EngineError::TooManySessions => "TooManySessions",
@@ -323,7 +338,8 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::GoalUnavailable => "GoalUnavailable",
         EngineError::GoalAdmissionUncertain => "GoalAdmissionUncertain",
         EngineError::GoalBudgetExhausted => "GoalBudgetExhausted",
-        EngineError::StoppedAfterRun { .. } => "StoppedAfterRun",
+        EngineError::Busy => "Busy",
+        EngineError::GuardUnavailable => "GuardUnavailable",
         EngineError::SessionNotIdle => "SessionNotIdle",
         EngineError::ForkNotAtRunBoundary => "ForkNotAtRunBoundary",
         EngineError::WorkspaceMismatch => "WorkspaceMismatch",
@@ -536,6 +552,7 @@ mod tests {
             run_id: Default::default(),
             agent_run_id: Default::default(),
             observation: crate::tools::ToolObservation {
+                enforcement_cause: None,
                 intent: crate::tools::EffectIntent {
                     id: uuid::Uuid::now_v7(),
                     run_id: Default::default(),

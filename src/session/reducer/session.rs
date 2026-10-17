@@ -25,6 +25,13 @@ pub(super) fn apply(
             if boundary != Some((record.covered_run_id, record.covered_sequence)) {
                 return Err(ReplayError::InvalidSnapshot);
             }
+            if current
+                .runs
+                .last()
+                .is_some_and(|run| !run.compaction_matches(record))
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
             let goal = current.goals.iter_mut().find(|goal| {
                 goal.status == GoalStatus::Running
                     && goal.run_ids.last() == Some(&record.covered_run_id)

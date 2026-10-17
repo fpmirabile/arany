@@ -1,11 +1,9 @@
 use super::EngineError;
 use super::ledger::GoalLedger;
+use crate::journal::Subscription;
 use crate::provider::PreviewText;
-use crate::session::{
-    AgentRunId, Event, EventEnvelope, GoalView, RunId, RunView, SessionId, SessionView,
-};
-use crate::store::Store;
-use crate::telemetry::{RunTrace, TraceEventKind};
+use crate::session::{AgentRunId, GoalView, RunId, RunView, SessionView};
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -128,13 +126,6 @@ pub(super) struct PreviewContext {
     pub(super) limit_recorded: bool,
 }
 
-/// The Run's committed Events: the ledger reads them, the optional publisher projects them.
-#[derive(Clone, Copy)]
-pub(super) struct RunScope<'a> {
-    pub(super) ledger: &'a GoalLedger,
-    pub(super) publisher: Option<&'a ProgressPublisher>,
-}
-
 pub(super) struct ProgressPublisher {
     progress: RunProgress,
     run_id: RunId,
@@ -212,13 +203,35 @@ impl ProgressPublisher {
             }));
     }
 
-    fn project(&self, view: &SessionView, sequence: u64) -> Option<RunUpdate> {
+    /// Publishes the ledger's view after each tapped Event. The run-scoped append feeds the ledger
+    /// before the tap, so the view already holds every Event received, and a Resync recovers from it.
+    pub(super) async fn follow(
+        &self,
+        subscription: Subscription,
+        end: impl Future<Output = ()>,
+        ledger: &GoalLedger,
+    ) {
+        let mut published = None;
+        subscription
+            .follow(end, |_| {
+                let Ok(Some(update)) = ledger.view(|view| self.project(view)) else {
+                    return;
+                };
+                if published.is_none_or(|sequence| update.sequence > sequence) {
+                    published = Some(update.sequence);
+                    self.progress.publish(update);
+                }
+            })
+            .await;
+    }
+
+    fn project(&self, view: &SessionView) -> Option<RunUpdate> {
         view.runs
             .last()
             .filter(|run| run.id == self.run_id)
             .cloned()
             .map(|run| RunUpdate {
-                sequence,
+                sequence: view.last_sequence,
                 goal: view
                     .goals
                     .iter()
@@ -227,67 +240,4 @@ impl ProgressPublisher {
                 run,
             })
     }
-}
-
-/// Appends an Event the ledger does not track: lifecycle outside a Run and closing receipts.
-pub(super) async fn append_observed(
-    store: &Store,
-    trace: Option<&RunTrace>,
-    session_id: SessionId,
-    event: Event,
-) -> Result<EventEnvelope, EngineError> {
-    let kind = match &event {
-        Event::GoalStarted { .. } => Some(TraceEventKind::GoalStarted),
-        Event::GoalRunLinked { .. } => Some(TraceEventKind::GoalRunLinked),
-        Event::GoalResumed { .. } => Some(TraceEventKind::GoalResumed),
-        Event::GoalPlanContractRecorded { .. } => Some(TraceEventKind::GoalPlanContractRecorded),
-        Event::GoalFinished { .. } => Some(TraceEventKind::GoalFinished),
-        Event::GoalProviderCallReserved { .. } => Some(TraceEventKind::GoalProviderCallReserved),
-        Event::GoalCompactionCallReserved { .. } => {
-            Some(TraceEventKind::GoalCompactionCallReserved)
-        }
-        Event::GoalContextCompacted { .. } => Some(TraceEventKind::GoalContextCompacted),
-        Event::MessageAccepted { .. } => Some(TraceEventKind::MessageAccepted),
-        Event::RunStarted { .. } => Some(TraceEventKind::RunStarted),
-        Event::AgentSpawned { .. } => Some(TraceEventKind::AgentSpawned),
-        Event::ProviderCallRecorded { .. } => Some(TraceEventKind::ProviderCallRecorded),
-        Event::ToolStarted { .. } => Some(TraceEventKind::ToolStarted),
-        Event::ToolFinished { .. } => Some(TraceEventKind::ToolFinished),
-        Event::AgentFinished { .. } => Some(TraceEventKind::AgentFinished),
-        Event::MessageCommitted { .. } => Some(TraceEventKind::MessageCommitted),
-        Event::RunFinished { .. } => Some(TraceEventKind::RunFinished),
-        Event::AssistantDisplayRecorded { .. }
-        | Event::GoalSteeringNoteRecorded { .. }
-        | Event::SessionStarted { .. }
-        | Event::SessionDefaultChanged { .. }
-        | Event::SessionForked { .. }
-        | Event::ContextCompacted { .. }
-        | Event::SessionRenamed { .. } => None,
-    };
-    let committed = store.append(session_id, event).await?;
-    crate::diagnostics::event_failure(&committed.event);
-    if let (Some(trace), Some(kind)) = (trace, kind) {
-        trace.event_committed(committed.sequence, kind);
-    }
-    Ok(committed)
-}
-
-/// Appends a Run's Event and feeds it to the ledger before any projection sees it.
-pub(super) async fn append_scoped(
-    store: &Store,
-    scope: RunScope<'_>,
-    trace: Option<&RunTrace>,
-    session_id: SessionId,
-    event: Event,
-) -> Result<u64, EngineError> {
-    let committed = append_observed(store, trace, session_id, event).await?;
-    let update = scope.ledger.committed(&committed, |view| {
-        scope
-            .publisher
-            .and_then(|publisher| publisher.project(view, committed.sequence))
-    })?;
-    if let (Some(update), Some(publisher)) = (update, scope.publisher) {
-        publisher.progress.publish(update);
-    }
-    Ok(committed.sequence)
 }
