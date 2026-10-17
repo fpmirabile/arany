@@ -15,6 +15,8 @@ mod process;
 mod skills;
 pub(crate) mod toolchains;
 pub(crate) mod types;
+#[cfg_attr(not(test), expect(dead_code, reason = "wired in slice 4"))]
+mod unguarded;
 mod workspace;
 
 #[cfg(test)]
