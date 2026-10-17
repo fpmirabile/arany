@@ -1,6 +1,7 @@
-use super::{AgentPhase, Provider, ProviderIdentity};
+use super::{AgentPhase, Provenance, Provider, ProviderIdentity};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub const MAX_PROVIDER_FALLBACKS: usize = 2;
 pub const MAX_PROVIDER_SWITCHES: usize = 64;
@@ -122,8 +123,61 @@ impl ProviderRoutes {
 }
 
 impl ProviderIdentity {
+    /// Whether both identities bill one account. Models and evidence may differ within an account.
     pub(crate) fn shares_account(&self, other: &Self) -> bool {
-        self.profile == other.profile && self.provenance == other.provenance
+        self.profile == other.profile && self.account_key() == other.account_key()
+    }
+
+    fn account_key(&self) -> AccountKey<'_> {
+        match &self.provenance {
+            Provenance::Native {
+                saved_api_account_id,
+            } => AccountKey::Native(*saved_api_account_id),
+            Provenance::Custom(custom) => AccountKey::Custom(&custom.endpoint),
+            Provenance::ChatGpt(chatgpt) => AccountKey::ChatGpt(chatgpt.account_id),
+        }
+    }
+}
+
+#[derive(PartialEq)]
+enum AccountKey<'a> {
+    Native(Option<Uuid>),
+    Custom(&'a str),
+    ChatGpt(Uuid),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{ChatGptAdmission, ChatGptProvenance};
+
+    fn chatgpt(model: &str, account: u128, fingerprint: u8) -> ProviderIdentity {
+        ProviderIdentity::new(
+            "chatgpt",
+            model,
+            Provenance::ChatGpt(ChatGptProvenance {
+                account_id: Uuid::from_u128(account),
+                evidence_fingerprint: [fingerprint; 32],
+                admission: ChatGptAdmission::AccountConsent,
+            }),
+        )
+    }
+
+    #[test]
+    fn one_chatgpt_account_shares_across_models_and_evidence() {
+        assert!(chatgpt("model-a", 1, 1).shares_account(&chatgpt("model-b", 1, 2)));
+    }
+
+    #[test]
+    fn different_chatgpt_accounts_never_share() {
+        assert!(!chatgpt("model-a", 1, 1).shares_account(&chatgpt("model-a", 2, 1)));
+    }
+
+    #[test]
+    fn chatgpt_and_api_key_identities_never_share() {
+        let api_key = ProviderIdentity::new("chatgpt", "model-a", Provenance::native());
+        assert!(!chatgpt("model-a", 1, 1).shares_account(&api_key));
+        assert!(!api_key.shares_account(&chatgpt("model-a", 1, 1)));
     }
 }
 

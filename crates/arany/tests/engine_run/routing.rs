@@ -232,6 +232,34 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
 }
 
 #[tokio::test]
+async fn tool_enabled_fallback_between_models_of_one_chatgpt_account_is_admitted() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
+    let state = temp.path().join("state");
+    let account = Uuid::now_v7();
+    let mut first = ScriptedProvider::new(vec![])
+        .with_profile("chatgpt", "model-a")
+        .with_chatgpt_account(account, [1; 32]);
+    first.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+    let first = route(first);
+    let second = route(
+        ScriptedProvider::new(vec![finish("fallback answer")])
+            .with_profile("chatgpt", "model-b")
+            .with_chatgpt_account(account, [2; 32]),
+    );
+    let mut bindings = routes(&first);
+    bindings.primary = vec![first.clone(), second.clone()];
+    let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
+    let result = run_routed(&engine, bindings, input(&workspace), configured())
+        .await
+        .unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    engine.close().await.unwrap();
+    let (_, view) = reopen(&state, result.session_id).await;
+    assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
+}
+
+#[tokio::test]
 async fn fallback_after_a_tool_observation_never_redispatches_the_tool() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
