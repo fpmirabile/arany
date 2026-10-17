@@ -351,9 +351,16 @@ pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> 
     ]
 }
 
+pub(crate) const RUNTIME_PROFILE_LINES: [&str; 3] = [
+    "Optional runtime profiles (read only)",
+    "Check a toolchain to let commands use that exact version; its bin joins PATH. Check a cache to let commands read it. At most one version per runtime. Nothing is selected until you check it, and checking switches the choice to Trust.",
+    "Caches may hold private package data or credential URLs; a command can print them into bounded output that is journaled and sent to the Provider. Package-manager configuration and credential files stay excluded.",
+];
+
 /// Shows a path under `home` as `~`-relative; the caller escapes the result.
+/// `/` is not abbreviated: every absolute path is under it.
 pub fn abbreviate_home(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
-    let Some(home) = home.filter(|home| home.is_absolute()) else {
+    let Some(home) = home.filter(|home| home.is_absolute() && home.parent().is_some()) else {
         return path.to_string_lossy().into_owned();
     };
     match path.strip_prefix(home) {
@@ -1040,6 +1047,10 @@ mod tests {
             "/home/user2/x"
         );
         assert_eq!(abbreviate_home(Path::new("/opt/x"), None), "/opt/x");
+        assert_eq!(
+            abbreviate_home(Path::new("/opt/x"), Some(Path::new("/"))),
+            "/opt/x"
+        );
         assert_eq!(
             abbreviate_home(Path::new("/home/u/x"), Some(Path::new("relative"))),
             "/home/u/x"

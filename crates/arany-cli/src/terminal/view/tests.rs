@@ -2392,11 +2392,7 @@ fn is_choice_row(row: &str) -> bool {
 fn profile_frame_lines() -> Vec<String> {
     let mut lines =
         crate::presentation::workspace_permission_lines(std::path::Path::new("/projects/example"));
-    lines.extend([
-        "Optional runtime profiles (read only)".to_owned(),
-        "Check a toolchain to let commands use that exact version; its bin joins PATH. Check a cache to let commands read it. At most one version per runtime.".to_owned(),
-        "Caches may hold private package data or credential URLs; package-manager configuration stays excluded.".to_owned(),
-    ]);
+    lines.extend(crate::presentation::RUNTIME_PROFILE_LINES.map(String::from));
     lines
 }
 
@@ -2425,6 +2421,7 @@ fn permission_profile_rows_wrap_at_spaces_with_a_hanging_indent() {
                     profile_selection_enabled: Some(true),
                     footer: None,
                     palette: Palette { color: false },
+                    boxed: false,
                 },
             );
         })
@@ -2475,6 +2472,7 @@ fn permission_long_path_hard_breaks_only_at_the_row_edge() {
                         profile_selection_enabled: Some(true),
                         footer: None,
                         palette: Palette { color: false },
+                        boxed: false,
                     },
                 );
             })
@@ -2535,6 +2533,7 @@ fn permission_frame_fills_the_terminal_like_chat() {
                         profile_selection_enabled: Some(true),
                         footer: None,
                         palette: Palette { color: false },
+                        boxed: false,
                     },
                 ));
             })
@@ -2594,6 +2593,7 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                             profile_selection_enabled: None,
                             footer: Some("↑↓ Enter ^C exit"),
                             palette: Palette { color: false },
+                            boxed: false,
                         },
                     );
                 })
@@ -2713,4 +2713,34 @@ fn pausing_status_names_the_step_boundary_and_the_cancel_key() {
                 .contains("Pausing at the next step... Ctrl+C cancels now"))
     );
     assert!((0..6).all(|y| !buffer_row(buffer, y).contains("Run in progress")));
+}
+
+#[test]
+fn tool_approval_panel_stays_centered_and_boxed() {
+    let lines = vec!["Approve tool".to_owned(), "/p".to_owned()];
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw_permission_frame(
+                frame,
+                &lines,
+                PermissionFrameState {
+                    choices: ("Deny", "Allow once"),
+                    page: 0,
+                    allow: false,
+                    profile_start: None,
+                    profile_count: 0,
+                    focused_profile: None,
+                    profile_selection_enabled: None,
+                    footer: None,
+                    palette: Palette { color: false },
+                    boxed: true,
+                },
+            );
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer[(12, 11)].symbol(), "A");
+    assert_eq!(buffer[(11, 11)].symbol(), " ");
+    assert_eq!(buffer[(0, 0)].symbol(), " ");
 }

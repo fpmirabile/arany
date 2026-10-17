@@ -444,9 +444,7 @@ impl AttachedTerminal {
             lines.push("No supported runtime profiles were detected.".into());
             profile_start = None;
         } else {
-            lines.push("Optional runtime profiles (read only)".into());
-            lines.push("Check a toolchain to let commands use that exact version; its bin joins PATH. Check a cache to let commands read it. At most one version per runtime. Nothing is selected until you check it, and checking switches the choice to Trust.".into());
-            lines.push("Caches may hold private package data or credential URLs; a command can print them into bounded output that is journaled and sent to the Provider. Package-manager configuration and credential files stay excluded.".into());
+            lines.extend(crate::presentation::RUNTIME_PROFILE_LINES.map(String::from));
             profile_start = Some(lines.len());
             let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
             let linear = self.linear.is_some();
@@ -525,6 +523,7 @@ impl AttachedTerminal {
                             profile_selection_enabled: Some(profile_selection_enabled),
                             footer: None,
                             palette,
+                            boxed: false,
                         },
                     );
                 } else {
@@ -575,6 +574,7 @@ impl AttachedTerminal {
                                 "↑↓ choose · Enter confirm · Esc denies"
                             }),
                             palette,
+                            boxed: true,
                         },
                     )
                     .more;

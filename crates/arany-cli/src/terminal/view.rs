@@ -30,6 +30,8 @@ pub(super) struct PermissionFrameState<'a> {
     pub profile_selection_enabled: Option<bool>,
     pub footer: Option<&'a str>,
     pub palette: Palette,
+    /// Tool approvals keep the transcript visible behind a centered panel.
+    pub boxed: bool,
 }
 
 pub(super) struct PermissionFrameProgress {
@@ -39,8 +41,7 @@ pub(super) struct PermissionFrameProgress {
 
 const PROFILE_HANGING_INDENT: usize = 6;
 
-/// Wraps at the last space that fits; a token wider than the row hard-breaks at the row edge.
-/// Continuation rows start with `indent` cells, and every row is at most `width` cells wide.
+// Wraps at spaces; a token wider than the row hard-breaks at the row edge.
 fn wrap_cells(text: &str, width: usize, indent: usize) -> Vec<String> {
     let indent = indent.min(width.saturating_sub(1));
     let mut rows = Vec::new();
@@ -95,10 +96,23 @@ pub(super) fn draw_permission_frame(
         profile_selection_enabled,
         footer,
         palette,
+        boxed,
     } = state;
     let full = frame.area();
-    let gutter = if full.width >= 40 { 2 } else { 0 };
-    let width = full.width.saturating_sub(gutter * 2);
+    let gutter = if boxed {
+        0
+    } else if full.width >= 40 {
+        2
+    } else {
+        0
+    };
+    let width = if boxed {
+        full.width
+            .saturating_sub(if full.width >= 40 { 4 } else { 0 })
+            .min(76)
+    } else {
+        full.width.saturating_sub(gutter * 2)
+    };
     if width == 0 || full.height < 8 {
         return PermissionFrameProgress { more: true, page };
     }
@@ -130,10 +144,22 @@ pub(super) fn draw_permission_frame(
             profile_rows.push((index - start, row_start));
         }
     }
-    let height = full.height;
-    let area = Rect::new(full.x + gutter, full.y, width, height);
-    frame.render_widget(Clear, full);
-    let body_height = usize::from(height - 5);
+    let area = if boxed {
+        let height = full
+            .height
+            .min(u16::try_from(rows.len().saturating_add(5)).unwrap_or(u16::MAX))
+            .min(20);
+        Rect::new(
+            full.x + (full.width - width) / 2,
+            full.y + (full.height - height) / 2,
+            width,
+            height,
+        )
+    } else {
+        frame.render_widget(Clear, full);
+        Rect::new(full.x + gutter, full.y, width, full.height)
+    };
+    let body_height = usize::from(area.height - 5);
     let pages = rows.len().div_ceil(body_height).max(1);
     let page = profile_rows
         .iter()
