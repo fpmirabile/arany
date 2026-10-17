@@ -45,6 +45,7 @@ Everything else (agent loop, wire formats, defaults, permission modes, hooks, ag
 | Goals, budgets, steering, `exec` | [Goals spec](./docs/specs/goals.md) |
 | Runs, outcomes, Events, replay, persistence | [Execution spec](./docs/specs/execution.md) |
 | Tools, commands, Skills, MCP, Guard, folder trust, toolchains, build cache | [Tool spec](./docs/specs/tools.md) |
+| `serve --stdio`, JSON-RPC protocol, schema export | [Serve spec](./docs/specs/serve.md) |
 | Terminal, output, accessibility, history, clipboard, images, CLI modes | [Terminal spec](./docs/specs/terminal.md) |
 | OTLP telemetry; development logs and failure stages | [Telemetry](./docs/specs/telemetry.md), [Diagnostics](./docs/specs/diagnostics.md) |
 

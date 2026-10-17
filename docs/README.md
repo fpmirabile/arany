@@ -30,6 +30,7 @@ Specs state the agreed contract. Source and tests establish implementation and e
 
 | Task | Read first | Related boundary |
 |---|---|---|
+| `serve --stdio`, JSON-RPC protocol or schema export | [Serve spec](./specs/serve.md) | Session, execution, Goals and Tool contracts; [security rules](../agents/security.md) |
 | Terminal interaction, draft retention, selectors, accessibility or output | [Terminal spec](./specs/terminal.md) | Session and Tool specs for cross-boundary changes; [security rules](../agents/security.md) for untrusted rendering |
 | Goal lifecycle, task budgets, plan contracts or recovery | [Goals spec](./specs/goals.md) | [Execution spec](./specs/execution.md), [Session spec](./specs/session.md); Provider and Tools for cross-boundary changes |
 | Run coordination, teams, context or compaction | [Execution spec](./specs/execution.md), [Session spec](./specs/session.md) | Provider and terminal for cross-boundary changes |

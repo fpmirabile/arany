@@ -47,6 +47,25 @@ The [build-script source review](./beta-build-script-source-review.md) retains i
 
 Feature unification remains material: telemetry uses the private async Reqwest adapter without `blocking`; SQLite uses bundled source; direct minimal features do not remove preexisting transitive SIMD/unsafe or OS crypto. The Tool base adds `tokio/process`, `jsonschema 0.58.6` and `yaml_serde 0.10.7` with default features disabled, plus Linux-only `seccompiler 0.5.0` without JSON/filter-file deserialization. JSON Schema retrieval is offline and reference resolution is rejected at admission; YAML only enables `std`. Current selected normal/build duplicate-version names are `getrandom`, `hashbrown`, `io-lifetimes` and `syn`; optional lockfile entries are not active duplicates. Development features remain distinct from the release graph.
 
+### Serve schema dependency
+
+`schemars = "=1.2.2"` is selected only by `arany-cli`, with default features
+disabled and only `derive` and `std` enabled; `preserve_order` stays disabled.
+The harness library has no new dependency. It generates schemas for compiled
+wire types, never for repository-provided code or configuration. The existing
+`jsonschema` package also validates protocol examples as a CLI dev dependency.
+
+The locked additions are MIT `schemars 1.2.2` and
+`schemars_derive 1.2.2`, plus MIT OR Apache-2.0 `dyn-clone 1.0.20` and
+`serde_derive_internals 0.30.0`; existing `ref-cast 1.0.27` and its macro remain
+selected. Published manifests declare no build script for those four additions;
+`cargo tree --locked --offline -p schemars --edges build` has no direct build
+dependencies. The normal/build tree retains the existing `ref-cast` build and
+macro authority described above. `schemars_derive` is new compiler-host macro
+authority; its source forbids unsafe and the inspected derive/parser entrypoints
+have no filesystem, environment or process-command calls. This scoped review
+is not a release artifact, advisory or whole-transitive-source clearance.
+
 ## License and advisory status
 
 All 300 selected Linux third-party identities declare nonempty license metadata, with 22 distinct raw expressions. The five historical slash-form declarations retain their [pinned MIT-alternative source review](./beta-legacy-slash-license-source-research.md). `option-ext 0.2.0` still declares `MPL-2.0`; native compound expressions and Unicode notices remain separate distribution obligations. The new filter/parser metadata fits the existing reviewed allowlist without broadening it. Metadata is not proof of a chosen license branch, linked-code notices or legal compliance.
