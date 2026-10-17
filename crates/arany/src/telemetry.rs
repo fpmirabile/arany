@@ -822,7 +822,7 @@ impl TraceSpan {
             return;
         };
         let mut attributes = vec![
-            KeyValue::new("arany.event.sequence", sequence as i64),
+            KeyValue::new("arany.event.sequence", saturating_i64(sequence)),
             KeyValue::new("arany.event.kind", name),
         ];
         attributes.extend(extra);
