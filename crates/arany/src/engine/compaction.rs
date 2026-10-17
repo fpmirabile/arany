@@ -144,53 +144,15 @@ impl Engine {
             .await?
             .min(identity.limits.deadline);
         let provider_trace = trace.begin_provider(&requested_identity.model);
-        let (status, response_id, usage, wire_provenance, provider) = match &routing {
-            Some((ledger, actor)) => {
-                let router = super::routing::CallRouter {
-                    providers: providers.clone(),
-                    journal: &self.journal,
-                    ledger,
-                    publisher: None,
-                };
-                match router
-                    .compact(
-                        request,
-                        *actor,
-                        tokio::time::Instant::now() + provider_deadline,
-                        crate::RunCancellation::new(),
-                    )
-                    .await?
-                {
-                    Some((response, provider)) => {
-                        let (status, response_id, usage, wire_provenance) =
-                            compaction_outcome(response);
-                        (status, response_id, usage, wire_provenance, provider)
-                    }
-                    None => (
-                        CompactionStatus::Failed {
-                            reason: CompactionFailure::Cancelled,
-                        },
-                        None,
-                        Usage::default(),
-                        None,
-                        std::sync::Arc::clone(&provider),
-                    ),
-                }
-            }
-            None => {
-                let response = tokio::time::timeout(provider_deadline, provider.compact(request))
-                    .await
-                    .unwrap_or(Err(crate::provider::ProviderError::CallTimedOut));
-                let (status, response_id, usage, wire_provenance) = compaction_outcome(response);
-                (
-                    status,
-                    response_id,
-                    usage,
-                    wire_provenance,
-                    std::sync::Arc::clone(&provider),
-                )
-            }
-        };
+        let (status, response_id, usage, wire_provenance, provider) = self
+            .compaction_call(
+                providers,
+                routing.as_ref(),
+                provider,
+                request,
+                provider_deadline,
+            )
+            .await?;
         let identity = provider.identity();
         let provider_outcome = ProviderTraceOutcome::from(&status);
         provider_trace.finish_with_usage(provider_outcome, usage.input_tokens, usage.output_tokens);
@@ -271,6 +233,72 @@ impl Engine {
                 .min(COMPACTION_CALL_DEADLINE)
             }),
         )
+    }
+
+    async fn compaction_call(
+        &self,
+        providers: &AdmittedProviders,
+        routing: Option<&(super::ledger::GoalLedger, crate::session::AgentRunId)>,
+        provider: std::sync::Arc<dyn crate::provider::Provider>,
+        request: CompactionRequest,
+        provider_deadline: Duration,
+    ) -> Result<
+        (
+            CompactionStatus,
+            Option<String>,
+            Usage,
+            Option<crate::provider::ProviderWireProvenance>,
+            std::sync::Arc<dyn crate::provider::Provider>,
+        ),
+        EngineError,
+    > {
+        Ok(match routing {
+            Some((ledger, actor)) => {
+                let router = super::routing::CallRouter {
+                    providers: providers.clone(),
+                    journal: &self.journal,
+                    ledger,
+                    publisher: None,
+                };
+                match router
+                    .compact(
+                        request,
+                        *actor,
+                        tokio::time::Instant::now() + provider_deadline,
+                        crate::RunCancellation::new(),
+                    )
+                    .await?
+                {
+                    Some((response, provider)) => {
+                        let (status, response_id, usage, wire_provenance) =
+                            compaction_outcome(response);
+                        (status, response_id, usage, wire_provenance, provider)
+                    }
+                    None => (
+                        CompactionStatus::Failed {
+                            reason: CompactionFailure::Cancelled,
+                        },
+                        None,
+                        Usage::default(),
+                        None,
+                        std::sync::Arc::clone(&provider),
+                    ),
+                }
+            }
+            None => {
+                let response = tokio::time::timeout(provider_deadline, provider.compact(request))
+                    .await
+                    .unwrap_or(Err(crate::provider::ProviderError::CallTimedOut));
+                let (status, response_id, usage, wire_provenance) = compaction_outcome(response);
+                (
+                    status,
+                    response_id,
+                    usage,
+                    wire_provenance,
+                    std::sync::Arc::clone(&provider),
+                )
+            }
+        })
     }
 }
 
