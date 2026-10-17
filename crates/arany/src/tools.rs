@@ -15,6 +15,8 @@ mod process;
 mod skills;
 pub(crate) mod toolchains;
 pub(crate) mod types;
+#[allow(dead_code)]
+mod unguarded;
 mod workspace;
 
 #[cfg(test)]
