@@ -21,6 +21,8 @@ const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
 const MOUNTINFO_BYTES_CAP: usize = 1024 * 1024;
 const MOUNTINFO_ENTRIES_CAP: usize = 4096;
 const MOUNTINFO_LINE_CAP: usize = 16 * 1024;
+const HARDENED_THREADS_CAP: usize = 64;
+const STATUS_BYTES_CAP: usize = 16 * 1024;
 const BWRAP_BOOTSTRAP: &[&str] = &[
     "/usr/bin/env",
     "-i",
@@ -56,10 +58,12 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 }
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
-    let mut bytes = b"arany-guard-v14:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    let mut bytes = b"arany-guard-v15:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
+    bytes.extend_from_slice(&(HARDENED_THREADS_CAP as u64).to_le_bytes());
+    bytes.extend_from_slice(&(STATUS_BYTES_CAP as u64).to_le_bytes());
     Ok(digest(&bytes))
 }
 
@@ -116,7 +120,7 @@ pub(super) async fn stop_command_descendants(
     }
 }
 
-/// Drops capabilities, installs the syscall profile and verifies the result before Ready.
+/// Drops capabilities, installs the syscall profile and verifies every thread before Ready.
 pub(super) fn harden() -> Result<(), ToolError> {
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .map_err(|_| ToolError::ProtectionUnavailable)?;
@@ -138,8 +142,37 @@ pub(super) fn harden() -> Result<(), ToolError> {
         },
     )
     .map_err(|_| ToolError::ProtectionUnavailable)?;
-    let status = std::fs::read_to_string("/proc/self/status")
-        .map_err(|_| ToolError::ProtectionUnavailable)?;
+    let mut threads = 0usize;
+    for entry in
+        std::fs::read_dir("/proc/self/task").map_err(|_| ToolError::ProtectionUnavailable)?
+    {
+        threads += 1;
+        if threads > HARDENED_THREADS_CAP {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        let path = entry
+            .map_err(|_| ToolError::ProtectionUnavailable)?
+            .path()
+            .join("status");
+        let mut status = String::new();
+        std::fs::File::open(path)
+            .and_then(|file| {
+                file.take(STATUS_BYTES_CAP as u64 + 1)
+                    .read_to_string(&mut status)
+            })
+            .map_err(|_| ToolError::ProtectionUnavailable)?;
+        if status.len() > STATUS_BYTES_CAP {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        verify_hardened_status(&status)?;
+    }
+    if threads == 0 {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
+}
+
+fn verify_hardened_status(status: &str) -> Result<(), ToolError> {
     let field = |name: &str| {
         status.lines().find_map(|line| {
             let (key, value) = line.split_once(':')?;
@@ -1177,6 +1210,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hardened_status_requires_filter_no_new_privs_and_zero_capabilities() {
+        let hardened = "Name:\tarany\nNoNewPrivs:\t1\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nSeccomp:\t2\nSeccomp_filters:\t2\n";
+        assert!(verify_hardened_status(hardened).is_ok());
+        for (from, to) in [
+            ("Seccomp:\t2\n", "Seccomp:\t0\n"),
+            ("Seccomp:\t2\n", "Seccomp:\t1\n"),
+            ("Seccomp:\t2\n", ""),
+            ("NoNewPrivs:\t1\n", "NoNewPrivs:\t0\n"),
+            ("NoNewPrivs:\t1\n", ""),
+            ("CapEff:\t0000000000000000", "CapEff:\t0000000000200000"),
+            ("CapPrm:\t0000000000000000", "CapPrm:\t0000000000000001"),
+            ("CapInh:\t0000000000000000", "CapInh:\t0000000000000001"),
+            ("CapAmb:\t0000000000000000", "CapAmb:\t0000000000000001"),
+            ("CapAmb:\t0000000000000000\n", ""),
+        ] {
+            let status = hardened.replacen(from, to, 1);
+            assert_ne!(status, hardened);
+            assert!(verify_hardened_status(&status).is_err(), "{status}");
+        }
+        assert!(verify_hardened_status("").is_err());
+    }
+
+    #[test]
     fn mountinfo_escapes_decode_only_separator_bytes() {
         assert_eq!(decode_mount_field(br"a\040b").unwrap(), b"a b");
         assert_eq!(decode_mount_field(br"\134").unwrap(), b"\\");
@@ -1270,6 +1326,144 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[cfg_attr(not(arany_ci), ignore = "native Linux Git namespace isolation")]
+    fn native_git_launch_keeps_workspace_read_only_and_host_home_absent() {
+        use crate::test_process::BoundedOutput;
+
+        let _native_gate = crate::test_process::NATIVE_GATE.lock().unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let home = fixture.path().join("home");
+        let seed = fixture.path().join("seed");
+        for directory in [&workspace, &home, &seed] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        let host_config = home.join(".gitconfig");
+        let config_bytes = b"[user]\n\tname = Synthetic Host\n";
+        std::fs::write(&host_config, config_bytes).unwrap();
+        assert_eq!(std::fs::read(&host_config).unwrap(), config_bytes);
+        let git = crate::tools::git::discover().expect("pinned Git");
+        let initialized = std::process::Command::new(&git.executable)
+            .args(["init", "--quiet", "--initial-branch=main"])
+            .current_dir(&workspace)
+            .env_clear()
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .bounded_output_for(Duration::from_secs(20), 16 * 1024)
+            .unwrap();
+        assert!(initialized.status.success(), "pinned Git baseline");
+        for path in [workspace.join("a.txt"), workspace.join(".git/write-probe")] {
+            std::fs::write(&path, b"allowed\n").unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"allowed\n");
+        }
+
+        let mut command = Command::new(BWRAP_BOOTSTRAP[0]);
+        command.args(&BWRAP_BOOTSTRAP[1..]);
+        profile_arguments(
+            &mut command,
+            "/usr/bin:/bin",
+            &seed,
+            &[],
+            Some((&workspace, false)),
+            &ToolLimits::default(),
+            &std::env::current_exe().unwrap(),
+        );
+        command
+            .args(["--setenv", "ARANY_TEST_GIT_HOST_CONFIG"])
+            .arg(&host_config)
+            .args(["--setenv", "ARANY_TEST_GIT_PIN"])
+            .arg(serde_json::to_string(&git).unwrap())
+            .args(["--setenv", "ARANY_TEST_GIT_PARENT_NAMESPACES"])
+            .arg(serde_json::to_string(&profile::Namespaces::read().unwrap()).unwrap())
+            .args([
+                "--chdir",
+                "/",
+                "--",
+                "/arany",
+                "--exact",
+                "tools::guard::linux::tests::native_git_launch_probe",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear();
+        let output = command
+            .into_std()
+            .bounded_output_for(Duration::from_secs(40), 32 * 1024)
+            .expect("native Git namespace probe");
+        assert!(
+            output.status.success(),
+            "Git namespace probe: {:?}; stdout={:?}; stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        crate::test_process::assert_single_test_completed(&output.stdout, "Git namespace probe");
+        assert!(output.stderr.is_empty());
+        for path in [workspace.join("a.txt"), workspace.join(".git/write-probe")] {
+            assert_eq!(std::fs::read(path).unwrap(), b"allowed\n");
+        }
+        assert_eq!(std::fs::read(host_config).unwrap(), config_bytes);
+    }
+
+    #[test]
+    #[ignore = "isolated Linux Git namespace probe"]
+    fn native_git_launch_probe() {
+        let host_config =
+            std::env::var_os("ARANY_TEST_GIT_HOST_CONFIG").expect("private synthetic host config");
+        let git = serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PIN").unwrap()).unwrap();
+        let parent =
+            serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PARENT_NAMESPACES").unwrap())
+                .unwrap();
+        assert!(profile::Namespaces::read().unwrap().isolated_from(&parent));
+        harden().expect("production Guard hardening");
+        for path in ["/workspace/a.txt", "/workspace/.git/write-probe"] {
+            assert_eq!(std::fs::read(path).unwrap(), b"allowed\n");
+            assert_eq!(
+                std::fs::write(path, b"forbidden")
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(nix::libc::EROFS),
+                "Git Workspace bind must be read-only: {path}"
+            );
+        }
+        assert_eq!(
+            std::fs::File::open(host_config).unwrap_err().raw_os_error(),
+            Some(nix::libc::ENOENT),
+            "synthetic host HOME/.gitconfig must be absent from the Git namespace"
+        );
+        let view = Path::new("/scratch").join(crate::tools::git::VIEW);
+        std::fs::create_dir(&view).unwrap();
+        std::fs::write(view.join("write-probe"), b"allowed\n").unwrap();
+        assert_eq!(
+            std::fs::read(view.join("write-probe")).unwrap(),
+            b"allowed\n"
+        );
+        std::fs::remove_dir_all(view).unwrap();
+        let output = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(crate::tools::git::execute(
+                Path::new("/workspace"),
+                Path::new("/scratch"),
+                &git,
+                &ToolCall::GitStatus { path: ".".into() },
+                16 * 1024,
+                Duration::from_secs(20),
+            ))
+            .unwrap();
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(output.get("failed").is_none(), "{output}");
+        assert!(
+            output["entries"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({"path": "a.txt", "state": "??"}))
+        );
     }
 
     fn mountinfo_with_runtime(optional: &str, descendants: &[&str]) -> Vec<u8> {
@@ -1857,6 +2051,7 @@ mod tests {
                         "/fixture/arany-test-bin",
                         "--exact",
                         "tools::guard::linux::tests::native_runtime_mount_attestation",
+                        "--include-ignored",
                         "--nocapture",
                     ]);
                 let child = command

@@ -6076,3 +6076,434 @@ fn escape_heavy_session_over_the_compaction_bound_fails_closed_and_keeps_its_jou
         store.close().await.expect("store shutdown");
     });
 }
+
+/// How the step's Tool grant and approvals are configured.
+#[derive(Clone, Copy)]
+struct StepSetup {
+    write: bool,
+    approvals: Option<arany::ApprovalMode>,
+}
+
+const READ_ONLY: StepSetup = StepSetup {
+    write: false,
+    approvals: None,
+};
+
+/// The Events of one Run with a single Tool step, with each Tool intent's sizing and outcome.
+async fn tool_step_events(
+    policy: CollaborationPolicy,
+    outcomes: Vec<ProviderOutcome>,
+    setup: StepSetup,
+) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+    std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("fact");
+    let state_path = temp.path().join("state");
+    let mut engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        ScriptedProvider::new(outcomes),
+    )
+    .expect("engine");
+    let config = state_path.join("tools.json");
+    std::fs::write(
+        &config,
+        format!(
+            r#"{{"version":1,"workspace_paths":["notes"],"write":{},"commands":[],"skills":[],"mcp":[]}}"#,
+            setup.write
+        ),
+    )
+    .expect("Tool configuration");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+        .expect("private Tool configuration");
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .expect("Tools");
+    let mut inbox = setup.approvals.map(|mode| {
+        let (approvals, inbox) = arany::ToolApprovals::new(mode);
+        engine.set_tool_approvals(approvals);
+        inbox
+    });
+    let mut input = request(&workspace, "Inspect the notes");
+    input.policy = policy;
+    input.goal.budget = Some(arany::GoalBudget {
+        max_provider_calls: None,
+        max_tokens: None,
+        max_active_ms: Some(30 * 60 * 1000),
+        max_runs: 1,
+    });
+    let outcome = match (setup.approvals, inbox.as_mut()) {
+        (Some(arany::ApprovalMode::Request), Some(inbox)) => {
+            let decide = async {
+                inbox.next().await.expect("approval requested").decide(true);
+            };
+            tokio::join!(engine.run(input), decide).0
+        }
+        _ => engine.run(input).await,
+    }
+    .expect("Tool Run");
+    engine.close().await.expect("engine shutdown");
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let events = store
+        .load_session(outcome.session_id)
+        .await
+        .expect("Events");
+    store.close().await.expect("store shutdown");
+    events
+        .iter()
+        .map(|envelope| match &envelope.event {
+            Event::ToolStarted { intent, .. } => format!(
+                "ToolStarted result_bytes={} runtime_ms={} cache_bytes={} cache_transfer_ms={}",
+                intent.limits.result_bytes,
+                intent.limits.runtime_ms,
+                intent.limits.cache_bytes,
+                intent.limits.cache_transfer_ms,
+            ),
+            Event::ToolFinished { observation, .. } => {
+                format!("ToolFinished {:?}", observation.disposition)
+            }
+            Event::ProviderCallRecorded { record, .. } => {
+                format!("ProviderCallRecorded {:?}", record.phase)
+            }
+            event => format!("{event:?}")
+                .split([' ', '{', '('])
+                .next()
+                .expect("variant name")
+                .to_owned(),
+        })
+        .collect()
+}
+
+/// The Tool catalog's platform command contract differs on macOS, so only Linux pins exact
+/// result sizes.
+fn platform_events(events: &str) -> String {
+    if !cfg!(target_os = "macos") {
+        return events.to_owned();
+    }
+    events
+        .lines()
+        .map(|line| match line.split_once(" result_bytes=") {
+            Some((head, rest)) => {
+                let tail = rest.split_once(' ').map_or("", |(_, tail)| tail);
+                format!("{head} result_bytes=_ {tail}")
+            }
+            None => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn write_plan() -> arany::GoalPlanContract {
+    arany::GoalPlanContract {
+        mission: "Record a new fact".into(),
+        resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
+        paths: vec!["notes/new.txt".into()],
+        commands: Vec::new(),
+        skills: Vec::new(),
+        mcp_tools: Vec::new(),
+        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "notes/new.txt".into(),
+            content: "New".into(),
+        },
+        budget: arany::GoalBudget {
+            max_provider_calls: None,
+            max_tokens: None,
+            max_active_ms: Some(30 * 60 * 1000),
+            max_runs: 1,
+        },
+    }
+}
+
+#[tokio::test]
+async fn primary_tool_step_events_match_the_snapshot() {
+    let finish = |result: &str| {
+        ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: result.into(),
+        })
+    };
+    let read = arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: 0,
+        limit: 32,
+    };
+    let git = arany::ToolCall::GitStatus {
+        path: "notes".into(),
+    };
+    let write = || {
+        tool_outcome(
+            arany::ToolCall::Write {
+                path: "notes/new.txt".into(),
+                expected_digest: None,
+                content: "New".into(),
+            },
+            Some(Box::new(write_plan())),
+        )
+    };
+    let granted = |approvals| StepSetup {
+        write: true,
+        approvals,
+    };
+    // The read-only grant denies Git and the first Write before any Guard launch; the other Writes
+    // run in the Guard, after an AI review or a human approval where the mode asks for one.
+    for (case, outcomes, setup, expected) in [
+        (
+            "in-process read",
+            vec![tool_outcome(read, None), finish("answer")],
+            READ_ONLY,
+            PRIMARY_READ,
+        ),
+        (
+            "guard read",
+            vec![tool_outcome(git, None), finish("answer")],
+            READ_ONLY,
+            PRIMARY_GIT,
+        ),
+        (
+            "denied mutation",
+            vec![write(), finish("answer")],
+            READ_ONLY,
+            PRIMARY_DENIED_WRITE,
+        ),
+        (
+            "guard mutation",
+            vec![write(), finish("answer")],
+            granted(None),
+            PRIMARY_WRITE,
+        ),
+        (
+            "reviewed mutation",
+            vec![write(), finish("approve"), finish("answer")],
+            granted(Some(arany::ApprovalMode::Auto)),
+            PRIMARY_REVIEWED_WRITE,
+        ),
+        (
+            "approved mutation",
+            vec![write(), finish("answer")],
+            granted(Some(arany::ApprovalMode::Request)),
+            PRIMARY_APPROVED_WRITE,
+        ),
+    ] {
+        let events = tool_step_events(CollaborationPolicy::Single, outcomes, setup).await;
+        assert_eq!(
+            platform_events(&events.join("\n")),
+            platform_events(expected),
+            "primary {case} step"
+        );
+    }
+}
+
+#[tokio::test]
+async fn researcher_tool_step_events_match_the_snapshot() {
+    let finish = || {
+        ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: "answer".into(),
+        })
+    };
+    for (case, call, expected) in [
+        (
+            "in-process read",
+            arany::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: 0,
+                limit: 32,
+            },
+            RESEARCHER_READ,
+        ),
+        (
+            "guard read",
+            arany::ToolCall::Skill {
+                name: "missing".into(),
+                resource: None,
+            },
+            RESEARCHER_SKILL,
+        ),
+    ] {
+        let outcomes = vec![
+            ProviderOutcome::Delegate(Delegate {
+                children: vec!["Inspect the fact".into()],
+            }),
+            tool_outcome(call, None),
+            finish(),
+            finish(),
+        ];
+        let events = tool_step_events(
+            CollaborationPolicy::Team {
+                max_active_children: 1,
+            },
+            outcomes,
+            READ_ONLY,
+        )
+        .await;
+        assert_eq!(
+            platform_events(&events.join("\n")),
+            platform_events(expected),
+            "researcher {case} step"
+        );
+    }
+}
+
+const PRIMARY_READ: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+ToolStarted result_bytes=62443 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Succeeded
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const PRIMARY_GIT: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+ToolStarted result_bytes=62447 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Denied
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const PRIMARY_DENIED_WRITE: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalPlanContractRecorded
+ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Denied
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+AgentFinished
+RunFinished
+GoalFinished";
+
+const PRIMARY_WRITE: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalPlanContractRecorded
+ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Succeeded
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const PRIMARY_REVIEWED_WRITE: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalPlanContractRecorded
+ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+GoalProviderCallReserved
+ProviderCallRecorded ToolReview
+ToolFinished Succeeded
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const PRIMARY_APPROVED_WRITE: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalPlanContractRecorded
+ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Succeeded
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const RESEARCHER_READ: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded ChildWork
+ToolStarted result_bytes=59099 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Succeeded
+GoalProviderCallReserved
+ProviderCallRecorded ChildWork
+AgentFinished
+GoalProviderCallReserved
+ProviderCallRecorded RootSynthesis
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const RESEARCHER_SKILL: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded ChildWork
+ToolStarted result_bytes=59101 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Denied
+GoalProviderCallReserved
+ProviderCallRecorded ChildWork
+AgentFinished
+GoalProviderCallReserved
+ProviderCallRecorded RootSynthesis
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";

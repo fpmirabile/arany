@@ -1,8 +1,8 @@
 use super::{
-    Action, CallFailure, CallResult, MAX_PRIMARY_RESULT_BYTES, RunLoop, TOOL_CLEANUP_OVERHEAD,
-    call_record, call_trace_result, call_trace_usage, duration_ms, valid_finish,
+    Action, ActiveSegment, CallFailure, CallResult, Grant, MAX_PRIMARY_RESULT_BYTES, RunLoop,
+    call_record, call_trace_result, call_trace_usage, valid_finish,
 };
-use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
+use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
 use crate::provider::{
     AgentPhase, ChildResult, Finish, PromptRole, ProviderOutcome, ProviderRequest,
     ProviderResponse, ProviderTurn, RunInput,
@@ -12,10 +12,7 @@ use crate::session::{
     MAX_CHILD_TOOL_CALLS,
 };
 use crate::telemetry::{AgentTrace, ProviderTrace, TraceOutcome};
-use crate::tools::{
-    Attestation, CacheUpdate, GuardReceipt, ToolContext, ToolDisposition, ToolObservation,
-    ToolRequest, ToolStep,
-};
+use crate::tools::{ToolContext, ToolRequest, ToolStep};
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use tokio::task::{Id, JoinError, JoinSet};
@@ -31,13 +28,26 @@ const CHILD_INTENT_RESERVE_BYTES: usize = 4 * 1024;
 /// A full 4 KiB Read page plus metadata; with less room a child is offered only Finish.
 const MIN_CHILD_RESULT_BYTES: usize = 4096 + 512;
 
-struct ChildWork {
-    agent_run_id: AgentRunId,
+pub(super) struct ChildWork {
+    pub(super) agent_run_id: AgentRunId,
     objective: String,
     /// Read-only research context; `None` for a `NoTools` child.
-    tools: Option<ToolContext>,
-    tool_calls_remaining: usize,
+    pub(super) tools: Option<ToolContext>,
+    pub(super) tool_calls_remaining: usize,
     trace: Option<AgentTrace>,
+}
+
+struct Spawned {
+    children: Vec<ChildWork>,
+    parallel: usize,
+    active_segment: ActiveSegment,
+}
+
+/// Where the children stand once no call is in flight.
+struct Drained {
+    results: Vec<Option<ChildResult>>,
+    abort_reason: Option<AbortReason>,
+    pending: VecDeque<usize>,
 }
 
 struct ChildQueue {
@@ -134,13 +144,78 @@ impl RunLoop<'_> {
         delegate_turn: ProviderTurn,
         primary: AgentTrace,
     ) -> Result<(), EngineError> {
+        let Some(Spawned {
+            mut children,
+            parallel,
+            active_segment,
+        }) = self.spawn_children(objectives, &primary).await?
+        else {
+            return self.settle_stopped_primary(primary).await;
+        };
+        let deadline = active_segment.deadline();
+        let Drained {
+            results,
+            mut abort_reason,
+            pending,
+        } = self
+            .drive_children(&mut children, root_request, parallel, deadline)
+            .await?;
+        self.settle_active_segment(active_segment)?;
+        if matches!(abort_reason, Some(AbortReason::Paused)) {
+            self.pause_at_boundary();
+        }
+
+        if self.controls.cancellation.is_cancelled() {
+            abort_reason = Some(AbortReason::Cancelled);
+        }
+        if abort_reason.is_none() && self.ledger().active_time_exhausted() {
+            abort_reason = Some(AbortReason::Budget);
+        }
+        if abort_reason.is_none() && !pending.is_empty() {
+            abort_reason = Some(AbortReason::Failed);
+        }
+        if let Some(reason) = abort_reason {
+            for index in pending {
+                self.finish_child(
+                    children[index].agent_run_id,
+                    AgentDisposition::Cancelled,
+                    None,
+                    false,
+                )
+                .await?;
+                children[index]
+                    .trace
+                    .take()
+                    .expect("pending child trace exists")
+                    .finish(TraceOutcome::Cancelled);
+            }
+            return match reason {
+                AbortReason::Failed if self.ledger().active_time_exhausted() => {
+                    self.settle_stopped_primary(primary).await
+                }
+                AbortReason::Failed => self.fail_primary(primary).await,
+                AbortReason::Budget | AbortReason::Cancelled | AbortReason::Paused => {
+                    self.settle_stopped_primary(primary).await
+                }
+            };
+        }
+        self.synthesize(root_request, results, delegate_turn, primary)
+            .await
+    }
+
+    /// Reserves the delegation and journals each child; `None` means the primary must stop.
+    async fn spawn_children(
+        &self,
+        objectives: Vec<String>,
+        primary: &AgentTrace,
+    ) -> Result<Option<Spawned>, EngineError> {
         let research = self.controls.tools.is_some();
         let delegation = Action::Delegation {
             children: objectives.len(),
             research,
         };
         if !self.ledger().admits(delegation) {
-            return self.settle_stopped_primary(primary).await;
+            return Ok(None);
         }
         let tool_allowance = if research {
             self.ledger()
@@ -185,9 +260,7 @@ impl RunLoop<'_> {
             .await?;
         let active_segment = match self.reserve_active_segment(active_bound) {
             Ok(segment) => segment,
-            Err(EngineError::GoalBudgetExhausted) => {
-                return self.settle_stopped_primary(primary).await;
-            }
+            Err(EngineError::GoalBudgetExhausted) => return Ok(None),
             Err(error) => return Err(error),
         };
         let mut children = Vec::with_capacity(objectives.len());
@@ -224,14 +297,28 @@ impl RunLoop<'_> {
                     .expect("child trace exists")
                     .finish(TraceOutcome::Cancelled);
             }
-            return self.settle_stopped_primary(primary).await;
+            return Ok(None);
         }
+        Ok(Some(Spawned {
+            children,
+            parallel,
+            active_segment,
+        }))
+    }
 
+    /// Runs the children's calls and Tool steps in bounded slots until each one finished or the
+    /// delegation aborted.
+    async fn drive_children(
+        &self,
+        children: &mut [ChildWork],
+        root_request: &ProviderRequest,
+        parallel: usize,
+        deadline: Instant,
+    ) -> Result<Drained, EngineError> {
         let mut results = vec![None; children.len()];
         let mut queue = ChildQueue::new(children.len(), parallel);
-        let deadline = active_segment.deadline();
         if let Err(error) = self
-            .fill_slots(&mut queue, &mut children, root_request, deadline)
+            .fill_slots(&mut queue, children, root_request, deadline)
             .await
         {
             return Err(queue.abort_with(error).await);
@@ -328,117 +415,24 @@ impl RunLoop<'_> {
             {
                 return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
             }
-            let agent_run_id = children[index].agent_run_id;
-            if let Err(error) = self
-                .append(Event::ProviderCallRecorded {
-                    run_id: self.run_id,
-                    agent_run_id,
-                    record: call_record(AgentPhase::ChildWork, &result, valid_response),
-                })
+            let step_disposition = match self
+                .settle_child_call(
+                    &mut children[index],
+                    &mut results[index],
+                    result,
+                    valid_response,
+                    &mut abort_reason,
+                    deadline,
+                )
                 .await
             {
-                return Err(queue.abort_with(error).await);
-            }
-            // `None` means the child continues with another step.
-            let step_disposition = match result {
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Finish(finish),
-                    ..
-                }) if valid_response => {
-                    if let Err(error) = self
-                        .finish_child(
-                            agent_run_id,
-                            AgentDisposition::Finished,
-                            Some(&finish),
-                            true,
-                        )
-                        .await
-                    {
-                        return Err(queue.abort_with(error).await);
-                    }
-                    results[index] = Some(ChildResult {
-                        objective: children[index].objective.clone(),
-                        summary: finish.summary,
-                        result: finish.result,
-                    });
-                    Some(AgentDisposition::Finished)
+                Ok(None) => {
+                    queue.pending.push_back(index);
+                    None
                 }
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Tools(mut requests),
-                    turn,
-                    ..
-                }) if valid_response => {
-                    if let Err(error) = self.ledger().child_call_finished() {
-                        return Err(queue.abort_with(error).await);
-                    }
-                    // An exhausted Goal budget stops the child before its Tool starts, like a pause.
-                    let budget_spent = !self.ledger().can_start_provider_call()
-                        || self.ledger().remaining_calls() == Some(0);
-                    if budget_spent && abort_reason.is_none() {
-                        abort_reason = Some(AbortReason::Budget);
-                    }
-                    let skipped = self.controls.cancellation.is_cancelled()
-                        || self.pause_requested()
-                        || abort_reason.is_some();
-                    let continues = if skipped {
-                        false
-                    } else {
-                        // Boxed: the Tool future is large and would overflow the caller's stack.
-                        let request = requests.pop().ok_or(EngineError::CoordinatorFailed)?;
-                        match Box::pin(self.execute_child_tool(
-                            &mut children[index],
-                            request,
-                            turn,
-                            deadline,
-                        ))
-                        .await
-                        {
-                            Ok(continues) => continues,
-                            Err(error) => return Err(queue.abort_with(error).await),
-                        }
-                    };
-                    if continues {
-                        children[index].tool_calls_remaining =
-                            children[index].tool_calls_remaining.saturating_sub(1);
-                        queue.pending.push_back(index);
-                        None
-                    } else {
-                        let disposition = if skipped || self.controls.cancellation.is_cancelled() {
-                            AgentDisposition::Cancelled
-                        } else {
-                            AgentDisposition::Failed
-                        };
-                        if let Err(error) = self
-                            .finish_child(agent_run_id, disposition, None, false)
-                            .await
-                        {
-                            return Err(queue.abort_with(error).await);
-                        }
-                        Some(disposition)
-                    }
-                }
-                other => {
-                    let disposition = if matches!(other, CallResult::Cancelled) {
-                        AgentDisposition::Cancelled
-                    } else {
-                        AgentDisposition::Failed
-                    };
-                    if let Err(error) = self
-                        .finish_child(agent_run_id, disposition, None, true)
-                        .await
-                    {
-                        return Err(queue.abort_with(error).await);
-                    }
-                    Some(disposition)
-                }
+                Ok(Some(disposition)) => Some(disposition),
+                Err(error) => return Err(queue.abort_with(error).await),
             };
-            if let Some(disposition) = step_disposition {
-                children[index]
-                    .trace
-                    .take()
-                    .expect("child trace exists")
-                    .finish(disposition_trace_outcome(disposition));
-            }
             if abort_reason.is_none() {
                 abort_reason = if self.controls.cancellation.is_cancelled() {
                     Some(AbortReason::Cancelled)
@@ -462,7 +456,7 @@ impl RunLoop<'_> {
             }
             if abort_reason.is_none() {
                 if let Err(error) = self
-                    .fill_slots(&mut queue, &mut children, root_request, deadline)
+                    .fill_slots(&mut queue, children, root_request, deadline)
                     .await
                 {
                     return Err(queue.abort_with(error).await);
@@ -470,46 +464,120 @@ impl RunLoop<'_> {
                 abort_reason = self.unstarted_abort(&queue);
             }
         }
+        Ok(Drained {
+            results,
+            abort_reason,
+            pending: queue.pending,
+        })
+    }
 
-        self.settle_active_segment(active_segment)?;
-        if matches!(abort_reason, Some(AbortReason::Paused)) {
-            self.pause_at_boundary();
-        }
-
-        if self.controls.cancellation.is_cancelled() {
-            abort_reason = Some(AbortReason::Cancelled);
-        }
-        if abort_reason.is_none() && self.ledger().active_time_exhausted() {
-            abort_reason = Some(AbortReason::Budget);
-        }
-        if abort_reason.is_none() && !queue.pending.is_empty() {
-            abort_reason = Some(AbortReason::Failed);
-        }
-        if let Some(reason) = abort_reason {
-            for index in queue.pending {
+    /// Journals one child's finished call, then finishes the child or runs its Tool step; `None`
+    /// means the child continues with another call.
+    async fn settle_child_call(
+        &self,
+        child: &mut ChildWork,
+        result_slot: &mut Option<ChildResult>,
+        result: CallResult,
+        valid_response: bool,
+        abort_reason: &mut Option<AbortReason>,
+        deadline: Instant,
+    ) -> Result<Option<AgentDisposition>, EngineError> {
+        let agent_run_id = child.agent_run_id;
+        self.append(Event::ProviderCallRecorded {
+            run_id: self.run_id,
+            agent_run_id,
+            record: call_record(AgentPhase::ChildWork, &result, valid_response),
+        })
+        .await?;
+        let disposition = match result {
+            CallResult::Response(ProviderResponse {
+                outcome: ProviderOutcome::Finish(finish),
+                ..
+            }) if valid_response => {
                 self.finish_child(
-                    children[index].agent_run_id,
-                    AgentDisposition::Cancelled,
-                    None,
-                    false,
+                    agent_run_id,
+                    AgentDisposition::Finished,
+                    Some(&finish),
+                    true,
                 )
                 .await?;
-                children[index]
-                    .trace
-                    .take()
-                    .expect("pending child trace exists")
-                    .finish(TraceOutcome::Cancelled);
+                *result_slot = Some(ChildResult {
+                    objective: child.objective.clone(),
+                    summary: finish.summary,
+                    result: finish.result,
+                });
+                AgentDisposition::Finished
             }
-            return match reason {
-                AbortReason::Failed if self.ledger().active_time_exhausted() => {
-                    self.settle_stopped_primary(primary).await
+            CallResult::Response(ProviderResponse {
+                outcome: ProviderOutcome::Tools(mut requests),
+                turn,
+                ..
+            }) if valid_response => {
+                self.ledger().child_call_finished()?;
+                // An exhausted Goal budget stops the child before its Tool starts, like a pause.
+                let budget_spent = !self.ledger().can_start_provider_call()
+                    || self.ledger().remaining_calls() == Some(0);
+                if budget_spent && abort_reason.is_none() {
+                    *abort_reason = Some(AbortReason::Budget);
                 }
-                AbortReason::Failed => self.fail_primary(primary).await,
-                AbortReason::Budget | AbortReason::Cancelled | AbortReason::Paused => {
-                    self.settle_stopped_primary(primary).await
+                let skipped = self.controls.cancellation.is_cancelled()
+                    || self.pause_requested()
+                    || abort_reason.is_some();
+                let continues = if skipped {
+                    false
+                } else {
+                    let request = requests.pop().ok_or(EngineError::CoordinatorFailed)?;
+                    // Boxed: the Tool future is large and would overflow the caller's stack.
+                    Box::pin(self.execute_step(
+                        Grant::Researcher {
+                            child: &mut *child,
+                            deadline,
+                        },
+                        request,
+                        turn,
+                    ))
+                    .await?
+                };
+                if continues {
+                    child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
+                    return Ok(None);
                 }
-            };
-        }
+                let disposition = if skipped || self.controls.cancellation.is_cancelled() {
+                    AgentDisposition::Cancelled
+                } else {
+                    AgentDisposition::Failed
+                };
+                self.finish_child(agent_run_id, disposition, None, false)
+                    .await?;
+                disposition
+            }
+            other => {
+                let disposition = if matches!(other, CallResult::Cancelled) {
+                    AgentDisposition::Cancelled
+                } else {
+                    AgentDisposition::Failed
+                };
+                self.finish_child(agent_run_id, disposition, None, true)
+                    .await?;
+                disposition
+            }
+        };
+        child
+            .trace
+            .take()
+            .expect("child trace exists")
+            .finish(disposition_trace_outcome(disposition));
+        Ok(Some(disposition))
+    }
+
+    /// Asks the primary to synthesize the children's results; it may continue with Tool steps.
+    async fn synthesize(
+        &self,
+        root_request: &mut ProviderRequest,
+        results: Vec<Option<ChildResult>>,
+        delegate_turn: ProviderTurn,
+        primary: AgentTrace,
+    ) -> Result<(), EngineError> {
         if !self.ledger().can_start_provider_call() {
             return self.settle_stopped_primary(primary).await;
         }
@@ -589,10 +657,15 @@ impl RunLoop<'_> {
                     if self.pause_at_boundary() {
                         return self.settle_stopped_primary(primary).await;
                     }
-                    if !self.begin_tool_step(root_request, requests, turn).await? {
+                    let Some(request) = self.begin_tool_step(requests).await? else {
                         return self.fail_primary(primary).await;
-                    }
-                    match self.execute_tool(root_request, false, &primary).await {
+                    };
+                    let grant = Grant::Primary {
+                        request: &mut *root_request,
+                        review_allowed: false,
+                        trace: &primary,
+                    };
+                    match self.execute_step(grant, request, turn).await {
                         Ok(true) => {}
                         Ok(false) if self.controls.cancellation.is_cancelled() => {
                             return self.settle_stopped_primary(primary).await;
@@ -748,121 +821,6 @@ impl RunLoop<'_> {
                 && child.tool_calls_remaining > 0
                 && request.call.valid()
                 && request.call.is_child_research())
-    }
-
-    /// Runs one read-only child Tool inside the delegation's active segment; `false` stops the child.
-    async fn execute_child_tool(
-        &self,
-        child: &mut ChildWork,
-        request: ToolRequest,
-        turn: ProviderTurn,
-        deadline: Instant,
-    ) -> Result<bool, EngineError> {
-        // Copy the id first so the mutable borrow of `child.tools` below stays disjoint.
-        let agent_run_id = child.agent_run_id;
-        let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        let tools = child.tools.as_mut().ok_or(EngineError::CoordinatorFailed)?;
-        let mut intent = runtime.intent(self.run_id, agent_run_id, request.call.clone());
-        let available = deadline
-            .saturating_duration_since(Instant::now())
-            .saturating_sub(
-                runtime.reservation_overhead(&intent.call)
-                    + TOOL_CLEANUP_OVERHEAD
-                    + STORE_ACTION_OVERHEAD,
-            );
-        // Half for the Guard capacity wait (it ends at `expires_at_ms`), half for the run itself.
-        let runtime_ms = intent
-            .limits
-            .runtime_ms
-            .min(u32::try_from(duration_ms(available) / 2).unwrap_or(u32::MAX));
-        if runtime_ms == 0 {
-            return Ok(false);
-        }
-        intent.limits.runtime_ms = runtime_ms;
-        intent.expires_at_ms = crate::tools::now_ms().saturating_add(u64::from(runtime_ms));
-        let mut reserved = tools.clone();
-        reserved.steps.push(ToolStep {
-            turn: turn.clone(),
-            requests: vec![request.clone()],
-            observations: vec![ToolObservation {
-                intent: intent.clone(),
-                disposition: ToolDisposition::Succeeded,
-                output: String::new(),
-                attestation: Some(Attestation::Guard(GuardReceipt {
-                    contract_version: 1,
-                    intent_digest: intent.digest(),
-                    enforcement_digest: intent.enforcement_digest,
-                    limits: intent.limits.clone(),
-                })),
-                cache_update: CacheUpdate::NotApplicable,
-            }],
-            facts: None,
-            steering_notes: Vec::new(),
-            // Only sizes the reservation; `fill_slots` rewrites the count before the next render.
-            calls_remaining: Some(child.tool_calls_remaining.saturating_sub(1)),
-        });
-        let overhead = reserved.rendered_len();
-        let Some(capacity) = runtime.result_capacity(overhead, 0) else {
-            return Ok(false);
-        };
-        intent.limits.result_bytes =
-            capacity.min(crate::tools::types::MAX_TOOL_RESULT_BYTES) as u32;
-        let child_step = Action::Child {
-            in_flight: self.ledger().in_flight_children(),
-        };
-        self.store
-            .admit_operation(
-                self.session_id,
-                child_step.max_events_for(&self.routing.providers),
-                child_step.tool_observations(),
-            )
-            .await?;
-        self.append(Event::ToolStarted {
-            run_id: self.run_id,
-            agent_run_id,
-            intent: intent.clone(),
-            active_ceiling_ms: self.ledger().active_ceiling(0)?,
-        })
-        .await?;
-        let observation = if self.ledger().allows_tool(&intent.call) {
-            let worker_cancellation = RunCancellation::new();
-            let mut run_cancellation = self.controls.cancellation.clone();
-            let execution = runtime.execute(intent, worker_cancellation.clone());
-            tokio::pin!(execution);
-            tokio::select! {
-                biased;
-                () = run_cancellation.cancelled() => {
-                    worker_cancellation.cancel();
-                    execution.await
-                }
-                observation = &mut execution => observation,
-            }
-        } else {
-            ToolObservation {
-                intent,
-                disposition: ToolDisposition::Denied,
-                output: "The effect is outside the active Goal plan; no operation was dispatched"
-                    .into(),
-                attestation: None,
-                cache_update: CacheUpdate::NotApplicable,
-            }
-        };
-        self.append(Event::ToolFinished {
-            run_id: self.run_id,
-            agent_run_id,
-            observation: observation.clone(),
-        })
-        .await?;
-        let continues = !observation.stops_run() && !self.controls.cancellation.is_cancelled();
-        tools.steps.push(ToolStep {
-            turn,
-            requests: vec![request],
-            observations: vec![observation],
-            facts: None,
-            steering_notes: Vec::new(),
-            calls_remaining: Some(child.tool_calls_remaining.saturating_sub(1)),
-        });
-        Ok(continues && tools.rendered_len() <= runtime.context_limit_bytes())
     }
 
     async fn finish_child(
