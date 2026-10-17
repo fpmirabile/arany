@@ -941,6 +941,7 @@ fn fallback_switches_mark_the_run_and_keep_each_call_on_its_requested_route() {
     routes.primary = vec![
         identity("openai", "primary-a"),
         identity("anthropic", "primary-b"),
+        identity("openai", "primary-c"),
     ];
     routes.compaction = vec![
         identity("openai", "compact-a"),
@@ -969,6 +970,15 @@ fn fallback_switches_mark_the_run_and_keep_each_call_on_its_requested_route() {
             ProviderRole::Primary,
             &routes.primary[0],
             &routes.primary[1],
+        ),
+    });
+    let switched_again = segment.commit(Event::ProviderFallbackUsed {
+        run_id: segment.run_id,
+        agent_run_id: primary,
+        fallback: switch(
+            ProviderRole::Primary,
+            &routes.primary[1],
+            &routes.primary[2],
         ),
     });
     let recorded = segment.commit(Event::ProviderCallRecorded {
@@ -1009,6 +1019,17 @@ fn fallback_switches_mark_the_run_and_keep_each_call_on_its_requested_route() {
         goal_id: segment.goal_id,
         run_id: segment.run_id,
         covered_tool_count: 1,
+        record: record.clone(),
+    });
+    segment.commit(Event::GoalCompactionCallReserved {
+        goal_id: segment.goal_id,
+        run_id: segment.run_id,
+        active_ceiling_ms: 1,
+    });
+    segment.commit(Event::GoalContextCompacted {
+        goal_id: segment.goal_id,
+        run_id: segment.run_id,
+        covered_tool_count: 2,
         record,
     });
     segment.finish_agent(primary, AgentDisposition::Finished);
@@ -1033,23 +1054,115 @@ fn fallback_switches_mark_the_run_and_keep_each_call_on_its_requested_route() {
         "the logical call keeps the route it requested"
     );
     assert!(
-        routed("chat arany.provider", "anthropic", "primary-b"),
+        routed("chat arany.provider", "openai", "primary-c"),
         "the agent's next call follows the committed switch"
     );
     assert!(routed("chat arany.compaction", "openai", "compact-a"));
+    assert!(routed("chat arany.compaction", "anthropic", "compact-b"));
+    assert_eq!(
+        spans
+            .iter()
+            .filter(|span| span.name == "chat arany.compaction")
+            .count(),
+        2
+    );
     let run = spans
         .iter()
         .find(|span| span.name == "invoke_workflow arany.run")
         .expect("Run span");
-    let fallback = run
-        .events
+    for sequence in [switched, switched_again] {
+        let fallback = run
+            .events
+            .iter()
+            .find(|event| event.timestamp == committed_at(sequence))
+            .expect("fallback marker");
+        assert!(fallback.attributes.iter().any(|attribute| {
+            attribute.key.as_str() == "arany.event.kind"
+                && attribute.value == "ProviderFallbackUsed".into()
+        }));
+    }
+}
+
+#[test]
+fn a_child_fallback_switch_keeps_other_agents_on_their_requested_routes() {
+    let (telemetry, exporter) = in_memory();
+    let mut routes = child_routes();
+    routes.child.push(identity("openai", "child-fallback"));
+    let mut segment = Segment::routed(&telemetry, unit_context(), Some(routes.clone()));
+    let primary = segment.spawn(AgentRole::Primary);
+    let child = segment.spawn(AgentRole::Child);
+    let sibling = segment.spawn(AgentRole::Child);
+    segment.commit(Event::GoalProviderCallReserved {
+        goal_id: segment.goal_id,
+        run_id: segment.run_id,
+        agent_run_id: child,
+        active_ceiling_ms: 1,
+    });
+    segment.commit(Event::ProviderFallbackUsed {
+        run_id: segment.run_id,
+        agent_run_id: child,
+        fallback: crate::provider::ProviderFallback {
+            role: ProviderRole::Child,
+            call_index: 0,
+            failure: ProviderCallDisposition::Unavailable,
+            from: routes.child[0].clone(),
+            to: routes.child[1].clone(),
+        },
+    });
+    segment.commit(Event::ProviderCallRecorded {
+        run_id: segment.run_id,
+        agent_run_id: child,
+        record: provider_record(
+            AgentPhase::ChildWork,
+            ProviderCallDisposition::ToolRequested,
+            (None, None),
+        ),
+    });
+    let (child_call, _) = segment.call(
+        child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        (None, None),
+    );
+    let (sibling_call, _) = segment.call(
+        sibling,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        (None, None),
+    );
+    let (primary_call, _) = segment.call(
+        primary,
+        AgentPhase::RootSynthesis,
+        ProviderCallDisposition::Finished,
+        (None, None),
+    );
+    for actor in [child, sibling, primary] {
+        segment.finish_agent(actor, AgentDisposition::Finished);
+    }
+    segment.finish(RunDisposition::Finished, None);
+    let spans = finished_spans(&telemetry, &exporter);
+    let providers = spans
         .iter()
-        .find(|event| event.timestamp == committed_at(switched))
-        .expect("fallback marker");
-    assert!(fallback.attributes.iter().any(|attribute| {
-        attribute.key.as_str() == "arany.event.kind"
-            && attribute.value == "ProviderFallbackUsed".into()
-    }));
+        .filter(|span| span.name == "chat arany.provider")
+        .collect::<Vec<_>>();
+    assert_eq!(providers.len(), 4);
+    for (sequence, profile, model) in [
+        (child_call, "openai", "child-fallback"),
+        (sibling_call, "anthropic", "child-model"),
+        (primary_call, "other", "model-1"),
+    ] {
+        let span = providers
+            .iter()
+            .find(|span| span.start_time == committed_at(sequence))
+            .expect("agent call span");
+        assert!(has_attribute(span, "gen_ai.provider.name", profile.into()));
+        assert!(has_attribute(span, "gen_ai.request.model", model.into()));
+    }
+    assert!(has_attribute(
+        providers[0],
+        "gen_ai.request.model",
+        "child-model".into()
+    ));
 }
 
 fn goal_view() -> GoalView {
@@ -1248,6 +1361,166 @@ fn compaction_has_its_own_operation_and_committed_receipt() {
     ));
     assert_eq!(operation.events.len(), 1);
     assert_eq!(operation.events[0].name, "arany.event.committed");
+}
+
+struct CompactionRouteProvider {
+    identity: ProviderIdentity,
+    calls: std::sync::Mutex<Vec<String>>,
+    responses: std::sync::Mutex<
+        std::collections::VecDeque<Result<crate::provider::CompactionResponse, ProviderError>>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl Provider for CompactionRouteProvider {
+    fn identity(&self) -> &ProviderIdentity {
+        &self.identity
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        self.calls.lock().expect("calls").push(request.model);
+        Ok(ProviderResponse {
+            turn: crate::provider::ProviderTurn::scripted(),
+            outcome: ProviderOutcome::Finish(Finish {
+                summary: "done".into(),
+                result: "done".into(),
+            }),
+            response_id: None,
+            usage: crate::provider::Usage::default(),
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(
+        &self,
+        request: crate::provider::CompactionRequest,
+    ) -> Result<crate::provider::CompactionResponse, ProviderError> {
+        self.calls.lock().expect("calls").push(request.model);
+        self.responses
+            .lock()
+            .expect("responses")
+            .pop_front()
+            .expect("scripted compaction")
+    }
+}
+
+#[tokio::test]
+async fn session_compaction_span_uses_the_previously_switched_route() {
+    let temp = tempfile::tempdir().expect("private trace root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("Workspace");
+    let (telemetry, exporter) = in_memory();
+    let first = Arc::new(CompactionRouteProvider {
+        identity: identity("openai", "compact-a"),
+        calls: Default::default(),
+        responses: std::sync::Mutex::new([Err(ProviderError::RemoteHttp(503))].into()),
+    });
+    let second = Arc::new(CompactionRouteProvider {
+        identity: identity("anthropic", "compact-b"),
+        calls: Default::default(),
+        responses: std::sync::Mutex::new(
+            [
+                Err(ProviderError::Rejected),
+                Ok(crate::provider::CompactionResponse {
+                    summary: "summary".into(),
+                    response_id: None,
+                    usage: crate::provider::Usage::default(),
+                    wire_provenance: None,
+                }),
+            ]
+            .into(),
+        ),
+    });
+    let mut providers = crate::provider::AdmittedProviders::single(first.clone());
+    providers.compaction.push(second.clone());
+    let state = temp.path().join("state");
+    let engine = Engine::open(
+        StateRoot::admit(&state).expect("private State"),
+        EngineConfig {
+            telemetry: telemetry.clone(),
+            ..Default::default()
+        },
+    )
+    .expect("Engine");
+    let outcome = engine
+        .submit(
+            providers.clone(),
+            RunRequest {
+                session_id: None,
+                title: None,
+                objective: "task".into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal: crate::engine::GoalRequest::default(),
+            },
+            RunControls::default(),
+        )
+        .expect("submission")
+        .await
+        .expect("Run")
+        .run;
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    let failed = engine
+        .compact_session(&providers, outcome.session_id, workspace.clone())
+        .await
+        .expect("failed compaction receipt");
+    assert!(matches!(failed.status, CompactionStatus::Failed { .. }));
+    let succeeded = engine
+        .compact_session(&providers, outcome.session_id, workspace)
+        .await
+        .expect("successful compaction receipt");
+    assert!(matches!(
+        succeeded.status,
+        CompactionStatus::Succeeded { .. }
+    ));
+    assert_eq!(failed.model, "compact-b");
+    assert_eq!(succeeded.model, "compact-b");
+    engine.close().await.expect("Engine close");
+    assert_eq!(
+        *first.calls.lock().expect("first calls"),
+        ["compact-a", "compact-a"]
+    );
+    assert_eq!(
+        *second.calls.lock().expect("second calls"),
+        ["compact-b", "compact-b"]
+    );
+    assert!(first.responses.lock().expect("first responses").is_empty());
+    assert!(
+        second
+            .responses
+            .lock()
+            .expect("second responses")
+            .is_empty()
+    );
+    let store = crate::store::Store::open_read_only(
+        StateRoot::open_existing(&state).expect("existing State"),
+    )
+    .expect("read-only Store");
+    let events = store
+        .load_session(outcome.session_id)
+        .await
+        .expect("committed Events");
+    let view = crate::session::SessionView::replay(outcome.session_id, &events)
+        .expect("strict replay")
+        .expect("Session");
+    assert_eq!(view.compactions.len(), 2);
+    assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
+    store.close().await.expect("Store close");
+    let spans = finished_spans(&telemetry, &exporter);
+    let compactions = spans
+        .iter()
+        .filter(|span| span.name == "chat arany.compaction")
+        .collect::<Vec<_>>();
+    assert_eq!(compactions.len(), 2);
+    for (span, profile, model) in [
+        (compactions[0], "openai", "compact-a"),
+        (compactions[1], "anthropic", "compact-b"),
+    ] {
+        assert!(has_attribute(span, "gen_ai.provider.name", profile.into()));
+        assert!(has_attribute(span, "gen_ai.request.model", model.into()));
+    }
 }
 
 #[test]

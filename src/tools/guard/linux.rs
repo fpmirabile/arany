@@ -588,14 +588,26 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
     panic!("native seed controller must be killed by its parent");
 }
 
+struct UnitFilesystem<'a> {
+    seed_path: &'a Path,
+    seed_dir: &'a cap_std::fs::Dir,
+    runtime_directories: Vec<PathBuf>,
+    mounts: Vec<(PathBuf, PathBuf)>,
+}
+
 fn unit_command(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
     unit_name: &str,
     runtime_path: &str,
-    (seed_path, seed_dir): (&Path, &cap_std::fs::Dir),
-    (runtime_directories, mounts): RuntimeMounts,
+    filesystem: UnitFilesystem<'_>,
 ) -> Command {
+    let UnitFilesystem {
+        seed_path,
+        seed_dir,
+        runtime_directories,
+        mounts,
+    } = filesystem;
     let memory_max = format!("--property=MemoryMax={}", intent.limits.memory_bytes);
     let tasks_max = format!("--property=TasksMax={}", intent.limits.max_processes);
     let cpu_quota = if intent.limits.resource_class == ToolResourceClass::Build {
@@ -815,14 +827,13 @@ pub(super) async fn execute_inner(
         kill: None,
         limits: Some(intent.limits.clone()),
     };
-    let mut command = unit_command(
-        runtime,
-        intent,
-        &unit.name,
-        &runtime_path,
-        (&seed_path, &seed_dir),
-        (runtime_directories, mounts),
-    );
+    let filesystem = UnitFilesystem {
+        seed_path: &seed_path,
+        seed_dir: &seed_dir,
+        runtime_directories,
+        mounts,
+    };
+    let mut command = unit_command(runtime, intent, &unit.name, &runtime_path, filesystem);
     let parent_namespaces = profile::Namespaces::read()?;
     permit.launching()?;
     let mut child = match command.spawn() {

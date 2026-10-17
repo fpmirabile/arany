@@ -113,30 +113,21 @@ impl Engine {
             CompactionInputError::TooLarge => EngineError::CompactionInputTooLarge,
         })?;
         let compiler_version = prepared.compiler_version;
+        let requested_identity = compaction_trace_identity(last_run, identity);
         let trace = self.config.telemetry.begin_compaction(
             session_id,
             covered_run_id,
-            TraceProvider::from_profile(&identity.profile),
+            TraceProvider::from_profile(&requested_identity.profile),
         );
-        let mut items = prepared.items;
-        if let Some(goal) = goal {
-            pin_goal_context(&mut items, goal)?;
-        }
-        let request = CompactionRequest {
-            session_id,
-            covered_run_id,
-            model: identity.model.clone(),
-            previous_summary: prepared.previous_summary,
-            items,
-            max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS.min(identity.limits.max_output_tokens),
-        };
-        let source_bytes = checked_source_bytes(&request)?;
+        let (request, source_bytes) =
+            compaction_request(prepared, session_id, covered_run_id, identity, goal)?;
         let active_started = Instant::now();
         let provider_deadline = self
             .reserve_compaction_call(
                 session_id,
                 covered_run_id,
-                (goal_id, active_reservation_ms),
+                goal_id,
+                active_reservation_ms,
                 active_started,
                 identity.limits.deadline,
             )
@@ -156,7 +147,7 @@ impl Engine {
         } else {
             None
         };
-        let provider_trace = trace.begin_provider(&identity.model);
+        let provider_trace = trace.begin_provider(&requested_identity.model);
         let response = tokio::time::timeout(provider_deadline, async {
             match &routing {
                 Some((routing, actor)) => routing.compact(request, *actor).await,
@@ -182,10 +173,18 @@ impl Engine {
         let provider_outcome = ProviderTraceOutcome::from(&status);
         provider_trace.finish_with_usage(provider_outcome, usage.input_tokens, usage.output_tokens);
         let record = compaction_record(
-            (covered_run_id, covered_sequence, source_digest),
-            (compiler_version, source_bytes),
+            CompactionSource {
+                covered_run_id,
+                covered_sequence,
+                source_digest,
+                compiler_version,
+                source_bytes,
+            },
             identity,
-            (status, response_id, usage, wire_provenance),
+            status,
+            response_id,
+            usage,
+            wire_provenance,
         );
         let committed = self
             .journal
@@ -220,7 +219,8 @@ impl Engine {
         &self,
         session_id: SessionId,
         covered_run_id: crate::session::RunId,
-        (goal_id, active_reservation_ms): (Option<crate::session::GoalId>, Option<u64>),
+        goal_id: Option<crate::session::GoalId>,
+        active_reservation_ms: Option<u64>,
         active_started: Instant,
         provider_limit: Duration,
     ) -> Result<Duration, EngineError> {
@@ -250,6 +250,44 @@ impl Engine {
     }
 }
 
+fn compaction_request(
+    prepared: PreparedCompaction,
+    session_id: SessionId,
+    covered_run_id: crate::session::RunId,
+    identity: &crate::provider::ProviderIdentity,
+    goal: Option<&crate::session::GoalView>,
+) -> Result<(CompactionRequest, u32), EngineError> {
+    let mut items = prepared.items;
+    if let Some(goal) = goal {
+        pin_goal_context(&mut items, goal)?;
+    }
+    let request = CompactionRequest {
+        session_id,
+        covered_run_id,
+        model: identity.model.clone(),
+        previous_summary: prepared.previous_summary,
+        items,
+        max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS.min(identity.limits.max_output_tokens),
+    };
+    let source_bytes = checked_source_bytes(&request)?;
+    Ok((request, source_bytes))
+}
+
+fn compaction_trace_identity<'a>(
+    run: &'a crate::session::RunView,
+    initial: &'a crate::provider::ProviderIdentity,
+) -> &'a crate::provider::ProviderIdentity {
+    run.primary()
+        .and_then(|agent| {
+            super::routing::switched_identity(
+                run,
+                agent.id,
+                crate::provider::ProviderRole::Compaction,
+            )
+        })
+        .unwrap_or(initial)
+}
+
 fn compaction_route_ids(
     actor: Option<crate::session::AgentRunId>,
     open_view: &crate::session::SessionView,
@@ -265,17 +303,29 @@ fn compaction_route_ids(
     Ok((actor, goal_id))
 }
 
+struct CompactionSource {
+    covered_run_id: crate::session::RunId,
+    covered_sequence: u64,
+    source_digest: [u8; 32],
+    compiler_version: u16,
+    source_bytes: u32,
+}
+
 fn compaction_record(
-    (covered_run_id, covered_sequence, source_digest): (crate::session::RunId, u64, [u8; 32]),
-    (compiler_version, source_bytes): (u16, u32),
+    source: CompactionSource,
     identity: &crate::provider::ProviderIdentity,
-    (status, response_id, usage, wire_provenance): (
-        CompactionStatus,
-        Option<String>,
-        Usage,
-        Option<crate::provider::ProviderWireProvenance>,
-    ),
+    status: CompactionStatus,
+    response_id: Option<String>,
+    usage: Usage,
+    wire_provenance: Option<crate::provider::ProviderWireProvenance>,
 ) -> CompactionRecord {
+    let CompactionSource {
+        covered_run_id,
+        covered_sequence,
+        source_digest,
+        compiler_version,
+        source_bytes,
+    } = source;
     CompactionRecord {
         covered_run_id,
         covered_sequence,

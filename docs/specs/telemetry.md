@@ -27,7 +27,7 @@ A Provider span of a child aborted by its parent closes as `cancelled`. `abandon
 ## Export bounds
 
 - One batch worker runs with fixed queue, batch, body, request and shutdown bounds. A full queue drops spans, and the Engine never waits on export.
-- The Journal tap retains 256 committed Events per subscriber. A subscriber that falls further behind receives `Resync` with the missed count and never slows an append; agent, Run and Goal spans that lost their closing Event export as `abandoned`, while a Provider or compaction span whose receipt was lost is never created.
+- The Journal tap retains 256 committed Events per subscriber. A subscriber that falls further behind receives `Resync` with the missed count and never slows an append; agent, Run and Goal spans that lost their closing Event export as `abandoned`, while a Provider or compaction span whose receipt was lost, or whose Run's `RunStarted` was lost, is never created; a span after a lost `ProviderFallbackUsed` names the earlier route.
 - Exporter retries are disabled. The local Collector owns buffering and backend retry.
 - Product-process OTLP evidence must collect every export request through process shutdown. One request is not necessarily a whole trace, because the batch worker can export before a Run ends.
 

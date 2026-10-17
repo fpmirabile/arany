@@ -341,11 +341,11 @@ struct AdmittedTurn {
 }
 
 struct RootInput<'a> {
-    tool_context: &'a mut Option<crate::tools::ToolContext>,
+    tool_context: Option<crate::tools::ToolContext>,
     inputs: &'a mut WorkspaceInputs,
-    images: &'a mut Vec<crate::provider::ProviderImage>,
-    history: &'a mut Vec<crate::provider::HistoryTurn>,
-    summary: &'a mut Option<String>,
+    images: Vec<crate::provider::ProviderImage>,
+    history: Vec<crate::provider::HistoryTurn>,
+    summary: Option<String>,
 }
 
 struct PreparedTurn {
@@ -359,6 +359,14 @@ struct PreparedTurn {
     context_started: SystemTime,
     context_ended: SystemTime,
     provider_concurrency: u8,
+}
+
+struct RunOpening {
+    run_id: RunId,
+    agent_run_id: AgentRunId,
+    objective: String,
+    images: Vec<ImageAttachment>,
+    config: RunConfig,
 }
 
 struct StartedRun<'a> {
@@ -1309,11 +1317,11 @@ impl Engine {
         } = admitted;
         let PreparedTurn {
             tools,
-            mut tool_context,
+            tool_context,
             mut inputs,
-            mut images,
-            mut history,
-            mut summary,
+            images,
+            history,
+            summary,
             config,
             context_started,
             context_ended,
@@ -1354,13 +1362,13 @@ impl Engine {
         let ended = |mut ended: tokio::sync::watch::Receiver<()>| async move {
             let _ = ended.changed().await;
         };
-        let follow_progress = follow_progress(
+        let follow_progress = progress_follower(
             publisher.as_ref(),
             progress_tap,
             ended(end.subscribe()),
             &ledger,
         );
-        let follow_trace = follow_trace(trace, trace_tap, ended(end.subscribe()), &ledger, goal.id);
+        let trace = trace_follower(trace, trace_tap, ended(end.subscribe()), &ledger, goal.id);
         let started = StartedRun {
             session_id,
             run_id,
@@ -1381,13 +1389,13 @@ impl Engine {
                 self.open_run(
                     &ledger,
                     session_id,
-                    (run_id, agent_run_id),
-                    Event::MessageAccepted {
+                    RunOpening {
                         run_id,
-                        text: objective.clone(),
+                        agent_run_id,
+                        objective: objective.clone(),
                         images: request.images,
+                        config,
                     },
-                    config,
                 )
                 .await?;
                 let provider_request = root_request(
@@ -1398,11 +1406,11 @@ impl Engine {
                     objective,
                     budget,
                     RootInput {
-                        tool_context: &mut tool_context,
+                        tool_context,
                         inputs: &mut inputs,
-                        images: &mut images,
-                        history: &mut history,
-                        summary: &mut summary,
+                        images,
+                        history,
+                        summary,
                     },
                 );
                 if let Some(steering) = &submission.steering {
@@ -1421,15 +1429,15 @@ impl Engine {
                         steering: submission.steering.clone(),
                     },
                     provider_request,
-                    (&ledger, publisher.as_ref()),
+                    &ledger,
+                    publisher.as_ref(),
                 )
                 .await?;
                 self.settle_turn(started, leases).await
             },
             end,
         );
-        let (turn, (), ()) = tokio::join!(segment, follow_progress, follow_trace);
-        turn
+        tokio::join!(segment, follow_progress, trace).0
     }
 
     async fn drive_turn(
@@ -1438,7 +1446,8 @@ impl Engine {
         goal_id: GoalId,
         controls: LoopControls<'_>,
         request: ProviderRequest,
-        (ledger, publisher): (&GoalLedger, Option<&ProgressPublisher>),
+        ledger: &GoalLedger,
+        publisher: Option<&ProgressPublisher>,
     ) -> Result<(), EngineError> {
         // Boxed: the Run loop's future is large and would overflow a small caller stack.
         Box::pin(
@@ -1521,10 +1530,20 @@ impl Engine {
         &self,
         ledger: &GoalLedger,
         session_id: SessionId,
-        (run_id, agent_run_id): (RunId, AgentRunId),
-        accepted: Event,
-        config: RunConfig,
+        opening: RunOpening,
     ) -> Result<(), EngineError> {
+        let RunOpening {
+            run_id,
+            agent_run_id,
+            objective,
+            images,
+            config,
+        } = opening;
+        let accepted = Event::MessageAccepted {
+            run_id,
+            text: objective,
+            images,
+        };
         ledger.append(&self.journal, session_id, accepted).await?;
         let started = Event::RunStarted {
             run_id,
@@ -1989,7 +2008,7 @@ fn root_request(
     budget: GoalBudget,
     input: RootInput<'_>,
 ) -> ProviderRequest {
-    let tools = input.tool_context.take();
+    let tools = input.tool_context;
     let role = if tools.is_some() {
         PromptRole::Primary
     } else {
@@ -2004,7 +2023,7 @@ fn root_request(
         model: identity.model.clone(),
         max_output_tokens: identity.limits.max_output_tokens,
         input: RunInput {
-            images: std::mem::take(input.images),
+            images: input.images,
             goal_budget: Some(budget),
             goal_plan_contract: goal.plan_contract.clone(),
             workspace_guidance: input
@@ -2016,8 +2035,8 @@ fn root_request(
                 .into_iter()
                 .map(|snapshot| snapshot.model_include())
                 .collect(),
-            history: std::mem::take(input.history),
-            context_summary: input.summary.take(),
+            history: input.history,
+            context_summary: input.summary,
             tools,
             ..RunInput::new(role, objective)
         },
@@ -2033,7 +2052,7 @@ async fn end_turn(
     turn
 }
 
-async fn follow_progress(
+async fn progress_follower(
     publisher: Option<&ProgressPublisher>,
     tap: Option<Subscription>,
     ended: impl Future<Output = ()>,
@@ -2044,7 +2063,7 @@ async fn follow_progress(
     }
 }
 
-async fn follow_trace(
+async fn trace_follower(
     trace: Option<crate::telemetry::RunTrace>,
     tap: Option<Subscription>,
     ended: impl Future<Output = ()>,

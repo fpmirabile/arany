@@ -21,6 +21,18 @@ pub(super) struct CallRouter<'a> {
     pub(super) publisher: Option<&'a ProgressPublisher>,
 }
 
+pub(super) fn switched_identity(
+    run: &crate::session::RunView,
+    actor: AgentRunId,
+    role: ProviderRole,
+) -> Option<&ProviderIdentity> {
+    run.provider_fallbacks
+        .iter()
+        .rev()
+        .find(|(id, fallback)| *id == actor && fallback.role == role)
+        .map(|(_, fallback)| &fallback.to)
+}
+
 impl CallRouter<'_> {
     pub(super) fn provider(
         &self,
@@ -29,15 +41,14 @@ impl CallRouter<'_> {
     ) -> Result<Arc<dyn Provider>, EngineError> {
         let chain = self.providers.get(role);
         let index = self.ledger.view(|view| {
-            match view.runs.last().and_then(|run| {
-                run.provider_fallbacks
+            match view
+                .runs
+                .last()
+                .and_then(|run| switched_identity(run, actor, role))
+            {
+                Some(identity) => chain
                     .iter()
-                    .rev()
-                    .find(|(id, fallback)| *id == actor && fallback.role == role)
-            }) {
-                Some((_, fallback)) => chain
-                    .iter()
-                    .position(|provider| provider.identity() == &fallback.to)
+                    .position(|provider| provider.identity() == identity)
                     .ok_or(EngineError::InvalidHistory),
                 None => Ok(0),
             }
