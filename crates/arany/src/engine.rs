@@ -294,7 +294,11 @@ impl<'a> IntoFuture for RunHandle<'a> {
 struct AdmittedSubmission {
     providers: crate::provider::AdmittedProviders,
     grant: ToolGrant,
-    tools: Option<(crate::tools::config::Config, PathBuf)>,
+    tools: Option<(
+        crate::tools::config::Config,
+        Option<crate::tools::PermissionSnapshot>,
+        PathBuf,
+    )>,
     approvals: Option<crate::tools::ToolApprovals>,
     steering: Option<RunSteering>,
 }
@@ -1167,11 +1171,17 @@ impl Engine {
             ToolGrant::None => None,
             ToolGrant::Configured => {
                 let guard = guard()?;
-                Some((crate::tools::config::Config::load(&self.state)?, guard))
+                let permissions = crate::tools::ToolRuntime::load_permissions(&self.state)?;
+                Some((
+                    crate::tools::config::Config::load(&self.state)?,
+                    permissions,
+                    guard,
+                ))
             }
             ToolGrant::Trusted(permissions) => {
                 let guard = guard()?;
-                Some((permissions.config(&request.workspace)?, guard))
+                let snapshot = crate::tools::ToolRuntime::load_permissions(&self.state)?;
+                Some((permissions.config(&request.workspace)?, snapshot, guard))
             }
         };
         let RunControls {
@@ -1668,7 +1678,7 @@ impl Engine {
             ToolGrant::Configured => submission
                 .tools
                 .as_ref()
-                .is_some_and(|(config, _)| config.write),
+                .is_some_and(|(config, _, _)| config.write),
             ToolGrant::Trusted(_) => true,
         };
         let provisional_workspace_lock =
@@ -1709,9 +1719,10 @@ impl Engine {
         let mut tools = submission
             .tools
             .as_ref()
-            .map(|(config, executable)| {
+            .map(|(config, permissions, executable)| {
                 crate::tools::ToolRuntime::admit(
                     config.clone(),
+                    permissions.clone(),
                     &request.workspace,
                     &self.state,
                     executable.clone(),

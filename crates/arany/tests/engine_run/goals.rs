@@ -1706,6 +1706,74 @@ async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
 }
 
 #[tokio::test]
+async fn autonomous_goal_pins_permissions_settings_at_submission() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let settings = state_path.join("permissions.json");
+    let write_settings = |bytes: &'static [u8]| {
+        let path = settings.clone();
+        move || {
+            std::fs::write(&path, bytes).expect("permissions settings");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .expect("permissions settings mode");
+        }
+    };
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    write_settings(br#"{"permissions":{"allow":["Read"]}}"#)();
+    let provider = ScriptedProvider::new(vec![
+        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        finish_with("first pass"),
+        crate::tool_outcome(facts_read(), None),
+        finish_with("verified"),
+    ])
+    .with_before_call(1, {
+        let facts = write_facts(&workspace, "v2");
+        let settings = write_settings(br#"{ "permissions": { "allow": ["Read"] } }"#);
+        move || {
+            facts();
+            settings();
+        }
+    });
+    let provider = Arc::new(provider);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        autonomous_input(&workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("autonomous Goal");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(goal.run_ids.len(), 2);
+    let digests: Vec<_> = view
+        .runs
+        .iter()
+        .filter(|run| goal.run_ids.contains(&run.id))
+        .map(|run| {
+            run.config
+                .as_ref()
+                .and_then(|config| config.tool_policy.as_ref())
+                .and_then(|policy| policy.permissions_digest)
+        })
+        .collect();
+    assert_eq!(digests.len(), 2);
+    assert!(digests[0].is_some());
+    assert_eq!(
+        digests[0], digests[1],
+        "the Goal loop pins one settings snapshot"
+    );
+}
+
+#[tokio::test]
 async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
