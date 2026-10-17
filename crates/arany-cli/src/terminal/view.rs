@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::io;
 use unicode_segmentation::UnicodeSegmentation;
@@ -132,6 +132,7 @@ pub(super) fn draw_permission_frame(
     }
     let height = full.height;
     let area = Rect::new(full.x + gutter, full.y, width, height);
+    frame.render_widget(Clear, full);
     let body_height = usize::from(height - 5);
     let pages = rows.len().div_ceil(body_height).max(1);
     let page = profile_rows
