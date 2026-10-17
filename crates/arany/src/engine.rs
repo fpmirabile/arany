@@ -1171,10 +1171,10 @@ impl Engine {
             ToolGrant::None => None,
             ToolGrant::Configured => {
                 let guard = guard()?;
-                let permissions = crate::tools::ToolRuntime::load_permissions(&self.state)?;
+                let snapshot = crate::tools::ToolRuntime::load_permissions(&self.state)?;
                 Some((
                     crate::tools::config::Config::load(&self.state)?,
-                    permissions,
+                    snapshot,
                     guard,
                 ))
             }
