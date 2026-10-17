@@ -911,17 +911,22 @@ impl RunLoop<'_> {
         intent: &EffectIntent,
         delegation_deadline: Option<Instant>,
     ) -> Result<bool, EngineError> {
-        let provider = self
-            .routing
-            .provider(crate::provider::ProviderRole::Review, intent.agent_run_id)?;
+        let mut model = String::new();
+        let mut max_output_tokens = 256;
+        self.routing.bind(
+            crate::provider::ProviderRole::Review,
+            intent.agent_run_id,
+            &mut model,
+            &mut max_output_tokens,
+        )?;
         let mut review = ProviderRequest {
             session_id: self.session_id,
             run_id: self.run_id,
             agent_run_id: intent.agent_run_id,
             phase: AgentPhase::ToolReview,
             collaboration: CollaborationPolicy::Single,
-            model: provider.identity().model.clone(),
-            max_output_tokens: 256.min(provider.identity().limits.max_output_tokens),
+            model,
+            max_output_tokens,
             input: RunInput {
                 goal_budget: Some(self.ledger().effective_budget()?),
                 goal_plan_contract: self.ledger().plan_contract()?,

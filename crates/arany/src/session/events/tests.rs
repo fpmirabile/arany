@@ -1160,18 +1160,18 @@ mod provider_call_tests {
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        3,
+                        current,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id
                     )
-                    .is_err()
+                    .is_ok()
                 );
                 invalid.as_object_mut().unwrap().remove("failure_reason");
                 assert!(
                     Event::decode(
                         "ProviderCallRecorded",
-                        3,
+                        current,
                         &invalid.to_string(),
                         run_id,
                         agent_run_id

@@ -713,7 +713,6 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     if length == 0 || length > lease.candidate_limit() {
         return Err(ToolError::Limit);
     }
-    // Drain the archive after staging fails so the worker's trailing marker remains aligned.
     let staged = drain_candidate(reader, length, lease.candidate_writer().ok()).await?;
     let Some(file) = staged else {
         return Ok(CacheCandidate::Failed);
