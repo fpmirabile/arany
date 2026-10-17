@@ -1,6 +1,7 @@
 use crate::provider::evidence::{
     EvidenceOp, EvidenceRecord, NativeEvidenceRecord, ProviderEvidenceRecord,
 };
+use crate::session::WorkspaceIdentity;
 use crate::session::{
     Event, EventEnvelope, ReplayError, RunId, SessionId, SessionListItem, SessionView,
     payload_version,
@@ -161,11 +162,11 @@ enum Request {
         reply: oneshot::Sender<Result<ResolvedSession, StoreError>>,
     },
     LatestSession {
-        workspace_identity: (u64, u64),
+        workspace_identity: WorkspaceIdentity,
         reply: oneshot::Sender<Result<Option<SessionId>, StoreError>>,
     },
     ListSessions {
-        workspace_identity: (u64, u64),
+        workspace_identity: WorkspaceIdentity,
         reply: oneshot::Sender<Result<Vec<SessionListItem>, StoreError>>,
     },
     Fork {
@@ -493,7 +494,7 @@ impl Store {
 
     pub(crate) async fn latest_session_id(
         &self,
-        workspace_identity: (u64, u64),
+        workspace_identity: WorkspaceIdentity,
     ) -> Result<Option<SessionId>, StoreError> {
         self.call(|reply| Request::LatestSession {
             workspace_identity,
@@ -504,7 +505,7 @@ impl Store {
 
     pub(crate) async fn list_sessions(
         &self,
-        workspace_identity: (u64, u64),
+        workspace_identity: WorkspaceIdentity,
     ) -> Result<Vec<SessionListItem>, StoreError> {
         self.call(|reply| Request::ListSessions {
             workspace_identity,

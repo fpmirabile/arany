@@ -7,6 +7,8 @@ use crate::terminal::{
     AttachedTerminal, Composer, ComposerEdit, ShutdownSignal, TerminalError, TerminalInput,
     TerminalNotice,
 };
+#[cfg(test)]
+use arany::WorkspaceIdentity;
 use arany::{
     CompactionFailure, CompactionRecord, CompactionStatus, ImageAttachment, RunCancellation,
     RunOutcome, RunProgress, RunRequest, RunSteering, SessionView, SteeringRefused,
@@ -1080,12 +1082,18 @@ mod tests {
         let events = [
             arany::Event::SessionStarted {
                 title: "Goals".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
             },
             arany::Event::GoalStarted {
                 goal_id: arany::GoalId::new(),
                 objective: "Ship the parser".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
                 budget: arany::GoalBudget::default(),
                 phase: arany::GoalPhase::Implementation,
                 autonomous: false,
@@ -1213,7 +1221,10 @@ mod goal_request_tests {
         let event = arany::Event::GoalStarted {
             goal_id: arany::GoalId::new(),
             objective: "Ship the parser".into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
             budget: arany::GoalBudget::default(),
             phase: arany::GoalPhase::Implementation,
             autonomous,
@@ -1221,7 +1232,10 @@ mod goal_request_tests {
         };
         let started = arany::Event::SessionStarted {
             title: "Goals".into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
         };
         let events = [started, event]
             .into_iter()

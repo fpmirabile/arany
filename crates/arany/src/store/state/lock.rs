@@ -2,6 +2,7 @@
 use super::nonblocking;
 use super::{StateRoot, StoreError};
 use crate::session::SessionId;
+use crate::session::WorkspaceIdentity;
 #[cfg(unix)]
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 #[cfg(unix)]
@@ -165,7 +166,7 @@ impl StateRoot {
 
     pub(crate) fn lock_workspace(
         &self,
-        identity: (u64, u64),
+        identity: WorkspaceIdentity,
     ) -> Result<WorkspaceRunLock, StoreError> {
         #[cfg(unix)]
         {
@@ -182,7 +183,7 @@ impl StateRoot {
     pub(crate) fn lock_workspace_in(
         &self,
         account_root: &Path,
-        identity: (u64, u64),
+        identity: WorkspaceIdentity,
     ) -> Result<WorkspaceRunLock, StoreError> {
         lock_workspace(account_root, identity)
     }
@@ -249,11 +250,11 @@ fn lock_session_with_limit(
 #[cfg(unix)]
 fn lock_workspace(
     account_root: &Path,
-    identity: (u64, u64),
+    identity: WorkspaceIdentity,
 ) -> Result<WorkspaceRunLock, StoreError> {
     use rustix::fs::{FlockOperation, flock};
 
-    if identity.1 == 0 {
+    if identity.inode == 0 {
         return Err(StoreError::InvalidStateDirectory);
     }
     let path = account_root.join("guard/workspace-locks");
@@ -261,7 +262,7 @@ fn lock_workspace(
         .map_err(|_| StoreError::InvalidStateDirectory)?;
     let dir = private.dir;
     let _namespace = lock_named_namespace(&dir, WORKSPACE_LOCK_NAMESPACE_FILE)?;
-    let name = format!("workspace-{}-{}.lock", identity.0, identity.1);
+    let name = format!("workspace-{}-{}.lock", identity.device, identity.inode);
     let (file, _) = open_private_lock_file(&dir, &name, || {
         check_named_lock_file_quota(&dir, "workspace-", MAX_WORKSPACE_LOCK_FILES)
     })?;
@@ -417,7 +418,10 @@ mod tests {
         let first = StateRoot::admit(&temp.path().join("state-a")).expect("first StateRoot");
         let second = StateRoot::admit(&temp.path().join("state-b")).expect("second StateRoot");
         let account_root = temp.path().join("account");
-        let identity = (7, 11);
+        let identity = WorkspaceIdentity {
+            device: 7,
+            inode: 11,
+        };
 
         let writer = first
             .lock_workspace_in(&account_root, identity)

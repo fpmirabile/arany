@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::WorkspaceIdentity;
 use crate::session::{
     AgentRole, AgentRunId, AgentStatus, AgentView, GoalBudget, GoalId, GoalPhase, GoalStatus,
     GoalView, RunId, RunStatus, SessionId, ToolView,
@@ -145,7 +146,10 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     let goal = GoalView {
         id: goal_id,
         objective: "Report bounded evidence".into(),
-        workspace_identity: (1, 2),
+        workspace_identity: WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        },
         budget: GoalBudget::default(),
         phase: GoalPhase::Implementation,
         autonomous: false,
@@ -177,7 +181,10 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         title: "Report bounded evidence".into(),
         title_is_explicit: false,
         inherited_title: None,
-        workspace_identity: Some((1, 2)),
+        workspace_identity: Some(WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        }),
         defaults: crate::session::SessionDefaults::default(),
         created_sequence: 0,
         last_sequence: 2,

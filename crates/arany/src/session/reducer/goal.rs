@@ -3,6 +3,7 @@ use super::{
     current_run, is_integration_tool, pending_tool_requests,
 };
 use crate::provider::AgentPhase;
+use crate::session::WorkspaceIdentity;
 use crate::session::events::{
     AgentRole, AgentRunId, CompactionStatus, Event, GoalBudget, GoalId, GoalPhase,
     GoalPlanContract, GoalReport, GoalStatus, ProviderCallDisposition, ReplayError, RunId,
@@ -19,7 +20,7 @@ impl SessionView {
         &mut self,
         goal_id: &GoalId,
         objective: &str,
-        workspace_identity: &(u64, u64),
+        workspace_identity: WorkspaceIdentity,
         budget: &GoalBudget,
         resource_settings: &crate::tools::ToolResourceSettings,
         phase: &GoalPhase,
@@ -29,7 +30,7 @@ impl SessionView {
         if self.goals.iter().any(|goal| goal.id == *goal_id)
             || self
                 .workspace_identity
-                .is_some_and(|identity| identity != *workspace_identity)
+                .is_some_and(|identity| identity != workspace_identity)
         {
             return Err(ReplayError::InvalidTransition);
         }
@@ -41,11 +42,11 @@ impl SessionView {
         {
             seal_unfinished_goal(goal, &mut self.runs);
         }
-        self.workspace_identity = Some(*workspace_identity);
+        self.workspace_identity = Some(workspace_identity);
         self.goals.push(GoalView {
             id: *goal_id,
             objective: objective.to_owned(),
-            workspace_identity: *workspace_identity,
+            workspace_identity,
             budget: *budget,
             resource_settings: *resource_settings,
             phase: *phase,
@@ -528,7 +529,7 @@ pub(super) fn apply(
             current.start_goal(
                 goal_id,
                 objective,
-                workspace_identity,
+                *workspace_identity,
                 budget,
                 resource_settings,
                 phase,

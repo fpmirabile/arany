@@ -1,3 +1,5 @@
+#[cfg(test)]
+use arany::WorkspaceIdentity;
 use arany::{
     AgentStatus, Event, EventEnvelope, ProviderCallDisposition, ProviderCallRecord, RunStatus,
     RunView, SessionView,
@@ -714,7 +716,10 @@ mod exec_jsonl_tests {
         Event::GoalStarted {
             goal_id,
             objective: objective.into(),
-            workspace_identity: (1, 2),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
             budget: GoalBudget::default(),
             phase: GoalPhase::Implementation,
             autonomous: false,
@@ -1148,12 +1153,18 @@ mod goal_status_tests {
         let events = [
             Event::SessionStarted {
                 title: "Goals".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
             },
             Event::GoalStarted {
                 goal_id: GoalId::new(),
                 objective: "Ship the parser".into(),
-                workspace_identity: (1, 2),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
                 budget: GoalBudget::default(),
                 phase: GoalPhase::Implementation,
                 autonomous,

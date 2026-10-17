@@ -5,6 +5,7 @@ use super::events::{
     SessionDefaults, SessionId,
 };
 use crate::provider::AgentPhase;
+use crate::session::WorkspaceIdentity;
 
 mod agent;
 mod goal;
@@ -44,7 +45,7 @@ pub enum AgentStatus {
 pub struct GoalView {
     pub id: GoalId,
     pub objective: String,
-    pub workspace_identity: (u64, u64),
+    pub workspace_identity: WorkspaceIdentity,
     pub budget: GoalBudget,
     pub resource_settings: crate::tools::ToolResourceSettings,
     pub phase: GoalPhase,
@@ -384,7 +385,7 @@ pub struct SessionView {
     pub title: String,
     pub title_is_explicit: bool,
     pub inherited_title: Option<String>,
-    pub workspace_identity: Option<(u64, u64)>,
+    pub workspace_identity: Option<WorkspaceIdentity>,
     pub defaults: SessionDefaults,
     pub created_sequence: u64,
     pub last_sequence: u64,

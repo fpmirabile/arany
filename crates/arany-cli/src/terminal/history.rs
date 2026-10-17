@@ -1,6 +1,8 @@
 use crate::presentation::{
     escape_terminal, escaped_terminal_width, image_message_text, safe_truncate,
 };
+#[cfg(test)]
+use arany::WorkspaceIdentity;
 use arany::{RunId, RunView, SessionId, SessionView};
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -1708,7 +1710,10 @@ mod tests {
                     current_session_id,
                     Event::SessionStarted {
                         title: "Synthetic history".into(),
-                        workspace_identity: (1, 1),
+                        workspace_identity: WorkspaceIdentity {
+                            device: 1,
+                            inode: 1,
+                        },
                     },
                 )
                 .await

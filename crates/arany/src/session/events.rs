@@ -30,6 +30,12 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 use uuid::{Uuid, Version};
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct WorkspaceIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
 fn parse_v7(value: &str) -> Result<Uuid, &'static str> {
     let id = Uuid::parse_str(value).map_err(|_| "invalid ID")?;
     if id.get_version() != Some(Version::SortRand) {
@@ -188,7 +194,7 @@ impl FromStr for AgentRunId {
 pub enum Event {
     SessionStarted {
         title: String,
-        workspace_identity: (u64, u64),
+        workspace_identity: WorkspaceIdentity,
     },
     SessionDefaultChanged {
         defaults: SessionDefaults,
@@ -211,7 +217,7 @@ pub enum Event {
     GoalStarted {
         goal_id: GoalId,
         objective: String,
-        workspace_identity: (u64, u64),
+        workspace_identity: WorkspaceIdentity,
         budget: GoalBudget,
         phase: GoalPhase,
         /// Engine iterates Runs on the pinned objective until a Goal stop condition.
@@ -610,7 +616,11 @@ impl Event {
         match self {
             Self::SessionStarted {
                 title,
-                workspace_identity: (workspace_device, workspace_inode),
+                workspace_identity:
+                    WorkspaceIdentity {
+                        device: workspace_device,
+                        inode: workspace_inode,
+                    },
             } => serialize(&StartedPayload {
                 title: title.clone(),
                 workspace_device: *workspace_device,
@@ -640,7 +650,11 @@ impl Event {
             Self::GoalStarted {
                 goal_id,
                 objective,
-                workspace_identity: (workspace_device, workspace_inode),
+                workspace_identity:
+                    WorkspaceIdentity {
+                        device: workspace_device,
+                        inode: workspace_inode,
+                    },
                 budget,
                 phase,
                 autonomous,
@@ -780,7 +794,10 @@ impl Event {
                 let data: StartedPayload = parse(payload)?;
                 Self::SessionStarted {
                     title: data.title,
-                    workspace_identity: (data.workspace_device, data.workspace_inode),
+                    workspace_identity: WorkspaceIdentity {
+                        device: data.workspace_device,
+                        inode: data.workspace_inode,
+                    },
                 }
             }
             "SessionDefaultChanged" if run_id.is_none() && agent_run_id.is_none() => {
@@ -815,7 +832,10 @@ impl Event {
                 Self::GoalStarted {
                     goal_id: data.goal_id,
                     objective: data.objective,
-                    workspace_identity: (data.workspace_device, data.workspace_inode),
+                    workspace_identity: WorkspaceIdentity {
+                        device: data.workspace_device,
+                        inode: data.workspace_inode,
+                    },
                     budget: data.budget,
                     phase: data.phase,
                     autonomous: data.autonomous,

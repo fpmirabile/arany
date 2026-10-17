@@ -2,6 +2,7 @@ use super::catalog::{call_schemas, catalog_call_schemas, plan_contract_property}
 use super::config::Config;
 use super::skills::parse_json;
 use super::types::*;
+use crate::session::WorkspaceIdentity;
 use serde_json::{Value, json};
 
 fn config_value() -> Value {
@@ -41,7 +42,10 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         config,
         workspace: PathBuf::new(),
         reads: None,
-        workspace_identity: (1, 2),
+        workspace_identity: WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        },
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
         queue_progress: None,
@@ -1944,7 +1948,10 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         config,
         workspace: PathBuf::new(),
         reads: None,
-        workspace_identity: (1, 2),
+        workspace_identity: WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        },
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
         queue_progress: None,
@@ -2047,7 +2054,10 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         config: serde_json::from_value(value).unwrap(),
         workspace: PathBuf::new(),
         reads: None,
-        workspace_identity: (1, 2),
+        workspace_identity: WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        },
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
         queue_progress: None,
@@ -2146,7 +2156,7 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
     assert!(matches!(
         observation.attestation,
         Some(Attestation::InProcess { workspace_device, workspace_inode, .. })
-            if (workspace_device, workspace_inode) == runtime.workspace_identity
+            if WorkspaceIdentity { device: workspace_device, inode: workspace_inode } == runtime.workspace_identity
     ));
     assert_eq!(
         serde_json::from_str::<Value>(&observation.output).unwrap()["text"],

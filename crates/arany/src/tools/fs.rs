@@ -2,6 +2,7 @@ use super::catalog::{nullable, string};
 use super::config::Config;
 use super::types::*;
 use super::{ToolError, ToolRuntime};
+use crate::session::WorkspaceIdentity;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 use serde_json::{Value, json};
@@ -93,7 +94,7 @@ struct Entry {
 }
 
 pub(super) struct CommandSnapshot {
-    root_identity: (u64, u64),
+    root_identity: WorkspaceIdentity,
     entries: BTreeMap<String, Entry>,
 }
 
@@ -266,12 +267,15 @@ pub(crate) fn open_directory(path: &Path) -> Result<Dir, ToolError> {
     crate::private_fs::open_workspace_directory(path).map_err(|_| ToolError::Path)
 }
 
-pub(crate) fn identity(dir: &Dir) -> Result<(u64, u64), ToolError> {
+pub(crate) fn identity(dir: &Dir) -> Result<WorkspaceIdentity, ToolError> {
     #[cfg(unix)]
     {
         use cap_std::fs::MetadataExt;
         let meta = dir.dir_metadata().map_err(|_| ToolError::Path)?;
-        Ok((meta.dev(), meta.ino()))
+        Ok(WorkspaceIdentity {
+            device: meta.dev(),
+            inode: meta.ino(),
+        })
     }
     #[cfg(not(unix))]
     {
@@ -326,7 +330,7 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
     {
         use rustix::fs::{Mode, OFlags, openat};
         use std::os::unix::fs::MetadataExt;
-        let device = identity(root)?.0;
+        let device = identity(root)?.device;
         let mut file = root
             .try_clone()
             .map_err(|_| ToolError::Path)?
@@ -769,7 +773,9 @@ fn entries(root: &Dir, folder: &str, prefix: &str) -> Result<Vec<String>, ToolEr
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
-            if metadata.dev() != identity(root)?.0 || metadata.is_file() && metadata.nlink() != 1 {
+            if metadata.dev() != identity(root)?.device
+                || metadata.is_file() && metadata.nlink() != 1
+            {
                 continue;
             }
         }
@@ -829,7 +835,9 @@ fn find_entries(
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
-            if metadata.dev() != identity(root)?.0 || metadata.is_file() && metadata.nlink() != 1 {
+            if metadata.dev() != identity(root)?.device
+                || metadata.is_file() && metadata.nlink() != 1
+            {
                 continue;
             }
         }
@@ -1143,7 +1151,7 @@ fn change_parent(root: &Dir, path: &str) -> Result<ChangeParent, ToolError> {
 
 fn check_change_directory(root: &Dir, directory: &Dir) -> Result<(), ToolError> {
     let metadata = directory.dir_metadata().map_err(|_| ToolError::Path)?;
-    if !metadata.is_dir() || identity(directory)?.0 != identity(root)?.0 {
+    if !metadata.is_dir() || identity(directory)?.device != identity(root)?.device {
         return Err(ToolError::Path);
     }
     #[cfg(unix)]

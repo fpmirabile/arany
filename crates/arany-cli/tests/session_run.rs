@@ -1,3 +1,4 @@
+use arany::WorkspaceIdentity;
 use arany::{
     AgentRole, AgentRunId, AgentStatus, CollaborationPolicy, ContextUsage, EngineError, Event,
     RunConfig, RunId, RunStatus, SessionDefaults, SessionId, SessionView, StateRoot, Store,
@@ -1293,7 +1294,7 @@ fn exact_resume_and_rename_survive_file_backed_reopen() {
         assert_eq!(events.len(), 2);
         assert!(matches!(events[1].event, Event::SessionRenamed { .. }));
         store.close().await.expect("store shutdown");
-        let (device, inode) = view.workspace_identity.expect("bound Workspace");
+        let WorkspaceIdentity { device, inode } = view.workspace_identity.expect("bound Workspace");
         let shown = Command::new(env!("CARGO_BIN_EXE_arany"))
             .env_clear()
             .current_dir(temp.path())
@@ -1529,7 +1530,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .expect("resolved view")
             .expect("Session");
         assert_eq!(view.defaults, defaults);
-        let (workspace_device, workspace_inode) =
+        let WorkspaceIdentity { device: workspace_device, inode: workspace_inode } =
             view.workspace_identity.expect("pinned Workspace identity");
         store.close().await.expect("closed read-only store");
         let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
@@ -1565,7 +1566,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
                 Event::GoalStarted {
                     goal_id: pending_goal_id,
                     objective: "pending objective".into(),
-                    workspace_identity: (workspace_device, workspace_inode),
+                    workspace_identity: WorkspaceIdentity { device: workspace_device, inode: workspace_inode },
                     budget: arany::GoalBudget::default(),
                     phase: arany::GoalPhase::Research,
                     autonomous: false,
@@ -1716,7 +1717,7 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
                 id,
                 Event::SessionStarted {
                     title: "First Session".into(),
-                    workspace_identity: (1, 1),
+                    workspace_identity: WorkspaceIdentity { device: 1, inode: 1 },
                 },
             )
             .await
@@ -1738,7 +1739,7 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
                     id,
                     Event::SessionStarted {
                         title: "Invalid duplicate".into(),
-                        workspace_identity: (1, 1),
+                        workspace_identity: WorkspaceIdentity { device: 1, inode: 1 },
                     },
                 )
                 .await,
@@ -1755,7 +1756,7 @@ fn session_journal_survives_reopen_and_rejects_invalid_history() {
             .expect("Session exists");
         assert_eq!(view.title, hostile_title);
         assert_eq!(view.last_sequence, 2);
-        assert_eq!(view.workspace_identity, Some((1, 1)));
+        assert_eq!(view.workspace_identity, Some(WorkspaceIdentity { device: 1, inode: 1 }));
         store.close().await.expect("closed reopened store");
 
         let text = Command::new(env!("CARGO_BIN_EXE_arany"))
@@ -2206,8 +2207,8 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 policy: CollaborationPolicy::Single,
                 output_token_cap: 4096,
                 provider_concurrency: 1,
-                workspace_device: identity.0,
-                workspace_inode: identity.1,
+                workspace_device: identity.device,
+                workspace_inode: identity.inode,
                 instruction_digest: None,
                 include_digests: Vec::new(),
                 history_run_ids: Vec::new(),

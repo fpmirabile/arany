@@ -170,6 +170,7 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::WorkspaceIdentity;
     use crate::store::StateRoot;
 
     #[tokio::test]
@@ -184,7 +185,10 @@ mod tests {
                 session_id,
                 Event::SessionStarted {
                     title: "Tap".into(),
-                    workspace_identity: (1, 2),
+                    workspace_identity: WorkspaceIdentity {
+                        device: 1,
+                        inode: 2,
+                    },
                 },
             )
             .await

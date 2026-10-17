@@ -4,6 +4,7 @@ use crate::journal::{Journal, Subscription};
 use crate::provider::{
     AgentPhase, ImageAttachment, PromptRole, Provider, ProviderRequest, RunInput,
 };
+use crate::session::WorkspaceIdentity;
 use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
     AgentRole, AgentRunId, CollaborationPolicy, CompiledContext, Event, GoalBudget, GoalId,
@@ -335,7 +336,7 @@ impl Drop for OperationSlot<'_> {
 
 struct AdmittedTurn {
     session_id: SessionId,
-    workspace_identity: (u64, u64),
+    workspace_identity: WorkspaceIdentity,
     session_lock: SessionRunLock,
     _lineage_locks: Vec<SessionRunLock>,
     history: Option<crate::session::SessionView>,
@@ -379,7 +380,7 @@ struct StartedRun<'a> {
     run_id: RunId,
     goal: &'a GoalAdmission,
     finish_after_run: bool,
-    workspace_identity: (u64, u64),
+    workspace_identity: WorkspaceIdentity,
 }
 
 struct RunTurn {
@@ -620,7 +621,7 @@ pub struct Engine {
     busy: AtomicBool,
 }
 
-type WorkspaceLeases = HashMap<(u64, u64), GoalWorkspaceLock>;
+type WorkspaceLeases = HashMap<WorkspaceIdentity, GoalWorkspaceLock>;
 
 struct GoalWorkspaceLock {
     goal_id: GoalId,
@@ -660,7 +661,7 @@ impl Engine {
         &self,
         leases: &WorkspaceLeases,
         goal_id: GoalId,
-        identity: (u64, u64),
+        identity: WorkspaceIdentity,
     ) -> Result<Option<WorkspaceRunLock>, EngineError> {
         if let Some(held) = leases.get(&identity) {
             return if held.goal_id == goal_id {
@@ -682,7 +683,7 @@ impl Engine {
     fn retain_goal_workspace(
         leases: &mut WorkspaceLeases,
         goal_id: GoalId,
-        identity: (u64, u64),
+        identity: WorkspaceIdentity,
         lock: Option<WorkspaceRunLock>,
     ) {
         if let Some(lock) = lock {
@@ -696,7 +697,11 @@ impl Engine {
         }
     }
 
-    fn release_goal_workspace(leases: &mut WorkspaceLeases, goal_id: GoalId, identity: (u64, u64)) {
+    fn release_goal_workspace(
+        leases: &mut WorkspaceLeases,
+        goal_id: GoalId,
+        identity: WorkspaceIdentity,
+    ) {
         if leases
             .get(&identity)
             .is_some_and(|held| held.goal_id == goal_id)
@@ -1271,7 +1276,7 @@ impl Engine {
         session_lock: &mut SessionRunLock,
         session_id: SessionId,
         title: Option<String>,
-        workspace_identity: (u64, u64),
+        workspace_identity: WorkspaceIdentity,
     ) -> Result<(), EngineError> {
         self.journal
             .append(
@@ -1324,7 +1329,7 @@ impl Engine {
             None => Vec::new(),
         };
         if let Some(view) = &history {
-            ensure_session_workspace(view, workspace_identity.0, workspace_identity.1)?;
+            ensure_session_workspace(view, workspace_identity)?;
         }
         let goal = resolve_goal_admission(request, history.as_ref(), continuation)?;
         let objective = if request.objective.trim().is_empty() && request.goal.id.is_some() {
@@ -1429,12 +1434,12 @@ impl Engine {
             )?,
             None => WorkspaceInputs::load(&request.workspace, &self.state, &request.include_paths)?,
         };
-        let (workspace_device, workspace_inode) = inputs.root_identity()?;
-        if (workspace_device, workspace_inode) != workspace_identity {
+        let root_identity = inputs.root_identity()?;
+        if root_identity != workspace_identity {
             return Err(crate::tools::ToolError::ChangedInput.into());
         }
         if let Some(view) = &history {
-            ensure_session_workspace(view, workspace_device, workspace_inode)?;
+            ensure_session_workspace(view, root_identity)?;
         }
         let context_started = SystemTime::now();
         let steering_reserved = if submission.steering.is_some() {
@@ -1499,8 +1504,8 @@ impl Engine {
             policy: request.policy,
             output_token_cap: identity.limits.max_output_tokens,
             provider_concurrency,
-            workspace_device,
-            workspace_inode,
+            workspace_device: root_identity.device,
+            workspace_inode: root_identity.inode,
             instruction_digest: inputs
                 .instructions
                 .as_ref()

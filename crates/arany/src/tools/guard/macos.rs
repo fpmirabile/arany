@@ -2,6 +2,7 @@ use super::{
     BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, TASK_BYTES_CAP, Task,
     bootstrap_failure, drain_stderr, parse_ready, read_capped, read_line_capped, read_observation,
 };
+use crate::session::WorkspaceIdentity;
 use crate::tools::Cancellation;
 use crate::tools::executable::EXECUTABLES;
 use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES, digest};
@@ -359,7 +360,10 @@ fn unit_root(task: &Task) -> Result<PathBuf, ToolError> {
     crate::private_fs::open_directory(&root, false).map_err(|_| ToolError::Path)?;
     crate::tools::fs::reject_overlap(&root, &task.workspace)?;
     if crate::tools::fs::identity(&crate::tools::fs::open_directory(&task.workspace)?)?
-        != (task.intent.workspace_device, task.intent.workspace_inode)
+        != (WorkspaceIdentity {
+            device: task.intent.workspace_device,
+            inode: task.intent.workspace_inode,
+        })
     {
         return Err(ToolError::ChangedInput);
     }
@@ -900,7 +904,10 @@ impl Task {
             config: self.config,
             workspace: self.workspace,
             reads: None,
-            workspace_identity: (self.intent.workspace_device, self.intent.workspace_inode),
+            workspace_identity: WorkspaceIdentity {
+                device: self.intent.workspace_device,
+                inode: self.intent.workspace_inode,
+            },
             guard_executable: self.guard_executable,
             enforcement_digest: self.intent.enforcement_digest,
             process_enforcement_digest: self.intent.enforcement_digest,
@@ -1183,7 +1190,7 @@ mod tests {
             .unwrap();
         let cpu = std::env::var("ARANY_TEST_FILE_PROFILE_CPU").unwrap() == "1";
         let workspace = root.join("workspace");
-        let (device, inode) =
+        let WorkspaceIdentity { device, inode } =
             crate::tools::fs::identity(&crate::tools::fs::open_directory(&workspace).unwrap())
                 .unwrap();
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,
@@ -1384,7 +1391,7 @@ mod tests {
             .parse::<u16>()
             .unwrap();
         let git = crate::tools::git::discover().expect("pinned git");
-        let (device, inode) =
+        let WorkspaceIdentity { device, inode } =
             crate::tools::fs::identity(&crate::tools::fs::open_directory(&workspace).unwrap())
                 .unwrap();
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,

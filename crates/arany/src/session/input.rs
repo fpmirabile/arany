@@ -1,3 +1,4 @@
+use crate::session::WorkspaceIdentity;
 use crate::store::{StateRoot, StoreError};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
@@ -76,7 +77,7 @@ pub(crate) struct WorkspaceInputs {
 
 impl WorkspaceInputs {
     #[cfg(unix)]
-    pub(crate) fn root_identity(&self) -> Result<(u64, u64), InputError> {
+    pub(crate) fn root_identity(&self) -> Result<WorkspaceIdentity, InputError> {
         Self::identity(&self._root)
     }
 
@@ -84,16 +85,19 @@ impl WorkspaceInputs {
     pub(crate) fn admit_identity(
         workspace: &Path,
         state: &StateRoot,
-    ) -> Result<(u64, u64), InputError> {
+    ) -> Result<WorkspaceIdentity, InputError> {
         let root = Self::open_root(workspace, state)?;
         Self::identity(&root)
     }
 
     #[cfg(unix)]
-    fn identity(root: &Dir) -> Result<(u64, u64), InputError> {
+    fn identity(root: &Dir) -> Result<WorkspaceIdentity, InputError> {
         use cap_std::fs::MetadataExt;
         let metadata = root.dir_metadata()?;
-        Ok((metadata.dev(), metadata.ino()))
+        Ok(WorkspaceIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
     }
 
     fn open_root(workspace: &Path, state: &StateRoot) -> Result<Dir, InputError> {
@@ -119,7 +123,7 @@ impl WorkspaceInputs {
         workspace: &Path,
         state: &StateRoot,
         include_paths: &[PathBuf],
-        identity: Option<(u64, u64)>,
+        identity: Option<WorkspaceIdentity>,
     ) -> Result<Self, InputError> {
         if include_paths.len() > MAX_INCLUDES {
             return Err(InputError::TooManyIncludes);

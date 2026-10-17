@@ -5,6 +5,7 @@ use super::toolchains::{
 };
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
 use super::{ToolError, fs};
+use crate::session::WorkspaceIdentity;
 use crate::store::RecordKind;
 use crate::store::{StateRoot, StoreError};
 use serde::{Deserialize, Serialize};
@@ -65,7 +66,7 @@ pub fn mention_paths(objective: &str) -> Result<Vec<PathBuf>, ToolError> {
 #[derive(Clone)]
 pub struct WorkspacePermissions {
     path: PathBuf,
-    identity: (u64, u64),
+    identity: WorkspaceIdentity,
     trusted: bool,
     mode: ApprovalMode,
     runtime_grants: Vec<RuntimeGrant>,
@@ -272,7 +273,7 @@ impl WorkspacePermissions {
             .collect()
     }
 
-    pub(crate) fn matches_identity(&self, identity: (u64, u64)) -> bool {
+    pub(crate) fn matches_identity(&self, identity: WorkspaceIdentity) -> bool {
         self.identity == identity
     }
 
@@ -320,10 +321,13 @@ impl WorkspacePermissions {
         root.ensure_outside_workspace(&directory)
             .map_err(|_| TrustRecordError::StateInsideWorkspace)?;
         let record = read(root)?;
-        let entry = record
-            .workspaces
-            .iter()
-            .find(|entry| entry.path == path && (entry.device, entry.inode) == identity);
+        let entry = record.workspaces.iter().find(|entry| {
+            entry.path == path
+                && WorkspaceIdentity {
+                    device: entry.device,
+                    inode: entry.inode,
+                } == identity
+        });
         let runtime_grants = entry.map_or_else(Vec::new, |entry| entry.runtime_grants.clone());
         let trusted = entry.is_some();
         Ok(Self {
@@ -410,8 +414,8 @@ impl WorkspacePermissions {
                 }
                 record.workspaces.push(Entry {
                     path: self.path.clone(),
-                    device: self.identity.0,
-                    inode: self.identity.1,
+                    device: self.identity.device,
+                    inode: self.identity.inode,
                     mode,
                     runtime_grants: if trusted {
                         runtime_grants.clone()
@@ -795,7 +799,8 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         let cache = temp.path().join(".cargo/registry/cache");
         std::fs::create_dir_all(&cache).unwrap();
-        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let WorkspaceIdentity { device, inode } =
+            fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
         let grant = RuntimeGrant {
             kind: RuntimeKind::CargoCache,
             manager: RuntimeManager::HostCache,
@@ -830,7 +835,8 @@ mod tests {
         let cache = temp.path().join(".cargo/registry/cache");
         std::fs::create_dir_all(&cache).unwrap();
         let grant_at = |path: &Path| {
-            let (device, inode) = fs::identity(&fs::open_directory(path).unwrap()).unwrap();
+            let WorkspaceIdentity { device, inode } =
+                fs::identity(&fs::open_directory(path).unwrap()).unwrap();
             RuntimeGrant {
                 kind: RuntimeKind::CargoCache,
                 manager: RuntimeManager::HostCache,
@@ -871,7 +877,8 @@ mod tests {
         }
         let discovered = discover(&home);
         assert!(matches!(discovered, Err(ToolError::Limit)));
-        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let WorkspaceIdentity { device, inode } =
+            fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
         let mut access = WorkspacePermissions::load(&path, &root).unwrap();
         access
             .save(
@@ -915,7 +922,8 @@ mod tests {
         let cargo = temp.path().join("home/.cargo");
         let cache = cargo.join("registry/cache");
         std::fs::create_dir_all(&cache).unwrap();
-        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let WorkspaceIdentity { device, inode } =
+            fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
         let grant = RuntimeGrant {
             kind: RuntimeKind::CargoCache,
             manager: RuntimeManager::HostCache,
@@ -963,7 +971,8 @@ mod tests {
         let workspace = temp.path().join("home");
         let cache = workspace.join(".cargo/registry/cache");
         std::fs::create_dir_all(&cache).unwrap();
-        let (device, inode) = fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
+        let WorkspaceIdentity { device, inode } =
+            fs::identity(&fs::open_directory(&cache).unwrap()).unwrap();
         let grant = RuntimeGrant {
             kind: RuntimeKind::CargoCache,
             manager: RuntimeManager::HostCache,

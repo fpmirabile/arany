@@ -30,7 +30,7 @@ impl Event {
             Self::ContextCompacted { record, .. } => record.validate(),
             Self::GoalStarted {
                 objective,
-                workspace_identity: (_, inode),
+                workspace_identity: WorkspaceIdentity { inode, .. },
                 budget,
                 resource_settings,
                 ..
