@@ -566,3 +566,20 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             && item.contains("Lower request or change /settings")
     }));
 }
+
+#[test]
+fn read_evidence_names_the_site_that_attested_it() {
+    let call = ToolCall::Read {
+        path: "src/lib.rs".into(),
+        offset: 0,
+        limit: 4096,
+    };
+    assert_eq!(
+        goal_report_evidence(&call, "{}", true),
+        "The Engine attested a read of src/lib.rs."
+    );
+    assert_eq!(
+        goal_report_evidence(&call, "{}", false),
+        "Guard attested a read of src/lib.rs."
+    );
+}

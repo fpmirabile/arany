@@ -558,6 +558,13 @@ impl RunLoop<'_> {
             }
         };
         if let Some(config) = config {
+            let approved = matches!(&verdict, Verdict::Dispatch { .. });
+            // An approving review that did not lead to dispatch is not an AI approval.
+            let source = if !approved && source == PermissionSource::AiReview {
+                PermissionSource::UnavailableApproval
+            } else {
+                source
+            };
             self.append(Event::ToolPermissionDecided {
                 run_id: self.run_id,
                 agent_run_id: match &verdict {
@@ -570,7 +577,7 @@ impl RunLoop<'_> {
                     mode: config.mode(),
                     basis,
                     source,
-                    approved: matches!(&verdict, Verdict::Dispatch { .. }),
+                    approved,
                 },
             })
             .await?;
@@ -777,7 +784,7 @@ impl RunLoop<'_> {
                 biased;
                 () = run_cancellation.cancelled() => {
                     worker_cancellation.cancel();
-                    break execution.await;
+                    break settle_cancelled(execution.as_mut(), &mut active_receiver).await;
                 }
                 request = active_receiver.recv(), if active_segment.is_none() => {
                     if let Some(ActiveActionRequest { admitted_at, reply }) = request {
@@ -1046,6 +1053,22 @@ fn active_window(
         .ok_or(ToolError::Limit)
 }
 
+// Dropping a request's reply makes the Guard read an unstarted action. A send that reserved its
+// slot before the close can still arrive, so keep draining while the worker finishes.
+async fn settle_cancelled<T>(
+    mut execution: std::pin::Pin<&mut impl std::future::Future<Output = T>>,
+    receiver: &mut tokio::sync::mpsc::Receiver<ActiveActionRequest>,
+) -> T {
+    receiver.close();
+    loop {
+        tokio::select! {
+            biased;
+            output = &mut execution => return output,
+            Some(_) = receiver.recv() => {}
+        }
+    }
+}
+
 async fn execute_cancellable(
     runtime: &ToolRuntime,
     intent: EffectIntent,
@@ -1094,4 +1117,50 @@ fn active_time_limit_observation(intent: EffectIntent) -> ToolObservation {
         ToolDisposition::Limit,
         "Goal active-time budget exhausted; no operation was dispatched",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_refuses_buffered_and_late_active_window_requests() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let permit = sender
+            .clone()
+            .reserve_owned()
+            .await
+            .expect("reserve a slot");
+        let (reply, receipt) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            let _ = receipt.await;
+            "settled"
+        };
+        tokio::pin!(execution);
+        let late = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            permit.send(ActiveActionRequest {
+                admitted_at: Instant::now(),
+                reply,
+            });
+        });
+        let settled = tokio::time::timeout(
+            Duration::from_secs(5),
+            settle_cancelled(execution.as_mut(), &mut receiver),
+        )
+        .await
+        .expect("the Guard must not wait for a reply nobody sends");
+        assert_eq!(settled, "settled");
+        late.await.expect("late sender");
+        let (again, _) = tokio::sync::oneshot::channel();
+        assert!(
+            sender
+                .send(ActiveActionRequest {
+                    admitted_at: Instant::now(),
+                    reply: again,
+                })
+                .await
+                .is_err()
+        );
+    }
 }
