@@ -547,6 +547,17 @@ impl GoalLedger {
         .unwrap_or(Some(0))
     }
 
+    /// Like `active_time_exhausted`, but an open delegation reservation, already capped to the
+    /// remaining budget, does not count as spent.
+    pub(super) fn spent_active_time_exhausted(&self) -> bool {
+        self.read(|goal, in_flight| {
+            goal.effective_budget()
+                .max_active_ms
+                .is_some_and(|limit| in_flight.spent_ms(goal) >= limit)
+        })
+        .unwrap_or(false)
+    }
+
     pub(super) fn active_time_exhausted(&self) -> bool {
         self.read(|goal, in_flight| {
             let Some(limit) = goal.effective_budget().max_active_ms else {

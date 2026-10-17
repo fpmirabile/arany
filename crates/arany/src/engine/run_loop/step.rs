@@ -988,7 +988,12 @@ impl RunLoop<'_> {
         if let Some(active_segment) = active_segment {
             self.settle_active_segment(active_segment)?;
         }
-        if self.ledger().active_time_exhausted() {
+        let exhausted = if delegation_deadline.is_some() {
+            self.ledger().spent_active_time_exhausted()
+        } else {
+            self.ledger().active_time_exhausted()
+        };
+        if exhausted {
             return Ok(false);
         }
         Ok(

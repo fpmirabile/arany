@@ -249,6 +249,20 @@ fn acknowledged_active_time_overrun_is_recorded_within_the_action_bound() {
 }
 
 #[test]
+fn open_delegation_reservation_does_not_exhaust_its_own_review() {
+    let ledger = ledger(GoalBudget {
+        max_active_ms: Some(600_000),
+        ..GoalBudget::default()
+    });
+    let (_started, reserved_ms) = ledger.reserve_active(600_000).unwrap();
+    assert!(reserved_ms > 0);
+    assert!(ledger.active_time_exhausted());
+    assert!(!ledger.spent_active_time_exhausted());
+    edit(&ledger, |goal, _| goal.active_ms = 600_000);
+    assert!(ledger.spent_active_time_exhausted());
+}
+
+#[test]
 fn carried_acknowledgment_time_counts_toward_active_exhaustion() {
     let ledger = ledger(GoalBudget {
         max_active_ms: Some(100),
