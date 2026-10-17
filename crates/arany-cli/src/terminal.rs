@@ -444,11 +444,12 @@ impl AttachedTerminal {
             lines.push("No supported runtime profiles were detected.".into());
             profile_start = None;
         } else {
-            lines.push("Profiles are opt-in. Selected caches may contain private package data or embedded credential URLs. They are not loaded automatically, but commands can read and print them; bounded Tool output may be persisted and sent to the selected Provider.".into());
-            lines.push(
-                "Separate package-manager configuration and credential files stay excluded.".into(),
-            );
+            lines.push("Optional runtime profiles (read only)".into());
+            lines.push("Check a toolchain to let commands use that exact version; its bin joins PATH. Check a cache to let commands read it. At most one version per runtime. Nothing is selected until you check it, and checking switches the choice to Trust.".into());
+            lines.push("Caches may hold private package data or credential URLs; a command can print them into bounded output that is journaled and sent to the Provider. Package-manager configuration and credential files stay excluded.".into());
             profile_start = Some(lines.len());
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+            let linear = self.linear.is_some();
             lines.extend(options.iter().enumerate().map(|(index, option)| {
                 let marker = if focused_profile == Some(index) {
                     "›"
@@ -460,10 +461,25 @@ impl AttachedTerminal {
                     .copied()
                     .unwrap_or(option.selected);
                 let number = index + 3;
+                let body = if linear {
+                    option.label.clone()
+                } else {
+                    let head = match &option.version {
+                        Some(version) => format!("{} {version}", option.group),
+                        None => option.group.to_owned(),
+                    };
+                    let path = crate::presentation::abbreviate_home(&option.path, home.as_deref());
+                    let suffix = if option.detected {
+                        ""
+                    } else {
+                        " · no longer detected"
+                    };
+                    format!("{head} · {path}{suffix}")
+                };
                 format!(
                     "{marker} [{}] {number}. {}",
                     if checked { "x" } else { " " },
-                    crate::presentation::escape_terminal(&option.label)
+                    crate::presentation::escape_terminal(&body)
                 )
             }));
         }
