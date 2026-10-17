@@ -1,5 +1,4 @@
-use crate::cli::attached::run::{Selection, select_provider};
-use crate::cli::exec::ProviderArg;
+use super::select::{ProviderArg, Selection, SelectionError, select_provider};
 use arany::{
     AdmittedProviders, Effort, MAX_PROVIDER_FALLBACKS, Provider, ProviderRole, Providers,
     RecordKind, StateRoot,
@@ -7,6 +6,43 @@ use arany::{
 use serde::Deserialize;
 use std::{path::Path, str::FromStr, sync::Arc};
 use uuid::{Uuid, Version};
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RoutingError {
+    #[error("invalid Provider role route")]
+    InvalidRoute,
+    #[error("invalid Provider role model/effort")]
+    InvalidModelEffort,
+    #[error("invalid ChatGPT role model")]
+    InvalidChatGptModel,
+    #[error("ChatGPT role requires account_id and effort")]
+    ChatGptAccountAndEffortRequired,
+    #[error("invalid provider-routing.json")]
+    InvalidConfiguration,
+    #[error("unsupported Provider routing version")]
+    UnsupportedVersion,
+    #[error("Provider role needs one route and at most two fallbacks")]
+    InvalidRouteCount,
+    #[error("duplicate Provider role route")]
+    DuplicateRoute,
+    #[error("state directory unavailable or unsafe")]
+    StateUnavailable,
+    #[error("Provider routing unavailable or unsafe")]
+    RoutingUnavailable,
+    #[error("invalid primary effort")]
+    InvalidPrimaryEffort,
+    #[error("configured primary route differs from selected Provider")]
+    PrimarySelectionMismatch,
+    #[error("{0}")]
+    InvalidProvider(&'static str),
+    #[error("Provider role route {provider}/{model} refused: {source}")]
+    RouteRefused {
+        provider: String,
+        model: String,
+        #[source]
+        source: SelectionError,
+    },
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,8 +63,9 @@ struct Route {
 }
 
 impl Route {
-    fn validate(&self) -> Result<(), String> {
-        let profile = ProviderArg::from_str(&self.provider)?;
+    fn validate(&self) -> Result<(), RoutingError> {
+        let profile =
+            ProviderArg::from_str(&self.provider).map_err(RoutingError::InvalidProvider)?;
         if self.model.is_empty()
             || self.model.len() > 128
             || self.model.chars().any(char::is_control)
@@ -37,18 +74,18 @@ impl Route {
                 .is_some_and(|id| id.get_version() != Some(Version::SortRand))
             || matches!(profile, ProviderArg::Custom(_)) && self.account_id.is_some()
         {
-            return Err("invalid Provider role route".into());
+            return Err(RoutingError::InvalidRoute);
         }
         match profile {
             ProviderArg::Openai | ProviderArg::Anthropic => {
                 arany::resolve_native_effort_for_run(&self.provider, &self.model, self.effort)
-                    .map_err(|_| "invalid Provider role model/effort")?;
+                    .map_err(|_| RoutingError::InvalidModelEffort)?;
             }
             ProviderArg::Chatgpt => {
                 arany::validate_native_model_id(&self.model)
-                    .map_err(|_| "invalid ChatGPT role model")?;
+                    .map_err(|_| RoutingError::InvalidChatGptModel)?;
                 if self.effort.is_none() || self.account_id.is_none() {
-                    return Err("ChatGPT role requires account_id and effort".into());
+                    return Err(RoutingError::ChatGptAccountAndEffortRequired);
                 }
             }
             ProviderArg::Custom(_) => {}
@@ -57,20 +94,20 @@ impl Route {
     }
 }
 
-fn parse(bytes: &[u8]) -> Result<RoutingConfig, String> {
+fn parse(bytes: &[u8]) -> Result<RoutingConfig, RoutingError> {
     let config: RoutingConfig =
-        serde_json::from_slice(bytes).map_err(|_| "invalid provider-routing.json")?;
+        serde_json::from_slice(bytes).map_err(|_| RoutingError::InvalidConfiguration)?;
     if config.version != 1 {
-        return Err("unsupported Provider routing version".into());
+        return Err(RoutingError::UnsupportedVersion);
     }
     for chain in config.providers.values().into_iter().flatten() {
         if chain.is_empty() || chain.len() > MAX_PROVIDER_FALLBACKS + 1 {
-            return Err("Provider role needs one route and at most two fallbacks".into());
+            return Err(RoutingError::InvalidRouteCount);
         }
         for (index, route) in chain.iter().enumerate() {
             route.validate()?;
             if chain[..index].contains(route) {
-                return Err("duplicate Provider role route".into());
+                return Err(RoutingError::DuplicateRoute);
             }
         }
     }
@@ -81,12 +118,12 @@ pub(crate) async fn configured_providers(
     state_dir: &Path,
     workspace: &Path,
     primary: Arc<dyn Provider>,
-) -> Result<AdmittedProviders, String> {
-    let root = StateRoot::admit(state_dir).map_err(|_| "state directory unavailable or unsafe")?;
+) -> Result<AdmittedProviders, RoutingError> {
+    let root = StateRoot::admit(state_dir).map_err(|_| RoutingError::StateUnavailable)?;
     let Some(bytes) = root
         .record(RecordKind::ProviderRouting)
         .read()
-        .map_err(|_| "Provider routing unavailable or unsafe")?
+        .map_err(|_| RoutingError::RoutingUnavailable)?
     else {
         return Ok(Providers::all(vec![primary]));
     };
@@ -101,7 +138,7 @@ pub(crate) async fn configured_providers(
                     &selected.model,
                     selected.effort,
                 )
-                .map_err(|_| "invalid primary effort")?,
+                .map_err(|_| RoutingError::InvalidPrimaryEffort)?,
             )
         } else {
             selected.effort
@@ -119,7 +156,7 @@ pub(crate) async fn configured_providers(
             || effort != identity.effort
             || selected.account_id != account_id
         {
-            return Err("configured primary route differs from selected Provider".into());
+            return Err(RoutingError::PrimarySelectionMismatch);
         }
         for route in &chain[1..] {
             providers
@@ -151,7 +188,7 @@ async fn admit(
     state_dir: &Path,
     workspace: &Path,
     route: &Route,
-) -> Result<Arc<dyn Provider>, String> {
+) -> Result<Arc<dyn Provider>, RoutingError> {
     select_provider(
         state_dir,
         Selection {
@@ -163,17 +200,82 @@ async fn admit(
         },
     )
     .await
-    .map_err(|error| {
-        format!(
-            "Provider role route {}/{} refused: {error}",
-            route.provider, route.model
-        )
+    .map_err(|source| RoutingError::RouteRefused {
+        provider: route.provider.clone(),
+        model: route.model.clone(),
+        source,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_error_display_preserves_cli_text() {
+        for (error, expected) in [
+            (RoutingError::InvalidRoute, "invalid Provider role route"),
+            (
+                RoutingError::InvalidModelEffort,
+                "invalid Provider role model/effort",
+            ),
+            (
+                RoutingError::InvalidChatGptModel,
+                "invalid ChatGPT role model",
+            ),
+            (
+                RoutingError::ChatGptAccountAndEffortRequired,
+                "ChatGPT role requires account_id and effort",
+            ),
+            (
+                RoutingError::InvalidConfiguration,
+                "invalid provider-routing.json",
+            ),
+            (
+                RoutingError::UnsupportedVersion,
+                "unsupported Provider routing version",
+            ),
+            (
+                RoutingError::InvalidRouteCount,
+                "Provider role needs one route and at most two fallbacks",
+            ),
+            (
+                RoutingError::DuplicateRoute,
+                "duplicate Provider role route",
+            ),
+            (
+                RoutingError::StateUnavailable,
+                "state directory unavailable or unsafe",
+            ),
+            (
+                RoutingError::RoutingUnavailable,
+                "Provider routing unavailable or unsafe",
+            ),
+            (RoutingError::InvalidPrimaryEffort, "invalid primary effort"),
+            (
+                RoutingError::PrimarySelectionMismatch,
+                "configured primary route differs from selected Provider",
+            ),
+            (
+                RoutingError::InvalidProvider("invalid Provider"),
+                "invalid Provider",
+            ),
+            (
+                RoutingError::InvalidProvider("invalid custom Provider name"),
+                "invalid custom Provider name",
+            ),
+            (
+                RoutingError::RouteRefused {
+                    provider: "openai".into(),
+                    model: "gpt-5.4".into(),
+                    source: SelectionError::OpenAiKeyUnavailable,
+                },
+                "Provider role route openai/gpt-5.4 refused: selected OpenAI API key unavailable",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
 
     #[test]
     fn routing_configuration_is_closed_and_bounded() {

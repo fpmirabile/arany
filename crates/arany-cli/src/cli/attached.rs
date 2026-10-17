@@ -1,5 +1,6 @@
-use super::exec::ProviderArg;
+use super::provider::select::ProviderArg;
 use crate::accounts::chatgpt;
+use crate::cli::provider::select::Selection;
 use crate::terminal::{
     AttachedTerminal, Composer, ComposerEdit, InteractiveCommand, Submission, TerminalInput,
     parse_submission,
@@ -1831,7 +1832,7 @@ async fn preflight_prompt(
 ) -> Result<(), String> {
     run::preflight_selected(
         state_dir,
-        run::Selection {
+        Selection {
             workspace,
             profile: defaults
                 .provider
