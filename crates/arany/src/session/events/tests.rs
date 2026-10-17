@@ -678,7 +678,7 @@ mod account_default_tests {
             event.payload().unwrap(),
             r#"{"config":{"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
         );
-        assert_eq!(payload_version("RunStarted"), Some(9));
+        assert_eq!(payload_version("RunStarted"), Some(10));
         assert_eq!(payload_version("ProviderCallRecorded"), Some(6));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
@@ -1329,15 +1329,63 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(8));
+        assert_eq!(payload_version("ToolFinished"), Some(9));
         assert_eq!(
-            Event::decode("ToolFinished", 8, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 9, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
-        assert!(matches!(
-            Event::decode("ToolFinished", 7, &payload, Some(run), Some(agent)),
-            Err(ReplayError::UnknownEvent)
-        ));
+        for previous in [8, 7] {
+            assert!(matches!(
+                Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
+                Err(ReplayError::UnknownEvent)
+            ));
+        }
+    }
+
+    #[test]
+    fn the_unguarded_format_bumps_reject_their_previous_versions() {
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        let mut intent = read_observation(run, agent).intent;
+        intent.call = crate::tools::ToolCall::CommandUnguarded {
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 7".into()],
+            cwd: String::new(),
+            justification: "Run the failed command once".into(),
+        };
+        let started = Event::ToolStarted {
+            run_id: run,
+            agent_run_id: agent,
+            intent,
+            active_ceiling_ms: 1,
+        };
+        let verdict = Event::ToolPermissionDecided {
+            run_id: run,
+            agent_run_id: agent,
+            verdict: crate::tools::permissions::PermissionVerdict {
+                intent_digest: [3; 32],
+                decision: crate::tools::permissions::Decision::Allow,
+                mode: None,
+                basis: crate::tools::permissions::PermissionSource::ExactCommandRule,
+                source: crate::tools::permissions::PermissionSource::ExactCommandRule,
+                approved: true,
+            },
+        };
+        for event in [&started, &verdict] {
+            let payload = event.payload().expect("payload");
+            let version = payload_version(event.kind()).expect("known kind");
+            assert_eq!(
+                Event::decode(event.kind(), version, &payload, Some(run), Some(agent))
+                    .expect("current"),
+                *event
+            );
+            assert!(matches!(
+                Event::decode(event.kind(), version - 1, &payload, Some(run), Some(agent)),
+                Err(ReplayError::UnknownEvent)
+            ));
+        }
+        assert_eq!(payload_version("ToolStarted"), Some(8));
+        assert_eq!(payload_version("ToolPermissionDecided"), Some(2));
     }
 
     #[test]
@@ -1446,10 +1494,10 @@ mod payload_version_tests {
         for event in bumped {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
-            let version = if matches!(event, Event::RunStarted { .. }) {
-                9
-            } else {
-                7
+            let version = match event {
+                Event::RunStarted { .. } => 10,
+                Event::ToolStarted { .. } => 8,
+                _ => 7,
             };
             assert_eq!(event.version(), version, "{}", event.kind());
             assert_eq!(
@@ -1458,7 +1506,7 @@ mod payload_version_tests {
                 event
             );
             assert!(matches!(
-                Event::decode(event.kind(), 6, &payload, run_id, agent_run_id),
+                Event::decode(event.kind(), version - 1, &payload, run_id, agent_run_id),
                 Err(ReplayError::UnknownEvent)
             ));
         }

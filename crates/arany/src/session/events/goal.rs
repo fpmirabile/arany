@@ -369,7 +369,9 @@ impl GoalPlanContract {
             | ToolCall::GitStatus { path }
             | ToolCall::GitDiff { path, .. }
             | ToolCall::GitLog { path, .. } => self.allows_path(path),
-            ToolCall::Command { program, .. } => self.commands.contains(program),
+            ToolCall::Command { program, .. } | ToolCall::CommandUnguarded { program, .. } => {
+                self.commands.contains(program)
+            }
             ToolCall::ApplyChangeset { changeset, .. } => changeset
                 .files
                 .iter()

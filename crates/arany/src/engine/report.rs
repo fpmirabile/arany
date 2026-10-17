@@ -423,6 +423,9 @@ fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
         | crate::tools::ToolCall::Write { path, .. }
         | crate::tools::ToolCall::Edit { path, .. } => format!("{} {path}", call.label()),
         crate::tools::ToolCall::Command { program, .. } => format!("Command {program}"),
+        crate::tools::ToolCall::CommandUnguarded { program, .. } => {
+            format!("Unguarded command {program}")
+        }
         crate::tools::ToolCall::ApplyChangeset { .. } => "Command changeset publication".into(),
         crate::tools::ToolCall::Skill { name, .. } => format!("Skill {name}"),
         crate::tools::ToolCall::McpList { server } => format!("MCP catalog {server}"),

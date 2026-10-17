@@ -168,6 +168,7 @@ mod goal_replay_tests {
                 contract_version: 1,
                 config_digest: [1; 32],
                 max_context_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES as u32,
+                unguarded_rules_digest: None,
             }),
         }
     }
@@ -2864,7 +2865,7 @@ mod goal_replay_tests {
                 verdict: PermissionVerdict {
                     intent_digest: intent.digest(),
                     decision: Decision::Deny,
-                    mode: PermissionMode::Default,
+                    mode: Some(PermissionMode::Default),
                     basis: PermissionSource::Rule,
                     source: PermissionSource::Rule,
                     approved: false,
@@ -2873,7 +2874,7 @@ mod goal_replay_tests {
             assert_eq!(
                 Event::decode(
                     "ToolPermissionDecided",
-                    1,
+                    2,
                     &verdict.payload().unwrap(),
                     Some(run),
                     Some(agent)
@@ -2894,7 +2895,7 @@ mod goal_replay_tests {
                 let mut unreviewed = verdict.clone();
                 if let Event::ToolPermissionDecided { verdict, .. } = &mut unreviewed {
                     verdict.decision = Decision::Ask;
-                    verdict.mode = mode;
+                    verdict.mode = Some(mode);
                     verdict.basis = PermissionSource::Mode;
                     verdict.source = PermissionSource::AiReview;
                     verdict.approved = true;

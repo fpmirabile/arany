@@ -167,6 +167,7 @@ impl Event {
                         PermissionSource::Rule
                             | PermissionSource::Mode
                             | PermissionSource::PinnedGrant
+                            | PermissionSource::ExactCommandRule
                     )
                     && (verdict.decision != Decision::Deny || !verdict.approved)
                     && match verdict.decision {
