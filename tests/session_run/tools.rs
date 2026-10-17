@@ -2969,20 +2969,69 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     );
     std::fs::write(workspace.join("src/a.txt"), "delta\n").unwrap();
     std::fs::write(workspace.join("src/new.txt"), "new\n").unwrap();
+    let gitconfig = home.join(".gitconfig");
+    let host_config = b"[status]\n\tshowUntrackedFiles = no\n";
+    std::fs::write(&gitconfig, host_config).unwrap();
+    let repository_write = workspace.join(".git/write-probe");
+    let monitor = workspace.join("src/fsmonitor");
+    std::fs::write(
+        &monitor,
+        b"#!/usr/bin/sh\nset -eu\nprintf forbidden > src/a.txt\nprintf forbidden > .git/write-probe\nprintf 'baseline\\0/\\0'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&monitor, std::fs::Permissions::from_mode(0o700)).unwrap();
     {
         use std::io::Write;
         let mut config = std::fs::OpenOptions::new()
             .append(true)
             .open(workspace.join(".git/config"))
             .unwrap();
-        config
-            .write_all(
-                b"[core]\n\tfsmonitor = /usr/bin/false\n[diff]\n\texternal = /usr/bin/false\n[filter \"evil\"]\n\tclean = /usr/bin/false\n\trequired = true\n",
-            )
-            .unwrap();
+        writeln!(
+            config,
+            "[core]\n\tfsmonitor = ./src/fsmonitor\n[diff]\n\texternal = /usr/bin/false\n[filter \"evil\"]\n\tclean = /usr/bin/false\n\trequired = true\n[include]\n\tpath = {}",
+            gitconfig.display()
+        )
+        .unwrap();
     }
+    // These controls prove config neutralization; the native Linux launch probe owns mount isolation.
+    let plain_git = |args: &[&str]| {
+        use crate::process::BoundedOutput;
+        let output = std::process::Command::new(GIT)
+            .args(args)
+            .current_dir(&workspace)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("LC_ALL", "C")
+            .bounded_output_for(Duration::from_secs(20), 16 * 1024)
+            .expect("plain Git attack baseline");
+        assert!(
+            output.status.success(),
+            "plain Git {args:?}: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    assert_eq!(
+        plain_git(&["config", "--global", "--get", "status.showUntrackedFiles"]).stdout,
+        b"no\n",
+        "plain Git must read the synthetic host HOME/.gitconfig"
+    );
+    let baseline = plain_git(&["--no-optional-locks", "status", "--porcelain=v1"]);
+    assert_eq!(std::fs::read(&repository_write).unwrap(), b"forbidden");
+    assert_eq!(
+        std::fs::read(workspace.join("src/a.txt")).unwrap(),
+        b"forbidden"
+    );
+    assert!(
+        !String::from_utf8_lossy(&baseline.stdout).contains("src/new.txt"),
+        "the synthetic host include must hide untracked files under plain Git"
+    );
+    std::fs::remove_file(&repository_write).unwrap();
+    std::fs::write(workspace.join("src/a.txt"), b"delta\n").unwrap();
     std::fs::write(workspace.join(".gitattributes"), "* filter=evil\n").unwrap();
-    let before = tree_snapshot(&workspace.join(".git"));
+    let before = tree_snapshot(&workspace);
 
     let state_path = temp.path().join("state");
     let state = StateRoot::admit(&state_path).unwrap();
@@ -3059,7 +3108,10 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     let status = output(0);
     let entries = status["entries"].as_array().unwrap();
     assert!(entries.contains(&json!({"path": "src/a.txt", "state": ".M"})));
-    assert!(entries.contains(&json!({"path": "src/new.txt", "state": "??"})));
+    assert!(
+        entries.contains(&json!({"path": "src/new.txt", "state": "??"})),
+        "guarded Git must neutralize host config settings from HOME and repository includes"
+    );
     let diff = output(1);
     assert_eq!(
         diff["files"],
@@ -3086,14 +3138,17 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         catalog["git"]["operations"],
         json!(["git_status", "git_diff", "git_log"])
     );
-    let after = tree_snapshot(&workspace.join(".git"));
+    let after = tree_snapshot(&workspace);
     let changed: Vec<_> = before
         .iter()
         .chain(&after)
         .filter(|entry| !(before.contains(entry) && after.contains(entry)))
         .map(|entry| &entry.0)
         .collect();
-    assert!(changed.is_empty(), "repository changed: {changed:?}");
+    assert!(
+        changed.is_empty(),
+        "Workspace or repository changed: {changed:?}"
+    );
 
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();
