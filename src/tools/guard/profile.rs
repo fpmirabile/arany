@@ -204,7 +204,9 @@ pub(super) fn profile_digest() -> Result<[u8; 32], ToolError> {
 
 pub(super) fn install() -> Result<(), ToolError> {
     for program in programs()? {
-        seccompiler::apply_filter(&program).map_err(|_| ToolError::ProtectionUnavailable)?;
+        // TSYNC filters every thread; per-thread filters would leave others unfiltered.
+        seccompiler::apply_filter_all_threads(&program)
+            .map_err(|_| ToolError::ProtectionUnavailable)?;
     }
     Ok(())
 }

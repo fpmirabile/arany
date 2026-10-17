@@ -39,7 +39,7 @@ run_worker() {
   export ARANY_TEST_RUNTIME_MOUNT_ALIAS="$alias"
   export ARANY_TEST_RUNTIME_MOUNT_TARGET="$target"
   export ARANY_TEST_RUNTIME_MOUNT_BINARY="$binary"
-  exec "$binary" --exact tools::guard::linux::tests::native_runtime_mount_attestation --nocapture
+  exec "$binary" --exact tools::guard::linux::tests::native_runtime_mount_attestation --include-ignored --nocapture
 }
 wait_worker_identity() {
   local phase=$1 worker=$2 namespace_pid
