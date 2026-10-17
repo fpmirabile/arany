@@ -12,6 +12,10 @@ async fn reopen(state: &Path, session: SessionId) -> (Vec<arany::EventEnvelope>,
     let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
     let events = store.load_session(session).await.unwrap();
     let view = SessionView::replay(session, &events).unwrap().unwrap();
+    let previews = events
+        .iter()
+        .any(|event| matches!(event.event, Event::AssistantDisplayRecorded { .. }));
+    super::goals::assert_action_bounds(&events, previews, false);
     store.close().await.unwrap();
     (events, view)
 }
@@ -127,14 +131,18 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
 #[tokio::test]
 async fn fallback_only_on_pre_output_call_failure_and_never_after_partial_output() {
     for (error, partial, fallback_expected) in [
-        (ProviderError::Unavailable, false, true),
-        (ProviderError::CallRejected, false, true),
-        (ProviderError::RemoteHttp(429), false, true),
+        (ProviderError::RemoteHttp(503), false, true),
+        (ProviderError::Unavailable, false, false),
+        (ProviderError::RemoteHttp(400), false, false),
+        (ProviderError::RemoteHttp(401), false, false),
+        (ProviderError::RemoteHttp(413), false, false),
+        (ProviderError::RemoteHttp(529), false, true),
+        (ProviderError::RemoteHttp(429), false, false),
         (ProviderError::PartialTransport, false, false),
         (ProviderError::InvalidStream, false, false),
         (ProviderError::InvalidOutcome, false, false),
         (ProviderError::Rejected, false, false),
-        (ProviderError::Unavailable, true, false),
+        (ProviderError::RemoteHttp(503), true, false),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
@@ -235,10 +243,10 @@ async fn fallback_chain_is_ordered_and_call_and_unknown_token_budgets_stop_it() 
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
         let mut primary = ScriptedProvider::new(vec![]).with_profile("scripted", "first");
-        primary.responses = Mutex::new(vec![Err(ProviderError::Unavailable)].into());
+        primary.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
         let primary = route(primary);
         let mut second = ScriptedProvider::new(vec![]).with_profile("scripted", "second");
-        second.responses = Mutex::new(vec![Err(ProviderError::Unavailable)].into());
+        second.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
         let second = route(second);
         let third =
             route(ScriptedProvider::new(vec![finish("third")]).with_profile("scripted", "third"));
@@ -296,8 +304,8 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
     let mut child = ScriptedProvider::new(vec![]).with_profile("scripted", "child");
     child.responses = Mutex::new(
         vec![
-            Err(ProviderError::Unavailable),
-            Err(ProviderError::Unavailable),
+            Err(ProviderError::RemoteHttp(503)),
+            Err(ProviderError::RemoteHttp(503)),
         ]
         .into(),
     );
@@ -309,7 +317,7 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
     let compaction = route(
         ScriptedProvider::new(vec![])
             .with_profile("scripted", "compact")
-            .with_compactions(vec![Err(ProviderError::Unavailable)]),
+            .with_compactions(vec![Err(ProviderError::RemoteHttp(503))]),
     );
     let compaction_fallback = route(
         ScriptedProvider::new(vec![])
@@ -372,7 +380,7 @@ async fn fallback_after_a_tool_observation_never_redispatches_the_tool() {
     primary.responses = Mutex::new(
         vec![
             Ok(tool_outcome(read, None)),
-            Err(ProviderError::Unavailable),
+            Err(ProviderError::RemoteHttp(503)),
         ]
         .into(),
     );
@@ -442,7 +450,7 @@ async fn review_role_fallback_does_not_dispatch_the_proposed_tool_twice() {
         .with_profile("scripted", "primary"),
     );
     let mut review = ScriptedProvider::new(vec![]).with_profile("scripted", "review");
-    review.responses = Mutex::new(vec![Err(ProviderError::Unavailable)].into());
+    review.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
     let review = route(review);
     let fallback = route(
         ScriptedProvider::new(vec![finish("approve")]).with_profile("scripted", "review-fallback"),
@@ -498,4 +506,131 @@ async fn review_role_fallback_does_not_dispatch_the_proposed_tool_twice() {
         std::fs::read_to_string(workspace.join("notes/result.txt")).unwrap(),
         "done"
     );
+}
+
+#[tokio::test]
+async fn tool_enabled_chains_refuse_different_adapters_and_accounts_before_dispatch() {
+    for kind in 0..3 {
+        for role in [ProviderRole::Primary, ProviderRole::Child] {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = super::goals::facts_workspace(temp.path(), "facts");
+            let primary = route(ScriptedProvider::new(vec![]).with_profile("openai", "model-a"));
+            let alternate = route(match kind {
+                0 => ScriptedProvider::new(vec![]).with_profile("anthropic", "model-b"),
+                1 => ScriptedProvider::new(vec![])
+                    .with_profile("openai", "model-b")
+                    .with_saved_api_account(Uuid::now_v7()),
+                _ => ScriptedProvider::new(vec![]).with_chatgpt_account(Uuid::now_v7(), [4; 32]),
+            });
+            let mut bindings = routes(&primary);
+            bindings.get_mut(role).push(alternate.clone());
+            let state = temp.path().join("state");
+            let mut engine = super::goals::facts_engine(
+                StateRoot::admit(&state).unwrap(),
+                &state,
+                primary.clone(),
+            );
+            engine.set_providers(bindings).unwrap();
+            assert!(matches!(
+                engine.run(input(&workspace)).await,
+                Err(EngineError::IncompatibleProviderChain)
+            ));
+            assert!(primary.requests.lock().unwrap().is_empty());
+            assert!(alternate.requests.lock().unwrap().is_empty());
+            engine.close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_route() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let mut first = ScriptedProvider::new(vec![]).with_profile("scripted", "first");
+    first.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+    let first = route(first);
+    let next = route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "next"));
+    let mut bindings = routes(&first);
+    bindings.primary.push(next.clone());
+    let mut engine = Engine::open(StateRoot::admit(&state).unwrap(), first.clone()).unwrap();
+    engine.set_providers(bindings).unwrap();
+    let mut initial = input(&workspace);
+    initial.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_runs: 2,
+            ..Default::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    let outcome = engine.run(initial).await.unwrap();
+    engine.close().await.unwrap();
+    let (mut events, _) = reopen(&state, outcome.session_id).await;
+    let switched = events
+        .iter()
+        .position(|event| matches!(event.event, Event::ProviderFallbackUsed { .. }))
+        .unwrap();
+    events.truncate(switched + 1);
+    let ceiling = events
+        .iter()
+        .find_map(|event| match event.event {
+            Event::GoalProviderCallReserved {
+                active_ceiling_ms, ..
+            } => Some(active_ceiling_ms),
+            _ => None,
+        })
+        .unwrap();
+    let crashed = SessionView::replay(outcome.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(crashed.goals[0].provider_calls, 2);
+    assert_eq!(crashed.goals[0].active_ceiling_ms, ceiling);
+    assert_eq!(crashed.goals[0].unobserved_provider_calls.len(), 1);
+    assert!(crashed.goals[0].token_usage_unknown);
+    assert!(
+        crashed.runs[0]
+            .agents
+            .iter()
+            .find(|agent| agent.role == arany::AgentRole::Primary)
+            .unwrap()
+            .provider_calls
+            .is_empty()
+    );
+    assert_eq!(first.requests.lock().unwrap().len(), 1);
+    assert_eq!(next.requests.lock().unwrap().len(), 1);
+
+    let recovered_state = temp.path().join("recovered");
+    let store = Store::open(StateRoot::admit(&recovered_state).unwrap()).unwrap();
+    for event in &events {
+        store
+            .append(outcome.session_id, event.event.clone())
+            .await
+            .unwrap();
+    }
+    store.close().await.unwrap();
+    let first =
+        route(ScriptedProvider::new(vec![finish("recovered")]).with_profile("scripted", "first"));
+    let next = route(ScriptedProvider::new(vec![]).with_profile("scripted", "next"));
+    let mut bindings = routes(&first);
+    bindings.primary.push(next.clone());
+    let mut engine = Engine::open(
+        StateRoot::open_existing(&recovered_state).unwrap(),
+        first.clone(),
+    )
+    .unwrap();
+    engine.set_providers(bindings).unwrap();
+    let mut resume = input(&workspace);
+    resume.session_id = Some(outcome.session_id);
+    resume.title = None;
+    resume.goal = arany::GoalRequest::resume(outcome.goal_id, true);
+    let recovered = engine.run(resume).await.unwrap();
+    assert_eq!(recovered.run.status, RunStatus::Finished);
+    assert_eq!(first.requests.lock().unwrap().len(), 1);
+    assert!(next.requests.lock().unwrap().is_empty());
+    assert!(recovered.run.provider_fallbacks.is_empty());
+    engine.close().await.unwrap();
+    let (_, view) = reopen(&recovered_state, outcome.session_id).await;
+    assert_eq!(view.goals[0].provider_calls, 3);
+    assert_eq!(view.goals[0].uncertain_active_ms, ceiling);
 }

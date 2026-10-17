@@ -14,15 +14,14 @@ use std::sync::{
 };
 use tokio::time::Instant;
 
-#[derive(Clone)]
-pub(super) struct CallRouter {
+pub(super) struct CallRouter<'a> {
     pub(super) providers: AdmittedProviders,
-    pub(super) store: Arc<Store>,
-    pub(super) ledger: Arc<GoalLedger>,
-    pub(super) publisher: Option<ProgressPublisher>,
+    pub(super) store: &'a Store,
+    pub(super) ledger: &'a GoalLedger,
+    pub(super) publisher: Option<&'a ProgressPublisher>,
 }
 
-impl CallRouter {
+impl CallRouter<'_> {
     pub(super) fn provider(
         &self,
         role: ProviderRole,
@@ -76,19 +75,16 @@ impl CallRouter {
             request.max_output_tokens = request
                 .max_output_tokens
                 .min(provider.identity().limits.max_output_tokens);
-            let attempt = Attempt {
-                provider: provider.as_ref(),
-                retryable: AtomicBool::new(false),
-            };
-            let result = invoke_bounded_with_preview(
-                &attempt,
+            let attempt = invoke_attempt(
+                provider.as_ref(),
                 request.clone(),
                 deadline,
                 cancellation.clone(),
                 Some(preview.clone()),
             )
             .await;
-            if !attempt.retryable.load(Ordering::Relaxed)
+            let result = attempt.result;
+            if !attempt.eligible
                 || preview.has_output()
                 || cancellation.is_cancelled()
                 || Instant::now() >= deadline
@@ -97,12 +93,7 @@ impl CallRouter {
                         (request.session_id, request.run_id, request.agent_run_id),
                         role,
                         provider.identity(),
-                        match &result {
-                            CallResult::Failed(super::run_loop::CallFailure::Rejected(_)) => {
-                                crate::session::ProviderCallDisposition::Rejected
-                            }
-                            _ => crate::session::ProviderCallDisposition::Unavailable,
-                        },
+                        Some(&request),
                     )
                     .await?
             {
@@ -145,13 +136,7 @@ impl CallRouter {
                         (request.session_id, request.covered_run_id, actor),
                         ProviderRole::Compaction,
                         provider.identity(),
-                        if response.as_ref().is_err_and(|error| {
-                            error.failure_class() == crate::provider::ProviderFailureClass::Rejected
-                        }) {
-                            crate::session::ProviderCallDisposition::Rejected
-                        } else {
-                            crate::session::ProviderCallDisposition::Unavailable
-                        },
+                        None,
                     )
                     .await?
             {
@@ -160,20 +145,41 @@ impl CallRouter {
         }
     }
 
-    async fn switch(
+    fn can_switch(
+        &self,
+        role: ProviderRole,
+        from: &ProviderIdentity,
+        request: &ProviderRequest,
+    ) -> bool {
+        let history = request
+            .input
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.steps.is_empty());
+        self.next(role, from)
+            .is_some_and(|to| !history || from.shares_account(to.identity()))
+    }
+
+    fn next(&self, role: ProviderRole, from: &ProviderIdentity) -> Option<&Arc<dyn Provider>> {
+        let chain = self.providers.get(role);
+        chain
+            .iter()
+            .position(|provider| provider.identity() == from)
+            .and_then(|index| chain.get(index + 1))
+    }
+
+    pub(super) async fn switch(
         &self,
         scope: (crate::session::SessionId, crate::session::RunId, AgentRunId),
         role: ProviderRole,
         from: &ProviderIdentity,
-        failure: crate::session::ProviderCallDisposition,
+        request: Option<&ProviderRequest>,
     ) -> Result<bool, EngineError> {
+        if request.is_some_and(|request| !self.can_switch(role, from, request)) {
+            return Ok(false);
+        }
         let (session_id, run_id, agent_run_id) = scope;
-        let chain = self.providers.get(role);
-        let Some(to) = chain
-            .iter()
-            .position(|provider| provider.identity() == from)
-            .and_then(|index| chain.get(index + 1))
-        else {
+        let Some(to) = self.next(role, from) else {
             return Ok(false);
         };
         let candidate = self.ledger.view(|view| {
@@ -191,7 +197,7 @@ impl CallRouter {
             let agent = run.agents.iter().find(|agent| agent.id == agent_run_id)?;
             Some(ProviderFallback {
                 role,
-                failure,
+                failure: crate::session::ProviderCallDisposition::Unavailable,
                 call_index: u32::try_from(if role == ProviderRole::Compaction {
                     if run.status == crate::session::RunStatus::Active {
                         run.tools.len()
@@ -232,7 +238,6 @@ impl CallRouter {
             ProviderRole::Primary => Action::ProviderCall {
                 previews: self
                     .publisher
-                    .as_ref()
                     .is_some_and(ProgressPublisher::previews_enabled),
                 steering: false,
             },
@@ -245,15 +250,15 @@ impl CallRouter {
         self.store
             .admit_operation(
                 session_id,
-                action.max_events() + 1,
+                action.max_events_for(&self.providers) + 1,
                 action.tool_observations(),
             )
             .await?;
         append_scoped(
-            &self.store,
+            self.store,
             RunScope {
-                ledger: &self.ledger,
-                publisher: self.publisher.as_ref(),
+                ledger: self.ledger,
+                publisher: self.publisher,
             },
             None,
             session_id,
@@ -283,7 +288,12 @@ impl Provider for Attempt<'_> {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        self.provider.invoke(request).await
+        let result = self.provider.invoke(request).await;
+        self.retryable.store(
+            result.as_ref().is_err_and(ProviderError::allows_fallback),
+            Ordering::Relaxed,
+        );
+        result
     }
 
     async fn invoke_with_preview(
@@ -297,5 +307,38 @@ impl Provider for Attempt<'_> {
             Ordering::Relaxed,
         );
         result
+    }
+}
+
+pub(super) struct AttemptResult {
+    pub(super) result: CallResult,
+    pub(super) eligible: bool,
+}
+
+pub(super) async fn invoke_attempt(
+    provider: &dyn Provider,
+    request: ProviderRequest,
+    deadline: Instant,
+    cancellation: RunCancellation,
+    preview: Option<ResponsePreview>,
+) -> AttemptResult {
+    let attempt = Attempt {
+        provider,
+        retryable: AtomicBool::new(false),
+    };
+    let result = invoke_bounded_with_preview(
+        &attempt,
+        request,
+        deadline,
+        cancellation.clone(),
+        preview.clone(),
+    )
+    .await;
+    AttemptResult {
+        result,
+        eligible: attempt.retryable.load(Ordering::Relaxed)
+            && preview.as_ref().is_none_or(|preview| !preview.has_output())
+            && !cancellation.is_cancelled()
+            && Instant::now() < deadline,
     }
 }

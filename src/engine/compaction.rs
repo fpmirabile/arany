@@ -137,7 +137,7 @@ impl Engine {
                 Action::BoundaryCompaction {
                     goal: goal_id.is_some(),
                 }
-                .max_events(),
+                .max_events_for(&self.providers),
                 0,
             )
             .await?;
@@ -239,14 +239,14 @@ impl Engine {
             Some((
                 super::routing::CallRouter {
                     providers: self.providers.clone(),
-                    store: std::sync::Arc::clone(&self.store),
-                    ledger: std::sync::Arc::new(super::ledger::GoalLedger::new(
+                    store: &self.store,
+                    ledger: &super::ledger::GoalLedger::new(
                         self.store
                             .load_open_view(session_id)
                             .await?
                             .ok_or(EngineError::MissingSession)?,
                         goal_id,
-                    )),
+                    ),
                     publisher: None,
                 },
                 actor,

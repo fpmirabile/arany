@@ -863,6 +863,20 @@ fn message_start() -> Value {
 }
 
 #[test]
+fn overloaded_stream_after_tool_input_never_allows_fallback() {
+    let (preview, _) = crate::provider::ResponsePreview::new();
+    let wire = sse(&[
+        message_start(),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-1","name":"read","input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}),
+        json!({"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}),
+    ]);
+    let error = run_stream(&wire, preview.clone()).unwrap_err();
+    assert!(!preview.has_output());
+    assert!(!error.allows_fallback());
+}
+
+#[test]
 fn streamed_messages_require_closed_blocks_and_exclude_thinking_from_preview() {
     use crate::provider::{PreviewText, ResponsePreview};
     let outcome =

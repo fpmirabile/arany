@@ -171,9 +171,9 @@ impl OpenAiProvider {
             .map_err(|_| ProviderError::Unavailable)?;
         if !response.status().is_success() {
             return Err(if response.status().is_server_error() {
-                ProviderError::Unavailable
+                ProviderError::HttpServerUnavailable
             } else {
-                ProviderError::CallRejected
+                ProviderError::Rejected
             });
         }
         let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
@@ -270,9 +270,9 @@ impl Provider for OpenAiProvider {
             .map_err(|_| ProviderError::Unavailable)?;
         if !response.status().is_success() {
             return Err(if response.status().is_server_error() {
-                ProviderError::Unavailable
+                ProviderError::HttpServerUnavailable
             } else {
-                ProviderError::CallRejected
+                ProviderError::Rejected
             });
         }
         let bytes = read_streamed_reply(

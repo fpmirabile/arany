@@ -216,15 +216,11 @@ impl AnthropicProvider {
             .await
             .map_err(|_| ProviderError::Unavailable)?;
         if !response.status().is_success() {
-            return Err(
-                if response.status().is_server_error()
-                    || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-                {
-                    ProviderError::Unavailable
-                } else {
-                    ProviderError::CallRejected
-                },
-            );
+            return Err(if response.status().is_server_error() {
+                ProviderError::HttpServerUnavailable
+            } else {
+                ProviderError::Rejected
+            });
         }
         let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
         if raw_reflects_secret(&bytes, &self.key) {
@@ -309,15 +305,11 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|_| ProviderError::Unavailable)?;
         if !response.status().is_success() {
-            return Err(
-                if response.status().is_server_error()
-                    || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-                {
-                    ProviderError::Unavailable
-                } else {
-                    ProviderError::CallRejected
-                },
-            );
+            return Err(if response.status().is_server_error() {
+                ProviderError::HttpServerUnavailable
+            } else {
+                ProviderError::Rejected
+            });
         }
         super::streaming::validate_stream_response(&response)?;
         let mut decoder = wire::MessageStream::new(&self.key, &self.identity.model, preview);

@@ -317,6 +317,49 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn role_chains_are_canonical_and_tool_history_stays_in_one_adapter_and_account() {
+        use crate::provider::{Provenance, Providers};
+        let mut config = config(CollaborationPolicy::Single, true);
+        let primary = config.identity().unwrap();
+        config.providers = Some(Providers::all(vec![primary.clone()]));
+        assert!(config.validate().is_err());
+        for child in [false, true] {
+            for account_kind in 0..3 {
+                let mut alternate = primary.clone();
+                alternate.model = "alternate".into();
+                if account_kind == 0 {
+                    alternate.profile = "anthropic".into();
+                } else if account_kind == 1 {
+                    alternate.provenance = Provenance::Native {
+                        saved_api_account_id: Some(uuid::Uuid::now_v7()),
+                    };
+                } else {
+                    alternate.profile = "chatgpt".into();
+                    alternate.effort = Some(crate::provider::Effort::High);
+                    alternate.limits.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;
+                    alternate.provenance =
+                        Provenance::ChatGpt(crate::provider::ChatGptProvenance {
+                            account_id: uuid::Uuid::now_v7(),
+                            evidence_fingerprint: [1; 32],
+                            admission: crate::provider::ChatGptAdmission::AccountConsent,
+                        });
+                }
+                let mut routes = Providers::all(vec![primary.clone()]);
+                if child {
+                    routes.child.push(alternate);
+                } else {
+                    routes.primary.push(alternate);
+                }
+                config.providers = Some(routes);
+                assert!(config.validate().is_err());
+                let mut no_tools = config.clone();
+                no_tools.tool_policy = None;
+                assert!(no_tools.validate().is_ok());
+            }
+        }
+    }
+
+    #[test]
     fn provider_fallback_replay_requires_pinned_chain_reservation_role_and_budget() {
         use crate::provider::{ProviderFallback, ProviderRole, Providers};
         let (session, goal, run, actor) = (
@@ -333,6 +376,12 @@ mod goal_replay_tests {
         let mut facts = vec![goal_started(goal, GoalBudget::default())];
         facts.extend(start_run(goal, run, actor, config));
         let mut completion = complete_run_and_goal(goal, run, actor);
+        if let Event::GoalProviderCallReserved {
+            active_ceiling_ms, ..
+        } = &mut completion[0]
+        {
+            *active_ceiling_ms = 7_000;
+        }
         completion.insert(
             1,
             Event::ProviderFallbackUsed {
@@ -349,6 +398,25 @@ mod goal_replay_tests {
         );
         facts.extend(completion);
         let valid = session_with(session, facts);
+        let switch = valid
+            .iter()
+            .position(|event| matches!(event.event, Event::ProviderFallbackUsed { .. }))
+            .unwrap();
+        let open = SessionView::replay_open(session, &valid[..=switch])
+            .unwrap()
+            .unwrap();
+        assert_eq!(open.goals[0].provider_calls, 2);
+        assert_eq!(open.goals[0].unobserved_provider_calls, [actor]);
+        assert!(open.goals[0].active_ceiling_ms > 0);
+        assert!(open.runs[0].primary().unwrap().provider_calls.is_empty());
+        let closed = SessionView::replay(session, &valid[..=switch])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            closed.goals[0].resume_usage(&closed).active_ms,
+            open.goals[0].active_ceiling_ms
+        );
+        assert_eq!(closed.goals[0].provider_calls, 2);
         let view = SessionView::replay(session, &valid).unwrap().unwrap();
         assert_eq!(view.goals[0].provider_calls, 2);
         assert!(view.goals[0].token_usage_unknown);
@@ -373,7 +441,7 @@ mod goal_replay_tests {
                         1 => fallback.to.model = "unknown".into(),
                         2 => fallback.role = ProviderRole::Child,
                         3 => fallback.call_index = 1,
-                        _ => fallback.failure = ProviderCallDisposition::Finished,
+                        _ => fallback.failure = ProviderCallDisposition::Rejected,
                     }
                 }
                 5..=6 => {

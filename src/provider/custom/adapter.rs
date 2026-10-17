@@ -124,7 +124,7 @@ fn transport_error(error: TransportError) -> ProviderError {
         TransportError::Unavailable => ProviderError::Unavailable,
         TransportError::PartialTransport => ProviderError::PartialTransport,
         TransportError::Rejected => ProviderError::Rejected,
-        TransportError::CallRejected => ProviderError::CallRejected,
+        TransportError::HttpServerUnavailable => ProviderError::HttpServerUnavailable,
         TransportError::InvalidOutcome => ProviderError::InvalidOutcome,
     }
 }

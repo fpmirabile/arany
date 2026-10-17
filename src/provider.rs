@@ -664,14 +664,14 @@ fn tool_request_reflects_secret(request: &crate::tools::ToolRequest, secret: &st
 pub enum ProviderError {
     #[error("Provider unavailable")]
     Unavailable,
+    #[error("Provider server unavailable before response admission")]
+    HttpServerUnavailable,
     #[error("Provider transport failed after response admission")]
     PartialTransport,
     #[error("Provider call timed out")]
     CallTimedOut,
     #[error("Provider rejected the request")]
     Rejected,
-    #[error("Provider rejected the call before output")]
-    CallRejected,
     #[error("Provider returned an invalid outcome")]
     InvalidOutcome,
     #[error("Provider stream was incomplete or malformed")]
@@ -682,6 +682,7 @@ pub enum ProviderError {
     InvalidOutcomeContract,
     #[error("Provider reported output above Arany's local token limit")]
     LocalOutputLimit,
+    // Only status-check failures, before any response body is admitted.
     #[error("Provider returned HTTP {0}")]
     RemoteHttp(u16),
     #[error("Provider stream failed: {0}")]
@@ -712,7 +713,7 @@ impl ProviderError {
     pub(crate) fn allows_fallback(&self) -> bool {
         matches!(
             self,
-            Self::Unavailable | Self::CallRejected | Self::RemoteHttp(_)
+            Self::HttpServerUnavailable | Self::RemoteHttp(500..=599)
         )
     }
 
@@ -741,6 +742,7 @@ impl ProviderError {
     pub(crate) fn failure_class(&self) -> ProviderFailureClass {
         match self {
             Self::Unavailable
+            | Self::HttpServerUnavailable
             | Self::PartialTransport
             | Self::CallTimedOut
             | Self::RemoteHttp(500..=599) => ProviderFailureClass::Unavailable,
@@ -750,10 +752,9 @@ impl ProviderError {
             {
                 ProviderFailureClass::Unavailable
             }
-            Self::Rejected
-            | Self::CallRejected
-            | Self::RemoteHttp(400..=499)
-            | Self::RemoteStreamCode(_) => ProviderFailureClass::Rejected,
+            Self::Rejected | Self::RemoteHttp(400..=499) | Self::RemoteStreamCode(_) => {
+                ProviderFailureClass::Rejected
+            }
             Self::InvalidOutcome
             | Self::InvalidStream
             | Self::InvalidResponseContract
@@ -903,6 +904,39 @@ mod tests {
             catalog: json!({"write": false, "commands": [], "skills": [], "mcp_servers": [], "tool_calls_remaining": 2}).to_string(),
             history_summary: None,
             steps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn fallback_requires_a_server_failure_at_the_http_status_stage() {
+        assert_eq!(
+            ProviderError::HttpServerUnavailable.failure_class(),
+            ProviderError::Unavailable.failure_class()
+        );
+        assert_eq!(
+            ProviderError::HttpServerUnavailable.failure_reason(),
+            ProviderError::Unavailable.failure_reason()
+        );
+        for (error, eligible) in [
+            (ProviderError::HttpServerUnavailable, true),
+            (ProviderError::RemoteHttp(500), true),
+            (ProviderError::RemoteHttp(503), true),
+            (ProviderError::RemoteHttp(529), true),
+            (ProviderError::RemoteHttp(400), false),
+            (ProviderError::RemoteHttp(401), false),
+            (ProviderError::RemoteHttp(402), false),
+            (ProviderError::RemoteHttp(413), false),
+            (ProviderError::RemoteHttp(429), false),
+            (ProviderError::Unavailable, false),
+            (ProviderError::PartialTransport, false),
+            (ProviderError::CallTimedOut, false),
+            (ProviderError::Rejected, false),
+            (
+                ProviderError::RemoteStreamCode("subscription_sharing_usage_unavailable".into()),
+                false,
+            ),
+        ] {
+            assert_eq!(error.allows_fallback(), eligible, "{error:?}");
         }
     }
 

@@ -4374,7 +4374,11 @@ async fn plan_contract_recorded_mid_run_survives_compaction() {
 
 /// Splits a journal at each action's first admission and asserts that the action's bound covers the
 /// Events up to the next admission, or up to the end of the journal (the terminal Events).
-fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steering: bool) {
+pub(super) fn assert_action_bounds(
+    events: &[arany::EventEnvelope],
+    previews: bool,
+    steering: bool,
+) {
     use arany::Action;
     let primaries: std::collections::HashSet<_> = events
         .iter()
@@ -4476,6 +4480,17 @@ fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steerin
                     Some(end),
                 ));
             }
+            Event::ProviderFallbackUsed { fallback, .. } => {
+                let action = match fallback.role {
+                    arany::ProviderRole::Primary => Action::ProviderCall { previews, steering },
+                    arany::ProviderRole::Child => Action::Child {
+                        in_flight: in_flight(index),
+                    },
+                    arany::ProviderRole::Review => Action::Review,
+                    arany::ProviderRole::Compaction => Action::Compaction,
+                };
+                points.push((index, action, None));
+            }
             Event::GoalCompactionCallReserved { .. } => {
                 let between_runs = events[index..]
                     .iter()
@@ -4527,10 +4542,21 @@ fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steerin
                 .unwrap_or(events.len())
         });
         let observed = end - index;
+        let providers = events[..=*index]
+            .iter()
+            .rev()
+            .find_map(|event| match &event.event {
+                Event::RunStarted { config, .. } => Some(config),
+                _ => None,
+            })
+            .and_then(|config| config.providers.as_ref());
+        let bound = providers.map_or_else(
+            || action.max_events(),
+            |providers| action.max_events_for(providers),
+        );
         assert!(
-            action.max_events() >= observed,
-            "{action:?} at {index} bounds {} Events but appends {observed}",
-            action.max_events()
+            bound >= observed,
+            "{action:?} at {index} bounds {bound} Events but appends {observed}",
         );
     }
 }

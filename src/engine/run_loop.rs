@@ -119,14 +119,14 @@ impl DisplayCheckpoint {
 }
 
 pub(super) struct RunLoop<'a> {
-    store: Arc<Store>,
-    routing: super::routing::CallRouter,
+    store: &'a Store,
+    routing: super::routing::CallRouter<'a>,
     session_id: SessionId,
     run_id: RunId,
     goal_id: crate::session::GoalId,
     primary_id: AgentRunId,
     controls: RunControls<'a>,
-    ledger: Arc<GoalLedger>,
+    ledger: &'a GoalLedger,
     progress: Option<&'a ProgressPublisher>,
     trace: &'a RunTrace,
 }
@@ -150,20 +150,20 @@ pub(super) struct RunIdentity {
 
 impl<'a> RunLoop<'a> {
     pub(super) fn new(
-        store: Arc<Store>,
+        store: &'a Store,
         providers: crate::provider::AdmittedProviders,
         identity: RunIdentity,
         controls: RunControls<'a>,
-        ledger: Arc<GoalLedger>,
+        ledger: &'a GoalLedger,
         progress: Option<&'a ProgressPublisher>,
         trace: &'a RunTrace,
     ) -> Self {
         Self {
             routing: super::routing::CallRouter {
                 providers,
-                store: Arc::clone(&store),
-                ledger: Arc::clone(&ledger),
-                publisher: progress.cloned(),
+                store,
+                ledger,
+                publisher: progress,
             },
             store,
             session_id: identity.session_id,
@@ -178,12 +178,12 @@ impl<'a> RunLoop<'a> {
     }
 
     fn ledger(&self) -> &GoalLedger {
-        &self.ledger
+        self.ledger
     }
 
     fn scope(&self) -> RunScope<'_> {
         RunScope {
-            ledger: &self.ledger,
+            ledger: self.ledger,
             publisher: self.progress,
         }
     }
@@ -195,7 +195,7 @@ impl<'a> RunLoop<'a> {
 
     async fn append(&self, event: Event) -> Result<(), EngineError> {
         let _ = append_scoped(
-            &self.store,
+            self.store,
             self.scope(),
             Some(self.trace),
             self.session_id,
@@ -317,7 +317,7 @@ impl<'a> RunLoop<'a> {
         self.store
             .admit_operation(
                 self.session_id,
-                action.max_events(),
+                action.max_events_for(&self.routing.providers),
                 action.tool_observations(),
             )
             .await?;
@@ -401,7 +401,7 @@ impl<'a> RunLoop<'a> {
         self.store
             .admit_operation(
                 self.session_id,
-                Action::Tool.remaining(0),
+                Action::Tool.remaining(0, &self.routing.providers),
                 Action::Tool.tool_observations(),
             )
             .await?;
@@ -608,7 +608,7 @@ impl<'a> RunLoop<'a> {
         let request = root.clone();
         let context = self
             .progress
-            .map(|progress| progress.preview_context(&self.ledger, self.primary_id))
+            .map(|progress| progress.preview_context(self.ledger, self.primary_id))
             .transpose()?
             .flatten();
         let Some(context) = context else {
@@ -1238,7 +1238,11 @@ impl<'a> RunLoop<'a> {
         let active_segment =
             self.reserve_active_segment(super::compaction::COMPACTION_CALL_DEADLINE)?;
         self.store
-            .admit_operation(self.session_id, Action::Compaction.max_events(), 0)
+            .admit_operation(
+                self.session_id,
+                Action::Compaction.max_events_for(&self.routing.providers),
+                0,
+            )
             .await?;
         self.append(Event::GoalCompactionCallReserved {
             goal_id: self.goal_id,
@@ -1394,10 +1398,14 @@ impl<'a> RunLoop<'a> {
             status,
         };
         self.store
-            .admit_operation(self.session_id, Action::Compaction.remaining(1), 0)
+            .admit_operation(
+                self.session_id,
+                Action::Compaction.remaining(1, &self.routing.providers),
+                0,
+            )
             .await?;
         let sequence = append_scoped(
-            &self.store,
+            self.store,
             self.scope(),
             Some(self.trace),
             self.session_id,
@@ -1473,7 +1481,7 @@ impl<'a> RunLoop<'a> {
         self.store
             .admit_operation(
                 self.session_id,
-                Action::Tool.remaining(1),
+                Action::Tool.remaining(1, &self.routing.providers),
                 Action::Tool.tool_observations(),
             )
             .await?;

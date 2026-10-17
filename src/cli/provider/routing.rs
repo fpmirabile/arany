@@ -65,7 +65,7 @@ fn parse(bytes: &[u8]) -> Result<RoutingConfig, String> {
     }
     for chain in config.providers.values().into_iter().flatten() {
         if chain.is_empty() || chain.len() > MAX_PROVIDER_FALLBACKS + 1 {
-            return Err("Provider role needs one route and at most three fallbacks".into());
+            return Err("Provider role needs one route and at most two fallbacks".into());
         }
         for (index, route) in chain.iter().enumerate() {
             route.validate()?;

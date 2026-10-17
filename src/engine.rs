@@ -56,6 +56,11 @@ const STORE_ACTION_OVERHEAD: std::time::Duration = std::time::Duration::from_sec
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    #[error(
+        "Tool-enabled primary and child fallback chains must keep the same adapter and account"
+    )]
+    IncompatibleProviderChain,
+
     #[error("invalid Run request")]
     InvalidRequest,
     #[error("Session not found")]
@@ -809,7 +814,7 @@ fn resolve_goal_admission(
 
 pub struct Engine {
     state: StateRoot,
-    store: Arc<Store>,
+    store: Store,
     providers: crate::provider::AdmittedProviders,
     telemetry: Telemetry,
     tools: Option<(crate::tools::config::Config, PathBuf)>,
@@ -975,7 +980,7 @@ impl Engine {
         let provider: Arc<dyn Provider> = Arc::new(provider);
         Ok(Self {
             state,
-            store: Arc::new(store),
+            store,
             providers: crate::provider::Providers::all(vec![Arc::clone(&provider)]),
             telemetry,
             tools: None,
@@ -1002,10 +1007,7 @@ impl Engine {
     }
 
     pub async fn close(self) -> Result<(), EngineError> {
-        Arc::try_unwrap(self.store)
-            .map_err(|_| EngineError::CoordinatorFailed)?
-            .close()
-            .await?;
+        self.store.close().await?;
         Ok(())
     }
 
@@ -1175,6 +1177,17 @@ impl Engine {
             return Err(EngineError::ImagesNotAdmitted);
         }
         if self.tools.is_some()
+            && [&self.providers.primary, &self.providers.child]
+                .iter()
+                .any(|chain| {
+                    chain
+                        .iter()
+                        .any(|candidate| !candidate.identity().shares_account(chain[0].identity()))
+                })
+        {
+            return Err(EngineError::IncompatibleProviderChain);
+        }
+        if self.tools.is_some()
             && self.providers.values().iter().take(2).any(|chain| {
                 chain
                     .iter()
@@ -1243,7 +1256,7 @@ impl Engine {
             .load_open_view(session_id)
             .await?
             .ok_or(EngineError::InvalidHistory)?;
-        let ledger = Arc::new(GoalLedger::new(view, goal.id));
+        let ledger = GoalLedger::new(view, goal.id);
         let publisher = progress.map(|progress| ProgressPublisher::new(progress, run_id));
         let scope = RunScope {
             ledger: &ledger,
@@ -1397,7 +1410,7 @@ impl Engine {
         // Boxed: the Run loop's future is large and would overflow a small caller stack.
         Box::pin(
             RunLoop::new(
-                Arc::clone(&self.store),
+                &self.store,
                 self.providers.clone(),
                 RunIdentity {
                     session_id,
@@ -1414,7 +1427,7 @@ impl Engine {
                     approvals: self.tool_approvals.as_ref(),
                     steering: self.steering.clone(),
                 },
-                Arc::clone(&ledger),
+                &ledger,
                 publisher.as_ref(),
                 &trace,
             )
@@ -1495,7 +1508,7 @@ impl Engine {
             steering: self.steering.is_some(),
         };
         let event_slots = RUN_START_EVENTS
-            + first_action.max_events()
+            + first_action.max_events_for(&self.providers)
             + usize::from(request.session_id.is_none());
         self.store.admit_run_start(session_id, event_slots).await?;
         let provisional_workspace_lock = if goal.phase == crate::session::GoalPhase::Implementation

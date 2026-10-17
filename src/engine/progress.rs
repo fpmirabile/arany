@@ -282,7 +282,6 @@ pub(super) async fn append_scoped(
     session_id: SessionId,
     event: Event,
 ) -> Result<u64, EngineError> {
-    let _journal = scope.ledger.journal().await;
     let committed = append_observed(store, trace, session_id, event).await?;
     let update = scope.ledger.committed(&committed, |view| {
         scope

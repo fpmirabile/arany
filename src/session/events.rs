@@ -1669,6 +1669,10 @@ impl RunConfig {
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
         if self.providers.as_ref().is_some_and(|providers| {
             !providers.valid()
+                || providers
+                    .values()
+                    .iter()
+                    .all(|chain| chain.len() == 1 && chain[0] == providers.primary[0])
                 || self.identity().is_none_or(|identity| {
                     let primary = &providers.primary[0];
                     identity.profile != primary.profile
@@ -1681,9 +1685,10 @@ impl RunConfig {
                 })
                 || self.tool_policy.is_some()
                     && providers.values().iter().take(2).any(|chain| {
-                        chain
-                            .iter()
-                            .any(|identity| identity.custom_provenance().is_some())
+                        chain.iter().any(|identity| {
+                            identity.custom_provenance().is_some()
+                                || !identity.shares_account(&chain[0])
+                        })
                     })
         }) || !self.identity().is_some_and(|identity| identity.valid())
             || self
@@ -3316,10 +3321,7 @@ impl Event {
                 if fallback.from.valid()
                     && fallback.to.valid()
                     && fallback.from != fallback.to
-                    && matches!(
-                        fallback.failure,
-                        ProviderCallDisposition::Unavailable | ProviderCallDisposition::Rejected
-                    )
+                    && fallback.failure == ProviderCallDisposition::Unavailable
                 {
                     Ok(())
                 } else {

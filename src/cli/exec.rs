@@ -368,6 +368,21 @@ async fn run_with_provider<P: Provider + 'static>(
                     _ => "",
                 },
             );
+            if run.config.as_ref().is_some_and(|config| {
+                config.chatgpt_provenance.is_none()
+                    && config.providers.as_ref().is_some_and(|providers| {
+                        providers.values().iter().any(|chain| {
+                            chain.iter().any(|identity| {
+                                identity.limits.output_token_bound
+                                    == arany::OutputTokenBound::LocalAcceptanceOnly
+                            })
+                        })
+                    })
+            }) {
+                receipt.push_str(
+                    "Output bound: some role routes are local only; remote usage is not capped\n",
+                );
+            }
             if let Some(notice) = arany::render_provider_fallbacks(run) {
                 receipt.push_str(&notice);
                 receipt.push('\n');

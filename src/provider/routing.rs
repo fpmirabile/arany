@@ -2,7 +2,7 @@ use super::{AgentPhase, Provider, ProviderIdentity};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub const MAX_PROVIDER_FALLBACKS: usize = 3;
+pub const MAX_PROVIDER_FALLBACKS: usize = 2;
 pub const MAX_PROVIDER_SWITCHES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -113,6 +113,12 @@ impl ProviderRoutes {
                     .enumerate()
                     .all(|(index, identity)| !chain[..index].iter().any(|prior| prior == identity))
         })
+    }
+}
+
+impl ProviderIdentity {
+    pub(crate) fn shares_account(&self, other: &Self) -> bool {
+        self.profile == other.profile && self.provenance == other.provenance
     }
 }
 

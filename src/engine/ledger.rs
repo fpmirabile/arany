@@ -1,5 +1,5 @@
 use super::{EngineError, STORE_ACTION_OVERHEAD};
-use crate::provider::GoalContextFacts;
+use crate::provider::{GoalContextFacts, ProviderRole, Providers};
 use crate::session::{
     Event, EventEnvelope, GoalBudget, GoalId, GoalPlanContract, GoalUsage, GoalView,
     MAX_CHILD_TOOL_CALLS, MAX_DISPLAY_CHUNKS, SessionView,
@@ -23,7 +23,7 @@ pub enum Action {
 }
 
 impl Action {
-    /// Upper bound of the Events the action may append after its first admission.
+    /// Base Event bound before configured Provider switches.
     pub fn max_events(self) -> usize {
         match self {
             // A finishing call: its reservation, record, an optional steering note and display chunks,
@@ -48,6 +48,29 @@ impl Action {
         }
     }
 
+    pub fn max_events_for<T>(self, providers: &Providers<Vec<T>>) -> usize {
+        let switches = |role| providers.get(role).len().saturating_sub(1);
+        self.max_events().saturating_add(match self {
+            Self::ProviderCall { .. } => switches(ProviderRole::Primary),
+            Self::Child { in_flight } => usize::try_from(in_flight)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1)
+                .saturating_mul(switches(ProviderRole::Child)),
+            Self::Tool | Self::Review => switches(ProviderRole::Review),
+            Self::Compaction | Self::BoundaryCompaction { .. } => {
+                switches(ProviderRole::Compaction)
+            }
+            Self::Delegation { children, research } => children
+                .saturating_mul(if research {
+                    MAX_CHILD_TOOL_CALLS + 1
+                } else {
+                    1
+                })
+                .saturating_mul(switches(ProviderRole::Child))
+                .saturating_add(switches(ProviderRole::Primary)),
+        })
+    }
+
     /// `ToolFinished` Events among `max_events`, which Store admission sizes at their larger bound.
     pub(super) fn tool_observations(self) -> usize {
         match self {
@@ -69,8 +92,8 @@ impl Action {
     }
 
     /// What is left of the bound once `appended` of the action's Events are committed.
-    pub(super) fn remaining(self, appended: usize) -> usize {
-        self.max_events().saturating_sub(appended)
+    pub(super) fn remaining<T>(self, appended: usize, providers: &Providers<Vec<T>>) -> usize {
+        self.max_events_for(providers).saturating_sub(appended)
     }
 }
 
@@ -83,7 +106,6 @@ pub(super) struct GoalLedger {
     goal_id: GoalId,
     state: Mutex<State>,
     admission: tokio::sync::Mutex<()>,
-    journal: tokio::sync::Mutex<()>,
 }
 
 struct State {
@@ -153,12 +175,7 @@ impl GoalLedger {
                 in_flight: InFlight::default(),
             }),
             admission: tokio::sync::Mutex::new(()),
-            journal: tokio::sync::Mutex::new(()),
         }
-    }
-
-    pub(super) async fn journal(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.journal.lock().await
     }
 
     pub(super) fn view<T>(&self, read: impl FnOnce(&SessionView) -> T) -> Result<T, EngineError> {
