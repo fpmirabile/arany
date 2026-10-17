@@ -15,6 +15,7 @@ mod process;
 mod skills;
 pub(crate) mod toolchains;
 pub(crate) mod types;
+pub(crate) mod unguarded_rules;
 mod workspace;
 
 #[cfg(test)]
@@ -128,6 +129,7 @@ pub(crate) struct PermissionSnapshot {
 pub(crate) struct ToolRuntime {
     config: Config,
     permissions: Option<PermissionSnapshot>,
+    unguarded_rules: Option<unguarded_rules::ExactCommandRules>,
     workspace: PathBuf,
     // Set at admission; `None` only in a runtime rebuilt inside a Guard unit, which never reads in process.
     reads: Option<InProcessReads>,
@@ -313,9 +315,16 @@ impl ToolRuntime {
             .transpose()
     }
 
+    pub(crate) fn load_exact_command_rules(
+        state: &StateRoot,
+    ) -> Result<Option<unguarded_rules::ExactCommandRules>, ToolError> {
+        unguarded_rules::ExactCommandRules::load(state)
+    }
+
     pub(crate) fn admit(
         mut config: Config,
         permissions: Option<PermissionSnapshot>,
+        unguarded_rules: Option<unguarded_rules::ExactCommandRules>,
         workspace: &Path,
         state: &StateRoot,
         guard_executable: PathBuf,
@@ -376,6 +385,7 @@ impl ToolRuntime {
         Ok(Self {
             config,
             permissions,
+            unguarded_rules,
             queue_progress: None,
             active_action_gate: None,
             cache_state: Some(std::sync::Arc::new(
@@ -409,6 +419,34 @@ impl ToolRuntime {
         self.permissions
             .as_ref()
             .map(|snapshot| snapshot.config.as_ref())
+    }
+
+    #[expect(dead_code, reason = "consumed by the unguarded approval integration")]
+    pub(crate) fn exact_command_rules(&self) -> Option<&unguarded_rules::ExactCommandRules> {
+        self.unguarded_rules.as_ref()
+    }
+
+    #[expect(dead_code, reason = "consumed by the unguarded approval integration")]
+    pub(crate) fn workspace_path(&self) -> &Path {
+        &self.workspace
+    }
+
+    #[expect(dead_code, reason = "consumed by the unguarded approval integration")]
+    pub(crate) fn record_exact_command_rule(
+        &self,
+        command: unguarded_rules::ExactCommand<'_>,
+    ) -> Result<(), ToolError> {
+        fs::validate_workspace(self)?;
+        let state = self
+            .cache_state
+            .as_deref()
+            .ok_or(ToolError::Configuration)?;
+        unguarded_rules::ExactCommandRules::record(
+            state,
+            &self.workspace,
+            self.workspace_identity,
+            command,
+        )
     }
 
     fn skill_rows(&self) -> Vec<serde_json::Value> {
