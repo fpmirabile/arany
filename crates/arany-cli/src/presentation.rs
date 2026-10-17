@@ -352,26 +352,21 @@ pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> 
 }
 
 pub fn render_provider_fallbacks(run: &RunView) -> Option<String> {
-    let notices: Vec<_> = run
-        .provider_fallbacks
-        .iter()
+    render_goal_provider_fallbacks([run])
+}
+
+pub fn render_goal_provider_fallbacks<'a>(
+    runs: impl IntoIterator<Item = &'a RunView>,
+) -> Option<String> {
+    let notices: Vec<_> = runs
+        .into_iter()
+        .flat_map(|run| run.provider_fallbacks.iter())
         .map(|(_, fallback)| escape_terminal(&fallback.notice()))
         .collect();
     (!notices.is_empty()).then(|| notices.join("\n"))
 }
 
-pub fn render_run_feedback(run: &RunView) -> Option<String> {
-    let feedback = run_feedback(run);
-    match render_provider_fallbacks(run) {
-        None => feedback,
-        Some(notices) => Some(match feedback {
-            Some(feedback) => format!("{notices}\n{feedback}"),
-            None => notices,
-        }),
-    }
-}
-
-fn run_feedback(run: &RunView) -> Option<String> {
+pub fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {
@@ -1009,6 +1004,57 @@ pub(crate) fn session_access_label(defaults: &arany::SessionDefaults) -> &str {
 mod tests {
     use super::{escape_terminal, escaped_terminal_bytes, user_message_lines};
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn goal_fallback_notices_collect_every_run_once_in_order() {
+        use arany::{
+            ProviderCallDisposition, ProviderFallback, ProviderIdentity, ProviderRole, RunId,
+            RunStatus,
+        };
+        fn fallback(model: &str) -> (arany::AgentRunId, ProviderFallback) {
+            (
+                arany::AgentRunId::new(),
+                ProviderFallback {
+                    role: ProviderRole::Primary,
+                    call_index: 0,
+                    failure: ProviderCallDisposition::Unavailable,
+                    from: ProviderIdentity::new("openai", model, arany::Provenance::native()),
+                    to: ProviderIdentity::new("openai", "fallback", arany::Provenance::native()),
+                },
+            )
+        }
+        let run = |fallbacks: Vec<_>| super::RunView {
+            id: RunId::new(),
+            objective: String::new(),
+            images: Vec::new(),
+            config: None,
+            agents: Vec::new(),
+            assistant_message: None,
+            status: RunStatus::Finished,
+            accepted_sequence: 0,
+            finished_sequence: None,
+            tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
+            display: Vec::new(),
+            steering_notes: Vec::new(),
+            provider_fallbacks: fallbacks,
+        };
+        let earlier = run(vec![fallback("first")]);
+        let latest = run(vec![fallback("second")]);
+        let notices = super::render_goal_provider_fallbacks([&earlier, &latest]).unwrap();
+        let lines: Vec<_> = notices.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("openai/first ") && lines[1].contains("openai/second "));
+        assert_eq!(
+            super::render_goal_provider_fallbacks([&latest]).unwrap(),
+            super::render_provider_fallbacks(&latest).unwrap()
+        );
+        assert_eq!(
+            super::render_goal_provider_fallbacks([&run(Vec::new())]),
+            None
+        );
+    }
 
     #[test]
     fn user_message_preview_is_labeled_bounded_and_inert() {

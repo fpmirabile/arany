@@ -14,6 +14,11 @@ use std::sync::{
 };
 use tokio::time::Instant;
 
+pub(super) type CompactionOutcome = (
+    Result<crate::provider::CompactionResponse, ProviderError>,
+    Arc<dyn Provider>,
+);
+
 pub(super) struct CallRouter<'a> {
     pub(super) providers: AdmittedProviders,
     pub(super) journal: &'a Journal,
@@ -117,31 +122,35 @@ impl CallRouter<'_> {
         &self,
         mut request: crate::provider::CompactionRequest,
         actor: AgentRunId,
-    ) -> Result<
-        (
-            Result<crate::provider::CompactionResponse, ProviderError>,
-            Arc<dyn Provider>,
-        ),
-        EngineError,
-    > {
+        deadline: Instant,
+        mut cancellation: RunCancellation,
+    ) -> Result<Option<CompactionOutcome>, EngineError> {
         loop {
             let provider = self.provider(ProviderRole::Compaction, actor)?;
             request.model = provider.identity().model.clone();
             request.max_output_tokens = request
                 .max_output_tokens
                 .min(provider.identity().limits.max_output_tokens);
-            let response = match tokio::time::timeout(
-                provider.identity().limits.deadline,
-                provider.compact(request.clone()),
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(_) => Err(ProviderError::CallTimedOut),
+            if cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            let attempt_deadline =
+                deadline.min(Instant::now() + provider.identity().limits.deadline);
+            let response = if Instant::now() >= attempt_deadline {
+                Err(ProviderError::CallTimedOut)
+            } else {
+                tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Ok(None),
+                    response = tokio::time::timeout_at(attempt_deadline, provider.compact(request.clone())) => {
+                        response.unwrap_or(Err(ProviderError::CallTimedOut))
+                    }
+                }
             };
             if !response
                 .as_ref()
                 .is_err_and(|error| error.allows_fallback())
+                || Instant::now() >= deadline
                 || !self
                     .switch(
                         (request.session_id, request.covered_run_id, actor),
@@ -151,7 +160,7 @@ impl CallRouter<'_> {
                     )
                     .await?
             {
-                return Ok((response, provider));
+                return Ok(Some((response, provider)));
             }
         }
     }

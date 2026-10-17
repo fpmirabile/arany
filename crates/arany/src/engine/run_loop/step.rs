@@ -504,7 +504,24 @@ impl RunLoop<'_> {
         } else {
             basis
         };
-        let (verdict, source) = if decision == Decision::Deny {
+        let timeout_limit = match grant {
+            Grant::Primary { .. } => self.ledger().command_timeout_limit(&intent.call)?,
+            Grant::Researcher { .. } => None,
+        };
+        let (verdict, source) = if let Some((requested, maximum)) = timeout_limit {
+            (
+                Verdict::Deny(Answer {
+                    observation: not_dispatched(
+                        intent,
+                        ToolDisposition::Limit,
+                        crate::tools::types::command_timeout_limit_message(requested, maximum),
+                    ),
+                    refused: false,
+                    active_time: None,
+                }),
+                source,
+            )
+        } else if decision == Decision::Deny {
             (
                 Verdict::Deny(Answer {
                     observation: not_dispatched(
@@ -589,17 +606,6 @@ impl RunLoop<'_> {
         } else {
             permission.basis
         };
-        if let Some((requested, maximum)) = self.ledger().command_timeout_limit(&intent.call)? {
-            let output = crate::tools::types::command_timeout_limit_message(requested, maximum);
-            return Ok((
-                Verdict::Deny(Answer {
-                    observation: not_dispatched(intent, ToolDisposition::Limit, output),
-                    refused: false,
-                    active_time: None,
-                }),
-                source,
-            ));
-        }
         let goal_allows = self.ledger().allows_tool(&intent.call);
         let mut approved = true;
         let mut active_time_exhausted = false;
@@ -638,7 +644,6 @@ impl RunLoop<'_> {
                 && !self.pause_at_boundary()
                 && let Some(approvals) = self.controls.approvals
             {
-                source = PermissionSource::Human;
                 match self.reserve_active_pause() {
                     Ok(pause) => {
                         let mut cancellation = self.controls.cancellation.clone();
@@ -646,7 +651,10 @@ impl RunLoop<'_> {
                         approved = tokio::select! {
                             biased;
                             () = cancellation.cancelled() => false,
-                            result = tokio::time::timeout(Duration::from_millis(expires), approvals.ask(&intent)) => result.unwrap_or(false),
+                            result = tokio::time::timeout(Duration::from_millis(expires), approvals.ask(&intent)) => {
+                                source = PermissionSource::Human;
+                                result.unwrap_or(false)
+                            }
                         };
                         let resume_at = approved.then(Instant::now);
                         self.settle_active_pause(pause, resume_at)?;
@@ -892,17 +900,19 @@ impl RunLoop<'_> {
         // A sibling Provider call keeps the shared delegation interval active.
         let idle = self.ledger().in_flight_children() == 0;
         let started = Instant::now();
-        let approved = tokio::select! {
+        let (approved, source) = tokio::select! {
             biased;
-            () = cancellation.cancelled() => false,
-            result = tokio::time::timeout_at(deadline.min(Instant::now() + expires), approvals.ask(intent)) => result.unwrap_or(false),
+            () = cancellation.cancelled() => (false, PermissionSource::UnavailableApproval),
+            result = tokio::time::timeout_at(deadline.min(Instant::now() + expires), approvals.ask(intent)) => {
+                (result.unwrap_or(false), PermissionSource::Human)
+            }
         };
         if idle {
             self.ledger().exclude_idle_approval(started.elapsed())?;
         }
         Ok((
             approved && !self.pause_requested() && !self.controls.cancellation.is_cancelled(),
-            PermissionSource::Human,
+            source,
         ))
     }
 

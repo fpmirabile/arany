@@ -116,10 +116,13 @@ pub enum ToolError {
     GuardBootstrap(guard::BootstrapFailure),
 }
 
+/// The `permissions.json` bytes' parsed form and digest, pinned once per submission.
+pub(crate) type PermissionSnapshot = (std::sync::Arc<permissions::PermissionConfig>, [u8; 32]);
+
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
     config: Config,
-    permissions: Option<(std::sync::Arc<permissions::PermissionConfig>, [u8; 32])>,
+    permissions: Option<PermissionSnapshot>,
     workspace: PathBuf,
     // Set at admission; `None` only in a runtime rebuilt inside a Guard unit, which never reads in process.
     reads: Option<InProcessReads>,
@@ -289,8 +292,24 @@ impl ToolRuntime {
         }
     }
 
+    pub(crate) fn load_permissions(
+        state: &StateRoot,
+    ) -> Result<Option<PermissionSnapshot>, ToolError> {
+        state
+            .record(crate::store::RecordKind::Permissions)
+            .read()
+            .map_err(|_| ToolError::Configuration)?
+            .map(|bytes| {
+                permissions::PermissionConfig::parse(&bytes)
+                    .map(|config| (std::sync::Arc::new(config), types::digest(&bytes)))
+                    .map_err(|_| ToolError::Configuration)
+            })
+            .transpose()
+    }
+
     pub(crate) fn admit(
         mut config: Config,
+        permissions: Option<PermissionSnapshot>,
         workspace: &Path,
         state: &StateRoot,
         guard_executable: PathBuf,
@@ -304,16 +323,6 @@ impl ToolRuntime {
             .ensure_outside_workspace(&root)
             .map_err(|_| ToolError::Path)?;
         fs::reject_overlap(workspace, state.path())?;
-        let permissions = state
-            .record(crate::store::RecordKind::Permissions)
-            .read()
-            .map_err(|_| ToolError::Configuration)?
-            .map(|bytes| {
-                permissions::PermissionConfig::parse(&bytes)
-                    .map(|config| (std::sync::Arc::new(config), types::digest(&bytes)))
-                    .map_err(|_| ToolError::Configuration)
-            })
-            .transpose()?;
         let account = StateRoot::account_path().map_err(|_| ToolError::Path)?;
         fs::reject_overlap(workspace, &account)?;
         for protected in [workspace, state.path(), account.as_path()] {

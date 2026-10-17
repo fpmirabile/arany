@@ -339,7 +339,7 @@ pub(crate) fn model_id_preview(id: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presentation::{AgentInspectorModel, render_run_feedback};
+    use crate::presentation::{AgentInspectorModel, run_feedback};
     use arany::{
         AgentRunId, AgentView, ContextUsage, ProviderCallDisposition, ProviderCallRecord,
         RunConfig, RunId, RunView, SessionDefaults, SessionId,
@@ -564,12 +564,12 @@ mod tests {
             let mut finished = run.clone();
             finished.status = RunStatus::Finished;
             assert_eq!(
-                render_run_feedback(&finished).as_deref(),
+                run_feedback(&finished).as_deref(),
                 Some("Build cache outcome is uncertain; inspect Session history before retrying.")
             );
             finished.status = RunStatus::Failed;
             assert_eq!(
-                render_run_feedback(&finished).as_deref(),
+                run_feedback(&finished).as_deref(),
                 Some(
                     "Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed."
                 )
@@ -577,7 +577,7 @@ mod tests {
             finished.tools[0].observation.as_mut().unwrap().disposition =
                 arany::ToolDisposition::Uncertain;
             assert_eq!(
-                render_run_feedback(&finished).as_deref(),
+                run_feedback(&finished).as_deref(),
                 Some(
                     "Error: Tool completion is uncertain. Files or effects may have changed; inspect them before retrying. No answer was committed."
                 )
@@ -587,7 +587,7 @@ mod tests {
             observation.attestation = None;
             observation.cache_update = arany::CacheUpdate::NotApplicable;
             assert!(
-                render_run_feedback(&finished)
+                run_feedback(&finished)
                     .unwrap()
                     .contains("inspect the Guard stage")
             );
@@ -598,7 +598,7 @@ mod tests {
             };
             finished.tools[0].intent.call = read.clone();
             finished.tools[0].observation.as_mut().unwrap().intent.call = read;
-            let feedback = render_run_feedback(&finished).unwrap();
+            let feedback = run_feedback(&finished).unwrap();
             assert!(feedback.contains("Workspace read stopped before it started"));
             assert!(!feedback.contains("Guard"));
             let observation = run.tools[0].observation.as_mut().unwrap();
@@ -861,7 +861,7 @@ mod tests {
                 record(ProviderCallDisposition::Delegated),
                 record(disposition),
             ];
-            let feedback = render_run_feedback(&view.runs[0]).expect("failed Run feedback");
+            let feedback = run_feedback(&view.runs[0]).expect("failed Run feedback");
             let expected = reason.map_or_else(
                 || "Error: Run failed. No answer was committed. Use /agents to inspect this Run.".to_owned(),
                 |reason| format!("Error: Run failed. {reason} No answer was committed. Use /agents to inspect this Run."),
@@ -905,7 +905,7 @@ mod tests {
             call.failure_reason = Some(reason);
             view.runs[0].agents[0].provider_calls = vec![call];
             assert_eq!(
-                render_run_feedback(&view.runs[0]).unwrap(),
+                run_feedback(&view.runs[0]).unwrap(),
                 format!(
                     "Error: Run failed. {message} No answer was committed. Use /agents to inspect this Run."
                 )
@@ -923,25 +923,25 @@ mod tests {
         let run = &mut view.runs[0];
         run.agents[0].provider_calls.clear();
         assert_eq!(
-            render_run_feedback(run).unwrap(),
+            run_feedback(run).unwrap(),
             "Error: Run failed. No answer was committed. Use /agents to inspect this Run."
         );
         run.agents[1].status = AgentStatus::Failed;
         assert!(
-            render_run_feedback(run)
+            run_feedback(run)
                 .unwrap()
                 .contains("Provider rejected the request.")
         );
         run.agents[0].status = AgentStatus::Cancelled;
         run.agents[0].provider_calls = vec![record(ProviderCallDisposition::Unavailable)];
         assert!(
-            render_run_feedback(run)
+            run_feedback(run)
                 .unwrap()
                 .contains("Provider rejected the request.")
         );
         run.status = RunStatus::Cancelled;
         assert_eq!(
-            render_run_feedback(run).unwrap(),
+            run_feedback(run).unwrap(),
             "Run cancelled. No answer was committed. You can submit a new task."
         );
         for status in [
@@ -951,7 +951,7 @@ mod tests {
             RunStatus::Interrupted,
         ] {
             run.status = status;
-            assert_eq!(render_run_feedback(run), None, "{status:?}");
+            assert_eq!(run_feedback(run), None, "{status:?}");
         }
     }
 }

@@ -55,6 +55,7 @@ struct Fixture {
     workspace: std::path::PathBuf,
     state: std::path::PathBuf,
     engine: Engine,
+    command_maximum: Option<u32>,
 }
 
 impl Fixture {
@@ -100,6 +101,7 @@ impl Fixture {
             workspace,
             state,
             engine,
+            command_maximum: None,
         }
     }
 
@@ -126,6 +128,10 @@ impl Fixture {
             CollaborationPolicy::Single
         };
         input.goal.budget = Some(budget());
+        if let Some(maximum) = self.command_maximum {
+            input.goal.resource_settings.default_command_timeout_ms = maximum;
+            input.goal.resource_settings.max_command_timeout_ms = maximum;
+        }
         let running = run_with(&self.engine, &provider, input, controls);
         tokio::pin!(running);
         let mut humans = 0;
@@ -464,6 +470,44 @@ async fn permission_dispatch_denied_replay_uses_pinned_verdict_and_safe_output()
         }
     }
     assert!(SessionView::replay(result.session_id, &forged).is_err());
+}
+
+#[tokio::test]
+async fn permission_dispatch_over_maximum_command_timeout_limits_before_deny() {
+    for settings in [
+        json!({"permissions":{"defaultMode":"plan"}}),
+        json!({"permissions":{"deny":["Bash"]}}),
+    ] {
+        let mut fixture = Fixture::new(Some(&settings), true);
+        fixture.command_maximum = Some(1_000);
+        let call = call("command");
+        let mut plan = plan(&call);
+        plan.command_timeout_ms = Some(2_000);
+        let (result, requests, humans) = fixture
+            .run(
+                vec![tool_outcome(call, Some(Box::new(plan))), finish("answer")],
+                Some(arany::ApprovalMode::Request),
+                false,
+            )
+            .await;
+        assert_eq!(humans, 0, "{settings}");
+        assert_eq!(
+            requests[1].input.tools.as_ref().unwrap().steps[0].observations[0].output,
+            "Timeout 2000 ms exceeds pinned max 1000 ms. Lower request or change /settings; Goal remains pinned.",
+            "{settings}"
+        );
+        let (_, view) = fixture.reopen(result.session_id).await;
+        assert_eq!(view.runs[0].status, arany::RunStatus::Failed, "{settings}");
+        let tool = &view.runs[0].tools[0];
+        let verdict = tool.permission_verdict.as_ref().unwrap();
+        assert_eq!(verdict.decision, Decision::Deny, "{settings}");
+        assert!(!verdict.approved, "{settings}");
+        assert_eq!(
+            tool.observation.as_ref().unwrap().disposition,
+            arany::ToolDisposition::Limit,
+            "{settings}"
+        );
+    }
 }
 
 #[tokio::test]

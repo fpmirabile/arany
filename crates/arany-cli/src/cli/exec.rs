@@ -393,7 +393,15 @@ async fn run_on_engine(
                     "Output bound: some role routes are local only; remote usage is not capped\n",
                 );
             }
-            if let Some(notice) = crate::presentation::render_provider_fallbacks(run) {
+            let goal_runs: Vec<_> = match view.goal(outcome.goal_id) {
+                Some(goal) => view
+                    .runs
+                    .iter()
+                    .filter(|candidate| goal.run_ids.contains(&candidate.id))
+                    .collect(),
+                None => vec![run],
+            };
+            if let Some(notice) = crate::presentation::render_goal_provider_fallbacks(goal_runs) {
                 receipt.push_str(&notice);
                 receipt.push('\n');
             }

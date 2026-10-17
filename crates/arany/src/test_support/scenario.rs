@@ -33,6 +33,7 @@ pub struct ScriptedProvider {
     pub preview: Option<crate::PreviewText>,
     pub responses: Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>>,
     pub cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
+    pub cancel_at_compaction: Option<RunCancellation>,
     pub before_call: Option<(usize, Box<dyn Fn() + Send + Sync>)>,
     pub clock_advance: Option<(usize, Duration)>,
     pub known_input_tokens: bool,
@@ -56,6 +57,7 @@ impl ScriptedProvider {
             preview: None,
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
+            cancel_at_compaction: None,
             before_call: None,
             clock_advance: None,
             known_input_tokens: false,
@@ -215,11 +217,16 @@ impl Provider for ScriptedProvider {
             .lock()
             .expect("compaction requests lock")
             .push(request);
-        self.compact_responses
+        let response = self
+            .compact_responses
             .lock()
             .expect("compaction responses lock")
             .pop_front()
-            .expect("scripted compaction response")
+            .expect("scripted compaction response");
+        if let Some(cancellation) = &self.cancel_at_compaction {
+            assert!(cancellation.cancel(), "first compaction-time cancellation");
+        }
+        response
     }
 }
 

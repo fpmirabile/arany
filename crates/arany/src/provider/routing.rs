@@ -1,4 +1,4 @@
-use super::{AgentPhase, Provider, ProviderIdentity};
+use super::{AgentPhase, Provenance, Provider, ProviderIdentity};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -122,8 +122,51 @@ impl ProviderRoutes {
 }
 
 impl ProviderIdentity {
+    // ChatGPT evidence may differ per model within one account; other provenance must match exactly.
     pub(crate) fn shares_account(&self, other: &Self) -> bool {
-        self.profile == other.profile && self.provenance == other.provenance
+        self.profile == other.profile
+            && match (&self.provenance, &other.provenance) {
+                (Provenance::ChatGpt(first), Provenance::ChatGpt(second)) => {
+                    first.account_id == second.account_id
+                }
+                (first, second) => first == second,
+            }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{ChatGptAdmission, ChatGptProvenance};
+    use uuid::Uuid;
+
+    fn chatgpt(model: &str, account: u128, fingerprint: u8) -> ProviderIdentity {
+        ProviderIdentity::new(
+            "chatgpt",
+            model,
+            Provenance::ChatGpt(ChatGptProvenance {
+                account_id: Uuid::from_u128(account),
+                evidence_fingerprint: [fingerprint; 32],
+                admission: ChatGptAdmission::AccountConsent,
+            }),
+        )
+    }
+
+    #[test]
+    fn one_chatgpt_account_shares_across_models_and_evidence() {
+        assert!(chatgpt("model-a", 1, 1).shares_account(&chatgpt("model-b", 1, 2)));
+    }
+
+    #[test]
+    fn different_chatgpt_accounts_never_share() {
+        assert!(!chatgpt("model-a", 1, 1).shares_account(&chatgpt("model-a", 2, 1)));
+    }
+
+    #[test]
+    fn chatgpt_and_api_key_identities_never_share() {
+        let api_key = ProviderIdentity::new("chatgpt", "model-a", Provenance::native());
+        assert!(!chatgpt("model-a", 1, 1).shares_account(&api_key));
+        assert!(!api_key.shares_account(&chatgpt("model-a", 1, 1)));
     }
 }
 
