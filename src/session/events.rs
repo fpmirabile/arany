@@ -118,7 +118,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "GoalFinished"
         | "AgentFinished"
         | "MessageCommitted" => Some(6),
-        "ToolFinished" => Some(7),
+        "ToolFinished" => Some(8),
         "RunStarted" => Some(7),
         "RunFinished" => Some(7),
         "GoalProviderCallReserved" => Some(7),
@@ -525,6 +525,7 @@ mod goal_success_tests {
             use_count: 1,
         };
         ToolObservation {
+            enforcement_cause: None,
             attestation: Some(crate::tools::Attestation::Guard(GuardReceipt {
                 contract_version: 1,
                 intent_digest: intent.digest(),
@@ -3465,6 +3466,7 @@ mod payload_version_tests {
             use_count: 1,
         };
         crate::tools::ToolObservation {
+            enforcement_cause: None,
             attestation: Some(crate::tools::Attestation::InProcess {
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
@@ -3487,13 +3489,13 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(7));
+        assert_eq!(payload_version("ToolFinished"), Some(8));
         assert_eq!(
-            Event::decode("ToolFinished", 7, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 8, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
         assert!(matches!(
-            Event::decode("ToolFinished", 6, &payload, Some(run), Some(agent)),
+            Event::decode("ToolFinished", 7, &payload, Some(run), Some(agent)),
             Err(ReplayError::UnknownEvent)
         ));
     }
