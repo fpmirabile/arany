@@ -159,7 +159,7 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
             let Some(output) = output else {
                 return Outcome::started(
                     ToolDisposition::Limit,
-                    "Tool result or resource limit reached",
+                    "Tool result or resource limit reached; host effects may have occurred",
                     stopped,
                 );
             };
