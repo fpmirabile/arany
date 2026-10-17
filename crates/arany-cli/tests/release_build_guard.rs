@@ -118,6 +118,7 @@ fn source_archive_contains_only_tracked_release_inputs() {
         "Cargo.toml",
         "Cargo.lock",
         "rust-toolchain.toml",
+        "clippy.toml",
         "LICENSE",
         "NOTICE",
         "crates/arany/Cargo.toml",
@@ -138,6 +139,7 @@ fn source_archive_contains_only_tracked_release_inputs() {
             "Cargo.toml",
             "Cargo.lock",
             "rust-toolchain.toml",
+            "clippy.toml",
             "LICENSE",
             "NOTICE",
             "scripts",
@@ -203,6 +205,7 @@ fn source_archive_contains_only_tracked_release_inputs() {
     let members = String::from_utf8(listed.stdout).unwrap();
     for expected in [
         "arany-0.1.0/rust-toolchain.toml",
+        "arany-0.1.0/clippy.toml",
         "arany-0.1.0/crates/arany/src/lib.rs",
         "arany-0.1.0/crates/arany-cli/src/main.rs",
         "arany-0.1.0/crates/arany/tests/fixture.txt",

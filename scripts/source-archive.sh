@@ -18,7 +18,7 @@ verify="$(mktemp -d "$project_root/target/source-verify.XXXXXXXX")"
 artifact="$(mktemp -d "$project_root/target/source-artifact.XXXXXXXX")"
 trap 'rm -rf -- "$stage" "$verify"' EXIT
 
-git ls-files -z -- Cargo.toml Cargo.lock rust-toolchain.toml LICENSE NOTICE scripts \
+git ls-files -z -- Cargo.toml Cargo.lock rust-toolchain.toml clippy.toml LICENSE NOTICE scripts \
   crates/arany/Cargo.toml crates/arany/src crates/arany/tests \
   crates/arany-cli/Cargo.toml crates/arany-cli/src crates/arany-cli/tests \
   > "$stage/tracked-files"
