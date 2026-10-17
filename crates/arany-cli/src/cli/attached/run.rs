@@ -309,13 +309,15 @@ mod tests {
     #[cfg(target_os = "macos")]
     use crate::terminal::{AttachedTerminal, Composer};
 
+    #[cfg(debug_assertions)]
+    use arany::RecordKind;
     #[cfg(target_os = "macos")]
     use arany::{
         AgentPhase, ApprovalMode, ChatGptAdmission, ChatGptProvenance, CollaborationPolicy, Finish,
         OutputTokenBound, Provenance, ProviderError, ProviderIdentity, ProviderOutcome,
         ProviderRequest, ProviderResponse, RunStatus,
     };
-    use arany::{RecordKind, SessionView, Store};
+    use arany::{SessionView, Store};
     #[cfg(target_os = "macos")]
     use std::sync::{Arc, Mutex};
     use std::{

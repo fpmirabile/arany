@@ -1,7 +1,9 @@
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 use crate::engine_support::run_with;
 use arany::{
     AgentPhase, CollaborationPolicy, RunStatus, SessionView, StateRoot, ToolCall, ToolDisposition,
 };
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 use arany::{EngineConfig, RunControls, ToolGrant};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
