@@ -568,13 +568,16 @@ pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<
     let mut attempt = 1;
     loop {
         match operation().await {
-            Err(ToolError::ProtectionUnavailable | ToolError::Operation)
+            Err(error @ (ToolError::ProtectionUnavailable | ToolError::Operation))
                 if attempt < attempts && tokio::time::Instant::now() < deadline =>
             {
                 tokio::time::sleep_until(
                     deadline.min(tokio::time::Instant::now() + pause * attempt as u32),
                 )
                 .await;
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
                 attempt += 1;
             }
             result => return result,
@@ -1342,6 +1345,20 @@ mod tests {
             .await;
         assert!(matches!(expired, Err(ToolError::Operation)));
         assert_eq!(calls.get(), 1);
+
+        calls.set(0);
+        let soon = tokio::time::Instant::now() + Duration::from_millis(20);
+        let lapsed: Result<(), _> = retry_transient(3, Duration::from_secs(5), soon, || {
+            calls.set(calls.get() + 1);
+            async { Err(ToolError::Operation) }
+        })
+        .await;
+        assert!(matches!(lapsed, Err(ToolError::Operation)));
+        assert_eq!(
+            calls.get(),
+            1,
+            "no attempt starts after the pause reaches the deadline"
+        );
 
         calls.set(0);
         let terminal: Result<(), _> = retry_transient(3, Duration::ZERO, far, || {
