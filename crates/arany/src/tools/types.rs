@@ -1120,7 +1120,7 @@ mod unguarded_vocabulary_tests {
     }
 
     #[test]
-    fn unguarded_success_projects_as_unguarded_and_failure_as_not_confirmed() {
+    fn attested_unguarded_runs_project_as_unguarded_and_unattested_as_not_confirmed() {
         let host = intent(unguarded(&["-c", "exit 0"], ""));
         let mut observation = ToolObservation {
             intent: host.clone(),

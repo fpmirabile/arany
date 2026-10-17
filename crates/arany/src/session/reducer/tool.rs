@@ -49,12 +49,17 @@ pub(super) fn apply(
             verdict,
         } => {
             let run = active_run(current, *run_id)?;
-            if run
+            let rules_pinned = match run
                 .config
                 .as_ref()
                 .and_then(|config| config.tool_policy.as_ref())
-                .is_none_or(|policy| policy.permissions_digest.is_none())
             {
+                Some(policy) if policy.permissions_digest.is_some() => {
+                    policy.unguarded_rules_digest.is_some()
+                }
+                _ => return Err(ReplayError::InvalidTransition),
+            };
+            if verdict.mode.is_none() {
                 return Err(ReplayError::InvalidTransition);
             }
             if verdict.source == crate::tools::permissions::PermissionSource::AiReview
@@ -80,6 +85,12 @@ pub(super) fn apply(
                 || tool.permission_verdict.is_some()
                 || tool.observation.is_some()
             {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let exact_rule = verdict.basis
+                == crate::tools::permissions::PermissionSource::ExactCommandRule
+                || verdict.source == crate::tools::permissions::PermissionSource::ExactCommandRule;
+            if exact_rule && !(rules_pinned && tool.intent.call.is_unguarded()) {
                 return Err(ReplayError::InvalidTransition);
             }
             tool.permission_verdict = Some(verdict.clone());
@@ -135,10 +146,12 @@ pub(super) fn apply(
                             .and_then(|tool| tool.observation.as_ref())
                             .is_none_or(|observation| !observation.stops_run())
                 };
+            // The approved host run has no replayable admission until its Engine gate lands.
             if config
                 .tool_policy
                 .as_ref()
                 .is_none_or(|policy| policy.config_digest != intent.policy_digest)
+                || intent.call.is_unguarded()
                 || primary.id != *agent_run_id
                 || primary.status != AgentStatus::Active
                 || !valid_origin
