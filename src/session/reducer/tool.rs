@@ -16,13 +16,16 @@ pub(super) fn apply(
             run_id,
             agent_run_id,
             intent,
+            active_ceiling_ms,
         } if names_child(current, *run_id, *agent_run_id) => {
             current.start_child_tool(*run_id, *agent_run_id, intent)?;
+            record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
         }
         Event::ToolStarted {
             run_id,
             agent_run_id,
             intent,
+            active_ceiling_ms,
         } => {
             let goal = active_run_goal(current, *run_id).ok_or(ReplayError::InvalidTransition)?;
             let phase_allows_call =
@@ -82,6 +85,7 @@ pub(super) fn apply(
                 review_call_index: None,
                 finished_sequence: None,
             });
+            record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
         }
         Event::ToolFinished {
             run_id,
@@ -219,4 +223,16 @@ fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) 
                 && observed_command_changeset(observation)
                     .is_some_and(|source| source == *changeset)
         })
+}
+
+fn record_run_ceiling(
+    current: &mut SessionView,
+    run_id: crate::session::RunId,
+    ceiling_ms: u64,
+) -> Result<(), ReplayError> {
+    let goal_id = active_run_goal(current, run_id)
+        .ok_or(ReplayError::InvalidTransition)?
+        .id;
+    super::goal::record_active_ceiling(current_goal_mut(current, goal_id)?, ceiling_ms);
+    Ok(())
 }

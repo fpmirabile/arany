@@ -1637,6 +1637,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
                     Event::RunStarted {
                         run_id: pending_run_id,
                         config: config.clone(),
+                        active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                     },
                 )
                 .await,
@@ -1651,6 +1652,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
                     Event::RunStarted {
                         run_id: pending_run_id,
                         config,
+                        active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                     },
                 )
                 .await,
@@ -2241,11 +2243,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 Event::RunStarted {
                     run_id: interrupted_run,
                     config: config.clone(),
-                },
-                Event::GoalActiveTimeReserved {
-                    goal_id,
-                    run_id: interrupted_run,
-                    reserved_ms: 30_000,
+                    active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                 },
                 Event::AgentSpawned {
                     run_id: interrupted_run,
@@ -2259,6 +2257,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     goal_id,
                     run_id: interrupted_run,
                     agent_run_id: primary,
+                    active_ceiling_ms: 0,
                 },
                 Event::ProviderCallRecorded {
                     run_id: interrupted_run,
@@ -2290,7 +2289,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
             ];
             let event_count = match prefix_len {
                 2 => 4,
-                5 => 9,
+                5 => 8,
                 7 => prefix.len(),
                 _ => unreachable!("declared crash point"),
             };
@@ -2395,11 +2394,13 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 2 => Event::RunStarted {
                     run_id: interrupted_run,
                     config: config.clone(),
+                    active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                 },
                 5 => prefix[event_count].clone(),
                 7 => Event::RunFinished {
                     run_id: interrupted_run,
                     disposition: arany::RunDisposition::Finished,
+                    active_ms: 0,
                 },
                 _ => unreachable!("declared crash point"),
             };
@@ -2447,21 +2448,11 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     Event::RunStarted {
                         run_id: next_run,
                         config,
+                        active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                     },
                 )
                 .await
                 .expect("fresh Run starts");
-            store
-                .append(
-                    session_id,
-                    Event::GoalActiveTimeReserved {
-                        goal_id,
-                        run_id: next_run,
-                        reserved_ms: 30_000,
-                    },
-                )
-                .await
-                .expect("new Goal active-time reservation");
             store
                 .append(
                     session_id,

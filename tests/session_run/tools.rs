@@ -488,29 +488,14 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             })
             .expect("canonical ToolFinished");
         assert!(start < finish);
-        let active_reservations = events[start + 1..finish]
-            .iter()
-            .filter(|event| matches!(event.event, arany::Event::GoalActiveTimeReserved { .. }))
-            .count();
-        if observation
-            .observation
-            .as_ref()
-            .is_some_and(|observation| observation.attestation.is_some())
-        {
-            assert_eq!(
-                active_reservations, 1,
-                "an admitted Tool reserves its Goal action after ToolStarted and before Guard setup"
-            );
-            assert!(matches!(
-                events.get(finish + 1).map(|event| &event.event),
-                Some(arany::Event::GoalActiveTimeSettled { run_id, .. }) if *run_id == outcome.run.id
-            ));
-        } else {
-            assert_eq!(
-                active_reservations, 0,
-                "a denied Tool that never reaches Guard has no action reservation"
-            );
-        }
+        assert!(
+            events[start + 1..finish].iter().all(|event| matches!(
+                event.event,
+                arany::Event::GoalProviderCallReserved { .. }
+                    | arany::Event::ProviderCallRecorded { .. }
+            )),
+            "a Tool's active-time reservation stays in memory; only a review is journaled inside it"
+        );
     }
     store.close().await.unwrap();
 }
@@ -766,10 +751,6 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
         arany::Event::ToolFinished { observation, .. }
             if observation.disposition == ToolDisposition::Limit && observation.attestation.is_none()
     ));
-    assert!(!events[started + 1..finished].iter().any(|event| matches!(
-        &event.event,
-        arany::Event::GoalActiveTimeReserved { run_id, .. } if *run_id == outcome.run.id
-    )));
     let replay = SessionView::replay(outcome.session_id, &events)
         .unwrap()
         .unwrap();
@@ -907,28 +888,29 @@ async fn in_process_reads_are_attested_and_replay_after_exit_or_a_crash() {
         }
     }
     durations.sort_unstable();
-    // Journal timestamps include ToolStarted's and the reservation's commits; the gate times execute() in src/tools/tests.rs.
+    // Journal timestamps include ToolStarted's commit; the gate times execute() in src/tools/tests.rs.
     eprintln!("in-process read journal span ms: {durations:?}");
 
     let last_started = events
         .iter()
         .rposition(|envelope| matches!(envelope.event, arany::Event::ToolStarted { .. }))
         .unwrap();
-    let Some(arany::Event::GoalActiveTimeReserved { reserved_ms, .. }) =
-        events.get(last_started + 1).map(|envelope| &envelope.event)
+    let arany::Event::ToolStarted {
+        active_ceiling_ms, ..
+    } = &events[last_started].event
     else {
-        panic!("an in-process read reserves its Goal action after ToolStarted");
+        unreachable!("located above");
     };
-    let crashed = SessionView::replay(outcome.session_id, &events[..=last_started + 1])
+    let crashed = SessionView::replay(outcome.session_id, &events[..=last_started])
         .unwrap()
         .unwrap();
     assert_eq!(crashed.runs[0].status, RunStatus::Interrupted);
     assert_eq!(crashed.goals[0].status, arany::GoalStatus::Interrupted);
     assert!(crashed.runs[0].tools.last().unwrap().observation.is_none());
+    assert!(*active_ceiling_ms > 0);
     assert_eq!(
-        crashed.goals[0].reserved_active_ms,
-        Some(*reserved_ms),
-        "replay keeps the unsettled read reservation charged"
+        crashed.goals[0].active_ceiling_ms, *active_ceiling_ms,
+        "replay keeps the open read's ceiling to charge"
     );
 }
 
@@ -2844,32 +2826,6 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             .unwrap();
         assert_eq!(replay.runs[0].status, outcome.run.status);
         assert_eq!(replay.runs[0].tools, outcome.run.tools);
-        if matches!(
-            name,
-            "request-allow" | "request-deny" | "request-drop" | "request-cancel"
-        ) {
-            let id = replay.runs[0].tools[0].intent.id;
-            let start = events
-                .iter()
-                .position(|event| {
-                    matches!(&event.event, arany::Event::ToolStarted { intent, .. } if intent.id == id)
-                })
-                .unwrap();
-            let finish = events
-                .iter()
-                .position(|event| {
-                    matches!(&event.event, arany::Event::ToolFinished { observation, .. } if observation.intent.id == id)
-                })
-                .unwrap();
-            let has_full_action_reservation = events[start + 1..finish].iter().any(|event| {
-                matches!(&event.event, arany::Event::GoalActiveTimeReserved { reserved_ms, .. } if *reserved_ms > 20_000)
-            });
-            assert_eq!(
-                has_full_action_reservation,
-                name == "request-allow",
-                "{name}: approval wait/cancellation has only a pause reservation; the full Tool action is reserved only after approval and Guard admission"
-            );
-        }
         let calls = &replay.runs[0].agents[0].provider_calls;
         assert_eq!(calls.len(), 1 + review_count + usize::from(allowed));
         if review_count == 1 {

@@ -85,8 +85,7 @@ mod goal_recovery_tests {
                 awaiting_plan_contract: true,
                 active_ms: 0,
                 uncertain_active_ms: 0,
-                reserved_active_run: None,
-                reserved_active_ms: None,
+                active_deadline: None,
                 provider_calls: 1,
                 unobserved_provider_calls: Vec::new(),
                 compaction_call_reserved: None,
@@ -97,6 +96,7 @@ mod goal_recovery_tests {
                 report: None,
                 started_sequence: 1,
                 finished_sequence: None,
+                active_ceiling_ms: 0,
             }],
         }
     }
@@ -227,7 +227,11 @@ mod goal_replay_tests {
                 text: GOAL_OBJECTIVE.into(),
                 images: Vec::new(),
             },
-            Event::RunStarted { run_id, config },
+            Event::RunStarted {
+                run_id,
+                config,
+                active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
+            },
             Event::AgentSpawned {
                 run_id,
                 agent_run_id,
@@ -250,6 +254,7 @@ mod goal_replay_tests {
                 goal_id,
                 run_id,
                 agent_run_id,
+                active_ceiling_ms: 0,
             },
             Event::ProviderCallRecorded {
                 run_id,
@@ -274,6 +279,7 @@ mod goal_replay_tests {
             Event::RunFinished {
                 run_id,
                 disposition: RunDisposition::Finished,
+                active_ms: 0,
             },
             Event::GoalFinished {
                 goal_id,
@@ -303,6 +309,7 @@ mod goal_replay_tests {
             Event::RunFinished {
                 run_id,
                 disposition: RunDisposition::Cancelled,
+                active_ms: 0,
             },
         ]
     }
@@ -336,6 +343,7 @@ mod goal_replay_tests {
                 goal_id,
                 run_id,
                 agent_run_id,
+                active_ceiling_ms: 0,
             });
             events
         };
@@ -398,6 +406,7 @@ mod goal_replay_tests {
                 goal_id,
                 run_id,
                 agent_run_id,
+                active_ceiling_ms: 0,
             });
             events.push(Event::ProviderCallRecorded {
                 run_id,
@@ -420,6 +429,7 @@ mod goal_replay_tests {
                 goal_id,
                 run_id,
                 agent_run_id: child,
+                active_ceiling_ms: 0,
             });
             events
         };
@@ -532,6 +542,7 @@ mod goal_replay_tests {
             goal_id,
             run_id,
             agent_run_id,
+            active_ceiling_ms: 0,
         });
         let note = |text: &str| Event::GoalSteeringNoteRecorded {
             goal_id,
@@ -572,6 +583,7 @@ mod goal_replay_tests {
                 goal_id,
                 run_id,
                 agent_run_id,
+                active_ceiling_ms: 0,
             });
             events
         };
@@ -615,6 +627,7 @@ mod goal_replay_tests {
             goal_id,
             run_id,
             agent_run_id,
+            active_ceiling_ms: 0,
         });
         for _ in 0..4 {
             events.push(Event::GoalSteeringNoteRecorded {
@@ -652,6 +665,7 @@ mod goal_replay_tests {
             goal_id,
             run_id,
             agent_run_id,
+            active_ceiling_ms: 0,
         });
         events.push(Event::GoalSteeringNoteRecorded {
             goal_id,
@@ -917,6 +931,7 @@ mod goal_replay_tests {
             goal_id: goal,
             run_id: run,
             agent_run_id: agent,
+            active_ceiling_ms: 0,
         });
         let session = SessionId::new();
         let mut closing = crashed.clone();
@@ -942,6 +957,7 @@ mod goal_replay_tests {
             goal_id: goal,
             run_id: run,
             agent_run_id: agent,
+            active_ceiling_ms: 0,
         });
         admissible.push(close);
         assert!(
@@ -963,7 +979,11 @@ mod goal_replay_tests {
         ));
         events.extend(cancel_run(run_id, agent_run_id));
         // The process died after the compaction call was reserved, before its outcome was journaled.
-        events.push(Event::GoalCompactionCallReserved { goal_id, run_id });
+        events.push(Event::GoalCompactionCallReserved {
+            goal_id,
+            run_id,
+            active_ceiling_ms: 0,
+        });
         events.push(Event::GoalResumed { goal_id });
 
         let view = SessionView::replay_open(session_id, &session_with(session_id, events))
@@ -992,7 +1012,11 @@ mod goal_replay_tests {
         ));
         events.extend(cancel_run(run_id, agent_run_id));
         // The only admitted call is the compaction call, whose outcome never committed.
-        events.push(Event::GoalCompactionCallReserved { goal_id, run_id });
+        events.push(Event::GoalCompactionCallReserved {
+            goal_id,
+            run_id,
+            active_ceiling_ms: 0,
+        });
         events.push(Event::GoalFinished {
             goal_id,
             status: GoalStatus::Failed,
@@ -1042,6 +1066,7 @@ mod goal_replay_tests {
             goal_id,
             run_id,
             agent_run_id,
+            active_ceiling_ms: 0,
         });
         events.push(Event::ProviderCallRecorded {
             run_id,
@@ -1067,10 +1092,15 @@ mod goal_replay_tests {
             Event::RunFinished {
                 run_id,
                 disposition: RunDisposition::Finished,
+                active_ms: 0,
             },
         ]);
         // The Run finished, but its between-Run compaction call never committed: the Goal is paused.
-        events.push(Event::GoalCompactionCallReserved { goal_id, run_id });
+        events.push(Event::GoalCompactionCallReserved {
+            goal_id,
+            run_id,
+            active_ceiling_ms: 0,
+        });
         events.push(Event::GoalFinished {
             goal_id,
             status: GoalStatus::Failed,
@@ -1114,6 +1144,7 @@ mod goal_replay_tests {
             goal_id,
             run_id,
             agent_run_id,
+            active_ceiling_ms: 0,
         });
         events.push(Event::GoalResumed { goal_id });
 
@@ -1150,6 +1181,7 @@ mod goal_replay_tests {
             goal_id,
             run_id,
             agent_run_id,
+            active_ceiling_ms: 0,
         });
         events.push(Event::ProviderCallRecorded {
             run_id,
@@ -1211,15 +1243,17 @@ mod goal_replay_tests {
                 agent_run_id,
                 config(CollaborationPolicy::Single, false),
             ));
-            events.push(Event::GoalActiveTimeReserved {
-                goal_id,
-                run_id,
-                reserved_ms: limit,
-            });
+            if let Some(Event::RunStarted {
+                active_deadline_ms, ..
+            }) = events.get_mut(4)
+            {
+                *active_deadline_ms = Some(limit);
+            }
             events.push(Event::GoalProviderCallReserved {
                 goal_id,
                 run_id,
                 agent_run_id,
+                active_ceiling_ms: 0,
             });
             events.push(Event::ProviderCallRecorded {
                 run_id,
@@ -1241,14 +1275,10 @@ mod goal_replay_tests {
                 run_id,
                 text: "done".into(),
             });
-            events.push(Event::GoalActiveTimeSettled {
-                goal_id,
-                run_id,
-                active_ms: settled,
-            });
             events.push(Event::RunFinished {
                 run_id,
                 disposition: RunDisposition::Finished,
+                active_ms: settled,
             });
             let mut view = SessionView::replay_open(session_id, &journal(session_id, events))
                 .expect("Finished Run before the Goal receipt")
@@ -1307,15 +1337,11 @@ mod goal_replay_tests {
             agent_run_id,
             config(CollaborationPolicy::Single, true),
         ));
-        events.push(Event::GoalActiveTimeReserved {
-            goal_id,
-            run_id,
-            reserved_ms: 1000,
-        });
         events.push(Event::GoalProviderCallReserved {
             goal_id,
             run_id,
             agent_run_id,
+            active_ceiling_ms: 0,
         });
         events.push(Event::ProviderCallRecorded {
             run_id,
@@ -1325,11 +1351,6 @@ mod goal_replay_tests {
                 ProviderCallDisposition::ToolRequested,
                 Some(0),
             ),
-        });
-        events.push(Event::GoalActiveTimeSettled {
-            goal_id,
-            run_id,
-            active_ms: 0,
         });
         // Engine fails the primary when the Tool deadline or context capacity refuses before ToolStarted.
         events.push(Event::AgentFinished {
@@ -1342,6 +1363,7 @@ mod goal_replay_tests {
         events.push(Event::RunFinished {
             run_id,
             disposition: RunDisposition::Failed,
+            active_ms: 0,
         });
         events.push(Event::GoalFinished {
             goal_id,
@@ -1366,10 +1388,72 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn unsettled_active_time_reservation_blocks_the_next_run_link() {
+    fn crash_between_tool_start_and_finish_replays_interrupted_with_the_tool_ceiling_charged() {
         let session_id = SessionId::new();
         let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
-        let next_run_id = RunId::new();
+        let mut events = vec![
+            Event::SessionStarted {
+                title: "Goal".into(),
+                workspace_identity: (1, 2),
+            },
+            goal_started(goal_id, GoalBudget::default()),
+        ];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, true),
+        ));
+        let intent = read_intent(run_id, agent_run_id, "src/lib.rs");
+        events.extend([
+            Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+                active_ceiling_ms: 605_000,
+            },
+            Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::ToolRequested,
+                    Some(0),
+                ),
+            },
+            Event::ToolStarted {
+                run_id,
+                agent_run_id,
+                intent,
+                active_ceiling_ms: 46_000,
+            },
+        ]);
+        let view = SessionView::replay(session_id, &journal(session_id, events.clone()))
+            .expect("crash-left prefix")
+            .expect("Session");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        assert!(view.runs[0].tools[0].observation.is_none());
+        assert_eq!(goal.status, GoalStatus::Interrupted);
+        assert_eq!(
+            goal.resume_usage(&view).active_ms,
+            46_000,
+            "only the open Tool's ceiling is charged, not the settled call's reservation"
+        );
+        assert!(
+            !goal.can_resume(&view),
+            "an unobserved effect stops continuation"
+        );
+
+        let mut resumed = events;
+        resumed.push(Event::GoalResumed { goal_id });
+        assert!(SessionView::replay_open(session_id, &journal(session_id, resumed)).is_err());
+    }
+
+    #[test]
+    fn crash_mid_run_charges_only_the_open_action_and_resume_continues() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
         let mut events = vec![
             Event::SessionStarted {
                 title: "Goal".into(),
@@ -1383,40 +1467,66 @@ mod goal_replay_tests {
             agent_run_id,
             config(CollaborationPolicy::Single, false),
         ));
-        events.push(Event::GoalActiveTimeReserved {
+        events.push(Event::GoalProviderCallReserved {
             goal_id,
-            run_id,
-            reserved_ms: 1000,
-        });
-        events.push(Event::AgentFinished {
             run_id,
             agent_run_id,
-            disposition: AgentDisposition::Failed,
-            summary: None,
-            result: None,
+            active_ceiling_ms: 7_000,
         });
-        events.push(Event::RunFinished {
-            run_id,
-            disposition: RunDisposition::Failed,
-        });
-        let unsettled = events.clone();
-        let link_next = Event::GoalRunLinked {
-            goal_id,
-            run_id: next_run_id,
-            phase: GoalPhase::Implementation,
-        };
-        let mut blocked = unsettled.clone();
-        blocked.push(link_next.clone());
-        assert!(
-            SessionView::replay_open(session_id, &journal(session_id, blocked)).is_err(),
-            "a Run cannot link while its active-time reservation is outstanding"
-        );
-
-        let mut resumed = unsettled;
+        let mut resumed = events.clone();
         resumed.push(Event::GoalResumed { goal_id });
-        resumed.push(link_next);
-        SessionView::replay_open(session_id, &journal(session_id, resumed))
-            .expect("explicit resume converts the orphaned reservation before linking");
+        resumed.extend(start_run(
+            goal_id,
+            RunId::new(),
+            AgentRunId::new(),
+            config(CollaborationPolicy::Single, false),
+        ));
+        if let Some(Event::RunStarted {
+            active_deadline_ms, ..
+        }) = resumed.iter_mut().rev().nth(1)
+        {
+            *active_deadline_ms = Some(crate::session::MAX_GOAL_ACTIVE_MS - 7_000);
+        }
+        let view = SessionView::replay_open(session_id, &journal(session_id, resumed))
+            .expect("resume continues with time left")
+            .expect("Session");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!((goal.active_ms, goal.uncertain_active_ms), (7_000, 7_000));
+        assert_eq!(goal.active_ceiling_ms, 0, "charged once");
+
+        let view = SessionView::replay(session_id, &journal(session_id, events))
+            .expect("crash-left Run")
+            .expect("Session");
+        let mut capped = view.goals[0].clone();
+        capped.active_deadline = Some((run_id, Some(3_000)));
+        assert_eq!(
+            capped.unsettled_active_charge_ms(),
+            3_000,
+            "the Run deadline caps it"
+        );
+        capped.active_deadline = Some((run_id, Some(30_000)));
+        capped.plan_contract = Some(GoalPlanContract {
+            mission: GOAL_OBJECTIVE.into(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            paths: Vec::new(),
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/lib.rs".into(),
+                content: "ok".into(),
+            },
+            budget: GoalBudget {
+                max_active_ms: Some(5_000),
+                ..GoalBudget::default()
+            },
+        });
+        assert_eq!(
+            capped.unsettled_active_charge_ms(),
+            5_000,
+            "plan narrowing caps it"
+        );
     }
 
     fn delegated_session(known_tokens: u64) -> SessionView {
@@ -1501,8 +1611,7 @@ mod goal_replay_tests {
                 awaiting_plan_contract: false,
                 active_ms: 0,
                 uncertain_active_ms: 0,
-                reserved_active_run: None,
-                reserved_active_ms: None,
+                active_deadline: None,
                 compaction_call_reserved: None,
                 uncertain_compaction_calls: 0,
                 success_state: crate::session::GoalSuccessState::NoContract,
@@ -1515,6 +1624,7 @@ mod goal_replay_tests {
                 started_sequence: 1,
                 finished_sequence: None,
                 known_cached_tokens: 0,
+                active_ceiling_ms: 0,
             }],
         }
     }
@@ -1615,6 +1725,7 @@ mod goal_replay_tests {
             goal_id,
             run_id,
             agent_run_id,
+            active_ceiling_ms: 0,
         }
     }
 
@@ -1654,6 +1765,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: child,
                 intent: read.clone(),
+                active_ceiling_ms: 0,
             }
         ));
         let mut no_tools = delegated_session(0);
@@ -1685,6 +1797,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: child,
             intent: read.clone(),
+            active_ceiling_ms: 0,
         };
         let finished = Event::ToolFinished {
             run_id: run,
@@ -1707,6 +1820,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: child,
                 intent: write,
+                active_ceiling_ms: 0,
             }
         ));
         let mcp = child_intent(
@@ -1725,6 +1839,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: child,
                 intent: mcp,
+                active_ceiling_ms: 0,
             }
         ));
         for call in [
@@ -1742,6 +1857,7 @@ mod goal_replay_tests {
                     run_id: run,
                     agent_run_id: child,
                     intent,
+                    active_ceiling_ms: 0,
                 }
             ));
         }
@@ -1831,6 +1947,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: child,
                 intent: outside.clone(),
+                active_ceiling_ms: 0,
             },
         )
         .expect("child Tool starts");
@@ -1886,6 +2003,7 @@ mod goal_replay_tests {
                     run_id: run,
                     agent_run_id: child,
                     intent: read.clone(),
+                    active_ceiling_ms: 0,
                 },
             )
             .expect("child Tool starts");
@@ -1935,6 +2053,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: child,
                 intent: read.clone(),
+                active_ceiling_ms: 0,
             },
         )
         .expect("child Tool starts");
@@ -2107,8 +2226,7 @@ mod goal_replay_tests {
                 awaiting_plan_contract: true,
                 active_ms: 0,
                 uncertain_active_ms: 0,
-                reserved_active_run: None,
-                reserved_active_ms: None,
+                active_deadline: None,
                 compaction_call_reserved: None,
                 uncertain_compaction_calls: 0,
                 success_state: crate::session::GoalSuccessState::NoContract,
@@ -2120,6 +2238,7 @@ mod goal_replay_tests {
                 report: None,
                 started_sequence: 1,
                 finished_sequence: None,
+                active_ceiling_ms: 0,
             }],
         };
         view.apply_committed(&EventEnvelope {
@@ -2247,8 +2366,7 @@ mod goal_replay_tests {
                 awaiting_plan_contract: true,
                 active_ms: 0,
                 uncertain_active_ms: 0,
-                reserved_active_run: None,
-                reserved_active_ms: None,
+                active_deadline: None,
                 provider_calls: 2,
                 unobserved_provider_calls: Vec::new(),
                 compaction_call_reserved: None,
@@ -2259,6 +2377,7 @@ mod goal_replay_tests {
                 report: None,
                 started_sequence: 1,
                 finished_sequence: None,
+                active_ceiling_ms: 0,
             }],
         };
         view.apply_committed(&EventEnvelope {
@@ -2312,6 +2431,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: agent,
             intent: intent.clone(),
+            active_ceiling_ms: 0,
         }
     }
 
@@ -2447,6 +2567,7 @@ mod goal_replay_tests {
             Event::GoalCompactionCallReserved {
                 goal_id: goal,
                 run_id: run,
+                active_ceiling_ms: 0,
             },
         )
         .expect("compaction call reserved");
@@ -2524,6 +2645,7 @@ mod goal_replay_tests {
                     goal_id,
                     run_id,
                     agent_run_id,
+                    active_ceiling_ms: 0,
                 },
                 Event::ProviderCallRecorded {
                     run_id,
@@ -2544,6 +2666,7 @@ mod goal_replay_tests {
                 Event::RunFinished {
                     run_id,
                     disposition: RunDisposition::Finished,
+                    active_ms: 0,
                 },
                 Event::GoalFinished {
                     goal_id,

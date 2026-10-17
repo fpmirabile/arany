@@ -61,6 +61,7 @@ fn terminal_event(run_id: RunId) -> Event {
     Event::RunFinished {
         run_id,
         disposition: RunDisposition::Failed,
+        active_ms: 0,
     }
 }
 
@@ -105,6 +106,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
                     compaction_content_digest: None,
                     tool_policy: None,
                 },
+                active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
             },
             Event::AgentSpawned {
                 run_id,
