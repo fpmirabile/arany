@@ -388,11 +388,20 @@ impl<'a> RunLoop<'a> {
         &self,
         mut root_request: ProviderRequest,
     ) -> Result<(), EngineError> {
+        self.drive_primary(&mut root_request).await
+    }
+
+    pub(super) async fn drive_primary(
+        &self,
+        root_request: &mut ProviderRequest,
+    ) -> Result<(), EngineError> {
+        let phase = root_request.phase;
+        let planning = phase == AgentPhase::RootPlan;
         loop {
             if self.pause_at_boundary() {
                 return self.settle_stopped_primary().await;
             }
-            let (first, active_segment) = match self.invoke_primary(&mut root_request).await {
+            let (first, active_segment) = match self.invoke_primary(root_request).await {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
                     return self.settle_stopped_primary().await;
@@ -405,13 +414,14 @@ impl<'a> RunLoop<'a> {
                         outcome: ProviderOutcome::Finish(finish),
                         ..
                     }) => {
-                        !matches!(self.controls.policy, CollaborationPolicy::Team { .. })
+                        (!planning
+                            || !matches!(self.controls.policy, CollaborationPolicy::Team { .. }))
                             && valid_finish(finish, MAX_PRIMARY_RESULT_BYTES)
                     }
                     CallResult::Response(ProviderResponse {
                         outcome: ProviderOutcome::Delegate(delegation),
                         ..
-                    }) => self.valid_delegation(&delegation.children),
+                    }) => planning && self.valid_delegation(&delegation.children),
                     CallResult::Response(ProviderResponse {
                         outcome: ProviderOutcome::Tools(requests),
                         ..
@@ -421,7 +431,7 @@ impl<'a> RunLoop<'a> {
             self.append(Event::ProviderCallRecorded {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
-                record: call_record(AgentPhase::RootPlan, &first, valid_response),
+                record: call_record(phase, &first, valid_response),
             })
             .await?;
             self.settle_active_segment(active_segment)?;
@@ -448,7 +458,7 @@ impl<'a> RunLoop<'a> {
                         return self.settle_stopped_primary().await;
                     }
                     return self
-                        .run_children(&mut root_request, delegation.children, turn)
+                        .run_children(root_request, delegation.children, turn)
                         .await;
                 }
                 CallResult::Response(ProviderResponse {
@@ -463,11 +473,10 @@ impl<'a> RunLoop<'a> {
                         return self.fail_primary().await;
                     };
                     let grant = Grant::Primary {
-                        request: &mut root_request,
-                        review_allowed: self.ledger().admits(Action::Review),
+                        request: &mut *root_request,
+                        review_allowed: planning && self.ledger().admits(Action::Review),
                     };
-                    let continuation = self.execute_step(grant, request, turn).await;
-                    match continuation {
+                    match self.execute_step(grant, request, turn).await {
                         Ok(true) => {}
                         Ok(false) if self.controls.cancellation.is_cancelled() => {
                             return self.settle_stopped_primary().await;
@@ -476,11 +485,6 @@ impl<'a> RunLoop<'a> {
                             return self.settle_stopped_primary().await;
                         }
                         Ok(false) => return self.fail_primary().await,
-                        Err(EngineError::GoalBudgetExhausted)
-                            if self.controls.cancellation.is_cancelled() =>
-                        {
-                            return self.settle_stopped_primary().await;
-                        }
                         Err(EngineError::GoalBudgetExhausted) => {
                             return self.settle_stopped_primary().await;
                         }

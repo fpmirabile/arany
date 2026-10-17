@@ -1,6 +1,5 @@
 use super::{
-    Action, ActiveSegment, CallFailure, CallResult, Grant, MAX_PRIMARY_RESULT_BYTES, RunLoop,
-    call_record, valid_finish,
+    Action, ActiveSegment, CallFailure, CallResult, Grant, RunLoop, call_record, valid_finish,
 };
 use crate::engine::routing::CallScope;
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
@@ -544,80 +543,8 @@ impl RunLoop<'_> {
                 calls_remaining: None,
             });
         }
-        loop {
-            if self.pause_at_boundary() {
-                return self.settle_stopped_primary().await;
-            }
-            let (synthesis, active_segment) = match self.invoke_primary(root_request).await {
-                Ok(result) => result,
-                Err(EngineError::GoalBudgetExhausted) => {
-                    return self.settle_stopped_primary().await;
-                }
-                Err(error) => return Err(error),
-            };
-            let valid_response = self.ledger().tokens_within_limit()
-                && (matches!(
-                    &synthesis,
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Finish(finish),
-                        ..
-                    }) if valid_finish(finish, MAX_PRIMARY_RESULT_BYTES)
-                ) || matches!(&synthesis, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tools(requests), .. }) if self.valid_tools(requests)));
-            self.append(Event::ProviderCallRecorded {
-                run_id: self.run_id,
-                agent_run_id: self.primary_id,
-                record: call_record(AgentPhase::RootSynthesis, &synthesis, valid_response),
-            })
-            .await?;
-            self.settle_active_segment(active_segment)?;
-            if self.controls.cancellation.is_cancelled() {
-                return self.settle_stopped_primary().await;
-            }
-            if matches!(&synthesis, CallResult::Cancelled) {
-                return self.cancel_primary().await;
-            }
-            if self.ledger().active_time_exhausted() {
-                return self.settle_stopped_primary().await;
-            }
-            match synthesis {
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Finish(finish),
-                    ..
-                }) if valid_response => return self.finish_primary(finish).await,
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Tools(requests),
-                    turn,
-                    ..
-                }) if valid_response => {
-                    if self.pause_at_boundary() {
-                        return self.settle_stopped_primary().await;
-                    }
-                    let Some(request) = self.begin_tool_step(requests).await? else {
-                        return self.fail_primary().await;
-                    };
-                    let grant = Grant::Primary {
-                        request: &mut *root_request,
-                        review_allowed: false,
-                    };
-                    match self.execute_step(grant, request, turn).await {
-                        Ok(true) => {}
-                        Ok(false) if self.controls.cancellation.is_cancelled() => {
-                            return self.settle_stopped_primary().await;
-                        }
-                        Ok(false) if self.ledger().active_time_exhausted() => {
-                            return self.settle_stopped_primary().await;
-                        }
-                        Ok(false) => return self.fail_primary().await,
-                        Err(EngineError::GoalBudgetExhausted) => {
-                            return self.settle_stopped_primary().await;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                CallResult::Cancelled => return self.cancel_primary().await,
-                _ => return self.fail_primary().await,
-            }
-        }
+        // drive_primary reaches run_children, which reaches synthesize again.
+        Box::pin(self.drive_primary(root_request)).await
     }
 
     // Honor pause before reporting an exhausted queued-child call budget.
