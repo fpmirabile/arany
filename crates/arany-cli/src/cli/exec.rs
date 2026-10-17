@@ -39,6 +39,13 @@ pub(crate) struct ExecArgs {
     pub resume_goal: Option<String>,
     #[arg(
         long,
+        requires = "session_id",
+        conflicts_with_all = ["prompt", "goal", "resume_goal"],
+        help = "Start a new Goal with a fresh budget from the exhausted Goal in --session-id"
+    )]
+    pub continue_goal: Option<String>,
+    #[arg(
+        long,
         conflicts_with_all = ["prompt", "resume_goal"],
         help = "Run an autonomous Goal on this objective until it is satisfied or stops"
     )]
@@ -53,8 +60,23 @@ pub(crate) struct ExecArgs {
     pub include_paths: Vec<PathBuf>,
     #[arg(long, help = "Enable guarded tools from private tools.json")]
     pub tools: bool,
-    /// Objective of a new Run; omitted only with --resume-goal, which continues the pinned objective.
+    /// Objective of a new Run; omitted only with --resume-goal (continues the pinned objective) or --continue-goal.
     pub prompt: Option<String>,
+}
+
+// A continuation keeps the defaults the spec states; saved limits apply to other exec Goals.
+fn apply_saved_limits(
+    goal: &mut GoalRequest,
+    budget: GoalBudget,
+    resource_settings: arany::ToolResourceSettings,
+) {
+    if goal.continues.is_some() {
+        return;
+    }
+    if goal.id.is_none() {
+        goal.budget = Some(budget);
+    }
+    goal.resource_settings = resource_settings;
 }
 
 struct Admission {
@@ -113,19 +135,34 @@ impl ExecArgs {
             .map(arany::GoalId::from_str)
             .transpose()
             .map_err(|_| "invalid Goal ID")?;
-        let resumes_without_text =
-            self.goal.is_none() && self.prompt.is_none() && resume_goal.is_some();
-        let (objective, goal) = match (&self.goal, &self.prompt, resume_goal) {
-            (Some(objective), None, None) => (
+        let continue_goal = self
+            .continue_goal
+            .as_deref()
+            .map(arany::GoalId::from_str)
+            .transpose()
+            .map_err(|_| "invalid Goal ID")?;
+        let resumes_without_text = self.goal.is_none()
+            && self.prompt.is_none()
+            && (resume_goal.is_some() || continue_goal.is_some());
+        let (objective, goal) = match (&self.goal, &self.prompt, resume_goal, continue_goal) {
+            (Some(objective), None, None, None) => (
                 objective.clone(),
                 GoalRequest::autonomous(GoalBudget::default(), GoalPhase::Implementation),
             ),
-            (None, Some(prompt), None) => (prompt.clone(), GoalRequest::default()),
-            (None, Some(prompt), Some(id)) => (prompt.clone(), GoalRequest::resume(id, true)),
-            (None, None, Some(id)) => (String::new(), GoalRequest::resume(id, true)),
+            (None, Some(prompt), None, None) => (prompt.clone(), GoalRequest::default()),
+            (None, Some(prompt), Some(id), None) => (prompt.clone(), GoalRequest::resume(id, true)),
+            (None, None, Some(id), None) => (String::new(), GoalRequest::resume(id, true)),
+            (None, None, None, Some(id)) => (
+                String::new(),
+                GoalRequest::continue_from(
+                    id,
+                    GoalBudget::default(),
+                    arany::ToolResourceSettings::default(),
+                ),
+            ),
             _ => {
                 return Err(
-                    "pass --goal alone, a prompt alone, or --resume-goal with an optional prompt",
+                    "pass --goal alone, a prompt alone, --resume-goal with an optional prompt, or --continue-goal alone",
                 );
             }
         };
@@ -212,10 +249,7 @@ async fn run_on_engine(
     let (goal_budget, resource_settings) =
         crate::cli::attached::execution_limits(&admission.state_dir).await?;
     let mut goal = admission.goal;
-    if goal.id.is_none() {
-        goal.budget = Some(goal_budget);
-    }
-    goal.resource_settings = resource_settings;
+    apply_saved_limits(&mut goal, goal_budget, resource_settings);
     let end = run_signalled(
         &engine,
         providers,
@@ -558,6 +592,7 @@ mod tests {
             effort: None,
             session_id: None,
             resume_goal: None,
+            continue_goal: None,
             goal: None,
             output: OutputArg::Text,
             collaboration: CollaborationArg::Single,
@@ -663,6 +698,43 @@ mod tests {
         assert_eq!(admission.objective, "Ship the change");
         assert!(admission.goal.autonomous);
 
+        let admission = parse(&["--session-id", &session, "--continue-goal", &goal_id])
+            .expect("continue parses without a prompt")
+            .admit()
+            .expect("prompt-less continuation");
+        assert!(admission.objective.is_empty());
+        assert_eq!(
+            admission.goal.continues,
+            Some(goal_id.parse().expect("Goal ID"))
+        );
+        assert_eq!(admission.goal.id, None);
+        let mut continued = admission.goal;
+        let saved = GoalBudget {
+            max_runs: 1,
+            ..GoalBudget::default()
+        };
+        apply_saved_limits(
+            &mut continued,
+            saved,
+            arany::ToolResourceSettings::default(),
+        );
+        assert_eq!(continued.budget, Some(GoalBudget::default()));
+        let mut fresh = GoalRequest::default();
+        apply_saved_limits(&mut fresh, saved, arany::ToolResourceSettings::default());
+        assert_eq!(fresh.budget, Some(saved));
+        assert!(parse(&["--continue-goal", &goal_id]).is_err());
+        assert!(
+            parse(&[
+                "--session-id",
+                &session,
+                "--continue-goal",
+                &goal_id,
+                "--resume-goal",
+                &goal_id
+            ])
+            .is_err()
+        );
+
         let admission = parse(&["--session-id", &session, "--resume-goal", &goal_id])
             .expect("resume parses without a prompt")
             .admit()
@@ -686,7 +758,9 @@ mod tests {
         assert_eq!(admission.objective, "Keep going");
         assert_eq!(
             parse(&[]).expect("parses").admit().err(),
-            Some("pass --goal alone, a prompt alone, or --resume-goal with an optional prompt")
+            Some(
+                "pass --goal alone, a prompt alone, --resume-goal with an optional prompt, or --continue-goal alone"
+            )
         );
         assert_eq!(
             parse(&["--goal", " "]).expect("parses").admit().err(),

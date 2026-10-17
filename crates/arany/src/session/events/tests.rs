@@ -1511,18 +1511,6 @@ mod payload_version_tests {
             ));
         }
         let unbumped = [
-            Event::GoalFinished {
-                goal_id,
-                status: GoalStatus::Completed,
-                active_ms: 1_234,
-                report: GoalReport {
-                    summary: "done".into(),
-                    changes: Vec::new(),
-                    evidence: Vec::new(),
-                    unresolved: Vec::new(),
-                    cached_input_tokens: 0,
-                },
-            },
             Event::SessionRenamed {
                 title: "renamed".into(),
             },
@@ -1539,6 +1527,52 @@ mod payload_version_tests {
                 Event::decode(event.kind(), 6, &payload, run_id, agent_run_id).expect("unbumped"),
                 event
             );
+        }
+        let finished = Event::GoalFinished {
+            goal_id,
+            status: GoalStatus::Completed,
+            active_ms: 1_234,
+            report: GoalReport {
+                summary: "done".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+                cached_input_tokens: 0,
+            },
+            exhausted: false,
+        };
+        let (run_id, agent_run_id) = finished.scope();
+        let payload = finished.payload().expect("payload");
+        assert_eq!(
+            Event::decode("GoalFinished", 7, &payload, run_id, agent_run_id).expect("bumped"),
+            finished
+        );
+        let started = Event::GoalStarted {
+            goal_id,
+            objective: "continue".into(),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
+            budget: GoalBudget::default(),
+            phase: GoalPhase::Implementation,
+            autonomous: false,
+            resource_settings: crate::tools::ToolResourceSettings::default(),
+            continues: Some(GoalId::new()),
+        };
+        let started_payload = started.payload().expect("payload");
+        assert_eq!(
+            Event::decode("GoalStarted", 7, &started_payload, None, None).expect("v7"),
+            started
+        );
+        for (kind, payload) in [
+            ("GoalStarted", &started_payload),
+            ("GoalFinished", &payload),
+        ] {
+            assert!(matches!(
+                Event::decode(kind, 6, payload, None, None),
+                Err(ReplayError::UnknownEvent)
+            ));
         }
         for deleted in ["GoalActiveTimeReserved", "GoalActiveTimeSettled"] {
             assert_eq!(payload_version(deleted), None);

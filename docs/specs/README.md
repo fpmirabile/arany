@@ -6,6 +6,7 @@ A spec is the maintained contract for one product domain: what a user or caller 
 
 | Domain | Contract | Editing rules |
 |---|---|---|
+| `serve --stdio`, JSON-RPC protocol and schema export | [Serve](./serve.md) | [security](../../agents/security.md), [testing](../../agents/testing.md) |
 | Attached terminal, interactive controls, accessibility and deterministic output | [Terminal](./terminal.md) | [security](../../agents/security.md), [testing](../../agents/testing.md) |
 | Saved-account scope, storage, selected-item authorization and recovery | [Credentials](./credentials.md) | [security](../../agents/security.md), [testing](../../agents/testing.md) |
 | Tool grants, guarded file effects, commands, runtime Skills and local MCP | [Tools](./tools.md) | [security](../../agents/security.md), [testing](../../agents/testing.md) |

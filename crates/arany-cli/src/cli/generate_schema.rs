@@ -1,0 +1,50 @@
+use super::CommandOutput;
+use arany_cli::protocol::protocol_schema;
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::Path,
+};
+
+pub(crate) fn run(out: Option<&Path>) -> Result<CommandOutput, String> {
+    let mut schema = serde_json::to_string_pretty(&protocol_schema())
+        .map_err(|_| "schema serialization failed")?;
+    schema.push('\n');
+    if let Some(out) = out {
+        write_schema(out, schema.as_bytes())
+            .map_err(|_| "schema export failed: output unavailable or unsafe")?;
+        schema.clear();
+    }
+    Ok(CommandOutput {
+        stdout: schema,
+        stderr: String::new(),
+        success: true,
+    })
+}
+
+fn write_schema(out: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    fs::create_dir_all(out)?;
+    let target = out.join("arany-protocol.schema.json");
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if !metadata.is_file() || metadata.is_symlink() => {
+            return Err(std::io::Error::other("unsafe schema target"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let temp = out.join(format!(".arany-protocol.{}.tmp", uuid::Uuid::now_v7()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, &target)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
