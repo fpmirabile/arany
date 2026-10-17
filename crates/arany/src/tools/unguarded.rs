@@ -1,10 +1,10 @@
 use super::ToolError;
 use super::cancel::Cancellation;
 use super::config::Program;
-use super::fs::{identity, open_absolute, open_directory, open_file, read_regular};
+use super::fs::{identity, open_directory, open_file};
 use super::guard::{read_capped, reap_owned_child, runtime_path};
 use super::toolchains::RuntimeGrant;
-use super::types::{CommandChangeset, CommandResult, ToolDisposition, hex_digest};
+use super::types::{CommandChangeset, CommandResult, ToolDisposition};
 use crate::session::WorkspaceIdentity;
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
@@ -13,7 +13,8 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 
-const MAX_EXECUTABLE_BYTES: usize = 256 * 1024 * 1024;
+const UNCONFIRMED: &str =
+    "Unguarded run outcome unconfirmed; processes may still run. Do not retry automatically.";
 const REAP_BOUND: Duration = Duration::from_secs(1);
 const GROUP_POLL: Duration = Duration::from_millis(10);
 const GROUP_POLLS: u32 = 100;
@@ -113,17 +114,17 @@ pub(super) async fn run(request: Request<'_>, mut cancellation: Cancellation) ->
                 .is_ok_and(|status| status.is_ok())
         }
     };
-    // The leader's pid stays reserved as the group id while any member lives, so this sweep cannot hit another group.
+    // While a member lives the leader pid stays reserved as the group id; after a normal exit, pid reuse is theoretical.
     let stopped = match group {
         Some(group) => stop_group(group).await,
         None => false,
     };
-    if !reaped {
-        return Outcome::started(
-            ToolDisposition::Uncertain,
-            "Unguarded run outcome unconfirmed; processes may still run. Do not retry automatically.",
-            false,
-        );
+    settle(ended, reaped, stopped)
+}
+
+fn settle(ended: Ended, reaped: bool, stopped: bool) -> Outcome {
+    if !reaped || !stopped {
+        return Outcome::started(ToolDisposition::Uncertain, UNCONFIRMED, false);
     }
     finish(ended, stopped)
 }
@@ -137,12 +138,12 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
         ),
         Ended::Timeout | Ended::Failed(ToolError::Limit) => Outcome::started(
             ToolDisposition::Limit,
-            "Tool result or resource limit reached",
+            "Tool result or resource limit reached; host effects may have occurred",
             stopped,
         ),
         Ended::Failed(_) => Outcome::started(
             ToolDisposition::Failed,
-            "Unguarded run failed; no automatic retry",
+            "Unguarded run failed; host effects may have occurred; no automatic retry",
             stopped,
         ),
         Ended::Done(status, stdout, stderr) => {
@@ -220,16 +221,13 @@ async fn stop_group(group: Pid) -> bool {
 }
 
 fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
+    request
+        .program
+        .verify()
+        .map_err(|_| ToolError::ChangedInput)?;
     let executable = Path::new(&request.program.executable);
-    let bytes = read_regular(
-        open_absolute(&request.program.executable)?,
-        MAX_EXECUTABLE_BYTES,
-    )?;
-    if hex_digest(&bytes) != request.program.sha256 {
-        return Err(ToolError::ChangedInput);
-    }
-    let workspace = open_directory(request.workspace)?;
-    let found = identity(&workspace)?;
+    let workspace = open_directory(request.workspace).map_err(|_| ToolError::ChangedInput)?;
+    let found = identity(&workspace).map_err(|_| ToolError::ChangedInput)?;
     if (found.0, found.1)
         != (
             request.workspace_identity.device,
@@ -284,6 +282,7 @@ fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::types::hex_digest;
     use std::os::unix::fs::PermissionsExt;
 
     struct Fixture {
@@ -347,11 +346,7 @@ mod tests {
     {
         let fixture = fixture();
         let outcome = fixture
-            .sh(
-                "env; echo cwd=$(pwd -P); touch made; echo \"$1\"",
-                "sub",
-                10_000,
-            )
+            .sh("env; echo \"cwd: $(pwd -P)\"; touch made", "sub", 10_000)
             .await;
         assert_eq!(outcome.disposition, ToolDisposition::Succeeded);
         assert!(outcome.spawned);
@@ -359,7 +354,7 @@ mod tests {
         let names: Vec<&str> = text
             .lines()
             .filter_map(|line| line.split_once('=').map(|(name, _)| name))
-            .filter(|name| name.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
+            .filter(|name| name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
             .collect();
         let allowed = [
             "PATH",
@@ -381,7 +376,7 @@ mod tests {
         assert!(text.contains(&format!("HOME={}\n", home.home_dir().display())));
         assert!(text.contains("ARANY_UNGUARDED=1\n") && text.contains("NO_COLOR=1\n"));
         let real = fixture.workspace.join("sub");
-        assert!(text.contains(&format!("cwd={}\n", real.display())));
+        assert!(text.contains(&format!("cwd: {}\n", real.display())));
         assert!(text.contains(&format!(
             "ARANY_TOOL_WORKSPACE={}\n",
             fixture.workspace.display()
@@ -460,5 +455,24 @@ mod tests {
             assert!(!outcome.spawned);
         }
         assert!(!outside.join("made").exists());
+    }
+
+    #[test]
+    fn unconfirmed_reap_or_group_is_uncertain_for_every_ending() {
+        for (reaped, stopped) in [(false, true), (true, false), (false, false)] {
+            for ended in [
+                Ended::Timeout,
+                Ended::Cancelled,
+                Ended::Failed(ToolError::Operation),
+            ] {
+                let outcome = settle(ended, reaped, stopped);
+                assert_eq!(outcome.disposition, ToolDisposition::Uncertain);
+                assert_eq!(outcome.output, UNCONFIRMED);
+            }
+        }
+        assert_eq!(
+            settle(Ended::Timeout, true, true).disposition,
+            ToolDisposition::Limit
+        );
     }
 }
