@@ -60,8 +60,23 @@ pub(crate) struct ExecArgs {
     pub include_paths: Vec<PathBuf>,
     #[arg(long, help = "Enable guarded tools from private tools.json")]
     pub tools: bool,
-    /// Objective of a new Run; omitted only with --resume-goal, which continues the pinned objective.
+    /// Objective of a new Run; omitted only with --resume-goal (continues the pinned objective) or --continue-goal.
     pub prompt: Option<String>,
+}
+
+// A continuation keeps the defaults the spec states; saved limits apply to other exec Goals.
+fn apply_saved_limits(
+    goal: &mut GoalRequest,
+    budget: GoalBudget,
+    resource_settings: arany::ToolResourceSettings,
+) {
+    if goal.continues.is_some() {
+        return;
+    }
+    if goal.id.is_none() {
+        goal.budget = Some(budget);
+    }
+    goal.resource_settings = resource_settings;
 }
 
 struct Admission {
@@ -234,10 +249,7 @@ async fn run_on_engine(
     let (goal_budget, resource_settings) =
         crate::cli::attached::execution_limits(&admission.state_dir).await?;
     let mut goal = admission.goal;
-    if goal.id.is_none() {
-        goal.budget = Some(goal_budget);
-    }
-    goal.resource_settings = resource_settings;
+    apply_saved_limits(&mut goal, goal_budget, resource_settings);
     let end = run_signalled(
         &engine,
         providers,
@@ -696,6 +708,20 @@ mod tests {
             Some(goal_id.parse().expect("Goal ID"))
         );
         assert_eq!(admission.goal.id, None);
+        let mut continued = admission.goal;
+        let saved = GoalBudget {
+            max_runs: 1,
+            ..GoalBudget::default()
+        };
+        apply_saved_limits(
+            &mut continued,
+            saved,
+            arany::ToolResourceSettings::default(),
+        );
+        assert_eq!(continued.budget, Some(GoalBudget::default()));
+        let mut fresh = GoalRequest::default();
+        apply_saved_limits(&mut fresh, saved, arany::ToolResourceSettings::default());
+        assert_eq!(fresh.budget, Some(saved));
         assert!(parse(&["--continue-goal", &goal_id]).is_err());
         assert!(
             parse(&[

@@ -1536,6 +1536,34 @@ mod goal_replay_tests {
             );
         }
 
+        let mut newer = base.clone();
+        let mut newer_goal = newer.goals[0].clone();
+        let mut newer_run = newer.runs[0].clone();
+        newer_goal.id = GoalId::new();
+        newer_run.id = RunId::new();
+        newer_goal.run_ids = vec![newer_run.id];
+        let intent = read_intent(newer_run.id, agent_run_id, "src/lib.rs");
+        newer_run.tools.push(ToolView {
+            intent: intent.clone(),
+            observation: Some(ToolObservation {
+                intent,
+                disposition: ToolDisposition::Uncertain,
+                enforcement_cause: None,
+                output: String::new(),
+                attestation: None,
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
+            }),
+            review_call_index: None,
+            permission_verdict: None,
+            finished_sequence: Some(2),
+        });
+        newer.goals.push(newer_goal);
+        newer.runs.push(newer_run);
+        assert!(
+            newer.continuable_goal().is_none(),
+            "an unknown outcome in the latest budget-closed Goal never falls back to an older one"
+        );
+
         let mut cancelled = base.clone();
         let intent = read_intent(run_id, agent_run_id, "src/lib.rs");
         cancelled.runs[0].tools.push(ToolView {

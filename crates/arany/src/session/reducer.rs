@@ -648,31 +648,30 @@ impl SessionView {
     /// The most recent Goal closed by budget exhaustion that no later Goal continues yet,
     /// unless its last Run left a Tool without a known outcome.
     pub fn continuable_goal(&self) -> Option<&GoalView> {
-        self.goals.iter().rev().find(|goal| {
+        let latest = self.goals.iter().rev().find(|goal| {
             goal.budget_closed
-                && goal
-                    .run_ids
-                    .iter()
-                    .rev()
-                    .find_map(|run_id| self.runs.iter().find(|run| run.id == *run_id))
-                    .is_some_and(|run| {
-                        run.tools
-                            .iter()
-                            .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
-                            .all(|tool| {
-                                tool.observation.as_ref().is_some_and(|observation| {
-                                    observation.disposition
-                                        != crate::tools::ToolDisposition::Uncertain
-                                        && observation.cache_update
-                                            != crate::tools::CacheUpdate::Uncertain
-                                })
-                            })
-                    })
                 && !self
                     .goals
                     .iter()
                     .any(|other| other.continues == Some(goal.id))
-        })
+        })?;
+        latest
+            .run_ids
+            .iter()
+            .rev()
+            .find_map(|run_id| self.runs.iter().find(|run| run.id == *run_id))
+            .is_some_and(|run| {
+                run.tools
+                    .iter()
+                    .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
+                    .all(|tool| {
+                        tool.observation.as_ref().is_some_and(|observation| {
+                            observation.disposition != crate::tools::ToolDisposition::Uncertain
+                                && observation.cache_update != crate::tools::CacheUpdate::Uncertain
+                        })
+                    })
+            })
+            .then_some(latest)
     }
 
     pub fn goal(&self, id: GoalId) -> Option<&GoalView> {
