@@ -719,6 +719,13 @@ pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
     }
 }
 
+pub(crate) fn failure_check(error: &ToolError) -> Option<&'static str> {
+    match error {
+        ToolError::GuardBootstrap(failure) => failure.check(),
+        _ => None,
+    }
+}
+
 fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
     let site = match intent.call.facts().site {
         Site::InProcess => "Read",
