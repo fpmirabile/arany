@@ -909,6 +909,13 @@ mod tests {
 
     #[test]
     fn fallback_requires_a_server_failure_at_the_http_status_stage() {
+        let anthropic_rate_limit = anthropic::http_failure(reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            anthropic_rate_limit.failure_class(),
+            ProviderFailureClass::Unavailable
+        );
+        assert_eq!(anthropic_rate_limit.failure_reason(), None);
+        assert!(!anthropic_rate_limit.allows_fallback());
         assert_eq!(
             ProviderError::HttpServerUnavailable.failure_class(),
             ProviderError::Unavailable.failure_class()
