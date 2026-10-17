@@ -1292,16 +1292,14 @@ mod goal_request_tests {
     }
 
     #[test]
-    fn goal_continue_needs_an_exhausted_goal_and_no_active_one() {
+    fn goal_continue_refuses_goals_that_were_not_closed_by_exhaustion() {
         let mut view = session_with_goal(true);
         let refusal = Err("No exhausted Goal is available to continue".to_owned());
         view.goals[0].status = arany::GoalStatus::Interrupted;
         assert_eq!(goal_request(&view, GoalStart::Continue), refusal);
         view.goals[0].status = arany::GoalStatus::Failed;
         view.goals[0].budget.max_runs = 0;
-        let request = goal_request(&view, GoalStart::Continue).expect("continue request");
-        assert_eq!(request.continues, Some(view.goals[0].id));
-        assert_eq!(request.id, None);
+        assert_eq!(goal_request(&view, GoalStart::Continue), refusal);
     }
 
     #[test]

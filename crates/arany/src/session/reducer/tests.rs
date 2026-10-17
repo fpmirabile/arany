@@ -211,6 +211,15 @@ mod goal_replay_tests {
     }
 
     fn goal_started(goal_id: GoalId, budget: GoalBudget) -> Event {
+        started_with(goal_id, budget, false, None)
+    }
+
+    fn started_with(
+        goal_id: GoalId,
+        budget: GoalBudget,
+        autonomous: bool,
+        continues: Option<GoalId>,
+    ) -> Event {
         Event::GoalStarted {
             goal_id,
             objective: GOAL_OBJECTIVE.into(),
@@ -221,8 +230,8 @@ mod goal_replay_tests {
             budget,
             resource_settings: crate::tools::ToolResourceSettings::default(),
             phase: GoalPhase::Implementation,
-            autonomous: false,
-            continues: None,
+            autonomous,
+            continues,
         }
     }
 
@@ -1394,71 +1403,140 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn goal_continuation_replays_only_from_a_budget_closed_unclaimed_source() {
-        let session_id = SessionId::new();
-        let (source, target) = (GoalId::new(), GoalId::new());
-        let continued = |goal_id, continues| {
-            let Event::GoalStarted {
-                objective,
-                workspace_identity,
-                budget,
-                resource_settings,
-                phase,
-                autonomous,
-                ..
-            } = goal_started(goal_id, GoalBudget::default())
-            else {
-                unreachable!();
-            };
-            Event::GoalStarted {
-                goal_id,
-                objective,
-                workspace_identity,
-                budget,
-                resource_settings,
-                phase,
-                autonomous,
-                continues: Some(continues),
+    fn goal_continuation_replays_only_from_the_unclaimed_budget_closed_source() {
+        let (source, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let mut events = vec![started_with(
+            source,
+            GoalBudget {
+                max_provider_calls: Some(2),
+                ..GoalBudget::default()
+            },
+            true,
+            None,
+        )];
+        events.extend(start_run(
+            source,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend([
+            Event::GoalProviderCallReserved {
+                goal_id: source,
+                run_id,
+                agent_run_id,
+                active_ceiling_ms: 0,
+            },
+            Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Finished,
+                    None,
+                ),
+            },
+            Event::AgentFinished {
+                run_id,
+                agent_run_id,
+                disposition: AgentDisposition::Finished,
+                summary: Some("done".into()),
+                result: Some("done".into()),
+            },
+            Event::MessageCommitted {
+                run_id,
+                text: "done".into(),
+            },
+            Event::RunFinished {
+                run_id,
+                disposition: RunDisposition::Finished,
+                active_ms: 0,
+            },
+            Event::GoalCompactionCallReserved {
+                goal_id: source,
+                run_id,
+                active_ceiling_ms: 0,
+            },
+            Event::GoalFinished {
+                goal_id: source,
+                status: GoalStatus::Failed,
+                active_ms: 0,
+                report: GoalReport {
+                    summary: "Goal budget is exhausted.".into(),
+                    changes: Vec::new(),
+                    evidence: Vec::new(),
+                    unresolved: Vec::new(),
+                    cached_input_tokens: 0,
+                },
+            },
+        ]);
+        let session = SessionId::new();
+        let replay = |extra: Vec<Event>| {
+            let mut all = events.clone();
+            all.extend(extra);
+            SessionView::replay_open(session, &session_with(session, all))
+        };
+        let continued = |goal_id, edit: &dyn Fn(&mut Event)| {
+            let mut event = started_with(goal_id, GoalBudget::default(), true, Some(source));
+            edit(&mut event);
+            event
+        };
+
+        let base = replay(Vec::new())
+            .expect("source replays")
+            .expect("Session");
+        assert_eq!(base.continuable_goal().map(|goal| goal.id), Some(source));
+        let mut failed_run = base.clone();
+        failed_run.runs[0].status = RunStatus::Failed;
+        assert!(
+            failed_run.continuable_goal().is_none(),
+            "a failed Run is not exhaustion"
+        );
+
+        let target = GoalId::new();
+        let view = replay(vec![continued(target, &|_| {})])
+            .expect("a matching continuation replays")
+            .expect("Session");
+        assert_eq!(
+            view.goal(target).and_then(|goal| goal.continues),
+            Some(source)
+        );
+        assert!(view.continuable_goal().is_none(), "the source is claimed");
+
+        assert!(
+            replay(vec![
+                continued(target, &|_| {}),
+                continued(GoalId::new(), &|_| {}),
+            ])
+            .is_err(),
+            "a second continuation of one source"
+        );
+        let mismatches: [&dyn Fn(&mut Event); 3] = [
+            &|event| {
+                if let Event::GoalStarted { objective, .. } = event {
+                    objective.push('!');
+                }
+            },
+            &|event| {
+                if let Event::GoalStarted { phase, .. } = event {
+                    *phase = GoalPhase::Plan;
+                }
+            },
+            &|event| {
+                if let Event::GoalStarted { autonomous, .. } = event {
+                    *autonomous = false;
+                }
+            },
+        ];
+        for edit in mismatches {
+            assert!(replay(vec![continued(GoalId::new(), edit)]).is_err());
+        }
+        let unknown = continued(GoalId::new(), &|event| {
+            if let Event::GoalStarted { continues, .. } = event {
+                *continues = Some(GoalId::new());
             }
-        };
-        let replay =
-            |events: Vec<Event>| SessionView::replay(session_id, &journal(session_id, events));
-        let open_source = vec![
-            Event::SessionStarted {
-                title: "t".into(),
-                workspace_identity: WorkspaceIdentity {
-                    device: 1,
-                    inode: 2,
-                },
-            },
-            goal_started(source, GoalBudget::default()),
-            continued(target, source),
-        ];
-        let started = |goal_id| {
-            vec![
-                Event::SessionStarted {
-                    title: "t".into(),
-                    workspace_identity: WorkspaceIdentity {
-                        device: 1,
-                        inode: 2,
-                    },
-                },
-                goal_started(goal_id, GoalBudget::default()),
-            ]
-        };
-        assert!(replay(started(source)).is_ok());
-        assert!(replay(open_source).is_err(), "an open Goal is not a source");
-        let unknown = vec![
-            Event::SessionStarted {
-                title: "t".into(),
-                workspace_identity: WorkspaceIdentity {
-                    device: 1,
-                    inode: 2,
-                },
-            },
-            continued(target, source),
-        ];
-        assert!(replay(unknown).is_err(), "an unknown source is refused");
+        });
+        assert!(replay(vec![unknown]).is_err());
     }
 
     #[test]

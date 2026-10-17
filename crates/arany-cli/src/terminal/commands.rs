@@ -855,9 +855,9 @@ mod tests {
                 preview.status.as_str()
             ),
             (
-                " [pause|resume|objective]",
+                " [pause|resume|continue|objective]",
                 true,
-                "Command: /goal [pause|resume|objective]; Tab: pause, resume",
+                "Command: /goal [pause|resume|continue|objective]; Tab: pause, resume, continue",
             )
         );
         assert_eq!(
