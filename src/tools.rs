@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::too_many_lines))]
+
 mod approval;
 mod cancel;
 pub(crate) mod catalog;

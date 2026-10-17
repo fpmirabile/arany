@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::too_many_lines))]
+
 use crate::journal::{Journal, Subscription};
 use crate::provider::{
     AgentPhase, ImageAttachment, PromptRole, Provider, ProviderRequest, RunInput,
@@ -336,6 +338,14 @@ struct AdmittedTurn {
     objective: String,
     budget: GoalBudget,
     provisional_workspace_lock: Option<WorkspaceRunLock>,
+}
+
+struct RootInput<'a> {
+    tool_context: &'a mut Option<crate::tools::ToolContext>,
+    inputs: &'a mut WorkspaceInputs,
+    images: &'a mut Vec<crate::provider::ProviderImage>,
+    history: &'a mut Vec<crate::provider::HistoryTurn>,
+    summary: &'a mut Option<String>,
 }
 
 struct PreparedTurn {
@@ -1274,43 +1284,14 @@ impl Engine {
         }
 
         let identity = checked_identity(submission.providers.primary[0].as_ref())?;
-        let providers = &submission.providers;
-        if !request.images.is_empty()
-            && providers.values().iter().take(2).any(|chain| {
-                chain
-                    .iter()
-                    .any(|candidate| candidate.identity().custom_provenance().is_some())
-            })
-        {
-            return Err(EngineError::ImagesNotAdmitted);
-        }
-        if submission.tools.is_some()
-            && [&providers.primary, &providers.child].iter().any(|chain| {
-                chain
-                    .iter()
-                    .any(|candidate| !candidate.identity().shares_account(chain[0].identity()))
-            })
-        {
-            return Err(EngineError::IncompatibleProviderChain);
-        }
-        if submission.tools.is_some()
-            && providers.values().iter().take(2).any(|chain| {
-                chain
-                    .iter()
-                    .any(|candidate| candidate.identity().custom_provenance().is_some())
-            })
-        {
-            return Err(EngineError::InvalidRequest);
-        }
-        let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
-        let finish_after_run = request.goal.finish_after_run;
+        validate_turn_providers(submission, &request)?;
         let admitted = self
             .admit_turn(
                 submission,
                 &request,
                 identity,
                 continuation,
-                previews,
+                progress.as_ref().is_some_and(RunProgress::previews_enabled),
                 leases,
             )
             .await?;
@@ -1328,11 +1309,11 @@ impl Engine {
         } = admitted;
         let PreparedTurn {
             tools,
-            tool_context,
-            inputs,
-            images,
-            history,
-            summary,
+            mut tool_context,
+            mut inputs,
+            mut images,
+            mut history,
+            mut summary,
             config,
             context_started,
             context_ended,
@@ -1343,16 +1324,13 @@ impl Engine {
         }
 
         if request.session_id.is_none() {
-            self.journal
-                .append(
-                    session_id,
-                    Event::SessionStarted {
-                        title: request.title.unwrap_or_else(|| "New Session".into()),
-                        workspace_identity,
-                    },
-                )
-                .await?;
-            session_lock.keep();
+            self.start_session(
+                &mut session_lock,
+                session_id,
+                request.title,
+                workspace_identity,
+            )
+            .await?;
         }
         let run_id = RunId::new();
         let agent_run_id = AgentRunId::new();
@@ -1364,13 +1342,7 @@ impl Engine {
                 .telemetry
                 .trace_run(session_id, goal.id, (context_started, context_ended));
         // Reduces the open state that appends validate; the closed view would reject this Run's links.
-        let view = self
-            .journal
-            .store()
-            .load_open_view(session_id)
-            .await?
-            .ok_or(EngineError::InvalidHistory)?;
-        let ledger = GoalLedger::new(view, goal.id);
+        let ledger = self.open_ledger(session_id, goal.id).await?;
         let publisher = progress.map(|progress| ProgressPublisher::new(progress, run_id));
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
@@ -1382,177 +1354,228 @@ impl Engine {
         let ended = |mut ended: tokio::sync::watch::Receiver<()>| async move {
             let _ = ended.changed().await;
         };
-        let follow_progress = {
-            let ended = ended(end.subscribe());
-            let (publisher, ledger) = (publisher.as_ref(), &ledger);
-            async move {
-                if let (Some(publisher), Some(tap)) = (publisher, progress_tap) {
-                    publisher.follow(tap, ended, ledger).await;
-                }
-            }
+        let follow_progress = follow_progress(
+            publisher.as_ref(),
+            progress_tap,
+            ended(end.subscribe()),
+            &ledger,
+        );
+        let follow_trace = follow_trace(trace, trace_tap, ended(end.subscribe()), &ledger, goal.id);
+        let started = StartedRun {
+            session_id,
+            run_id,
+            goal: &goal,
+            finish_after_run: request.goal.finish_after_run,
+            workspace_identity,
         };
-        let follow_trace = {
-            let ended = ended(end.subscribe());
-            let (ledger, goal_id) = (&ledger, goal.id);
-            async move {
-                if let (Some(trace), Some(tap)) = (trace, trace_tap) {
-                    let goal = || {
-                        ledger
-                            .view(|view| view.goal(goal_id).cloned())
-                            .ok()
-                            .flatten()
-                    };
-                    trace.follow(tap, ended, goal).await;
-                }
-            }
-        };
-        let segment = async {
-            let turn = async {
+        let segment = end_turn(
+            async {
                 Self::retain_goal_workspace(
                     leases,
                     goal.id,
                     workspace_identity,
                     provisional_workspace_lock,
                 );
-                if goal.is_new {
-                    self.append_goal_lifecycle(
-                        session_id,
-                        Some(&ledger),
-                        Event::GoalStarted {
-                            goal_id: goal.id,
-                            objective: objective.clone(),
-                            workspace_identity,
-                            budget: goal.budget,
-                            phase: goal.phase,
-                            autonomous: goal.autonomous,
-                            resource_settings: goal.resource_settings,
-                        },
-                    )
+                self.begin_goal(&started, &ledger, &objective, &cancellation)
                     .await?;
-                } else if goal.resume {
-                    self.append_goal_lifecycle(
-                        session_id,
-                        Some(&ledger),
-                        Event::GoalResumed { goal_id: goal.id },
-                    )
-                    .await?;
-                }
-                if cancellation.is_cancelled() {
-                    return Err(EngineError::CancelledBeforeStart);
-                }
-                // A link is an admission acknowledgment: a lost acknowledgment may still have committed it.
-                self.append_goal_lifecycle(
+                self.open_run(
+                    &ledger,
                     session_id,
-                    Some(&ledger),
-                    Event::GoalRunLinked {
-                        goal_id: goal.id,
+                    (run_id, agent_run_id),
+                    Event::MessageAccepted {
                         run_id,
-                        phase: goal.phase,
+                        text: objective.clone(),
+                        images: request.images,
                     },
+                    config,
                 )
                 .await?;
-                if cancellation.is_cancelled() {
-                    return Err(EngineError::CancelledBeforeStart);
-                }
-                let accepted = Event::MessageAccepted {
-                    run_id,
-                    text: objective.clone(),
-                    images: request.images,
-                };
-                ledger.append(&self.journal, session_id, accepted).await?;
-                let started = Event::RunStarted {
-                    run_id,
-                    config,
-                    active_deadline_ms: ledger.run_active_deadline()?,
-                };
-                ledger.append(&self.journal, session_id, started).await?;
-                let spawned = Event::AgentSpawned {
-                    run_id,
-                    agent_run_id,
-                    role: AgentRole::Primary,
-                    ordinal: 0,
-                    objective: None,
-                    grant: None,
-                };
-                ledger.append(&self.journal, session_id, spawned).await?;
-                let role = if tool_context.is_some() {
-                    PromptRole::Primary
-                } else {
-                    PromptRole::ReadOnly
-                };
-                let provider_request = ProviderRequest {
-                    session_id,
-                    run_id,
-                    agent_run_id,
-                    phase: AgentPhase::RootPlan,
-                    collaboration: request.policy,
-                    model: identity.model.clone(),
-                    max_output_tokens: identity.limits.max_output_tokens,
-                    input: RunInput {
-                        images,
-                        goal_budget: Some(budget),
-                        goal_plan_contract: goal.plan_contract.clone(),
-                        workspace_guidance: inputs
-                            .instructions
-                            .map(|(_, snapshot)| snapshot.content),
-                        includes: inputs
-                            .includes
-                            .into_iter()
-                            .map(|snapshot| snapshot.model_include())
-                            .collect(),
-                        history,
-                        context_summary: summary,
-                        tools: tool_context,
-                        ..RunInput::new(role, objective)
+                let provider_request = root_request(
+                    (session_id, run_id, agent_run_id),
+                    request.policy,
+                    identity,
+                    &goal,
+                    objective,
+                    budget,
+                    RootInput {
+                        tool_context: &mut tool_context,
+                        inputs: &mut inputs,
+                        images: &mut images,
+                        history: &mut history,
+                        summary: &mut summary,
                     },
-                };
+                );
                 if let Some(steering) = &submission.steering {
                     steering.begin_run();
                 }
-                // Boxed: the Run loop's future is large and would overflow a small caller stack.
-                Box::pin(
-                    RunLoop::new(
-                        &self.journal,
-                        submission.providers.clone(),
-                        RunIdentity {
-                            session_id,
-                            run_id,
-                            goal_id: goal.id,
-                            primary_id: agent_run_id,
-                        },
-                        LoopControls {
-                            policy: request.policy,
-                            concurrency: provider_concurrency,
-                            goal_phase: goal.phase,
-                            cancellation,
-                            tools: tools.as_ref(),
-                            approvals: submission.approvals.as_ref(),
-                            steering: submission.steering.clone(),
-                        },
-                        &ledger,
-                        publisher.as_ref(),
-                    )
-                    .execute(provider_request),
+                self.drive_turn(
+                    submission,
+                    goal.id,
+                    LoopControls {
+                        policy: request.policy,
+                        concurrency: provider_concurrency,
+                        goal_phase: goal.phase,
+                        cancellation,
+                        tools: tools.as_ref(),
+                        approvals: submission.approvals.as_ref(),
+                        steering: submission.steering.clone(),
+                    },
+                    provider_request,
+                    (&ledger, publisher.as_ref()),
                 )
                 .await?;
-                self.settle_turn(
-                    StartedRun {
-                        session_id,
-                        run_id,
-                        goal: &goal,
-                        finish_after_run,
-                        workspace_identity,
-                    },
-                    leases,
-                )
-                .await
-            }
-            .await;
-            drop(end);
-            turn
-        };
+                self.settle_turn(started, leases).await
+            },
+            end,
+        );
         let (turn, (), ()) = tokio::join!(segment, follow_progress, follow_trace);
         turn
+    }
+
+    async fn drive_turn(
+        &self,
+        submission: &AdmittedSubmission,
+        goal_id: GoalId,
+        controls: LoopControls<'_>,
+        request: ProviderRequest,
+        (ledger, publisher): (&GoalLedger, Option<&ProgressPublisher>),
+    ) -> Result<(), EngineError> {
+        // Boxed: the Run loop's future is large and would overflow a small caller stack.
+        Box::pin(
+            RunLoop::new(
+                &self.journal,
+                submission.providers.clone(),
+                RunIdentity {
+                    session_id: request.session_id,
+                    run_id: request.run_id,
+                    goal_id,
+                    primary_id: request.agent_run_id,
+                },
+                controls,
+                ledger,
+                publisher,
+            )
+            .execute(request),
+        )
+        .await
+    }
+
+    async fn begin_goal(
+        &self,
+        started: &StartedRun<'_>,
+        ledger: &GoalLedger,
+        objective: &str,
+        cancellation: &RunCancellation,
+    ) -> Result<(), EngineError> {
+        let StartedRun {
+            session_id,
+            run_id,
+            goal,
+            workspace_identity,
+            ..
+        } = *started;
+        if goal.is_new {
+            self.append_goal_lifecycle(
+                session_id,
+                Some(ledger),
+                Event::GoalStarted {
+                    goal_id: goal.id,
+                    objective: objective.to_owned(),
+                    workspace_identity,
+                    budget: goal.budget,
+                    phase: goal.phase,
+                    autonomous: goal.autonomous,
+                    resource_settings: goal.resource_settings,
+                },
+            )
+            .await?;
+        } else if goal.resume {
+            self.append_goal_lifecycle(
+                session_id,
+                Some(ledger),
+                Event::GoalResumed { goal_id: goal.id },
+            )
+            .await?;
+        }
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+        // A link is an admission acknowledgment: a lost acknowledgment may still have committed it.
+        self.append_goal_lifecycle(
+            session_id,
+            Some(ledger),
+            Event::GoalRunLinked {
+                goal_id: goal.id,
+                run_id,
+                phase: goal.phase,
+            },
+        )
+        .await?;
+        if cancellation.is_cancelled() {
+            return Err(EngineError::CancelledBeforeStart);
+        }
+        Ok(())
+    }
+
+    async fn open_run(
+        &self,
+        ledger: &GoalLedger,
+        session_id: SessionId,
+        (run_id, agent_run_id): (RunId, AgentRunId),
+        accepted: Event,
+        config: RunConfig,
+    ) -> Result<(), EngineError> {
+        ledger.append(&self.journal, session_id, accepted).await?;
+        let started = Event::RunStarted {
+            run_id,
+            config,
+            active_deadline_ms: ledger.run_active_deadline()?,
+        };
+        ledger.append(&self.journal, session_id, started).await?;
+        let spawned = Event::AgentSpawned {
+            run_id,
+            agent_run_id,
+            role: AgentRole::Primary,
+            ordinal: 0,
+            objective: None,
+            grant: None,
+        };
+        ledger.append(&self.journal, session_id, spawned).await?;
+        Ok(())
+    }
+
+    async fn open_ledger(
+        &self,
+        session_id: SessionId,
+        goal_id: GoalId,
+    ) -> Result<GoalLedger, EngineError> {
+        let view = self
+            .journal
+            .store()
+            .load_open_view(session_id)
+            .await?
+            .ok_or(EngineError::InvalidHistory)?;
+        Ok(GoalLedger::new(view, goal_id))
+    }
+
+    async fn start_session(
+        &self,
+        session_lock: &mut SessionRunLock,
+        session_id: SessionId,
+        title: Option<String>,
+        workspace_identity: (u64, u64),
+    ) -> Result<(), EngineError> {
+        self.journal
+            .append(
+                session_id,
+                Event::SessionStarted {
+                    title: title.unwrap_or_else(|| "New Session".into()),
+                    workspace_identity,
+                },
+            )
+            .await?;
+        session_lock.keep();
+        Ok(())
     }
 
     /// Resolves the Goal and takes the Session, lineage and Workspace admissions a Run needs.
@@ -1920,6 +1943,123 @@ fn admit_providers(providers: &crate::provider::AdmittedProviders) -> Result<(),
         }
     }
     Ok(())
+}
+
+fn validate_turn_providers(
+    submission: &AdmittedSubmission,
+    request: &RunRequest,
+) -> Result<(), EngineError> {
+    let providers = &submission.providers;
+    if !request.images.is_empty()
+        && providers.values().iter().take(2).any(|chain| {
+            chain
+                .iter()
+                .any(|candidate| candidate.identity().custom_provenance().is_some())
+        })
+    {
+        return Err(EngineError::ImagesNotAdmitted);
+    }
+    if submission.tools.is_some()
+        && [&providers.primary, &providers.child].iter().any(|chain| {
+            chain
+                .iter()
+                .any(|candidate| !candidate.identity().shares_account(chain[0].identity()))
+        })
+    {
+        return Err(EngineError::IncompatibleProviderChain);
+    }
+    if submission.tools.is_some()
+        && providers.values().iter().take(2).any(|chain| {
+            chain
+                .iter()
+                .any(|candidate| candidate.identity().custom_provenance().is_some())
+        })
+    {
+        return Err(EngineError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn root_request(
+    (session_id, run_id, agent_run_id): (SessionId, RunId, AgentRunId),
+    policy: crate::session::CollaborationPolicy,
+    identity: &crate::provider::ProviderIdentity,
+    goal: &GoalAdmission,
+    objective: String,
+    budget: GoalBudget,
+    input: RootInput<'_>,
+) -> ProviderRequest {
+    let tools = input.tool_context.take();
+    let role = if tools.is_some() {
+        PromptRole::Primary
+    } else {
+        PromptRole::ReadOnly
+    };
+    ProviderRequest {
+        session_id,
+        run_id,
+        agent_run_id,
+        phase: AgentPhase::RootPlan,
+        collaboration: policy,
+        model: identity.model.clone(),
+        max_output_tokens: identity.limits.max_output_tokens,
+        input: RunInput {
+            images: std::mem::take(input.images),
+            goal_budget: Some(budget),
+            goal_plan_contract: goal.plan_contract.clone(),
+            workspace_guidance: input
+                .inputs
+                .instructions
+                .take()
+                .map(|(_, snapshot)| snapshot.content),
+            includes: std::mem::take(&mut input.inputs.includes)
+                .into_iter()
+                .map(|snapshot| snapshot.model_include())
+                .collect(),
+            history: std::mem::take(input.history),
+            context_summary: input.summary.take(),
+            tools,
+            ..RunInput::new(role, objective)
+        },
+    }
+}
+
+async fn end_turn(
+    turn: impl Future<Output = Result<RunTurn, EngineError>>,
+    end: tokio::sync::watch::Sender<()>,
+) -> Result<RunTurn, EngineError> {
+    let turn = turn.await;
+    drop(end);
+    turn
+}
+
+async fn follow_progress(
+    publisher: Option<&ProgressPublisher>,
+    tap: Option<Subscription>,
+    ended: impl Future<Output = ()>,
+    ledger: &GoalLedger,
+) {
+    if let (Some(publisher), Some(tap)) = (publisher, tap) {
+        publisher.follow(tap, ended, ledger).await;
+    }
+}
+
+async fn follow_trace(
+    trace: Option<crate::telemetry::RunTrace>,
+    tap: Option<Subscription>,
+    ended: impl Future<Output = ()>,
+    ledger: &GoalLedger,
+    goal_id: GoalId,
+) {
+    if let (Some(trace), Some(tap)) = (trace, tap) {
+        let goal = || {
+            ledger
+                .view(|view| view.goal(goal_id).cloned())
+                .ok()
+                .flatten()
+        };
+        trace.follow(tap, ended, goal).await;
+    }
 }
 
 fn checked_identity(

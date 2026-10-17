@@ -838,6 +838,122 @@ impl GuardContext<'_> {
     }
 }
 
+fn validate_task(task: &Task) -> Result<(), ToolError> {
+    task.config.validate()?;
+    if let Some(cache) = &task.cache {
+        cache.validate(&task.intent, &task.config)?;
+    }
+    verify_intent_runtime_grants(&task.intent, &task.config)?;
+    if !task.intent.valid()
+        || task.intent.call.facts().site != Site::Guard
+        || task.intent.policy_digest != task.config.digest()
+        || task.intent.expires_at_ms <= now_ms()
+        || !task.config.allows(&task.intent.call)
+        || task.intent.enforcement_digest != task.enforcement_digest()?
+        || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
+    {
+        return Err(ToolError::Configuration);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn restore_cache(
+    cache: &BuildCacheTransfer,
+    stdin: &mut impl Read,
+    root: &Path,
+) -> Result<(), ToolError> {
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(b"CACHE_READY\n")
+        .and_then(|()| stdout.flush())
+        .map_err(|_| ToolError::Operation)?;
+    let mut length = [0; 8];
+    stdin
+        .read_exact(&mut length)
+        .map_err(|_| ToolError::Operation)?;
+    let length = u64::from_le_bytes(length);
+    if length > cache.view_bytes {
+        return Err(ToolError::Limit);
+    }
+    if length > 0 {
+        let cache_dir = super::fs::open_directory(&root.join("cache"))?;
+        let mut archive = Read::take(&mut *stdin, length);
+        crate::store::restore_archive_with_limit(
+            &mut archive,
+            &cache_dir,
+            &cache.identity,
+            &cache.exclusions,
+            cache.view_bytes,
+        )
+        .map_err(map_cache_error)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn send_cache_candidate(
+    cache: &BuildCacheTransfer,
+    disposition: ToolDisposition,
+    stdout: &mut impl Write,
+    root: &Path,
+) -> Result<(), ToolError> {
+    if disposition != ToolDisposition::Succeeded {
+        stdout
+            .write_all(b"CACHE_REJECTED\n")
+            .and_then(|()| stdout.flush())
+            .map_err(|_| ToolError::Operation)?;
+    } else if cache.candidate_bytes == 0 {
+        stdout
+            .write_all(b"CACHE_REJECTED\n")
+            .and_then(|()| stdout.flush())
+            .map_err(|_| ToolError::Operation)?;
+    } else {
+        let cache_dir = super::fs::open_directory(&root.join("cache"))?;
+        match crate::store::archive_size_with_limit(
+            &cache_dir,
+            &cache.identity,
+            &cache.exclusions,
+            cache.candidate_bytes,
+        ) {
+            Ok(size) => {
+                stdout
+                    .write_all(b"CACHE_CANDIDATE\n")
+                    .and_then(|()| stdout.flush())
+                    .map_err(|_| ToolError::Operation)?;
+                stdout
+                    .write_all(&size.to_le_bytes())
+                    .map_err(|_| ToolError::Operation)?;
+                let captured = crate::store::capture_archive_with_limit(
+                    &cache_dir,
+                    &cache.identity,
+                    &cache.exclusions,
+                    &mut *stdout,
+                    cache.candidate_bytes,
+                )
+                .map_err(map_cache_error)?;
+                if captured != size {
+                    return Err(ToolError::Operation);
+                }
+                stdout.flush().map_err(|_| ToolError::Operation)?;
+            }
+            Err(StoreError::StorageFull) => {
+                stdout
+                    .write_all(b"CACHE_REJECTED\n")
+                    .and_then(|()| stdout.flush())
+                    .map_err(|_| ToolError::Operation)?;
+            }
+            Err(_) => {
+                stdout
+                    .write_all(b"CACHE_FAILED\n")
+                    .and_then(|()| stdout.flush())
+                    .map_err(|_| ToolError::Operation)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn helper_main() -> ExitCode {
     let mut stage = BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
@@ -845,21 +961,7 @@ pub(super) fn helper_main() -> ExitCode {
         macos::bootstrap()?;
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let task = read_task(&mut stdin)?;
-        task.config.validate()?;
-        if let Some(cache) = &task.cache {
-            cache.validate(&task.intent, &task.config)?;
-        }
-        verify_intent_runtime_grants(&task.intent, &task.config)?;
-        if !task.intent.valid()
-            || task.intent.call.facts().site != Site::Guard
-            || task.intent.policy_digest != task.config.digest()
-            || task.intent.expires_at_ms <= now_ms()
-            || !task.config.allows(&task.intent.call)
-            || task.intent.enforcement_digest != task.enforcement_digest()?
-            || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
-        {
-            return Err(ToolError::Configuration);
-        }
+        validate_task(&task)?;
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
         attest_runtime_mounts(
             &task.intent.call,
@@ -869,31 +971,7 @@ pub(super) fn helper_main() -> ExitCode {
         )?;
         #[cfg(target_os = "linux")]
         if let Some(cache) = &task.cache {
-            let mut stdout = std::io::stdout().lock();
-            stdout
-                .write_all(b"CACHE_READY\n")
-                .and_then(|()| stdout.flush())
-                .map_err(|_| ToolError::Operation)?;
-            let mut length = [0; 8];
-            stdin
-                .read_exact(&mut length)
-                .map_err(|_| ToolError::Operation)?;
-            let length = u64::from_le_bytes(length);
-            if length > cache.view_bytes {
-                return Err(ToolError::Limit);
-            }
-            if length > 0 {
-                let cache_dir = super::fs::open_directory(&root.join("cache"))?;
-                let mut archive = Read::take(&mut stdin, length);
-                crate::store::restore_archive_with_limit(
-                    &mut archive,
-                    &cache_dir,
-                    &cache.identity,
-                    &cache.exclusions,
-                    cache.view_bytes,
-                )
-                .map_err(map_cache_error)?;
-            }
+            restore_cache(cache, &mut stdin, &root)?;
         }
         let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
@@ -1006,59 +1084,7 @@ pub(super) fn helper_main() -> ExitCode {
             .map_err(|_| ToolError::Operation)?;
         #[cfg(target_os = "linux")]
         if let Some(cache) = &task.cache {
-            if observation.disposition != ToolDisposition::Succeeded {
-                stdout
-                    .write_all(b"CACHE_REJECTED\n")
-                    .and_then(|()| stdout.flush())
-                    .map_err(|_| ToolError::Operation)?;
-            } else if cache.candidate_bytes == 0 {
-                stdout
-                    .write_all(b"CACHE_REJECTED\n")
-                    .and_then(|()| stdout.flush())
-                    .map_err(|_| ToolError::Operation)?;
-            } else {
-                let cache_dir = super::fs::open_directory(&root.join("cache"))?;
-                match crate::store::archive_size_with_limit(
-                    &cache_dir,
-                    &cache.identity,
-                    &cache.exclusions,
-                    cache.candidate_bytes,
-                ) {
-                    Ok(size) => {
-                        stdout
-                            .write_all(b"CACHE_CANDIDATE\n")
-                            .and_then(|()| stdout.flush())
-                            .map_err(|_| ToolError::Operation)?;
-                        stdout
-                            .write_all(&size.to_le_bytes())
-                            .map_err(|_| ToolError::Operation)?;
-                        let captured = crate::store::capture_archive_with_limit(
-                            &cache_dir,
-                            &cache.identity,
-                            &cache.exclusions,
-                            &mut stdout,
-                            cache.candidate_bytes,
-                        )
-                        .map_err(map_cache_error)?;
-                        if captured != size {
-                            return Err(ToolError::Operation);
-                        }
-                        stdout.flush().map_err(|_| ToolError::Operation)?;
-                    }
-                    Err(StoreError::StorageFull) => {
-                        stdout
-                            .write_all(b"CACHE_REJECTED\n")
-                            .and_then(|()| stdout.flush())
-                            .map_err(|_| ToolError::Operation)?;
-                    }
-                    Err(_) => {
-                        stdout
-                            .write_all(b"CACHE_FAILED\n")
-                            .and_then(|()| stdout.flush())
-                            .map_err(|_| ToolError::Operation)?;
-                    }
-                }
-            }
+            send_cache_candidate(cache, observation.disposition, &mut stdout, &root)?;
         }
         Ok(())
     })();

@@ -588,57 +588,14 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
     panic!("native seed controller must be killed by its parent");
 }
 
-pub(super) async fn execute_inner(
+fn unit_command(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
-    mut cancellation: Cancellation,
-    dispatched: &mut bool,
-) -> Result<ToolObservation, ToolError> {
-    let permit = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => return Err(ToolError::Operation),
-        permit = super::admission::acquire(intent.id, intent.expires_at_ms, |queued| runtime.queue_changed(intent.id, queued)) => permit?,
-    };
-    let capacity_started = tokio::time::Instant::now();
-    let active_window = runtime.begin_active_action(capacity_started).await?;
-    let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
-    let preparation_deadline = active_window
-        .map_or(capacity_started + Duration::from_secs(5), |window| {
-            window.preparation_deadline
-        });
-    let go_deadline = active_window.map_or(preparation_deadline + cache_transfer, |window| {
-        window.go_deadline
-    });
-    let deadline = active_window.map_or_else(
-        || {
-            capacity_started
-                + Duration::from_secs(15)
-                + cache_transfer.saturating_mul(2)
-                + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-        },
-        |window| window.completion_deadline,
-    );
-    crate::tools::fs::validate_workspace(runtime)?;
-    let runtime_grants = if intent.call.is_process() {
-        runtime.config.runtime_grants.as_slice()
-    } else {
-        &[]
-    };
-    let (runtime_directories, mounts) =
-        runtime_mounts(runtime_grants, intent.limits.cache_bytes > 0)?;
-    let runtime_path = super::runtime_path(runtime_grants)?;
-    let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
-    let mut cache = super::build_cache_session(runtime, intent)?;
-    let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
-    let (seed_path, seed_dir) =
-        permit.prepare_seed(&workspace, &runtime.config, intent.call.is_process())?;
-    let mut unit = Unit {
-        name: format!("arany-tool-{}.service", permit.id),
-        invocation: None,
-        group: None,
-        kill: None,
-        limits: Some(intent.limits.clone()),
-    };
+    unit_name: &str,
+    runtime_path: &str,
+    (seed_path, seed_dir): (&Path, &cap_std::fs::Dir),
+    (runtime_directories, mounts): RuntimeMounts,
+) -> Command {
     let memory_max = format!("--property=MemoryMax={}", intent.limits.memory_bytes);
     let tasks_max = format!("--property=TasksMax={}", intent.limits.max_processes);
     let cpu_quota = if intent.limits.resource_class == ToolResourceClass::Build {
@@ -657,7 +614,7 @@ pub(super) async fn execute_inner(
         "--expand-environment=no",
         "--service-type=exec",
         "--unit",
-        &unit.name,
+        unit_name,
         "--property=Restart=no",
         "--property=KillMode=control-group",
         "--property=SendSIGKILL=yes",
@@ -693,8 +650,8 @@ pub(super) async fn execute_inner(
     let workspace_mount = native.then(|| (runtime.workspace.as_path(), intent.call.mutates()));
     profile_arguments(
         &mut command,
-        &runtime_path,
-        &seed_path,
+        runtime_path,
+        seed_path,
         &folders,
         workspace_mount,
         &intent.limits,
@@ -708,6 +665,164 @@ pub(super) async fn execute_inner(
     }
     command.args(["--chdir", "/", "/arany", "--internal-tool-guard"]);
     command.stdin(Stdio::piped());
+    command
+}
+
+async fn settle_launch(
+    unit: &mut Unit,
+    permit: &super::admission::Permit,
+    child: &mut tokio::process::Child,
+    stderr_task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
+    deadline: tokio::time::Instant,
+    result: Result<(ToolObservation, super::CacheCandidate), ToolError>,
+    cache: &mut Option<super::BuildCacheSession>,
+) -> Result<ToolObservation, ToolError> {
+    let cleanup = tokio::time::timeout_at(deadline, unit.stop()).await;
+    if !matches!(cleanup, Ok(Ok(()))) {
+        unit.kill_group();
+    }
+    let _ = child.start_kill();
+    let reaped = tokio::time::timeout_at(deadline, child.wait()).await;
+    let drained = match tokio::time::timeout_at(deadline, drain_stderr(stderr_task)).await {
+        Ok(drained) => drained,
+        Err(_) => {
+            stderr_task.abort();
+            let _ = stderr_task.await;
+            None
+        }
+    };
+    if matches!(cleanup, Ok(Ok(()))) {
+        permit
+            .terminated()
+            .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?;
+        tokio::time::timeout_at(deadline, permit.cleanup())
+            .await
+            .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?
+            .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?;
+    }
+    if result.is_err()
+        && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)
+    {
+        return Err(failure);
+    }
+    if !matches!(cleanup, Ok(Ok(()))) {
+        return Err(ToolError::GuardRejected(GuardStage::ProcessCleanup));
+    }
+    if !matches!(reaped, Ok(Ok(_))) {
+        return Err(ToolError::GuardRejected(GuardStage::LauncherReap));
+    }
+    let Some(stderr) = drained else {
+        return Err(ToolError::GuardRejected(GuardStage::OutputEof));
+    };
+    if result.is_err() {
+        let diagnostic = std::str::from_utf8(&stderr).unwrap_or_default();
+        let stage = if diagnostic.contains("bwrap:") || diagnostic.contains("unshare:") {
+            GuardStage::NamespaceBootstrap
+        } else if diagnostic.contains("Failed to") {
+            GuardStage::NativeManager
+        } else {
+            GuardStage::ControlProtocol
+        };
+        return Err(ToolError::GuardRejected(stage));
+    }
+    match result {
+        Ok((mut observation, candidate)) => {
+            super::publish_cache_candidate(&mut observation, candidate, cache.take(), deadline)
+                .await;
+            Ok(observation)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn action_deadlines(
+    active_window: Option<crate::tools::ActiveToolWindow>,
+    intent: &EffectIntent,
+    capacity_started: tokio::time::Instant,
+) -> (
+    tokio::time::Instant,
+    tokio::time::Instant,
+    tokio::time::Instant,
+) {
+    let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
+    let preparation_deadline = active_window
+        .map_or(capacity_started + Duration::from_secs(5), |window| {
+            window.preparation_deadline
+        });
+    let go_deadline = active_window.map_or(preparation_deadline + cache_transfer, |window| {
+        window.go_deadline
+    });
+    let completion = active_window.map_or_else(
+        || {
+            capacity_started
+                + Duration::from_secs(15)
+                + cache_transfer.saturating_mul(2)
+                + Duration::from_millis(u64::from(intent.limits.runtime_ms))
+        },
+        |window| window.completion_deadline,
+    );
+    (preparation_deadline, go_deadline, completion)
+}
+
+fn verify_ready(
+    ready_bytes: &[u8],
+    intent: &EffectIntent,
+    parent_namespaces: &profile::Namespaces,
+) -> Result<(), ToolError> {
+    let ready = parse_ready(ready_bytes, intent)?;
+    if ready.pid != 1 && ready.pid != 2 {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    if !ready.namespaces.isolated_from(parent_namespaces) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
+}
+
+pub(super) async fn execute_inner(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    mut cancellation: Cancellation,
+    dispatched: &mut bool,
+) -> Result<ToolObservation, ToolError> {
+    let permit = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(ToolError::Operation),
+        permit = super::admission::acquire(intent.id, intent.expires_at_ms, |queued| runtime.queue_changed(intent.id, queued)) => permit?,
+    };
+    let capacity_started = tokio::time::Instant::now();
+    let active_window = runtime.begin_active_action(capacity_started).await?;
+    let (preparation_deadline, go_deadline, deadline) =
+        action_deadlines(active_window, intent, capacity_started);
+    crate::tools::fs::validate_workspace(runtime)?;
+    let runtime_grants = if intent.call.is_process() {
+        runtime.config.runtime_grants.as_slice()
+    } else {
+        &[]
+    };
+    let (runtime_directories, mounts) =
+        runtime_mounts(runtime_grants, intent.limits.cache_bytes > 0)?;
+    let runtime_path = super::runtime_path(runtime_grants)?;
+    let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
+    let mut cache = super::build_cache_session(runtime, intent)?;
+    let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
+    let (seed_path, seed_dir) =
+        permit.prepare_seed(&workspace, &runtime.config, intent.call.is_process())?;
+    let mut unit = Unit {
+        name: format!("arany-tool-{}.service", permit.id),
+        invocation: None,
+        group: None,
+        kill: None,
+        limits: Some(intent.limits.clone()),
+    };
+    let mut command = unit_command(
+        runtime,
+        intent,
+        &unit.name,
+        &runtime_path,
+        (&seed_path, &seed_dir),
+        (runtime_directories, mounts),
+    );
     let parent_namespaces = profile::Namespaces::read()?;
     permit.launching()?;
     let mut child = match command.spawn() {
@@ -751,13 +866,7 @@ pub(super) async fn execute_inner(
                 .await
                 .map_err(|_| ToolError::Limit)??;
         }
-        let ready = parse_ready(&ready_bytes, intent)?;
-        if ready.pid != 1 && ready.pid != 2 {
-            return Err(ToolError::ProtectionUnavailable);
-        }
-        if !ready.namespaces.isolated_from(&parent_namespaces) {
-            return Err(ToolError::ProtectionUnavailable);
-        }
+        verify_ready(&ready_bytes, intent, &parent_namespaces)?;
         unit.admit()
             .await
             .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
@@ -811,62 +920,16 @@ pub(super) async fn execute_inner(
         () = cancellation.cancelled() => Err(ToolError::Operation),
         result = tokio::time::timeout_at(deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
     };
-    let cleanup = tokio::time::timeout_at(deadline, unit.stop()).await;
-    if !matches!(cleanup, Ok(Ok(()))) {
-        unit.kill_group();
-    }
-    let _ = child.start_kill();
-    let reaped = tokio::time::timeout_at(deadline, child.wait()).await;
-    let drained = match tokio::time::timeout_at(deadline, drain_stderr(&mut stderr_task)).await {
-        Ok(drained) => drained,
-        Err(_) => {
-            stderr_task.abort();
-            let _ = stderr_task.await;
-            None
-        }
-    };
-    if matches!(cleanup, Ok(Ok(()))) {
-        permit
-            .terminated()
-            .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?;
-        tokio::time::timeout_at(deadline, permit.cleanup())
-            .await
-            .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?
-            .map_err(|_| ToolError::GuardRejected(GuardStage::StorageCleanup))?;
-    }
-    if result.is_err()
-        && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)
-    {
-        return Err(failure);
-    }
-    if !matches!(cleanup, Ok(Ok(()))) {
-        return Err(ToolError::GuardRejected(GuardStage::ProcessCleanup));
-    }
-    if !matches!(reaped, Ok(Ok(_))) {
-        return Err(ToolError::GuardRejected(GuardStage::LauncherReap));
-    }
-    let Some(stderr) = drained else {
-        return Err(ToolError::GuardRejected(GuardStage::OutputEof));
-    };
-    if result.is_err() {
-        let diagnostic = std::str::from_utf8(&stderr).unwrap_or_default();
-        let stage = if diagnostic.contains("bwrap:") || diagnostic.contains("unshare:") {
-            GuardStage::NamespaceBootstrap
-        } else if diagnostic.contains("Failed to") {
-            GuardStage::NativeManager
-        } else {
-            GuardStage::ControlProtocol
-        };
-        return Err(ToolError::GuardRejected(stage));
-    }
-    match result {
-        Ok((mut observation, candidate)) => {
-            super::publish_cache_candidate(&mut observation, candidate, cache.take(), deadline)
-                .await;
-            Ok(observation)
-        }
-        Err(error) => Err(error),
-    }
+    settle_launch(
+        &mut unit,
+        &permit,
+        &mut child,
+        &mut stderr_task,
+        deadline,
+        result,
+        &mut cache,
+    )
+    .await
 }
 
 /// Destinations that `profile_arguments` mounts or creates; a toolchain may not overlap them.

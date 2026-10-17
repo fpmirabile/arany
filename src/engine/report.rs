@@ -53,51 +53,7 @@ pub(super) fn goal_report(
             &mut omitted_facts,
         );
     }
-    let mut cache_rejected = false;
-    let mut cache_failed = false;
-    let mut cache_uncertain = false;
-    for task_run in view
-        .runs
-        .iter()
-        .filter(|task_run| goal.run_ids.contains(&task_run.id))
-    {
-        for tool in &task_run.tools {
-            if let Some(observation) = tool.observation.as_ref() {
-                match observation.cache_update {
-                    crate::tools::CacheUpdate::Rejected => cache_rejected = true,
-                    crate::tools::CacheUpdate::Failed => cache_failed = true,
-                    crate::tools::CacheUpdate::Uncertain => cache_uncertain = true,
-                    crate::tools::CacheUpdate::NotApplicable
-                    | crate::tools::CacheUpdate::NotAttempted
-                    | crate::tools::CacheUpdate::Published => {}
-                }
-            }
-        }
-    }
-    if cache_rejected {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            "One or more Commands completed, but the build cache update was rejected; the previous cache was kept.",
-            &mut omitted_facts,
-        );
-    }
-    if cache_failed {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            "One or more Commands completed, but the build cache update failed; the previous cache was kept.",
-            &mut omitted_facts,
-        );
-    }
-    if cache_uncertain {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            "One or more Commands have an uncertain build cache publication; inspect Session history before retrying.",
-            &mut omitted_facts,
-        );
-    }
+    push_cache_facts(&mut report, view, goal, &mut omitted_facts);
     for (index, (_, fallback)) in view
         .runs
         .iter()
@@ -138,6 +94,73 @@ pub(super) fn goal_report(
         assert!(summary_bytes > 0 || goal_report_fits_with_omission(&mut report));
     }
     let protected_unresolved_count = report.unresolved.len();
+    push_unresolved_tool_facts(&mut report, view, goal, &mut omitted_facts);
+    push_success_facts(&mut report, view, goal, &mut omitted_facts);
+    if omitted_facts {
+        append_goal_report_omission(&mut report, protected_unresolved_count);
+    }
+    report
+}
+
+fn push_cache_facts(
+    report: &mut GoalReport,
+    view: &crate::session::SessionView,
+    goal: &crate::session::GoalView,
+    omitted_facts: &mut bool,
+) {
+    let mut cache_rejected = false;
+    let mut cache_failed = false;
+    let mut cache_uncertain = false;
+    for task_run in view
+        .runs
+        .iter()
+        .filter(|task_run| goal.run_ids.contains(&task_run.id))
+    {
+        for tool in &task_run.tools {
+            if let Some(observation) = tool.observation.as_ref() {
+                match observation.cache_update {
+                    crate::tools::CacheUpdate::Rejected => cache_rejected = true,
+                    crate::tools::CacheUpdate::Failed => cache_failed = true,
+                    crate::tools::CacheUpdate::Uncertain => cache_uncertain = true,
+                    crate::tools::CacheUpdate::NotApplicable
+                    | crate::tools::CacheUpdate::NotAttempted
+                    | crate::tools::CacheUpdate::Published => {}
+                }
+            }
+        }
+    }
+    if cache_rejected {
+        push_goal_report_item(
+            report,
+            GoalReportSection::Unresolved,
+            "One or more Commands completed, but the build cache update was rejected; the previous cache was kept.",
+            omitted_facts,
+        );
+    }
+    if cache_failed {
+        push_goal_report_item(
+            report,
+            GoalReportSection::Unresolved,
+            "One or more Commands completed, but the build cache update failed; the previous cache was kept.",
+            omitted_facts,
+        );
+    }
+    if cache_uncertain {
+        push_goal_report_item(
+            report,
+            GoalReportSection::Unresolved,
+            "One or more Commands have an uncertain build cache publication; inspect Session history before retrying.",
+            omitted_facts,
+        );
+    }
+}
+
+fn push_unresolved_tool_facts(
+    report: &mut GoalReport,
+    view: &crate::session::SessionView,
+    goal: &crate::session::GoalView,
+    omitted_facts: &mut bool,
+) {
     for task_run in view
         .runs
         .iter()
@@ -154,10 +177,10 @@ pub(super) fn goal_report(
                         | crate::session::RunStatus::Interrupted
                 ) {
                     push_goal_report_item(
-                        &mut report,
+                        report,
                         GoalReportSection::Unresolved,
                         &format!("{label} has no committed Tool outcome."),
-                        &mut omitted_facts,
+                        omitted_facts,
                     );
                 }
                 continue;
@@ -168,10 +191,10 @@ pub(super) fn goal_report(
                 crate::tools::ToolDisposition::Denied
                 | crate::tools::ToolDisposition::Failed
                 | crate::tools::ToolDisposition::Conflict => push_goal_report_item(
-                    &mut report,
+                    report,
                     GoalReportSection::Unresolved,
                     &format!("{label} failed; its effect was not recorded as successful."),
-                    &mut omitted_facts,
+                    omitted_facts,
                 ),
                 crate::tools::ToolDisposition::Limit => {
                     let timeout_limit = match call {
@@ -195,34 +218,42 @@ pub(super) fn goal_report(
                         },
                     );
                     push_goal_report_item(
-                        &mut report,
+                        report,
                         GoalReportSection::Unresolved,
                         &fact,
-                        &mut omitted_facts,
+                        omitted_facts,
                     );
                 }
                 crate::tools::ToolDisposition::Uncertain
                 | crate::tools::ToolDisposition::Cancelled => {
                     if observation.cache_update != crate::tools::CacheUpdate::Uncertain {
                         push_goal_report_item(
-                            &mut report,
+                            report,
                             GoalReportSection::Unresolved,
                             &format!(
                                 "{label} has an uncertain or cancelled outcome; inspect Workspace state before retrying."
                             ),
-                            &mut omitted_facts,
+                            omitted_facts,
                         );
                     }
                 }
                 crate::tools::ToolDisposition::Succeeded => push_goal_report_item(
-                    &mut report,
+                    report,
                     GoalReportSection::Unresolved,
                     &format!("{label} reported success without a valid Guard attestation."),
-                    &mut omitted_facts,
+                    omitted_facts,
                 ),
             }
         }
     }
+}
+
+fn push_success_facts(
+    report: &mut GoalReport,
+    view: &crate::session::SessionView,
+    goal: &crate::session::GoalView,
+    omitted_facts: &mut bool,
+) {
     for task_run in view
         .runs
         .iter()
@@ -242,18 +273,18 @@ pub(super) fn goal_report(
                 crate::tools::ToolCall::Write { path, .. }
                 | crate::tools::ToolCall::Edit { path, .. } => {
                     push_goal_report_item(
-                        &mut report,
+                        report,
                         GoalReportSection::Changes,
                         &format!("{} {path}.", call.label()),
-                        &mut omitted_facts,
+                        omitted_facts,
                     );
                 }
                 crate::tools::ToolCall::Mkdir { path } => {
                     push_goal_report_item(
-                        &mut report,
+                        report,
                         GoalReportSection::Changes,
                         &format!("Created directory {path}."),
-                        &mut omitted_facts,
+                        omitted_facts,
                     );
                 }
                 crate::tools::ToolCall::ApplyChangeset { changeset, .. } => {
@@ -266,27 +297,23 @@ pub(super) fn goal_report(
                             "updated"
                         };
                         push_goal_report_item(
-                            &mut report,
+                            report,
                             GoalReportSection::Changes,
                             &format!("Command {action} {}.", change.path),
-                            &mut omitted_facts,
+                            omitted_facts,
                         );
                     }
                 }
                 _ => {}
             }
             push_goal_report_item(
-                &mut report,
+                report,
                 GoalReportSection::Evidence,
                 &goal_report_evidence(call, &observation.output),
-                &mut omitted_facts,
+                omitted_facts,
             );
         }
     }
-    if omitted_facts {
-        append_goal_report_omission(&mut report, protected_unresolved_count);
-    }
-    report
 }
 
 #[cfg(test)]

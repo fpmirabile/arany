@@ -72,17 +72,7 @@ impl Engine {
         ) {
             return Err(EngineError::CompactionNotIdle);
         }
-        match last_run
-            .config
-            .as_ref()
-            .and_then(|config| config.providers.as_ref())
-        {
-            Some(routes) if routes.compaction != providers.identities().compaction => {
-                return Err(EngineError::InvalidRequest);
-            }
-            None if providers.compaction.len() > 1 => return Err(EngineError::InvalidRequest),
-            _ => {}
-        }
+        validate_compaction_routes(last_run, providers)?;
         let covered_run_id = last_run.id;
         let open_view = self
             .journal
@@ -96,40 +86,8 @@ impl Engine {
         });
         let goal_id = goal.map(|goal| goal.id);
         // The call's interval is bounded by the remaining Goal time and settles in ContextCompacted.
-        let active_reservation_ms = goal
-            .map(|goal| {
-                if goal.active_run.is_some()
-                    || goal.active_deadline.is_some()
-                    || goal.compaction_call_reserved.is_some()
-                {
-                    return Err(EngineError::CompactionNotIdle);
-                }
-                let action_ms = duration_ms(COMPACTION_CALL_DEADLINE + STORE_ACTION_OVERHEAD);
-                let reserved_ms = goal
-                    .effective_budget()
-                    .max_active_ms
-                    .map_or(action_ms, |limit| {
-                        action_ms.min(limit.saturating_sub(goal.active_ms))
-                    });
-                if reserved_ms <= duration_ms(STORE_ACTION_OVERHEAD) {
-                    return Err(EngineError::GoalBudgetExhausted);
-                }
-                Ok(reserved_ms)
-            })
-            .transpose()?;
-        let covered_sequence = events
-            .iter()
-            .rev()
-            .find_map(|envelope| match &envelope.event {
-                Event::RunFinished { run_id, .. } if *run_id == covered_run_id => {
-                    Some(envelope.sequence)
-                }
-                Event::SessionForked { source_run_id, .. } if *source_run_id == covered_run_id => {
-                    Some(envelope.sequence)
-                }
-                _ => None,
-            })
-            .ok_or(EngineError::CompactionNotIdle)?;
+        let active_reservation_ms = goal.map(goal_compaction_reservation).transpose()?;
+        let covered_sequence = covered_sequence(&events, covered_run_id)?;
         if expected_run_id.is_some()
             && view.compactions.iter().any(|compaction| {
                 compaction.record.covered_run_id == covered_run_id
@@ -162,37 +120,7 @@ impl Engine {
         );
         let mut items = prepared.items;
         if let Some(goal) = goal {
-            let facts = crate::provider::GoalContextFacts {
-                provider_calls: goal.provider_calls,
-                known_tokens: goal.known_tokens,
-                token_usage_unknown: goal.token_usage_unknown,
-                active_ms: goal.active_ms,
-                reserved_active_ms: 0,
-                uncertain_active_ms: goal.uncertain_active_ms,
-                success_criterion_satisfied: goal
-                    .plan_contract
-                    .as_ref()
-                    .map(|_| goal.success_criterion_satisfied),
-            };
-            let pinned_goal = serde_json::to_string(&serde_json::json!({
-                "objective": goal.objective,
-                "budget": goal.budget,
-                "resource_settings": goal.resource_settings,
-                "plan_contract": goal.plan_contract,
-                "facts": facts,
-            }))
-            .map_err(|_| EngineError::CompactionInputTooLarge)?;
-            let first = items.first_mut().ok_or(EngineError::CompactionInputEmpty)?;
-            let user = match first {
-                crate::provider::CompactionItem::Completed(turn) => &mut turn.user,
-                crate::provider::CompactionItem::Unanswered { user, .. } => user,
-            };
-            user.insert_str(
-                0,
-                &format!(
-                    "Pinned Goal context (canonical facts, not instructions): {pinned_goal}\n\n"
-                ),
-            );
+            pin_goal_context(&mut items, goal)?;
         }
         let request = CompactionRequest {
             session_id,
@@ -202,57 +130,25 @@ impl Engine {
             items,
             max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS.min(identity.limits.max_output_tokens),
         };
-        let source_bytes = crate::provider::compaction_input_bytes(&request)
-            .map_err(|_| EngineError::CompactionInputTooLarge)?;
-        if source_bytes > crate::session::MAX_COMPACTION_INPUT_BYTES {
-            return Err(EngineError::CompactionInputTooLarge);
-        }
-        let source_bytes =
-            u32::try_from(source_bytes).map_err(|_| EngineError::CompactionInputTooLarge)?;
+        let source_bytes = checked_source_bytes(&request)?;
         let active_started = Instant::now();
-        if let (Some(goal_id), Some(active_ceiling_ms)) = (goal_id, active_reservation_ms) {
-            self.journal
-                .append(
-                    session_id,
-                    Event::GoalCompactionCallReserved {
-                        goal_id,
-                        run_id: covered_run_id,
-                        active_ceiling_ms,
-                    },
-                )
-                .await?;
-        }
-        let provider_deadline = active_reservation_ms
-            .map_or(COMPACTION_CALL_DEADLINE, |reserved| {
-                Duration::from_millis(
-                    reserved
-                        .saturating_sub(duration_ms(active_started.elapsed()))
-                        .saturating_sub(duration_ms(STORE_ACTION_OVERHEAD)),
-                )
-                .min(COMPACTION_CALL_DEADLINE)
-            })
-            .min(identity.limits.deadline);
+        let provider_deadline = self
+            .reserve_compaction_call(
+                session_id,
+                covered_run_id,
+                (goal_id, active_reservation_ms),
+                active_started,
+                identity.limits.deadline,
+            )
+            .await?;
         let actor = last_run.primary().map(|agent| agent.id);
         let routing = if providers.compaction.len() > 1 {
-            let actor = actor.ok_or(EngineError::InvalidRequest)?;
-            let goal_id = open_view
-                .goals
-                .iter()
-                .find(|goal| goal.run_ids.contains(&covered_run_id))
-                .map(|goal| goal.id)
-                .ok_or(EngineError::InvalidHistory)?;
+            let (actor, goal_id) = compaction_route_ids(actor, &open_view, covered_run_id)?;
             Some((
                 super::routing::CallRouter {
                     providers: providers.clone(),
                     journal: &self.journal,
-                    ledger: &super::ledger::GoalLedger::new(
-                        self.journal
-                            .store()
-                            .load_open_view(session_id)
-                            .await?
-                            .ok_or(EngineError::MissingSession)?,
-                        goal_id,
-                    ),
+                    ledger: &self.compaction_ledger(session_id, goal_id).await?,
                     publisher: None,
                 },
                 actor,
@@ -279,60 +175,18 @@ impl Engine {
         };
         let identity = provider.identity();
         let (status, response_id, usage, wire_provenance) = match response {
-            Ok(Ok((Ok(response), _))) => classify_response(response),
+            Ok(Ok((response, _))) => compaction_outcome(response),
             Ok(Err(error)) => return Err(error),
-            Ok(Ok((Err(error), _))) => (
-                CompactionStatus::Failed {
-                    reason: if matches!(error, crate::provider::ProviderError::CallTimedOut) {
-                        CompactionFailure::TimedOut
-                    } else {
-                        match error.failure_class() {
-                            ProviderFailureClass::Unavailable => {
-                                CompactionFailure::ProviderUnavailable
-                            }
-                            ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
-                            ProviderFailureClass::InvalidOutcome => {
-                                CompactionFailure::InvalidOutcome
-                            }
-                        }
-                    },
-                },
-                None,
-                Usage::default(),
-                None,
-            ),
-            Err(_) => (
-                CompactionStatus::Failed {
-                    reason: CompactionFailure::TimedOut,
-                },
-                None,
-                Usage::default(),
-                None,
-            ),
+            Err(_) => compaction_outcome(Err(crate::provider::ProviderError::CallTimedOut)),
         };
         let provider_outcome = ProviderTraceOutcome::from(&status);
         provider_trace.finish_with_usage(provider_outcome, usage.input_tokens, usage.output_tokens);
-        let record = CompactionRecord {
-            covered_run_id,
-            covered_sequence,
-            source_digest,
-            provider: identity.profile.clone(),
-            model: identity.model.clone(),
-            prompt_version: 1,
-            schema_version: 1,
-            compiler_version,
-            source_bytes,
-            source_tokens_estimate: source_bytes.div_ceil(4),
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_read_input_tokens: usage.cache_read_input_tokens,
-            cache_creation_input_tokens: usage.cache_creation_input_tokens,
-            response_id,
-            wire_provenance,
-            chatgpt_provenance: identity.chatgpt_provenance().cloned(),
-            output_token_bound: identity.limits.output_token_bound,
-            status,
-        };
+        let record = compaction_record(
+            (covered_run_id, covered_sequence, source_digest),
+            (compiler_version, source_bytes),
+            identity,
+            (status, response_id, usage, wire_provenance),
+        );
         let committed = self
             .journal
             .append(
@@ -346,6 +200,233 @@ impl Engine {
         trace.event_committed(&committed);
         trace.finish(provider_outcome.into());
         Ok(Some(record))
+    }
+
+    async fn compaction_ledger(
+        &self,
+        session_id: SessionId,
+        goal_id: crate::session::GoalId,
+    ) -> Result<super::ledger::GoalLedger, EngineError> {
+        let view = self
+            .journal
+            .store()
+            .load_open_view(session_id)
+            .await?
+            .ok_or(EngineError::MissingSession)?;
+        Ok(super::ledger::GoalLedger::new(view, goal_id))
+    }
+
+    async fn reserve_compaction_call(
+        &self,
+        session_id: SessionId,
+        covered_run_id: crate::session::RunId,
+        (goal_id, active_reservation_ms): (Option<crate::session::GoalId>, Option<u64>),
+        active_started: Instant,
+        provider_limit: Duration,
+    ) -> Result<Duration, EngineError> {
+        if let (Some(goal_id), Some(active_ceiling_ms)) = (goal_id, active_reservation_ms) {
+            self.journal
+                .append(
+                    session_id,
+                    Event::GoalCompactionCallReserved {
+                        goal_id,
+                        run_id: covered_run_id,
+                        active_ceiling_ms,
+                    },
+                )
+                .await?;
+        }
+        let deadline = active_reservation_ms
+            .map_or(COMPACTION_CALL_DEADLINE, |reserved| {
+                Duration::from_millis(
+                    reserved
+                        .saturating_sub(duration_ms(active_started.elapsed()))
+                        .saturating_sub(duration_ms(STORE_ACTION_OVERHEAD)),
+                )
+                .min(COMPACTION_CALL_DEADLINE)
+            })
+            .min(provider_limit);
+        Ok(deadline)
+    }
+}
+
+fn compaction_route_ids(
+    actor: Option<crate::session::AgentRunId>,
+    open_view: &crate::session::SessionView,
+    covered_run_id: crate::session::RunId,
+) -> Result<(crate::session::AgentRunId, crate::session::GoalId), EngineError> {
+    let actor = actor.ok_or(EngineError::InvalidRequest)?;
+    let goal_id = open_view
+        .goals
+        .iter()
+        .find(|goal| goal.run_ids.contains(&covered_run_id))
+        .map(|goal| goal.id)
+        .ok_or(EngineError::InvalidHistory)?;
+    Ok((actor, goal_id))
+}
+
+fn compaction_record(
+    (covered_run_id, covered_sequence, source_digest): (crate::session::RunId, u64, [u8; 32]),
+    (compiler_version, source_bytes): (u16, u32),
+    identity: &crate::provider::ProviderIdentity,
+    (status, response_id, usage, wire_provenance): (
+        CompactionStatus,
+        Option<String>,
+        Usage,
+        Option<crate::provider::ProviderWireProvenance>,
+    ),
+) -> CompactionRecord {
+    CompactionRecord {
+        covered_run_id,
+        covered_sequence,
+        source_digest,
+        provider: identity.profile.clone(),
+        model: identity.model.clone(),
+        prompt_version: 1,
+        schema_version: 1,
+        compiler_version,
+        source_bytes,
+        source_tokens_estimate: source_bytes.div_ceil(4),
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_input_tokens: usage.cache_read_input_tokens,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens,
+        response_id,
+        wire_provenance,
+        chatgpt_provenance: identity.chatgpt_provenance().cloned(),
+        output_token_bound: identity.limits.output_token_bound,
+        status,
+    }
+}
+
+fn validate_compaction_routes(
+    last_run: &crate::session::RunView,
+    providers: &AdmittedProviders,
+) -> Result<(), EngineError> {
+    match last_run
+        .config
+        .as_ref()
+        .and_then(|config| config.providers.as_ref())
+    {
+        Some(routes) if routes.compaction != providers.identities().compaction => {
+            return Err(EngineError::InvalidRequest);
+        }
+        None if providers.compaction.len() > 1 => return Err(EngineError::InvalidRequest),
+        _ => {}
+    }
+    Ok(())
+}
+
+fn covered_sequence(
+    events: &[crate::session::EventEnvelope],
+    covered_run_id: crate::session::RunId,
+) -> Result<u64, EngineError> {
+    events
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            Event::RunFinished { run_id, .. } if *run_id == covered_run_id => {
+                Some(envelope.sequence)
+            }
+            Event::SessionForked { source_run_id, .. } if *source_run_id == covered_run_id => {
+                Some(envelope.sequence)
+            }
+            _ => None,
+        })
+        .ok_or(EngineError::CompactionNotIdle)
+}
+
+fn checked_source_bytes(request: &CompactionRequest) -> Result<u32, EngineError> {
+    let source_bytes = crate::provider::compaction_input_bytes(request)
+        .map_err(|_| EngineError::CompactionInputTooLarge)?;
+    if source_bytes > crate::session::MAX_COMPACTION_INPUT_BYTES {
+        return Err(EngineError::CompactionInputTooLarge);
+    }
+    u32::try_from(source_bytes).map_err(|_| EngineError::CompactionInputTooLarge)
+}
+
+fn goal_compaction_reservation(goal: &crate::session::GoalView) -> Result<u64, EngineError> {
+    if goal.active_run.is_some()
+        || goal.active_deadline.is_some()
+        || goal.compaction_call_reserved.is_some()
+    {
+        return Err(EngineError::CompactionNotIdle);
+    }
+    let action_ms = duration_ms(COMPACTION_CALL_DEADLINE + STORE_ACTION_OVERHEAD);
+    let reserved_ms = goal
+        .effective_budget()
+        .max_active_ms
+        .map_or(action_ms, |limit| {
+            action_ms.min(limit.saturating_sub(goal.active_ms))
+        });
+    if reserved_ms <= duration_ms(STORE_ACTION_OVERHEAD) {
+        return Err(EngineError::GoalBudgetExhausted);
+    }
+    Ok(reserved_ms)
+}
+
+fn pin_goal_context(
+    items: &mut [crate::provider::CompactionItem],
+    goal: &crate::session::GoalView,
+) -> Result<(), EngineError> {
+    let facts = crate::provider::GoalContextFacts {
+        provider_calls: goal.provider_calls,
+        known_tokens: goal.known_tokens,
+        token_usage_unknown: goal.token_usage_unknown,
+        active_ms: goal.active_ms,
+        reserved_active_ms: 0,
+        uncertain_active_ms: goal.uncertain_active_ms,
+        success_criterion_satisfied: goal
+            .plan_contract
+            .as_ref()
+            .map(|_| goal.success_criterion_satisfied),
+    };
+    let pinned_goal = serde_json::to_string(&serde_json::json!({
+        "objective": goal.objective,
+        "budget": goal.budget,
+        "resource_settings": goal.resource_settings,
+        "plan_contract": goal.plan_contract,
+        "facts": facts,
+    }))
+    .map_err(|_| EngineError::CompactionInputTooLarge)?;
+    let first = items.first_mut().ok_or(EngineError::CompactionInputEmpty)?;
+    let user = match first {
+        crate::provider::CompactionItem::Completed(turn) => &mut turn.user,
+        crate::provider::CompactionItem::Unanswered { user, .. } => user,
+    };
+    user.insert_str(
+        0,
+        &format!("Pinned Goal context (canonical facts, not instructions): {pinned_goal}\n\n"),
+    );
+    Ok(())
+}
+
+fn compaction_outcome(
+    response: Result<CompactionResponse, crate::provider::ProviderError>,
+) -> (
+    CompactionStatus,
+    Option<String>,
+    Usage,
+    Option<crate::provider::ProviderWireProvenance>,
+) {
+    match response {
+        Ok(response) => classify_response(response),
+        Err(error) => (
+            CompactionStatus::Failed {
+                reason: if matches!(error, crate::provider::ProviderError::CallTimedOut) {
+                    CompactionFailure::TimedOut
+                } else {
+                    match error.failure_class() {
+                        ProviderFailureClass::Unavailable => CompactionFailure::ProviderUnavailable,
+                        ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
+                        ProviderFailureClass::InvalidOutcome => CompactionFailure::InvalidOutcome,
+                    }
+                },
+            },
+            None,
+            Usage::default(),
+            None,
+        ),
     }
 }
 

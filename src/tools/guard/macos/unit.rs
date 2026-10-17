@@ -774,6 +774,7 @@ impl Drop for Unit {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "frozen until C2")]
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -960,6 +961,7 @@ fn connect_control(path: &Path) -> Result<(PrivateDirectory, UnixStream), ToolEr
     Ok((root, stream))
 }
 
+#[expect(clippy::too_many_lines, reason = "frozen until C2")]
 pub(super) fn helper_main() -> std::process::ExitCode {
     let mut diagnostic = None;
     let mut stage = super::super::BootstrapStage::Admission;
