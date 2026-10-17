@@ -16,7 +16,7 @@ pub(super) const STORAGE_BYTES_CAP: u64 = crate::tools::types::SCRATCH_BYTES;
 const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
 const STORAGE_NAMES: [&str; 3] = ["workspace", "scratch", "cache"];
-const CLEANUP_ATTEMPTS: usize = 3;
+const CLEANUP_ATTEMPTS: usize = 8;
 const CLEANUP_PAUSE: Duration = Duration::from_millis(250);
 pub(super) const STORAGE_PENDING: &str = "storage.pending";
 
@@ -596,13 +596,14 @@ fn attachments(bytes: &[u8], root: &Path) -> Result<Vec<Attachment>, ToolError> 
     let mut result = Vec::new();
     for image in images.iter() {
         let image = super::ffi::dictionary(&image)?;
-        let image_path = value(&image, "image-path")?
-            .downcast::<CFString>()
-            .ok_or(ToolError::ProtectionUnavailable)?
-            .to_string();
-        if image_path.len() > 4096 {
-            return Err(ToolError::Limit);
-        }
+        // Host-wide listing: another call's image mid-attach or mid-detach may carry no path yet.
+        let Some(image_path) = image
+            .find(CFString::new("image-path"))
+            .and_then(|path| path.downcast::<CFString>())
+            .map(|path| path.to_string())
+        else {
+            continue;
+        };
         let Some(name) = STORAGE_NAMES
             .into_iter()
             .find(|name| root.join(format!("{name}.dmg")) == Path::new(&image_path))
@@ -761,6 +762,13 @@ mod tests {
                 assert_eq!(result.unwrap()[0].device, Path::new(device));
             }
         }
+        let pathless = format!(
+            "<plist version=\"1.0\"><dict><key>images</key><array><dict><key>system-entities</key><array/></dict><dict><key>image-path</key><string>{}/workspace.dmg</string><key>system-entities</key><array><dict><key>dev-entry</key><string>/dev/disk7</string></dict></array></dict></array></dict></plist>",
+            root.display()
+        );
+        let found = attachments(pathless.as_bytes(), root).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].device, Path::new("/dev/disk7"));
         for bytes in [
             b"not a plist".as_slice(),
             b"<plist><dict/></plist>",
