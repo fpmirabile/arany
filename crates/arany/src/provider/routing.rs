@@ -1,7 +1,6 @@
 use super::{AgentPhase, Provenance, Provider, ProviderIdentity};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use uuid::Uuid;
 
 pub const MAX_PROVIDER_FALLBACKS: usize = 2;
 pub const MAX_PROVIDER_SWITCHES: usize = 64;
@@ -123,33 +122,23 @@ impl ProviderRoutes {
 }
 
 impl ProviderIdentity {
-    /// Whether both identities bill one account. Models and evidence may differ within an account.
+    // ChatGPT evidence may differ per model within one account; other provenance must match exactly.
     pub(crate) fn shares_account(&self, other: &Self) -> bool {
-        self.profile == other.profile && self.account_key() == other.account_key()
+        self.profile == other.profile
+            && match (&self.provenance, &other.provenance) {
+                (Provenance::ChatGpt(first), Provenance::ChatGpt(second)) => {
+                    first.account_id == second.account_id
+                }
+                (first, second) => first == second,
+            }
     }
-
-    fn account_key(&self) -> AccountKey<'_> {
-        match &self.provenance {
-            Provenance::Native {
-                saved_api_account_id,
-            } => AccountKey::Native(*saved_api_account_id),
-            Provenance::Custom(custom) => AccountKey::Custom(&custom.endpoint),
-            Provenance::ChatGpt(chatgpt) => AccountKey::ChatGpt(chatgpt.account_id),
-        }
-    }
-}
-
-#[derive(PartialEq)]
-enum AccountKey<'a> {
-    Native(Option<Uuid>),
-    Custom(&'a str),
-    ChatGpt(Uuid),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::provider::{ChatGptAdmission, ChatGptProvenance};
+    use uuid::Uuid;
 
     fn chatgpt(model: &str, account: u128, fingerprint: u8) -> ProviderIdentity {
         ProviderIdentity::new(
