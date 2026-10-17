@@ -58,6 +58,8 @@ Guard internals.
 
 - **One Seatbelt profile builder.** `install`, `install_command` and `install_git` in `crates/arany/src/tools/guard/macos.rs` repeat rules, ancestors, grants, port detach, install and attestation; one private builder with a single install-and-attest tail keeps digest-relevant logic in one place.
 - **Native Git profile probe hardening (needs a Mac).** Add a service-specific Mach-lookup denial with an unsandboxed success baseline to the Seatbelt Git probe. A direct lookup needs new test-only `unsafe` FFI, which requires the dedicated review in [AGENTS.md](./AGENTS.md#global-rules) rule 7.
+- **RUSTSEC-2026-0370/0371/0372 wait for zbus 6.** The fresh [release-policy](./agents/references/testing-details.md#release-policy-ci) advisory fetch flags `zvariant`, `zbus_names` and `zvariant_derive` as unmaintained because their code moved into zbus 6; they arrive via `keyring` → `zbus-secret-service-keyring-store` → `secret-service 5.2.0` → `zbus 5`. The owner chose to wait, so no ignore is added to `deny.toml`. Bump `keyring` or `secret-service` once they adopt zbus 6; see the [dependency inventory](./docs/security/beta-dependency-inventory.md).
+- **macOS `guard_runs` permission tests flake on loaded runners.** They have intermittently failed with "Guard execution/storage cleanup unconfirmed" on CI. Teardown now shares one bounded deadline and names the failing stage; if it recurs, use that stage name to target the fix.
 
 ## Terminal continuity evidence
 
