@@ -129,6 +129,10 @@ mod goal_recovery_tests {
 
         let uncertain = pending_plan_view(Some(ToolDisposition::Uncertain));
         assert!(!uncertain.goals[0].can_resume(&uncertain));
+
+        // Resume keeps refusing a Tool that stopped the Run, such as a cancelled one.
+        let cancelled = pending_plan_view(Some(ToolDisposition::Cancelled));
+        assert!(!cancelled.goals[0].can_resume(&cancelled));
     }
 }
 
@@ -1530,6 +1534,28 @@ mod goal_replay_tests {
                 "an unknown Tool outcome in the last Run ({disposition:?}, {cache_update:?})"
             );
         }
+
+        let mut cancelled = base.clone();
+        let intent = read_intent(run_id, agent_run_id, "src/lib.rs");
+        cancelled.runs[0].tools.push(ToolView {
+            intent: intent.clone(),
+            observation: Some(ToolObservation {
+                intent,
+                disposition: ToolDisposition::Cancelled,
+                enforcement_cause: None,
+                output: String::new(),
+                attestation: None,
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
+            }),
+            review_call_index: None,
+            permission_verdict: None,
+            finished_sequence: Some(2),
+        });
+        assert_eq!(
+            cancelled.continuable_goal().map(|goal| goal.id),
+            Some(source),
+            "a Tool cancelled by the user has a known outcome"
+        );
 
         let target = GoalId::new();
         let view = replay(vec![continued(target, &|_| {})])

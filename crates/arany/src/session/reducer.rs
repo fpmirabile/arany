@@ -156,11 +156,9 @@ impl GoalView {
                         .iter()
                         .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
                         .all(|tool| {
-                            tool.observation.as_ref().is_some_and(|observation| {
-                                observation.disposition != crate::tools::ToolDisposition::Uncertain
-                                    && observation.cache_update
-                                        != crate::tools::CacheUpdate::Uncertain
-                            })
+                            tool.observation
+                                .as_ref()
+                                .is_some_and(|observation| !observation.stops_run())
                         })
                 })
         })
@@ -658,11 +656,17 @@ impl SessionView {
                     .rev()
                     .find_map(|run_id| self.runs.iter().find(|run| run.id == *run_id))
                     .is_some_and(|run| {
-                        run.tools.iter().all(|tool| {
-                            tool.observation
-                                .as_ref()
-                                .is_some_and(|observation| !observation.stops_run())
-                        })
+                        run.tools
+                            .iter()
+                            .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
+                            .all(|tool| {
+                                tool.observation.as_ref().is_some_and(|observation| {
+                                    observation.disposition
+                                        != crate::tools::ToolDisposition::Uncertain
+                                        && observation.cache_update
+                                            != crate::tools::CacheUpdate::Uncertain
+                                })
+                            })
                     })
                 && !self
                     .goals
