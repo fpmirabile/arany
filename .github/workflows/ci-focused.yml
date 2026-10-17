@@ -1,6 +1,6 @@
 name: Focused CI lane
 
-# Mirrors one ci.yml test lane; change both together. Job names must never match required checks.
+# Uses the same test action as ci.yml. Job names must never match required checks.
 on:
   workflow_dispatch:
     inputs:
@@ -38,28 +38,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install repository Rust toolchain
-        run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/ci-tests
         with:
-          key: ${{ matrix.profile }}
-      - name: Prepare isolated Linux terminal fixtures
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap util-linux
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          bwrap --unshare-user --unshare-net --ro-bind / / -- true
-      - run: cargo fetch --locked
-      - run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
+          profile: ${{ matrix.profile }}
 
   macos:
     name: Focused macOS Tests (${{ matrix.profile }})
     if: startsWith(inputs.lane, 'macos-')
     runs-on: macos-15
     timeout-minutes: 30
-    env:
-      TMPDIR: /private/tmp
-      ARANY_TEST_EXE: ${{ github.workspace }}/target/${{ matrix.profile }}/arany
     strategy:
       matrix:
         profile: ["${{ endsWith(inputs.lane, '-release') && 'release' || 'debug' }}"]
@@ -67,13 +54,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install repository Rust toolchain
-        run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/ci-tests
         with:
-          key: ${{ matrix.profile }}
-      - run: cargo fetch --locked
-      - name: Clippy on macOS
-        if: matrix.profile == 'debug'
-        run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-      - run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
+          profile: ${{ matrix.profile }}
