@@ -670,7 +670,7 @@ impl SessionView {
             .iter()
             .rev()
             .find_map(|run_id| self.runs.iter().find(|run| run.id == *run_id))
-            .is_none_or(|run| {
+            .is_some_and(|run| {
                 run.tools
                     .iter()
                     .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))

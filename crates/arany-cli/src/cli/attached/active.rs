@@ -1311,6 +1311,25 @@ mod goal_request_tests {
         view.goals[0].objective = "Fix @src/lib.rs".into();
         view.goals[0].status = arany::GoalStatus::Failed;
         view.goals[0].budget_closed = true;
+        let run = arany::RunView {
+            id: arany::RunId::new(),
+            objective: "Fix".into(),
+            images: Vec::new(),
+            config: None,
+            provider_fallbacks: Vec::new(),
+            agents: Vec::new(),
+            assistant_message: None,
+            status: arany::RunStatus::Finished,
+            accepted_sequence: 3,
+            finished_sequence: Some(4),
+            tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
+            display: Vec::new(),
+            steering_notes: Vec::new(),
+        };
+        view.goals[0].run_ids.push(run.id);
+        view.runs.push(run);
         assert_eq!(
             mention_source(&view, GoalStart::Continue, ""),
             "Fix @src/lib.rs"
