@@ -28,7 +28,7 @@ You need Git, Rustup and native build tools, including a C compiler. Rustup sele
 ```sh
 git clone https://github.com/fpmirabile/arany.git
 cd arany
-cargo install --path . --locked
+cargo install --path crates/arany-cli --locked
 arany --help
 ```
 
