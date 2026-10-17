@@ -288,14 +288,15 @@ impl RunLoop<'_> {
         let call_deadline = deadline
             .saturating_duration_since(Instant::now())
             .min(COMPACTION_CALL_DEADLINE);
-        let mut cancellation = self.controls.cancellation.clone();
-        let response = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => None,
-            response = tokio::time::timeout(call_deadline, self.routing.compact(compaction_request, self.primary_id)) => {
-                Some(response)
-            }
-        };
+        let response = self
+            .routing
+            .compact_interruptible(
+                compaction_request,
+                self.primary_id,
+                call_deadline,
+                self.controls.cancellation.clone(),
+            )
+            .await?;
         let failed = |reason| {
             (
                 CompactionStatus::Failed { reason },
@@ -306,17 +307,15 @@ impl RunLoop<'_> {
         };
         let (mut status, response_id, usage, wire_provenance) = match response {
             None => failed(CompactionFailure::Cancelled),
-            Some(Ok(Ok((Ok(response), _)))) => classify_response(response),
-            Some(Ok(Err(error))) => return Err(error),
-            Some(Ok(Ok((Err(crate::provider::ProviderError::CallTimedOut), _)))) => {
+            Some((Ok(response), _)) => classify_response(response),
+            Some((Err(crate::provider::ProviderError::CallTimedOut), _)) => {
                 failed(CompactionFailure::TimedOut)
             }
-            Some(Ok(Ok((Err(error), _)))) => failed(match error.failure_class() {
+            Some((Err(error), _)) => failed(match error.failure_class() {
                 ProviderFailureClass::Unavailable => CompactionFailure::ProviderUnavailable,
                 ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
                 ProviderFailureClass::InvalidOutcome => CompactionFailure::InvalidOutcome,
             }),
-            Some(Err(_)) => failed(CompactionFailure::TimedOut),
         };
         if let CompactionStatus::Succeeded { summary, .. } = &status {
             let context = request

@@ -12,7 +12,13 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 use tokio::time::Instant;
+
+pub(super) type CompactionOutcome = (
+    Result<crate::provider::CompactionResponse, ProviderError>,
+    Arc<dyn Provider>,
+);
 
 pub(super) struct CallRouter<'a> {
     pub(super) providers: AdmittedProviders,
@@ -115,29 +121,56 @@ impl CallRouter<'_> {
 
     pub(super) async fn compact(
         &self,
+        request: crate::provider::CompactionRequest,
+        actor: AgentRunId,
+    ) -> Result<CompactionOutcome, EngineError> {
+        self.compact_loop(request, actor, None)
+            .await?
+            .ok_or(EngineError::CoordinatorFailed)
+    }
+
+    /// Like `compact`, but cancellation and `bound` interrupt only the Provider wait; a durable
+    /// fallback switch always completes first. `None` means the Run was cancelled mid-wait.
+    pub(super) async fn compact_interruptible(
+        &self,
+        request: crate::provider::CompactionRequest,
+        actor: AgentRunId,
+        bound: Duration,
+        cancellation: RunCancellation,
+    ) -> Result<Option<CompactionOutcome>, EngineError> {
+        self.compact_loop(request, actor, Some((bound, cancellation)))
+            .await
+    }
+
+    async fn compact_loop(
+        &self,
         mut request: crate::provider::CompactionRequest,
         actor: AgentRunId,
-    ) -> Result<
-        (
-            Result<crate::provider::CompactionResponse, ProviderError>,
-            Arc<dyn Provider>,
-        ),
-        EngineError,
-    > {
+        interrupt: Option<(Duration, RunCancellation)>,
+    ) -> Result<Option<CompactionOutcome>, EngineError> {
         loop {
             let provider = self.provider(ProviderRole::Compaction, actor)?;
             request.model = provider.identity().model.clone();
             request.max_output_tokens = request
                 .max_output_tokens
                 .min(provider.identity().limits.max_output_tokens);
-            let response = match tokio::time::timeout(
-                provider.identity().limits.deadline,
-                provider.compact(request.clone()),
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(_) => Err(ProviderError::CallTimedOut),
+            let limit = provider.identity().limits.deadline;
+            let call = provider.compact(request.clone());
+            let response = match &interrupt {
+                None => match tokio::time::timeout(limit, call).await {
+                    Ok(response) => response,
+                    Err(_) => Err(ProviderError::CallTimedOut),
+                },
+                Some((bound, cancellation)) => {
+                    let mut cancellation = cancellation.clone();
+                    tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => return Ok(None),
+                        response = tokio::time::timeout(limit.min(*bound), call) => {
+                            response.unwrap_or(Err(ProviderError::CallTimedOut))
+                        }
+                    }
+                }
             };
             if !response
                 .as_ref()
@@ -151,7 +184,7 @@ impl CallRouter<'_> {
                     )
                     .await?
             {
-                return Ok((response, provider));
+                return Ok(Some((response, provider)));
             }
         }
     }
