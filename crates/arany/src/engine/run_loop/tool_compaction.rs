@@ -285,12 +285,10 @@ impl RunLoop<'_> {
         }
         let source_bytes = u32::try_from(source_len).map_err(|_| EngineError::InvalidRequest)?;
 
-        let call_deadline = deadline
-            .saturating_duration_since(Instant::now())
-            .min(COMPACTION_CALL_DEADLINE);
+        let call_deadline = deadline.min(Instant::now() + COMPACTION_CALL_DEADLINE);
         let response = self
             .routing
-            .compact_interruptible(
+            .compact(
                 compaction_request,
                 self.primary_id,
                 call_deadline,

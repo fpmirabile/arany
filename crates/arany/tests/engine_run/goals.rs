@@ -167,20 +167,21 @@ async fn prose_objective_at_the_limit_compacts_its_read_only_goal_prefix() {
     compact_read_only_goal_prefix(&prose[..64 * 1024]).await;
 }
 
-async fn compact_read_only_goal_prefix(objective: &str) {
-    const PAGE_BYTES: usize = 4096;
-    const READS: usize = 104;
+const PAGE_BYTES: usize = 4096;
+const READS: usize = 104;
 
-    let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = temp.path().join("workspace");
+fn paged_read_workspace(root: &Path) -> std::path::PathBuf {
+    let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(
         workspace.join("notes/data.txt"),
         "x".repeat(PAGE_BYTES * READS),
     )
     .expect("bounded fixture file");
-    let state_path = temp.path().join("state");
+    workspace
+}
 
+fn paged_read_outcomes() -> Vec<ProviderOutcome> {
     let mut outcomes = (0..READS)
         .map(|page| {
             crate::tool_outcome(
@@ -197,6 +198,14 @@ async fn compact_read_only_goal_prefix(objective: &str) {
         summary: "Read-only inspection completed".into(),
         result: "The bounded pages were inspected".into(),
     }));
+    outcomes
+}
+
+async fn compact_read_only_goal_prefix(objective: &str) {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = paged_read_workspace(temp.path());
+    let state_path = temp.path().join("state");
+    let outcomes = paged_read_outcomes();
     let good_compaction = || {
         Ok(CompactionResponse {
             summary:
@@ -4810,4 +4819,81 @@ async fn steered_run_near_the_event_cap_is_refused_up_front_never_stranded() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = paged_read_workspace(temp.path());
+    let state_path = temp.path().join("state");
+    let cancellation = RunCancellation::new();
+    let mut failing = ScriptedProvider::new(vec![]).with_profile("scripted", "compact-primary");
+    failing.compact_responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+    failing.cancel_at_compaction = Some(cancellation.clone());
+    let failing = Arc::new(failing);
+    let fallback =
+        Arc::new(ScriptedProvider::new(vec![]).with_profile("scripted", "compact-fallback"));
+    let primary =
+        Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("scripted", "primary"));
+    let mut bindings = AdmittedProviders::single(primary.clone());
+    bindings.compaction = vec![failing.clone(), fallback.clone()];
+    let engine = facts_engine(
+        StateRoot::admit(&state_path).expect("private state"),
+        &state_path,
+    );
+    let mut input = request(&workspace, "Inspect the bounded file in pages");
+    input.include_paths.clear();
+    input.goal.budget = Some(arany::GoalBudget {
+        max_provider_calls: None,
+        max_tokens: None,
+        max_active_ms: Some(30 * 60 * 1000),
+        max_runs: 1,
+    });
+    let outcome = super::engine_support::run_routed(
+        &engine,
+        bindings,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            cancellation,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("cancelled Run");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(
+        run.provider_fallbacks
+            .iter()
+            .filter(|(_, fallback)| fallback.role == arany::ProviderRole::Compaction)
+            .count(),
+        1,
+        "the started switch completes before cancellation applies"
+    );
+    let record = events
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::GoalContextCompacted { record, .. } => Some(record),
+            _ => None,
+        })
+        .expect("compaction record");
+    assert_eq!(record.model, "compact-fallback");
+    assert!(matches!(
+        record.status,
+        arany::CompactionStatus::Failed {
+            reason: arany::CompactionFailure::Cancelled
+        }
+    ));
+    assert!(
+        fallback
+            .compact_requests
+            .lock()
+            .expect("requests")
+            .is_empty()
+    );
+    assert_eq!(failing.compact_requests.lock().expect("requests").len(), 1);
 }

@@ -148,28 +148,25 @@ impl Engine {
             None
         };
         let provider_trace = trace.begin_provider(&requested_identity.model);
-        let response = tokio::time::timeout(provider_deadline, async {
-            match &routing {
-                Some((routing, actor)) => routing.compact(request, *actor).await,
-                None => Ok((
-                    provider.compact(request).await,
-                    std::sync::Arc::clone(&provider),
-                )),
-            }
-        })
-        .await;
-        let provider = match &routing {
-            Some((routing, actor)) => {
-                routing.provider(crate::provider::ProviderRole::Compaction, *actor)?
-            }
-            None => std::sync::Arc::clone(&provider),
+        let (response, provider) = match &routing {
+            Some((routing, actor)) => routing
+                .compact(
+                    request,
+                    *actor,
+                    tokio::time::Instant::now() + provider_deadline,
+                    crate::RunCancellation::new(),
+                )
+                .await?
+                .ok_or(EngineError::CoordinatorFailed)?,
+            None => (
+                tokio::time::timeout(provider_deadline, provider.compact(request))
+                    .await
+                    .unwrap_or(Err(crate::provider::ProviderError::CallTimedOut)),
+                std::sync::Arc::clone(&provider),
+            ),
         };
         let identity = provider.identity();
-        let (status, response_id, usage, wire_provenance) = match response {
-            Ok(Ok((response, _))) => compaction_outcome(response),
-            Ok(Err(error)) => return Err(error),
-            Err(_) => compaction_outcome(Err(crate::provider::ProviderError::CallTimedOut)),
-        };
+        let (status, response_id, usage, wire_provenance) = compaction_outcome(response);
         let provider_outcome = ProviderTraceOutcome::from(&status);
         provider_trace.finish_with_usage(provider_outcome, usage.input_tokens, usage.output_tokens);
         let record = compaction_record(
