@@ -15,7 +15,12 @@ pub(super) fn apply(
             current.defaults = defaults.clone();
         }
         Event::ContextCompacted { record, active_ms } => {
-            let boundary = if let Some(run) = current.runs.last() {
+            // Inherited Runs were accepted before the fork; this Session's own Runs follow it.
+            let own_last = current
+                .runs
+                .last()
+                .filter(|run| run.accepted_sequence > current.created_sequence);
+            let boundary = if let Some(run) = own_last {
                 run.finished_sequence.map(|sequence| (run.id, sequence))
             } else {
                 current
@@ -25,11 +30,7 @@ pub(super) fn apply(
             if boundary != Some((record.covered_run_id, record.covered_sequence)) {
                 return Err(ReplayError::InvalidSnapshot);
             }
-            if current
-                .runs
-                .last()
-                .is_some_and(|run| !run.compaction_matches(record))
-            {
+            if own_last.is_some_and(|run| !run.compaction_matches(record)) {
                 return Err(ReplayError::InvalidTransition);
             }
             let goal = current.goals.iter_mut().find(|goal| {

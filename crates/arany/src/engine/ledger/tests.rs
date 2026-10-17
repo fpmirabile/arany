@@ -53,7 +53,7 @@ fn ledger(budget: GoalBudget) -> GoalLedger {
         compactions: Vec::new(),
         goals: vec![goal_view(goal_id, budget)],
     };
-    GoalLedger::new(view, goal_id)
+    GoalLedger::new(view, Some(goal_id))
 }
 
 fn edit(ledger: &GoalLedger, change: impl FnOnce(&mut GoalView, &mut InFlight)) {
@@ -246,6 +246,20 @@ fn acknowledged_active_time_overrun_is_recorded_within_the_action_bound() {
         in_flight.origin = Some(Instant::now());
     });
     assert!(ledger.active_time_exhausted());
+}
+
+#[test]
+fn open_delegation_reservation_does_not_exhaust_its_own_review() {
+    let ledger = ledger(GoalBudget {
+        max_active_ms: Some(600_000),
+        ..GoalBudget::default()
+    });
+    let (_started, reserved_ms) = ledger.reserve_active(600_000).unwrap();
+    assert!(reserved_ms > 0);
+    assert!(ledger.active_time_exhausted());
+    assert!(!ledger.spent_active_time_exhausted());
+    edit(&ledger, |goal, _| goal.active_ms = 600_000);
+    assert!(ledger.spent_active_time_exhausted());
 }
 
 #[test]

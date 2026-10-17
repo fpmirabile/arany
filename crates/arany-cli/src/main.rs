@@ -8,7 +8,7 @@ use arany_cli::{presentation, terminal};
 use arany::test_support::process as test_process;
 
 use crate::presentation::render_session;
-use arany::{RunId, SessionId, SessionView, StateRoot, Store, Telemetry};
+use arany::{RunId, SessionId, StateRoot, Store, Telemetry};
 use clap::{ColorChoice, Parser, Subcommand, error::ErrorKind};
 use cli::{
     CommandOutput, OutputArg, attached::AttachedArgs, exec::ExecArgs, provider::ProviderArgs,
@@ -196,10 +196,12 @@ async fn show(
             .await
             .map_err(|_| "Session history unavailable or invalid")?;
     }
-    store.close().await.map_err(|_| "store shutdown failed")?;
-    let view = SessionView::replay(id, &events)
+    let view = store
+        .load_view(id)
+        .await
         .map_err(|_| "Session history unavailable or invalid")?
         .ok_or("Session or Run not found")?;
+    store.close().await.map_err(|_| "store shutdown failed")?;
     if run_selected {
         if !view.runs.iter().any(|run| run.id == run_id) {
             return Err("Session history unavailable or invalid");

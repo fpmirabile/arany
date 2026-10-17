@@ -36,6 +36,7 @@ pub(crate) use events::{
     MAX_STEP_TOOL_CALLS, ReplayError, payload_version,
 };
 pub(crate) use lineage::prefix_digest;
+pub(crate) use reducer::ForkInheritance;
 pub use reducer::{
     AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,
 };

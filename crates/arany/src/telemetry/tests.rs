@@ -481,6 +481,16 @@ impl Segment {
         context: (SystemTime, SystemTime),
         routes: Option<ProviderRoutes>,
     ) -> Self {
+        let mut segment = Self::opened(telemetry, context);
+        segment.commit(Event::RunStarted {
+            run_id: segment.run_id,
+            config: run_config(routes),
+            active_deadline_ms: None,
+        });
+        segment
+    }
+
+    fn opened(telemetry: &Telemetry, context: (SystemTime, SystemTime)) -> Self {
         let session_id = SessionId::new();
         let goal_id = GoalId::new();
         let mut segment = Self {
@@ -501,11 +511,6 @@ impl Segment {
             run_id: segment.run_id,
             text: "objective".into(),
             images: Vec::new(),
-        });
-        segment.commit(Event::RunStarted {
-            run_id: segment.run_id,
-            config: run_config(routes),
-            active_deadline_ms: None,
         });
         segment
     }
@@ -1270,6 +1275,38 @@ fn fullest_mapped_batch_fits_trace_body_limit() {
     assert!(
         request.encoded_len() <= MAX_TRACE_BODY_BYTES,
         "fullest mapped batch exceeds the OTLP body limit"
+    );
+}
+
+#[test]
+fn compaction_span_without_its_run_routing_receipt_is_not_exported() {
+    let (telemetry, exporter) = in_memory();
+    let mut segment = Segment::opened(&telemetry, unit_context());
+    segment.commit(Event::GoalCompactionCallReserved {
+        goal_id: segment.goal_id,
+        run_id: segment.run_id,
+        active_ceiling_ms: 1,
+    });
+    segment.commit(Event::GoalContextCompacted {
+        goal_id: segment.goal_id,
+        run_id: segment.run_id,
+        covered_tool_count: 1,
+        record: compaction_record(CompactionStatus::Failed {
+            reason: CompactionFailure::TimedOut,
+        }),
+    });
+    segment.finish(RunDisposition::Finished, None);
+    let spans = finished_spans(&telemetry, &exporter);
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.name == "invoke_workflow arany.run")
+    );
+    assert!(
+        !spans
+            .iter()
+            .any(|span| span.name == "compact arany.goal_tool_context"
+                || span.name == "chat arany.compaction")
     );
 }
 

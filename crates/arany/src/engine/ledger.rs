@@ -129,7 +129,7 @@ pub(super) fn duration_ms(duration: Duration) -> u64 {
 
 /// Goal bookkeeping read from the reducer's view. Only what has no Event yet lives outside it.
 pub(super) struct GoalLedger {
-    goal_id: GoalId,
+    goal_id: Option<GoalId>,
     state: Mutex<State>,
     admission: tokio::sync::Mutex<()>,
 }
@@ -194,7 +194,7 @@ impl Reservation<'_> {
 }
 
 impl GoalLedger {
-    pub(super) fn new(view: SessionView, goal_id: GoalId) -> Self {
+    pub(super) fn new(view: SessionView, goal_id: Option<GoalId>) -> Self {
         Self {
             goal_id,
             state: Mutex::new(State {
@@ -261,9 +261,9 @@ impl GoalLedger {
             .state
             .lock()
             .map_err(|_| EngineError::CoordinatorFailed)?;
-        let goal = state
-            .view
-            .goal(self.goal_id)
+        let goal = self
+            .goal_id
+            .and_then(|goal_id| state.view.goal(goal_id))
             .ok_or(EngineError::InvalidHistory)?;
         Ok(read(goal, &state.in_flight))
     }
@@ -285,7 +285,10 @@ impl GoalLedger {
             .lock()
             .map_err(|_| EngineError::CoordinatorFailed)?;
         let State { view, in_flight } = &mut *state;
-        let goal = view.goal(self.goal_id).ok_or(EngineError::InvalidHistory)?;
+        let goal = self
+            .goal_id
+            .and_then(|goal_id| view.goal(goal_id))
+            .ok_or(EngineError::InvalidHistory)?;
         Ok(update(goal, in_flight))
     }
 
@@ -545,6 +548,15 @@ impl GoalLedger {
                 .map(|limit| limit.saturating_sub(in_flight.consumed_ms(goal)))
         })
         .unwrap_or(Some(0))
+    }
+
+    pub(super) fn spent_active_time_exhausted(&self) -> bool {
+        self.read(|goal, in_flight| {
+            goal.effective_budget()
+                .max_active_ms
+                .is_some_and(|limit| in_flight.spent_ms(goal) >= limit)
+        })
+        .unwrap_or(false)
     }
 
     pub(super) fn active_time_exhausted(&self) -> bool {

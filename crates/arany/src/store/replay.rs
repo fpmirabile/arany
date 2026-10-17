@@ -1,7 +1,8 @@
 use super::{ResolvedSession, StoreError, event_payload_limit};
+use crate::session::ForkInheritance;
 use crate::session::{
-    AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, RunConfig, RunDisposition,
-    RunId, SessionDefaults, SessionId, SessionListItem, SessionView, prefix_digest,
+    AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, ForkLineage, RunConfig,
+    RunDisposition, RunId, SessionDefaults, SessionId, SessionListItem, SessionView, prefix_digest,
     validate_compaction_references,
 };
 use rusqlite::{Connection, types::ValueRef};
@@ -373,72 +374,129 @@ fn resolve_view_with_mode(
     if *total_events > MAX_SESSION_EVENTS {
         return Err(StoreError::ReplayLimit);
     }
-    let mut view = if close_history {
-        SessionView::replay(session_id, &events)?
-    } else {
-        SessionView::replay_open(session_id, &events)?
+    let view = replay_through(
+        connection,
+        session_id,
+        &events,
+        depth,
+        total_events,
+        close_history,
+    )?;
+    Ok((events, view))
+}
+
+pub(super) fn replay_through(
+    connection: &Connection,
+    session_id: SessionId,
+    events: &[EventEnvelope],
+    depth: usize,
+    total_events: &mut usize,
+    close_history: bool,
+) -> Result<Option<SessionView>, StoreError> {
+    let lineage = match events.first().map(|envelope| &envelope.event) {
+        Some(Event::SessionForked {
+            title: _,
+            source_session_id,
+            source_run_id,
+            source_sequence,
+            prefix_digest,
+        }) if *source_session_id != session_id => ForkLineage {
+            source_session_id: *source_session_id,
+            source_run_id: *source_run_id,
+            source_sequence: *source_sequence,
+            prefix_digest: *prefix_digest,
+        },
+        _ => {
+            let view = if close_history {
+                SessionView::replay(session_id, events)?
+            } else {
+                SessionView::replay_open(session_id, events)?
+            };
+            if let Some(view) = &view {
+                validate_compaction_references(view)?;
+            }
+            return Ok(view);
+        }
     };
-    if let Some(current) = &mut view
-        && let Some(lineage) = current.lineage
+    let (inherited, source) = fork_projection(connection, lineage, depth, total_events)?;
+    let mut view = SessionView::replay_forked(session_id, events, close_history, &inherited)?
+        .ok_or(StoreError::InvalidHistory)?;
+    if view
+        .workspace_identity
+        .is_some_and(|identity| Some(identity) != source.workspace_identity)
     {
-        let (source_events, source_view) = resolve_view(
-            connection,
-            lineage.source_session_id,
-            depth + 1,
-            total_events,
-        )?;
-        let source = source_view.ok_or(StoreError::InvalidHistory)?;
-        if current.workspace_identity.is_some()
-            && current.workspace_identity != source.workspace_identity
-        {
-            return Err(StoreError::InvalidHistory);
-        }
-        current.workspace_identity = source.workspace_identity;
-        let boundary = source_events
-            .iter()
-            .find(|event| event.sequence == lineage.source_sequence)
-            .ok_or(StoreError::InvalidHistory)?;
-        match &boundary.event {
-            Event::RunFinished { run_id, .. }
-            | Event::SessionForked {
-                source_run_id: run_id,
-                ..
-            } if *run_id == lineage.source_run_id => {}
-            _ => return Err(StoreError::InvalidHistory),
-        }
-        if prefix_digest(&source_events, lineage.source_sequence)? != lineage.prefix_digest {
-            return Err(StoreError::InvalidHistory);
-        }
-        current.inherited_title = Some(source.generated_title_through(lineage.source_sequence));
-        let inherited: Vec<_> = source
+        return Err(StoreError::InvalidHistory);
+    }
+    view.workspace_identity = source.workspace_identity;
+    view.inherited_title = Some(source.generated_title_through(lineage.source_sequence));
+    validate_compaction_references(&view)?;
+    Ok(Some(view))
+}
+
+fn fork_projection(
+    connection: &Connection,
+    fork: ForkLineage,
+    depth: usize,
+    total_events: &mut usize,
+) -> Result<(ForkInheritance, SessionView), StoreError> {
+    if depth + 1 > MAX_FORK_DEPTH {
+        return Err(StoreError::ReplayLimit);
+    }
+    let source_events = load_session_events(connection, fork.source_session_id)?;
+    *total_events = total_events
+        .checked_add(source_events.len())
+        .ok_or(StoreError::ReplayLimit)?;
+    if *total_events > MAX_SESSION_EVENTS {
+        return Err(StoreError::ReplayLimit);
+    }
+    let boundary = source_events
+        .iter()
+        .find(|event| event.sequence == fork.source_sequence)
+        .ok_or(StoreError::InvalidHistory)?;
+    match &boundary.event {
+        Event::RunFinished { run_id, .. }
+        | Event::SessionForked {
+            source_run_id: run_id,
+            ..
+        } if *run_id == fork.source_run_id => {}
+        _ => return Err(StoreError::InvalidHistory),
+    }
+    if prefix_digest(&source_events, fork.source_sequence)? != fork.prefix_digest {
+        return Err(StoreError::InvalidHistory);
+    }
+    let through: Vec<_> = source_events
+        .into_iter()
+        .filter(|envelope| envelope.sequence <= fork.source_sequence)
+        .collect();
+    let source = replay_through(
+        connection,
+        fork.source_session_id,
+        &through,
+        depth + 1,
+        total_events,
+        false,
+    )?
+    .ok_or(StoreError::InvalidHistory)?;
+    let inherited = ForkInheritance {
+        runs: source
             .runs
-            .into_iter()
+            .iter()
             .filter(|run| {
                 run.finished_sequence
-                    .is_some_and(|sequence| sequence <= lineage.source_sequence)
+                    .is_some_and(|sequence| sequence <= fork.source_sequence)
             })
-            .collect();
-        if inherited
-            .last()
-            .is_none_or(|run| run.id != lineage.source_run_id)
-            || current
-                .runs
-                .iter()
-                .any(|run| inherited.iter().any(|parent| parent.id == run.id))
-        {
-            return Err(StoreError::InvalidHistory);
-        }
-        current.runs.splice(0..0, inherited);
-        let inherited_compactions = source
-            .compactions
-            .into_iter()
-            .filter(|compaction| compaction.event_sequence <= lineage.source_sequence);
-        current.compactions.splice(0..0, inherited_compactions);
+            .cloned()
+            .collect(),
+        compactions: source.compactions.clone(),
+    };
+    if inherited
+        .runs
+        .last()
+        .is_none_or(|run| run.id != fork.source_run_id)
+    {
+        return Err(StoreError::InvalidHistory);
     }
-    if let Some(current) = &view {
-        validate_compaction_references(current)?;
-    }
-    Ok((events, view))
+    Ok((inherited, source))
 }
 
 fn load_session_events(

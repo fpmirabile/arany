@@ -1667,6 +1667,52 @@ async fn primary_tool_step_events_match_the_snapshot() {
 }
 
 #[tokio::test]
+async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit() {
+    let read = || arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: 0,
+        limit: 32,
+    };
+    let finish = || {
+        ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: "answer".into(),
+        })
+    };
+    let result_bytes = |events: &[String]| {
+        events
+            .iter()
+            .find_map(|line| line.strip_prefix("ToolStarted result_bytes="))
+            .and_then(|tail| tail.split_whitespace().next())
+            .and_then(|value| value.parse::<usize>().ok())
+            .expect("ToolStarted result bound")
+    };
+    let child = tool_step_events(
+        CollaborationPolicy::Team {
+            max_active_children: 1,
+        },
+        vec![
+            ProviderOutcome::Delegate(Delegate {
+                children: vec!["Inspect the fact".into()],
+            }),
+            tool_outcome(read(), None),
+            finish(),
+            finish(),
+        ],
+        READ_ONLY,
+    )
+    .await;
+    let primary = tool_step_events(
+        CollaborationPolicy::Single,
+        vec![tool_outcome(read(), None), finish()],
+        READ_ONLY,
+    )
+    .await;
+    assert!(result_bytes(&child) > 16 * 1024);
+    assert!(result_bytes(&primary) > result_bytes(&child));
+}
+
+#[tokio::test]
 async fn researcher_tool_step_events_match_the_snapshot() {
     let finish = || {
         ProviderOutcome::Finish(Finish {
@@ -2497,5 +2543,146 @@ mod routing {
             std::fs::read_to_string(workspace.join("notes/result.txt")).unwrap(),
             "done"
         );
+    }
+
+    #[tokio::test]
+    async fn compaction_fallback_in_a_fork_runs_without_the_inherited_goal() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
+        let state = temp.path().join("state");
+        let primary =
+            route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
+        let first = route(
+            ScriptedProvider::new(vec![])
+                .with_profile("scripted", "compaction")
+                .with_compactions(vec![Err(ProviderError::RemoteHttp(503))]),
+        );
+        let second = route(
+            ScriptedProvider::new(vec![])
+                .with_profile("scripted", "compaction-fallback")
+                .with_compactions(vec![Ok(CompactionResponse {
+                    summary: "Fork summary".into(),
+                    response_id: None,
+                    usage: arany::Usage {
+                        input_tokens: Some(20),
+                        output_tokens: Some(8),
+                        ..Default::default()
+                    },
+                    wire_provenance: None,
+                })]),
+        );
+        let engine = Engine::open(
+            StateRoot::admit(&state).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..EngineConfig::default()
+            },
+        )
+        .unwrap();
+        let config = state.join("tools.json");
+        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut bindings = routes(&primary);
+        bindings.compaction = vec![first.clone(), second.clone()];
+        let outcome = run_routed(&engine, bindings.clone(), input(&workspace), configured())
+            .await
+            .unwrap();
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        let fork = engine
+            .fork_session(outcome.session_id, workspace.clone(), None)
+            .await
+            .unwrap();
+        let record = engine
+            .compact_session(&bindings, fork, workspace.clone())
+            .await
+            .unwrap();
+        assert!(matches!(record.status, CompactionStatus::Succeeded { .. }));
+        engine.close().await.unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let view = store.load_view(fork).await.unwrap().unwrap();
+        store.close().await.unwrap();
+        assert_eq!(view.runs.last().unwrap().provider_fallbacks.len(), 1);
+        assert_eq!(
+            view.runs.last().unwrap().provider_fallbacks[0].1.role,
+            ProviderRole::Compaction
+        );
+        assert_eq!(second.compact_requests.lock().unwrap().len(), 1);
+        let shown = std::process::Command::new(env!("CARGO_BIN_EXE_arany"))
+            .args(["show", "--state-dir"])
+            .arg(&state)
+            .args(["--output", "text", &fork.to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            shown.status.success(),
+            "show on a fork after a compaction switch: {}",
+            String::from_utf8_lossy(&shown.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_inherited_runs_ignore_later_parent_compaction_switches() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
+        let state = temp.path().join("state");
+        let primary =
+            route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
+        let first = route(
+            ScriptedProvider::new(vec![])
+                .with_profile("scripted", "compaction")
+                .with_compactions(vec![Err(ProviderError::RemoteHttp(503))]),
+        );
+        let second = route(
+            ScriptedProvider::new(vec![])
+                .with_profile("scripted", "compaction-fallback")
+                .with_compactions(vec![Ok(CompactionResponse {
+                    summary: "Parent summary".into(),
+                    response_id: None,
+                    usage: arany::Usage {
+                        input_tokens: Some(20),
+                        output_tokens: Some(8),
+                        ..Default::default()
+                    },
+                    wire_provenance: None,
+                })]),
+        );
+        let engine = Engine::open(
+            StateRoot::admit(&state).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..EngineConfig::default()
+            },
+        )
+        .unwrap();
+        let config = state.join("tools.json");
+        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut bindings = routes(&primary);
+        bindings.compaction = vec![first.clone(), second.clone()];
+        let outcome = run_routed(&engine, bindings.clone(), input(&workspace), configured())
+            .await
+            .unwrap();
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        let fork = engine
+            .fork_session(outcome.session_id, workspace.clone(), None)
+            .await
+            .unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let before = store.load_view(fork).await.unwrap().unwrap();
+        store.close().await.unwrap();
+        engine
+            .compact_session(&bindings, outcome.session_id, workspace.clone())
+            .await
+            .unwrap();
+        engine.close().await.unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let after = store.load_view(fork).await.unwrap().unwrap();
+        let parent = store.load_view(outcome.session_id).await.unwrap().unwrap();
+        store.close().await.unwrap();
+        assert_eq!(parent.runs.last().unwrap().provider_fallbacks.len(), 1);
+        assert_eq!(after.runs, before.runs);
+        assert!(after.runs.last().unwrap().provider_fallbacks.is_empty());
     }
 }

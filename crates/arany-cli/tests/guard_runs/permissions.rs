@@ -111,6 +111,16 @@ impl Fixture {
         mode: Option<arany::ApprovalMode>,
         team: bool,
     ) -> (arany::RunOutcome, Vec<ProviderRequest>, usize) {
+        self.run_budgeted(outcomes, mode, team, budget()).await
+    }
+
+    async fn run_budgeted(
+        &self,
+        outcomes: Vec<ProviderOutcome>,
+        mode: Option<arany::ApprovalMode>,
+        team: bool,
+        goal_budget: arany::GoalBudget,
+    ) -> (arany::RunOutcome, Vec<ProviderRequest>, usize) {
         let provider = Arc::new(ScriptedProvider::new(outcomes));
         let (approvals, mut inbox) = arany::ToolApprovals::new(mode.unwrap_or_default());
         let controls = RunControls {
@@ -127,7 +137,7 @@ impl Fixture {
         } else {
             CollaborationPolicy::Single
         };
-        input.goal.budget = Some(budget());
+        input.goal.budget = Some(goal_budget);
         if let Some(maximum) = self.command_maximum {
             input.goal.resource_settings.default_command_timeout_ms = maximum;
             input.goal.resource_settings.max_command_timeout_ms = maximum;
@@ -147,9 +157,21 @@ impl Fixture {
             }
         };
         let requests = provider.requests.lock().unwrap().clone();
+        let unconsumed = provider.responses.lock().unwrap().len();
         assert!(
-            provider.responses.lock().unwrap().is_empty(),
-            "all expected calls consumed"
+            unconsumed == 0,
+            "all expected calls consumed: {unconsumed} left, run {:?}, tools {:?}",
+            result.run.status,
+            result
+                .run
+                .tools
+                .iter()
+                .map(|tool| tool.observation.as_ref().map(|observation| (
+                    observation.disposition,
+                    observation.attestation.is_some(),
+                    &observation.output
+                )))
+                .collect::<Vec<_>>()
         );
         (result, requests, humans)
     }
@@ -622,6 +644,127 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
         );
         assert!(events.iter().any(|event| matches!(&event.event, Event::ToolPermissionDecided { agent_run_id, .. } if *agent_run_id == child.id)));
     }
+}
+
+#[tokio::test]
+async fn researcher_review_approval_dispatches_within_a_short_goal_budget() {
+    let fixture = Fixture::new(
+        Some(&json!({"permissions":{"defaultMode":"auto","allow":["mcp__server"]}})),
+        false,
+    );
+    let short = arany::GoalBudget {
+        max_active_ms: Some(10 * 60 * 1000),
+        ..budget()
+    };
+    let (result, _, humans) = fixture
+        .run_budgeted(
+            vec![
+                ProviderOutcome::Delegate(Delegate {
+                    children: vec!["Inspect the facts".into()],
+                }),
+                tool_outcome(call("catalog"), None),
+                finish("approve"),
+                finish("report"),
+                finish("answer"),
+            ],
+            Some(arany::ApprovalMode::Auto),
+            true,
+            short,
+        )
+        .await;
+    assert_eq!(humans, 0);
+    assert_eq!(result.run.status, RunStatus::Finished);
+    let (events, view) = fixture.reopen(result.session_id).await;
+    let child = &view.runs[0].agents[1];
+    let verdict = child.tools[0].permission_verdict.as_ref().unwrap();
+    assert!(verdict.approved);
+    assert_eq!(verdict.source, PermissionSource::AiReview);
+    assert_eq!(
+        child.tools[0].observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Succeeded
+    );
+    let reservations: Vec<u64> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::GoalProviderCallReserved {
+                agent_run_id,
+                active_ceiling_ms,
+                ..
+            } if *agent_run_id == child.id => Some(*active_ceiling_ms),
+            _ => None,
+        })
+        .collect();
+    assert!(reservations.len() >= 2, "child call and review reserved");
+    assert!(
+        reservations[1] <= reservations[0],
+        "the review's crash ceiling adds no Tool action time: {reservations:?}"
+    );
+}
+
+#[tokio::test]
+async fn researcher_review_503_falls_back_and_the_run_completes() {
+    use arany::test_support::engine::run_routed;
+    use arany::test_support::routing::{input, route, routes};
+    let fixture = Fixture::new(
+        Some(&json!({"permissions":{"defaultMode":"auto","allow":["mcp__server"]}})),
+        false,
+    );
+    let primary = route(
+        ScriptedProvider::new(vec![
+            ProviderOutcome::Delegate(Delegate {
+                children: vec!["Inspect the facts".into()],
+            }),
+            finish("answer"),
+        ])
+        .with_profile("scripted", "primary"),
+    );
+    let child = route(
+        ScriptedProvider::new(vec![tool_outcome(call("catalog"), None), finish("report")])
+            .with_profile("scripted", "child"),
+    );
+    let mut review = ScriptedProvider::new(vec![]).with_profile("scripted", "review");
+    review.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+    let review = route(review);
+    let fallback = route(
+        ScriptedProvider::new(vec![finish("approve")]).with_profile("scripted", "review-fallback"),
+    );
+    let mut bindings = routes(&primary);
+    bindings.child = vec![child.clone()];
+    bindings.review = vec![review.clone(), fallback.clone()];
+    let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
+    let mut request = input(&fixture.workspace);
+    request.policy = CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    request.goal.budget = Some(budget());
+    let result = run_routed(
+        &fixture.engine,
+        bindings,
+        request,
+        RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    let (_events, view) = fixture.reopen(result.session_id).await;
+    let child_id = view.runs[0].agents[1].id;
+    let switches = &view.runs[0].provider_fallbacks;
+    assert_eq!(switches.len(), 1);
+    assert_eq!(switches[0].0, child_id);
+    assert_eq!(switches[0].1.role, arany::ProviderRole::Review);
+    assert_eq!(fallback.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        view.runs[0].agents[1].tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .disposition,
+        arany::ToolDisposition::Succeeded
+    );
 }
 
 #[tokio::test]

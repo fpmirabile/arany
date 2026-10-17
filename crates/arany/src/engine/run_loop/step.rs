@@ -959,14 +959,13 @@ impl RunLoop<'_> {
             .or(delegation_deadline)
             .ok_or(EngineError::CoordinatorFailed)?
             .min(Instant::now() + TOOL_REVIEW_DEADLINE);
+        // A researcher's Tool runs inside the delegation's reservation, so its review adds no time.
+        let pending_ms = match (delegation_deadline, self.controls.tools) {
+            (None, Some(runtime)) => tool_action_ms(runtime, intent),
+            _ => 0,
+        };
         if let Err(error) = self
-            .reserve_provider_call(
-                intent.agent_run_id,
-                Action::Review,
-                self.controls
-                    .tools
-                    .map_or(0, |runtime| tool_action_ms(runtime, intent)),
-            )
+            .reserve_provider_call(intent.agent_run_id, Action::Review, pending_ms)
             .await
         {
             if matches!(error, EngineError::GoalBudgetExhausted)
@@ -998,7 +997,12 @@ impl RunLoop<'_> {
         if let Some(active_segment) = active_segment {
             self.settle_active_segment(active_segment)?;
         }
-        if self.ledger().active_time_exhausted() {
+        let exhausted = if delegation_deadline.is_some() {
+            self.ledger().spent_active_time_exhausted()
+        } else {
+            self.ledger().active_time_exhausted()
+        };
+        if exhausted {
             return Ok(false);
         }
         Ok(

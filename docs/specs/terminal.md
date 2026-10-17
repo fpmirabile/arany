@@ -232,7 +232,7 @@ Restore raw mode, cursor, wrapping, echo and every enabled mode on normal exit, 
 | History find | At most 64 UTF-8 bytes; local-only |
 | Rendered history row | 4,096 cells |
 | Local notices | 32 of 8 KiB; oldest dropped, UTF-8 prefix with ellipsis |
-| Classic cold projection | 16 Runs, 64 KiB rendered rows, 4,096 rows |
+| Classic cold projection | bounds in [Conversation, progress and history](#conversation-progress-and-history) |
 | Hidden native API key | At most 512 printable ASCII characters; secret content never reaches presentation |
 | Slash-name suggestions | At most 20 entry rows plus a header, clipped to available geometry |
 | Display and execution preferences | Strict version 3, 1 KiB private `ui-preferences.json` record plus one atomic pending replacement; unsupported or invalid records are refused without conversion or overwrite |

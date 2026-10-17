@@ -197,6 +197,97 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
 }
 
 #[test]
+fn a_tampered_compaction_reference_fails_load() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let state_path = temp.path().join("state");
+        let provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Finish(Finish {
+                summary: "first".into(),
+                result: "First answer".into(),
+            }),
+            ProviderOutcome::Finish(Finish {
+                summary: "second".into(),
+                result: "Second answer".into(),
+            }),
+        ])
+        .with_compactions(vec![Ok(CompactionResponse {
+            summary: "Derived summary".into(),
+            response_id: None,
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
+            wire_provenance: None,
+        })]);
+        let provider = Arc::new(provider);
+        let engine = Engine::open(
+            StateRoot::admit(&state_path).expect("private state"),
+            EngineConfig::default(),
+        )
+        .expect("engine");
+        let first = run_to_end(&engine, &provider, request(&workspace, "First question"))
+            .await
+            .expect("first Run");
+        engine
+            .compact_session(
+                &AdmittedProviders::single(provider.clone()),
+                first.session_id,
+                workspace.clone(),
+            )
+            .await
+            .expect("compaction");
+        let mut next = request(&workspace, "Second question");
+        next.session_id = Some(first.session_id);
+        next.title = None;
+        run_to_end(&engine, &provider, next)
+            .await
+            .expect("Run after compaction");
+        engine.close().await.expect("engine shutdown");
+        let store =
+            Store::open(StateRoot::admit(&state_path).expect("state readmission")).expect("store");
+        let view = store
+            .load_view(first.session_id)
+            .await
+            .expect("honest replay")
+            .expect("Session");
+        let reference = view
+            .runs
+            .last()
+            .and_then(|run| run.config.as_ref())
+            .and_then(|config| config.compaction_event_sequence)
+            .expect("later Run names its compaction");
+        store.close().await.expect("store shutdown");
+        let connection =
+            rusqlite::Connection::open(state_path.join("events.sqlite3")).expect("database");
+        let changed = connection
+            .execute(
+                "UPDATE events SET payload = replace(payload, ?1, ?2)
+                 WHERE kind = 'RunStarted' AND instr(payload, ?1) > 0",
+                rusqlite::params![
+                    format!("\"compaction_event_sequence\":{reference}"),
+                    format!("\"compaction_event_sequence\":{}", reference + 1000),
+                ],
+            )
+            .expect("tamper");
+        assert_eq!(changed, 1);
+        drop(connection);
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+            .expect("read-only store");
+        assert!(store.load_view(first.session_id).await.is_err());
+        store.close().await.expect("store shutdown");
+    });
+}
+
+#[test]
 fn a_fork_before_the_snapshot_event_recompiles_from_canonical_history() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
