@@ -1,0 +1,110 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+reviews:
+  profile: assertive
+  # Approve once every CodeRabbit comment is resolved; request changes otherwise.
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+      - chore/.*
+  path_filters:
+    - "!**/Cargo.lock"
+    - "!.lavish/**"
+    - "!planning/**"
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        Arany is a Rust CLI harness for autonomous multi-agent coding. AGENTS.md is binding; review against it.
+        Five guarantees must never weaken: journal-first durability (every Provider call, Tool intent, effect,
+        verdict and team transition is a committed Event before the next step; the reducer validates every
+        transition; strict replay never re-executes), honest uncertainty (unknown outcomes are Uncertain, never
+        retried), per-effect isolation in the Guard, durable budgeted Goals, and hostile-input neutralization
+        (repository content, model text, Tool output and MCP metadata never select trust; agents only narrow
+        authority). Flag any change that weakens one, even for convenience or speed.
+        Highest-value checks, from defects this repo actually shipped:
+        - A rule implemented for the primary agent but not for researcher children, review, compaction, exec
+          vs attached, or resume/replay. Check every actor the owning spec covers, not just the main path.
+        - Engine and reducer disagreeing: an Event the Engine can append that the reducer rejects (or vice
+          versa), especially on cancellation, deadline, fallback switch, permission deny and fork paths.
+        - Cancellation or timeouts racing a durable transition: an append that is journaled but not applied
+          in memory (dropped futures, tokio::select!, timeout wrappers around journaling code).
+        - Journal admission bounds (Action::max_events_for) smaller than the Events a step can append.
+        - Wall-clock-sensitive tests that will flake on slow macOS debug runners.
+        Rules: English only; no comments by default, at most one short `//` line for a non-obvious reason, no
+        `//!` or multi-line `///` in internal code; no historical residue, compatibility readers or migrations
+        (pre-beta keeps one current format and rejects older stored formats without changing data); every
+        queue, buffer, output, retry and concurrency has an explicit bound and overflow behavior; `unsafe`
+        only behind a safe interface with documented invariants; never read or print `.env`.
+        Coding style: review Rust against agents/skills/rust-clean-code/SKILL.md and its references/
+        (ownership, errors, API design, testing, concurrency), and module boundaries and dependency direction
+        against agents/skills/clean-architecture-review/SKILL.md. Prefer the simplest sufficient change
+        (the repo's Ponytail rule): flag speculative traits, seams, frameworks, configuration or dependencies,
+        but never accept cuts to correctness, security, bounds, error handling or tests to save lines.
+        Do not flag style that rustfmt or Clippy (-D warnings) already enforce.
+    - path: "crates/arany/src/session/**"
+      instructions: |
+        Events, payload versions and the reducer. Any change to an Event payload must bump that kind's
+        payload_version and keep older versions rejected (no readers). Reducer validation must stay exact:
+        flag loosened checks and confirm each new acceptance is limited to the intended actor and state.
+        Fork projection and replay must not depend on parent Events after the fork point.
+    - path: "crates/arany/src/engine/**"
+      instructions: |
+        Run loop, routing, ledger and compaction. Verify the Event order a change produces is accepted by the
+        reducer for primary, researcher, review and compaction actors; that budgets, active time and call
+        reservations are charged exactly once; that fallback switches are journaled before dispatch and never
+        raced by cancellation; and that admission reserves enough Events.
+    - path: "crates/arany/src/store/**"
+      instructions: |
+        Persistence and replay. Every load path must run the same strict validation. Private files and
+        directories keep owner-only modes and ACL checks; symlinks are refused. Bounds on records and the
+        database stay explicit.
+    - path: "crates/arany/src/{tools,private_fs}/**"
+      instructions: |
+        Tools, Guard and folder trust. Effects run only in the Guard under a pinned, typed grant; read-only
+        operations never widen disclosure; unsupported enforcement fails closed. Untrusted text (paths,
+        Tool output, MCP metadata, errors) is data, never instructions. Linux (bwrap/seccomp) and macOS
+        (Seatbelt/launchd) must keep equivalent behavior; flag platform-only changes without a reason.
+    - path: "crates/arany/src/provider/**"
+      instructions: |
+        Provider adapters and routing. Credentials never reach arguments, Events, logs, telemetry or error
+        bodies. Fallback only on 5xx before body admission; Tool-enabled chains keep one adapter and account.
+        Requests must be byte-stable for prompt caching.
+    - path: "crates/arany-cli/**"
+      instructions: |
+        The `arany` binary and terminal. The library crate must not depend on ratatui, crossterm or keyring.
+        All terminal text derived from paths, errors or model output goes through escape_terminal. Check
+        linear/screen-reader mode, classic vs fullscreen, and small geometries for any rendering change.
+        Review terminal layout and interaction against agents/skills/arany-terminal-design/SKILL.md.
+    - path: "docs/specs/**"
+      instructions: |
+        Specs are the only home of behavior, limits and decisions. State each fact once and link elsewhere;
+        flag a number or rule duplicated from another row (a duplicated limit already drifted once). Specs
+        describe the current system, not history. Check that a behavior change in code updates its owning
+        spec and that the spec matches the code.
+    - path: "**/tests/**"
+      instructions: |
+        Tests pin invariants. A fix needs a regression test that fails without it. Flag tests that sleep,
+        depend on wall-clock timing or test order, or weaken an assertion to pass.
+    - path: ".github/workflows/**"
+      instructions: |
+        Pin actions and toolchains, keep least-privilege permissions, and keep the library dependency-boundary
+        check and the code-change detector consistent with the workspace layout.
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+      - "agents/*.md"
+      - "agents/references/**/*.md"
+      - "agents/skills/rust-clean-code/**/*.md"
+      - "agents/skills/clean-architecture-review/SKILL.md"
+      - "agents/skills/arany-terminal-design/SKILL.md"
+chat:
+  auto_reply: true
