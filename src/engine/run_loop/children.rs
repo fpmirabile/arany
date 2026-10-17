@@ -1,6 +1,6 @@
 use super::{
     Action, ActiveSegment, CallFailure, CallResult, Grant, MAX_PRIMARY_RESULT_BYTES, RunLoop,
-    call_record, call_trace_result, call_trace_usage, valid_finish,
+    call_record, valid_finish,
 };
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
 use crate::provider::{
@@ -11,7 +11,6 @@ use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, Event,
     MAX_CHILD_TOOL_CALLS,
 };
-use crate::telemetry::{AgentTrace, ProviderTrace, TraceOutcome};
 use crate::tools::{ToolContext, ToolRequest, ToolStep};
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
@@ -34,7 +33,6 @@ pub(super) struct ChildWork {
     /// Read-only research context; `None` for a `NoTools` child.
     pub(super) tools: Option<ToolContext>,
     pub(super) tool_calls_remaining: usize,
-    trace: Option<AgentTrace>,
 }
 
 struct Spawned {
@@ -59,7 +57,6 @@ struct ChildQueue {
 
 struct ActiveChild {
     index: usize,
-    provider_trace: ProviderTrace,
     request: ProviderRequest,
 }
 
@@ -94,35 +91,13 @@ impl ChildQueue {
         self.calls.abort_all();
         let deadline = Instant::now() + CANCELLATION_DRAIN;
         while !self.calls.is_empty() {
-            let joined = tokio::time::timeout_at(deadline, self.calls.join_next_with_id())
+            let _ = tokio::time::timeout_at(deadline, self.calls.join_next_with_id())
                 .await
                 .map_err(|_| EngineError::CancellationDrainTimeout)?
                 .ok_or(EngineError::CoordinatorFailed)?;
-            let (task_id, result) = classify_join(joined);
-            self.close_provider_span(
-                task_id,
-                &result.result,
-                valid_child_response(&result.result),
-            );
         }
         self.active.clear();
         Ok(())
-    }
-
-    fn close_provider_span(
-        &mut self,
-        task_id: Id,
-        result: &CallResult,
-        valid_response: bool,
-    ) -> Option<usize> {
-        let active = self.active.remove(&task_id)?;
-        let (input_tokens, output_tokens) = call_trace_usage(result);
-        active.provider_trace.finish_with_usage(
-            call_trace_result(result, valid_response),
-            input_tokens,
-            output_tokens,
-        );
-        Some(active.index)
     }
 }
 
@@ -142,15 +117,14 @@ impl RunLoop<'_> {
         root_request: &mut ProviderRequest,
         objectives: Vec<String>,
         delegate_turn: ProviderTurn,
-        primary: AgentTrace,
     ) -> Result<(), EngineError> {
         let Some(Spawned {
             mut children,
             parallel,
             active_segment,
-        }) = self.spawn_children(objectives, &primary).await?
+        }) = self.spawn_children(objectives).await?
         else {
-            return self.settle_stopped_primary(primary).await;
+            return self.settle_stopped_primary().await;
         };
         let deadline = active_segment.deadline();
         let Drained {
@@ -183,31 +157,24 @@ impl RunLoop<'_> {
                     false,
                 )
                 .await?;
-                children[index]
-                    .trace
-                    .take()
-                    .expect("pending child trace exists")
-                    .finish(TraceOutcome::Cancelled);
             }
             return match reason {
                 AbortReason::Failed if self.ledger().active_time_exhausted() => {
-                    self.settle_stopped_primary(primary).await
+                    self.settle_stopped_primary().await
                 }
-                AbortReason::Failed => self.fail_primary(primary).await,
+                AbortReason::Failed => self.fail_primary().await,
                 AbortReason::Budget | AbortReason::Cancelled | AbortReason::Paused => {
-                    self.settle_stopped_primary(primary).await
+                    self.settle_stopped_primary().await
                 }
             };
         }
-        self.synthesize(root_request, results, delegate_turn, primary)
-            .await
+        self.synthesize(root_request, results, delegate_turn).await
     }
 
     /// Reserves the delegation and journals each child; `None` means the primary must stop.
     async fn spawn_children(
         &self,
         objectives: Vec<String>,
-        primary: &AgentTrace,
     ) -> Result<Option<Spawned>, EngineError> {
         let research = self.controls.tools.is_some();
         let delegation = Action::Delegation {
@@ -251,8 +218,8 @@ impl RunLoop<'_> {
             waves,
         );
         // Covers every child's calls, Tools and terminal facts plus the largest later admission, so a refusal precedes AgentSpawned.
-        self.store
-            .admit_operation(
+        self.journal
+            .admit(
                 self.session_id,
                 delegation.max_events_for(&self.routing.providers),
                 delegation.tool_observations(),
@@ -283,19 +250,13 @@ impl RunLoop<'_> {
                 objective,
                 tools: research_template.clone(),
                 tool_calls_remaining: tool_allowance,
-                trace: Some(primary.begin_child(agent_run_id)),
             });
         }
         if self.controls.cancellation.is_cancelled() {
             self.settle_active_segment(active_segment)?;
-            for mut child in children {
+            for child in children {
                 self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
                     .await?;
-                child
-                    .trace
-                    .take()
-                    .expect("child trace exists")
-                    .finish(TraceOutcome::Cancelled);
             }
             return Ok(None);
         }
@@ -395,6 +356,7 @@ impl RunLoop<'_> {
                     Err(error) => return Err(queue.abort_with(error).await),
                 }
             }
+            queue.active.remove(&task_id);
             let result = result.result;
             self.settle_result(&result);
             let valid_response = self.ledger().tokens_within_limit()
@@ -409,12 +371,6 @@ impl RunLoop<'_> {
                     }) => self.valid_child_tools(&children[index], requests),
                     _ => false,
                 };
-            if queue
-                .close_provider_span(task_id, &result, valid_response)
-                .is_none()
-            {
-                return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
-            }
             let step_disposition = match self
                 .settle_child_call(
                     &mut children[index],
@@ -562,11 +518,6 @@ impl RunLoop<'_> {
                 disposition
             }
         };
-        child
-            .trace
-            .take()
-            .expect("child trace exists")
-            .finish(disposition_trace_outcome(disposition));
         Ok(Some(disposition))
     }
 
@@ -576,10 +527,9 @@ impl RunLoop<'_> {
         root_request: &mut ProviderRequest,
         results: Vec<Option<ChildResult>>,
         delegate_turn: ProviderTurn,
-        primary: AgentTrace,
     ) -> Result<(), EngineError> {
         if !self.ledger().can_start_provider_call() {
-            return self.settle_stopped_primary(primary).await;
+            return self.settle_stopped_primary().await;
         }
         root_request.phase = AgentPhase::RootSynthesis;
         root_request.input.child_results = results
@@ -598,23 +548,15 @@ impl RunLoop<'_> {
         }
         loop {
             if self.pause_at_boundary() {
-                return self.settle_stopped_primary(primary).await;
+                return self.settle_stopped_primary().await;
             }
-            let provider = self
-                .routing
-                .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
-            root_request.model = provider.identity().model.clone();
-            let synthesis_trace =
-                primary.begin_provider(AgentPhase::RootSynthesis, provider.identity());
             let (synthesis, active_segment) = match self.invoke_primary(root_request).await {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
-                    synthesis_trace.finish_refused();
-                    return self.settle_stopped_primary(primary).await;
+                    return self.settle_stopped_primary().await;
                 }
                 Err(error) => return Err(error),
             };
-            let (input_tokens, output_tokens) = call_trace_usage(&synthesis);
             let valid_response = self.ledger().tokens_within_limit()
                 && (matches!(
                     &synthesis,
@@ -623,11 +565,6 @@ impl RunLoop<'_> {
                         ..
                     }) if valid_finish(finish, MAX_PRIMARY_RESULT_BYTES)
                 ) || matches!(&synthesis, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tools(requests), .. }) if self.valid_tools(requests)));
-            synthesis_trace.finish_with_usage(
-                call_trace_result(&synthesis, valid_response),
-                input_tokens,
-                output_tokens,
-            );
             self.append(Event::ProviderCallRecorded {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
@@ -636,52 +573,51 @@ impl RunLoop<'_> {
             .await?;
             self.settle_active_segment(active_segment)?;
             if self.controls.cancellation.is_cancelled() {
-                return self.settle_stopped_primary(primary).await;
+                return self.settle_stopped_primary().await;
             }
             if matches!(&synthesis, CallResult::Cancelled) {
-                return self.cancel_primary(primary).await;
+                return self.cancel_primary().await;
             }
             if self.ledger().active_time_exhausted() {
-                return self.settle_stopped_primary(primary).await;
+                return self.settle_stopped_primary().await;
             }
             match synthesis {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
                     ..
-                }) if valid_response => return self.finish_primary(finish, primary).await,
+                }) if valid_response => return self.finish_primary(finish).await,
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Tools(requests),
                     turn,
                     ..
                 }) if valid_response => {
                     if self.pause_at_boundary() {
-                        return self.settle_stopped_primary(primary).await;
+                        return self.settle_stopped_primary().await;
                     }
                     let Some(request) = self.begin_tool_step(requests).await? else {
-                        return self.fail_primary(primary).await;
+                        return self.fail_primary().await;
                     };
                     let grant = Grant::Primary {
                         request: &mut *root_request,
                         review_allowed: false,
-                        trace: &primary,
                     };
                     match self.execute_step(grant, request, turn).await {
                         Ok(true) => {}
                         Ok(false) if self.controls.cancellation.is_cancelled() => {
-                            return self.settle_stopped_primary(primary).await;
+                            return self.settle_stopped_primary().await;
                         }
                         Ok(false) if self.ledger().active_time_exhausted() => {
-                            return self.settle_stopped_primary(primary).await;
+                            return self.settle_stopped_primary().await;
                         }
-                        Ok(false) => return self.fail_primary(primary).await,
+                        Ok(false) => return self.fail_primary().await,
                         Err(EngineError::GoalBudgetExhausted) => {
-                            return self.settle_stopped_primary(primary).await;
+                            return self.settle_stopped_primary().await;
                         }
                         Err(error) => return Err(error),
                     }
                 }
-                CallResult::Cancelled => return self.cancel_primary(primary).await,
-                _ => return self.fail_primary(primary).await,
+                CallResult::Cancelled => return self.cancel_primary().await,
+                _ => return self.fail_primary().await,
             }
         }
     }
@@ -784,11 +720,6 @@ impl RunLoop<'_> {
                 0,
             )
             .await?;
-            let provider_trace = children[index]
-                .trace
-                .as_ref()
-                .expect("child trace exists")
-                .begin_provider(AgentPhase::ChildWork, provider.identity());
             let preview = (self.routing.providers.child.len() > 1)
                 .then(|| crate::provider::ResponsePreview::new().0);
             let attempt_request = request.clone();
@@ -802,14 +733,9 @@ impl RunLoop<'_> {
                 )
                 .await
             });
-            queue.active.insert(
-                handle.id(),
-                ActiveChild {
-                    index,
-                    provider_trace,
-                    request,
-                },
-            );
+            queue
+                .active
+                .insert(handle.id(), ActiveChild { index, request });
         }
         Ok(())
     }
@@ -862,24 +788,6 @@ fn classify_join(
             },
         ),
     }
-}
-
-fn disposition_trace_outcome(disposition: AgentDisposition) -> TraceOutcome {
-    match disposition {
-        AgentDisposition::Finished => TraceOutcome::Finished,
-        AgentDisposition::Failed => TraceOutcome::Failed,
-        AgentDisposition::Cancelled => TraceOutcome::Cancelled,
-    }
-}
-
-fn valid_child_response(result: &CallResult) -> bool {
-    matches!(
-        result,
-        CallResult::Response(ProviderResponse {
-            outcome: ProviderOutcome::Finish(finish),
-            ..
-        }) if valid_finish(finish, MAX_CHILD_RESULT_BYTES)
-    )
 }
 
 /// Researcher delegations use the fixed bound; a tool-free delegation runs one call per wave.

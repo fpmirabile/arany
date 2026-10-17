@@ -1,7 +1,7 @@
 use super::children::ChildWork;
 use super::{
     ActivePause, ActiveSegment, CallResult, RunLoop, TOOL_CLEANUP_OVERHEAD, TOOL_REVIEW_DEADLINE,
-    call_record, call_trace_result, call_trace_usage, valid_finish,
+    call_record, valid_finish,
 };
 use crate::engine::ledger::{Action, duration_ms};
 use crate::engine::progress::ProgressPublisher;
@@ -11,7 +11,6 @@ use crate::provider::{
     RunInput,
 };
 use crate::session::{CollaborationPolicy, Event};
-use crate::telemetry::AgentTrace;
 use crate::tools::types::{
     CommandChangeset, CommandResult, MAX_TOOL_ARGUMENT_BYTES, MAX_TOOL_RESULT_BYTES,
 };
@@ -28,7 +27,6 @@ pub(super) enum Grant<'s> {
     Primary {
         request: &'s mut ProviderRequest,
         review_allowed: bool,
-        trace: &'s AgentTrace,
     },
     /// A read-only child inside its delegation's active segment, which ends at `deadline`.
     Researcher {
@@ -398,8 +396,8 @@ impl RunLoop<'_> {
                 )
             }
         };
-        self.store
-            .admit_operation(self.session_id, tail, observations)
+        self.journal
+            .admit(self.session_id, tail, observations)
             .await?;
         Ok(true)
     }
@@ -434,12 +432,10 @@ impl RunLoop<'_> {
             Grant::Primary {
                 request,
                 review_allowed,
-                trace,
             } => {
                 self.before_primary_dispatch(
                     runtime,
                     request,
-                    trace,
                     *review_allowed && self.ledger().admits(Action::Review),
                     intent,
                 )
@@ -464,7 +460,6 @@ impl RunLoop<'_> {
         &self,
         runtime: &ToolRuntime,
         request: &ProviderRequest,
-        trace: &AgentTrace,
         review_allowed: bool,
         intent: EffectIntent,
     ) -> Result<Verdict, EngineError> {
@@ -487,7 +482,7 @@ impl RunLoop<'_> {
         {
             approved = false;
             if approvals.mode() == ApprovalMode::Auto && review_allowed {
-                match self.review_tool(request, &intent, trace).await {
+                match self.review_tool(request, &intent).await {
                     Ok(review_approved) => {
                         approved = review_approved && approvals.mode() == ApprovalMode::Auto;
                         active_time_exhausted = self.ledger().active_time_exhausted();
@@ -688,7 +683,6 @@ impl RunLoop<'_> {
         &self,
         request: &ProviderRequest,
         intent: &EffectIntent,
-        primary: &AgentTrace,
     ) -> Result<bool, EngineError> {
         let provider = self
             .routing
@@ -711,7 +705,6 @@ impl RunLoop<'_> {
                 )
             },
         };
-        let trace = primary.begin_provider(AgentPhase::ToolReview, provider.identity());
         let active_segment =
             self.reserve_active_segment(TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD)?;
         if let Err(error) = self
@@ -724,7 +717,6 @@ impl RunLoop<'_> {
             )
             .await
         {
-            trace.finish_refused();
             if matches!(error, EngineError::GoalBudgetExhausted) {
                 self.settle_active_segment(active_segment)?;
             }
@@ -747,8 +739,6 @@ impl RunLoop<'_> {
         self.settle_result(&result);
         let valid = matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Finish(finish), .. }) if valid_finish(finish, 1024) && matches!(finish.result.as_str(), "approve" | "ask"));
         let valid = valid && self.ledger().tokens_within_limit();
-        let (input, output) = call_trace_usage(&result);
-        trace.finish_with_usage(call_trace_result(&result, valid), input, output);
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id: self.primary_id,

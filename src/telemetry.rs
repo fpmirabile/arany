@@ -1,5 +1,13 @@
-use crate::provider::{AgentPhase, MAX_REPORTED_INPUT_TOKENS};
-use crate::session::{AgentRunId, GoalId, GoalStatus, GoalView, RunId, SessionId};
+use crate::journal::{Subscription, Tapped};
+use crate::provider::{
+    AgentPhase, MAX_REPORTED_INPUT_TOKENS, ProviderIdentity, ProviderRole, ProviderRoutes,
+    Providers,
+};
+use crate::session::{
+    AgentDisposition, AgentRole, AgentRunId, CompactionFailure, CompactionStatus, Event,
+    EventEnvelope, GoalId, GoalStatus, GoalView, ProviderCallDisposition, ProviderCallRecord,
+    RunDisposition, RunId, SessionId,
+};
 use opentelemetry::{
     Context, KeyValue,
     trace::{SpanKind, Status, TraceContextExt, Tracer, TracerProvider},
@@ -10,7 +18,9 @@ use opentelemetry_sdk::{
     trace::{BatchConfigBuilder, BatchSpanProcessor, Sampler, SdkTracer, SdkTracerProvider},
 };
 use std::{
+    collections::HashMap,
     env,
+    future::Future,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -53,32 +63,36 @@ struct TraceSpan {
     context: Option<Context>,
 }
 
+/// One Goal segment's spans, projected from its committed Events at their commit times.
 pub(crate) struct RunTrace {
-    span: TraceSpan,
-    goal_context: Option<Context>,
+    tracer: SdkTracer,
     session_id: SessionId,
-    run_id: RunId,
-    provider: TraceProvider,
-}
-
-pub(crate) struct GoalTrace {
-    span: TraceSpan,
     goal_id: GoalId,
+    /// The Run's pinned role routes, from its committed `RunStarted`.
+    routes: Option<ProviderRoutes>,
+    /// Each agent's current route per role after its committed `ProviderFallbackUsed` switches.
+    switched: HashMap<(AgentRunId, ProviderRole), ProviderIdentity>,
+    /// Context compilation precedes every Event, so it rides on the next committed marker.
+    context: Option<(SystemTime, SystemTime)>,
+    goal: Option<TraceSpan>,
+    run: Option<(RunId, TraceSpan)>,
+    primary: Option<AgentRunId>,
+    agents: HashMap<AgentRunId, AgentSpan>,
+    primary_called: bool,
+    compaction_started: Option<SystemTime>,
+    compaction_requested: Option<ProviderIdentity>,
+    run_end: Option<(TraceOutcome, SystemTime)>,
+    goal_end: Option<(GoalStatus, SystemTime)>,
 }
 
-pub(crate) struct AgentTrace {
+struct AgentSpan {
     span: TraceSpan,
-    session_id: SessionId,
-    run_id: RunId,
-    agent_run_id: AgentRunId,
-    provider: TraceProvider,
+    call_started: Option<SystemTime>,
+    /// The route a call requested before its first fallback switch.
+    requested: Option<ProviderIdentity>,
 }
 
 pub(crate) struct ProviderTrace(TraceSpan);
-
-pub(crate) struct PlanTrace(TraceSpan);
-
-pub(crate) struct FirstProviderCall(Option<SystemTime>);
 
 pub(crate) struct CompactionTrace {
     span: TraceSpan,
@@ -118,26 +132,12 @@ pub(crate) enum TraceFailure {
     TaskPanic,
 }
 
+/// Which span marks a committed Event: Goal lifecycle markers go to the segment span.
 #[derive(Clone, Copy)]
 pub(crate) enum TraceEventKind {
-    GoalStarted,
-    GoalRunLinked,
-    GoalResumed,
-    GoalPlanContractRecorded,
-    GoalFinished,
-    GoalProviderCallReserved,
-    GoalCompactionCallReserved,
-    GoalContextCompacted,
-    MessageAccepted,
-    RunStarted,
-    AgentSpawned,
-    ProviderCallRecorded,
-    ToolStarted,
-    ToolFinished,
-    AgentFinished,
-    MessageCommitted,
-    RunFinished,
-    ContextCompacted,
+    Goal(&'static str),
+    Run(&'static str),
+    Unmarked,
 }
 
 impl Telemetry {
@@ -194,101 +194,31 @@ impl Telemetry {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn begin_run(
-        &self,
-        session_id: SessionId,
-        run_id: RunId,
-        provider: TraceProvider,
-        context_timing: Option<(SystemTime, SystemTime)>,
-    ) -> RunTrace {
-        let span = self
-            .inner
-            .as_ref()
-            .map_or_else(TraceSpan::disabled, |inner| {
-                TraceSpan::root_at(
-                    &inner.tracer,
-                    "invoke_workflow arany.run",
-                    SpanKind::Internal,
-                    vec![
-                        KeyValue::new("gen_ai.operation.name", "invoke_workflow"),
-                        KeyValue::new("gen_ai.workflow.name", "arany.run"),
-                        KeyValue::new("arany.session.id", session_id.to_string()),
-                        KeyValue::new("arany.run.id", run_id.to_string()),
-                    ],
-                    context_timing.map(|(started, _)| started),
-                )
-            });
-        let trace = RunTrace {
-            span,
-            goal_context: None,
-            session_id,
-            run_id,
-            provider,
-        };
-        if let Some((started, ended)) = context_timing {
-            trace.context_compiled(started, ended);
-        }
-        trace
-    }
-
-    pub(crate) fn begin_goal_run(
-        &self,
-        session_id: SessionId,
-        run_id: RunId,
-        provider: TraceProvider,
-        goal: &GoalTrace,
-        context_timing: Option<(SystemTime, SystemTime)>,
-    ) -> RunTrace {
-        let span = goal.span.child(
-            "invoke_workflow arany.run",
-            SpanKind::Internal,
-            vec![
-                KeyValue::new("gen_ai.operation.name", "invoke_workflow"),
-                KeyValue::new("gen_ai.workflow.name", "arany.run"),
-                KeyValue::new("arany.session.id", session_id.to_string()),
-                KeyValue::new("arany.run.id", run_id.to_string()),
-                KeyValue::new("arany.goal.id", goal.goal_id.to_string()),
-            ],
-            context_timing.map(|(started, _)| started),
-        );
-        let trace = RunTrace {
-            span,
-            goal_context: goal.span.context.clone(),
-            session_id,
-            run_id,
-            provider,
-        };
-        if let Some((started, ended)) = context_timing {
-            trace.context_compiled(started, ended);
-        }
-        trace
-    }
-
-    pub(crate) fn begin_goal(
+    /// `None` when telemetry is disabled, so a disabled Run has no subscriber.
+    pub(crate) fn trace_run(
         &self,
         session_id: SessionId,
         goal_id: GoalId,
-        started: SystemTime,
-    ) -> GoalTrace {
-        let span = self
-            .inner
-            .as_ref()
-            .map_or_else(TraceSpan::disabled, |inner| {
-                TraceSpan::root_at(
-                    &inner.tracer,
-                    "invoke_workflow arany.goal",
-                    SpanKind::Internal,
-                    vec![
-                        KeyValue::new("gen_ai.operation.name", "invoke_workflow"),
-                        KeyValue::new("gen_ai.workflow.name", "arany.goal"),
-                        KeyValue::new("arany.session.id", session_id.to_string()),
-                        KeyValue::new("arany.goal.id", goal_id.to_string()),
-                    ],
-                    Some(started),
-                )
-            });
-        GoalTrace { span, goal_id }
+        context: (SystemTime, SystemTime),
+    ) -> Option<RunTrace> {
+        let inner = self.inner.as_ref()?;
+        Some(RunTrace {
+            tracer: inner.tracer.clone(),
+            session_id,
+            goal_id,
+            routes: None,
+            switched: HashMap::new(),
+            context: Some(context),
+            goal: None,
+            run: None,
+            primary: None,
+            agents: HashMap::new(),
+            primary_called: false,
+            compaction_started: None,
+            compaction_requested: None,
+            run_end: None,
+            goal_end: None,
+        })
     }
 
     pub(crate) fn begin_compaction(
@@ -304,7 +234,7 @@ impl Telemetry {
             };
         };
         CompactionTrace {
-            span: TraceSpan::root(
+            span: TraceSpan::root_at(
                 &inner.tracer,
                 "compact arany.session",
                 SpanKind::Internal,
@@ -313,6 +243,7 @@ impl Telemetry {
                     KeyValue::new("arany.session.id", session_id.to_string()),
                     KeyValue::new("arany.run.id", covered_run_id.to_string()),
                 ],
+                None,
             ),
             provider,
         }
@@ -360,6 +291,20 @@ impl TraceProvider {
             Self::Custom | Self::Other => None,
         }
     }
+
+    fn compaction_attributes(self, model: &str) -> Vec<KeyValue> {
+        let mut attributes = vec![
+            KeyValue::new("arany.provider.phase", "compaction"),
+            KeyValue::new("gen_ai.provider.name", self.name()),
+        ];
+        if let Some(address) = self.server_address() {
+            attributes.push(KeyValue::new("server.address", address));
+        }
+        if let Some(model) = safe_model(model) {
+            attributes.push(KeyValue::new("gen_ai.request.model", model.to_owned()));
+        }
+        attributes
+    }
 }
 
 impl Default for Telemetry {
@@ -369,221 +314,306 @@ impl Default for Telemetry {
 }
 
 impl RunTrace {
-    pub(crate) fn begin_context_compaction(&self, provider: TraceProvider) -> CompactionTrace {
-        let span = self.span.child(
-            "compact arany.goal_tool_context",
-            SpanKind::Internal,
-            vec![
-                KeyValue::new("arany.operation", "compact_goal_tool_context"),
-                KeyValue::new("arany.session.id", self.session_id.to_string()),
-                KeyValue::new("arany.run.id", self.run_id.to_string()),
-            ],
-            None,
-        );
-        CompactionTrace { span, provider }
+    /// Projects the segment's committed Events until `end`; `goal` then reads the Goal's view.
+    pub(crate) async fn follow(
+        mut self,
+        subscription: Subscription,
+        end: impl Future<Output = ()>,
+        goal: impl FnOnce() -> Option<GoalView>,
+    ) {
+        subscription
+            .follow(end, |tapped| {
+                // Lost Events leave their spans open; they export as abandoned.
+                if let Tapped::Committed(envelope) = tapped {
+                    self.committed(&envelope);
+                }
+            })
+            .await;
+        self.finish(goal().as_ref());
     }
 
-    fn context_compiled(&self, started: SystemTime, ended: SystemTime) {
-        if self.span.context.is_none() {
+    fn committed(&mut self, envelope: &EventEnvelope) {
+        if envelope.session_id != self.session_id {
             return;
         }
-        self.span
-            .child(
-                "compile_context arany.run",
-                SpanKind::Internal,
-                vec![
-                    KeyValue::new("arany.operation", "compile_context"),
-                    KeyValue::new("arany.session.id", self.session_id.to_string()),
-                    KeyValue::new("arany.run.id", self.run_id.to_string()),
-                ],
-                Some(started),
-            )
-            .finish_at(TraceOutcome::Finished, ended);
+        let at = commit_time(envelope.created_at_ms);
+        self.open(&envelope.event, at);
+        self.mark(envelope, at);
+        self.close(envelope, at);
     }
 
-    pub(crate) fn begin_primary(&self, agent_run_id: AgentRunId) -> AgentTrace {
-        if self.span.context.is_none() {
-            return AgentTrace {
-                span: TraceSpan::disabled(),
-                session_id: self.session_id,
-                run_id: self.run_id,
-                agent_run_id,
-                provider: self.provider,
-            };
-        }
-        let span = self.span.child(
-            "invoke_agent arany.primary",
-            SpanKind::Internal,
-            vec![
-                KeyValue::new("gen_ai.operation.name", "invoke_agent"),
-                KeyValue::new("gen_ai.agent.name", "primary"),
-                KeyValue::new("arany.session.id", self.session_id.to_string()),
-                KeyValue::new("arany.run.id", self.run_id.to_string()),
-                KeyValue::new("arany.agent_run.id", agent_run_id.to_string()),
-                KeyValue::new("arany.agent.role", "primary"),
-            ],
-            None,
-        );
-        AgentTrace {
-            span,
-            session_id: self.session_id,
-            run_id: self.run_id,
-            agent_run_id,
-            provider: self.provider,
-        }
+    fn run_id(&self) -> Option<RunId> {
+        self.run.as_ref().map(|(run_id, _)| *run_id)
     }
 
-    pub(crate) fn event_committed(&self, sequence: u64, kind: TraceEventKind) {
-        if kind.is_goal_event() {
-            if let Some(context) = &self.goal_context {
-                TraceSpan::event_committed_in(context, sequence, kind);
+    fn open(&mut self, event: &Event, at: SystemTime) {
+        match event {
+            Event::GoalStarted { goal_id, .. }
+            | Event::GoalResumed { goal_id }
+            | Event::GoalRunLinked { goal_id, .. }
+                if *goal_id == self.goal_id && self.goal.is_none() =>
+            {
+                self.goal = Some(TraceSpan::root_at(
+                    &self.tracer,
+                    "invoke_workflow arany.goal",
+                    SpanKind::Internal,
+                    vec![
+                        KeyValue::new("gen_ai.operation.name", "invoke_workflow"),
+                        KeyValue::new("gen_ai.workflow.name", "arany.goal"),
+                        KeyValue::new("arany.session.id", self.session_id.to_string()),
+                        KeyValue::new("arany.goal.id", self.goal_id.to_string()),
+                    ],
+                    Some(at),
+                ));
             }
-        } else {
-            self.span.event_committed(sequence, kind);
-        }
-    }
-
-    pub(crate) fn finish(self, outcome: TraceOutcome) {
-        self.span.finish(outcome);
-    }
-}
-
-impl GoalTrace {
-    pub(crate) fn event_committed(&self, sequence: u64, kind: TraceEventKind) {
-        self.span.event_committed(sequence, kind);
-    }
-
-    /// `run` is the segment's Run outcome, which decides the segment unless the Goal is terminal.
-    pub(crate) fn finish(self, status: GoalStatus, run: TraceOutcome, goal: &GoalView) {
-        if let Some(context) = &self.span.context {
-            for attribute in [
-                KeyValue::new("arany.goal.status", status.as_str()),
-                KeyValue::new("arany.goal.provider_calls", i64::from(goal.provider_calls)),
-                KeyValue::new(
-                    "arany.goal.known_tokens",
-                    goal.known_tokens.min(i64::MAX as u64) as i64,
-                ),
-                KeyValue::new("arany.goal.token_usage_unknown", goal.token_usage_unknown),
-                KeyValue::new(
-                    "arany.goal.active_ms",
-                    goal.active_ms.min(i64::MAX as u64) as i64,
-                ),
-                KeyValue::new(
-                    "arany.goal.uncertain_active_ms",
-                    goal.uncertain_active_ms.min(i64::MAX as u64) as i64,
-                ),
-            ] {
-                context.span().set_attribute(attribute);
+            Event::MessageAccepted { run_id, .. } if self.run.is_none() => {
+                let span = child_of(
+                    self.goal.as_ref(),
+                    "invoke_workflow arany.run",
+                    SpanKind::Internal,
+                    vec![
+                        KeyValue::new("gen_ai.operation.name", "invoke_workflow"),
+                        KeyValue::new("gen_ai.workflow.name", "arany.run"),
+                        KeyValue::new("arany.session.id", self.session_id.to_string()),
+                        KeyValue::new("arany.run.id", run_id.to_string()),
+                        KeyValue::new("arany.goal.id", self.goal_id.to_string()),
+                    ],
+                    at,
+                );
+                self.run = Some((*run_id, span));
             }
-        }
-        // A segment ends with its Run. A Goal still open stays open for a later segment,
-        // so only the Goal's own terminal status overrides the Run outcome.
-        let outcome = match status {
-            GoalStatus::Completed => TraceOutcome::Finished,
-            GoalStatus::Failed => TraceOutcome::Failed,
-            GoalStatus::Running | GoalStatus::Interrupted => run,
-        };
-        self.span.finish(outcome);
-    }
-}
-
-impl AgentTrace {
-    pub(crate) fn begin_child(&self, agent_run_id: AgentRunId) -> AgentTrace {
-        if self.span.context.is_none() {
-            return AgentTrace {
-                span: TraceSpan::disabled(),
-                session_id: self.session_id,
-                run_id: self.run_id,
+            Event::AgentSpawned {
+                run_id,
                 agent_run_id,
-                provider: self.provider,
-            };
-        }
-        AgentTrace {
-            span: self.span.child(
-                "invoke_agent arany.child",
-                SpanKind::Internal,
-                vec![
+                role,
+                ..
+            } if self.run_id() == Some(*run_id) => {
+                let mut attributes = vec![
                     KeyValue::new("gen_ai.operation.name", "invoke_agent"),
-                    KeyValue::new("gen_ai.agent.name", "child"),
                     KeyValue::new("arany.session.id", self.session_id.to_string()),
-                    KeyValue::new("arany.run.id", self.run_id.to_string()),
+                    KeyValue::new("arany.run.id", run_id.to_string()),
                     KeyValue::new("arany.agent_run.id", agent_run_id.to_string()),
-                    KeyValue::new("arany.agent_run.parent_id", self.agent_run_id.to_string()),
-                    KeyValue::new("arany.agent.role", "child"),
-                ],
-                None,
-            ),
-            session_id: self.session_id,
-            run_id: self.run_id,
-            agent_run_id,
-            provider: self.provider,
+                ];
+                let (name, parent) = match role {
+                    AgentRole::Primary => {
+                        self.primary = Some(*agent_run_id);
+                        attributes.push(KeyValue::new("gen_ai.agent.name", "primary"));
+                        attributes.push(KeyValue::new("arany.agent.role", "primary"));
+                        (
+                            "invoke_agent arany.primary",
+                            self.run.as_ref().map(|(_, span)| span),
+                        )
+                    }
+                    AgentRole::Child => {
+                        attributes.push(KeyValue::new("gen_ai.agent.name", "child"));
+                        if let Some(primary) = self.primary {
+                            attributes.push(KeyValue::new(
+                                "arany.agent_run.parent_id",
+                                primary.to_string(),
+                            ));
+                        }
+                        attributes.push(KeyValue::new("arany.agent.role", "child"));
+                        (
+                            "invoke_agent arany.child",
+                            self.primary
+                                .and_then(|primary| self.agents.get(&primary))
+                                .map(|agent| &agent.span),
+                        )
+                    }
+                };
+                let span = child_of(parent, name, SpanKind::Internal, attributes, at);
+                self.agents.insert(
+                    *agent_run_id,
+                    AgentSpan {
+                        span,
+                        call_started: None,
+                        requested: None,
+                    },
+                );
+            }
+            Event::RunStarted { run_id, config, .. } if self.run_id() == Some(*run_id) => {
+                self.routes = config.providers.clone().or_else(|| {
+                    config
+                        .identity()
+                        .map(|identity| Providers::all(vec![identity]))
+                });
+            }
+            Event::GoalProviderCallReserved { agent_run_id, .. } => {
+                if let Some(agent) = self.agents.get_mut(agent_run_id) {
+                    agent.call_started = Some(at);
+                    agent.requested = None;
+                }
+            }
+            Event::GoalCompactionCallReserved { .. } => {
+                self.compaction_started = Some(at);
+                self.compaction_requested = None;
+            }
+            Event::ProviderFallbackUsed {
+                run_id,
+                agent_run_id,
+                fallback,
+            } if self.run_id() == Some(*run_id) => {
+                // A logical call's span keeps the route it requested; the switch is its own marker.
+                let requested = if fallback.role == ProviderRole::Compaction {
+                    Some(&mut self.compaction_requested)
+                } else {
+                    self.agents
+                        .get_mut(agent_run_id)
+                        .map(|agent| &mut agent.requested)
+                };
+                if let Some(requested) = requested {
+                    requested.get_or_insert_with(|| fallback.from.clone());
+                }
+                self.switched
+                    .insert((*agent_run_id, fallback.role), fallback.to.clone());
+            }
+            _ => {}
         }
     }
 
-    pub(crate) fn begin_first_provider(&self) -> FirstProviderCall {
-        FirstProviderCall(self.span.context.as_ref().map(|_| SystemTime::now()))
+    fn mark(&mut self, envelope: &EventEnvelope, at: SystemTime) {
+        let kind = TraceEventKind::from(&envelope.event);
+        let span = match kind {
+            TraceEventKind::Goal(_) => self.goal.as_ref(),
+            TraceEventKind::Run(_) => self.run.as_ref().map(|(_, span)| span),
+            TraceEventKind::Unmarked => None,
+        };
+        let Some(span) = span.filter(|span| span.context.is_some()) else {
+            return;
+        };
+        let context = self
+            .context
+            .take()
+            .map(|(started, ended)| {
+                [
+                    KeyValue::new("arany.context.started_unix_nano", unix_nanos(started)),
+                    KeyValue::new("arany.context.ended_unix_nano", unix_nanos(ended)),
+                ]
+            })
+            .into_iter()
+            .flatten();
+        span.marker(envelope.sequence, kind, at, context);
     }
 
-    fn begin_plan_at(&self, started: SystemTime) -> PlanTrace {
-        PlanTrace(self.span.child(
-            "plan arany.primary",
-            SpanKind::Internal,
-            self.attributes("plan"),
-            Some(started),
-        ))
-    }
-
-    pub(crate) fn begin_provider(
-        &self,
-        phase: AgentPhase,
-        identity: &crate::provider::ProviderIdentity,
-    ) -> ProviderTrace {
-        if self.span.context.is_none() {
-            return ProviderTrace(TraceSpan::disabled());
+    fn close(&mut self, envelope: &EventEnvelope, at: SystemTime) {
+        match &envelope.event {
+            Event::ProviderCallRecorded {
+                agent_run_id,
+                record,
+                ..
+            } => self.provider_call(*agent_run_id, record, at),
+            Event::AgentFinished {
+                agent_run_id,
+                disposition,
+                ..
+            } => {
+                if let Some(agent) = self.agents.remove(agent_run_id) {
+                    agent.span.finish_at(TraceOutcome::from(*disposition), at);
+                }
+            }
+            Event::GoalContextCompacted { record, .. } => {
+                let started = self.compaction_started.take().unwrap_or(at);
+                let requested = self.compaction_requested.take();
+                let Some((run_id, run)) = &self.run else {
+                    return;
+                };
+                let (provider, model) = requested.as_ref().map_or(
+                    (TraceProvider::from_profile(&record.provider), &record.model),
+                    |identity| {
+                        (
+                            TraceProvider::from_profile(&identity.profile),
+                            &identity.model,
+                        )
+                    },
+                );
+                let span = run.child(
+                    "compact arany.goal_tool_context",
+                    SpanKind::Internal,
+                    vec![
+                        KeyValue::new("arany.operation", "compact_goal_tool_context"),
+                        KeyValue::new("arany.session.id", self.session_id.to_string()),
+                        KeyValue::new("arany.run.id", run_id.to_string()),
+                    ],
+                    Some(started),
+                );
+                let outcome = ProviderTraceOutcome::from(&record.status);
+                ProviderTrace(span.child(
+                    "chat arany.compaction",
+                    SpanKind::Client,
+                    provider.compaction_attributes(model),
+                    Some(started),
+                ))
+                .finish_at(outcome, at, record.input_tokens, record.output_tokens);
+                span.marker(
+                    envelope.sequence,
+                    TraceEventKind::from(&envelope.event),
+                    at,
+                    [],
+                );
+                span.finish_at(outcome.into(), at);
+            }
+            Event::RunFinished {
+                run_id,
+                disposition,
+                ..
+            } if self.run_id() == Some(*run_id) => {
+                let outcome = TraceOutcome::from(*disposition);
+                if let Some((_, span)) = self.run.take() {
+                    span.finish_at(outcome, at);
+                }
+                self.run_end = Some((outcome, at));
+            }
+            Event::GoalFinished {
+                goal_id, status, ..
+            } if *goal_id == self.goal_id => self.goal_end = Some((*status, at)),
+            _ => {}
         }
-        ProviderTrace(self.span.child(
-            "chat arany.provider",
-            SpanKind::Client,
-            self.provider_attributes(
-                phase,
-                &identity.model,
-                TraceProvider::from_profile(&identity.profile),
-            ),
-            None,
-        ))
     }
 
-    fn begin_provider_at(
-        &self,
-        phase: AgentPhase,
-        model: &str,
-        started: Option<SystemTime>,
-    ) -> ProviderTrace {
-        ProviderTrace(self.span.child(
-            "chat arany.provider",
-            SpanKind::Client,
-            self.provider_attributes(phase, model, self.provider),
-            started,
-        ))
-    }
-
-    fn attributes(&self, operation: &'static str) -> Vec<KeyValue> {
-        vec![
-            KeyValue::new("gen_ai.operation.name", operation),
-            KeyValue::new("arany.session.id", self.session_id.to_string()),
-            KeyValue::new("arany.run.id", self.run_id.to_string()),
-            KeyValue::new("arany.agent_run.id", self.agent_run_id.to_string()),
-        ]
-    }
-
-    fn provider_attributes(
-        &self,
-        phase: AgentPhase,
-        model: &str,
-        provider: TraceProvider,
-    ) -> Vec<KeyValue> {
-        let mut attributes = self.attributes("chat");
-        attributes.push(KeyValue::new("arany.provider.phase", phase_name(phase)));
+    fn provider_call(
+        &mut self,
+        agent_run_id: AgentRunId,
+        record: &ProviderCallRecord,
+        at: SystemTime,
+    ) {
+        let Some(run_id) = self.run_id() else {
+            return;
+        };
+        // The primary's first call opens a plan span when it delegates.
+        let planned = self.primary == Some(agent_run_id)
+            && !std::mem::replace(&mut self.primary_called, true)
+            && record.disposition == ProviderCallDisposition::Delegated;
+        let Some(agent) = self.agents.get_mut(&agent_run_id) else {
+            return;
+        };
+        let started = agent.call_started.take().unwrap_or(at);
+        let requested = agent.requested.take();
+        let role = ProviderRole::for_phase(record.phase);
+        let Some(route) = requested
+            .as_ref()
+            .or_else(|| self.switched.get(&(agent_run_id, role)))
+            .or_else(|| {
+                self.routes
+                    .as_ref()
+                    .and_then(|routes| routes.get(role).first())
+            })
+        else {
+            return;
+        };
+        let identity = |operation: &'static str| {
+            vec![
+                KeyValue::new("gen_ai.operation.name", operation),
+                KeyValue::new("arany.session.id", self.session_id.to_string()),
+                KeyValue::new("arany.run.id", run_id.to_string()),
+                KeyValue::new("arany.agent_run.id", agent_run_id.to_string()),
+            ]
+        };
+        let provider = TraceProvider::from_profile(&route.profile);
+        let mut attributes = identity("chat");
+        attributes.push(KeyValue::new(
+            "arany.provider.phase",
+            phase_name(record.phase),
+        ));
         attributes.push(KeyValue::new("gen_ai.provider.name", provider.name()));
         if let Some(address) = provider.server_address() {
             attributes.push(KeyValue::new("server.address", address));
@@ -591,57 +621,73 @@ impl AgentTrace {
         if matches!(provider, TraceProvider::OpenAi) {
             attributes.push(KeyValue::new("openai.api.type", "responses"));
         }
-        if let Some(model) = safe_model(model) {
+        if let Some(model) = safe_model(&route.model) {
             attributes.push(KeyValue::new("gen_ai.request.model", model.to_owned()));
         }
-        attributes
-    }
-
-    pub(crate) fn finish(self, outcome: TraceOutcome) {
-        self.span.finish(outcome);
-    }
-}
-
-impl PlanTrace {
-    fn begin_provider_at(
-        &self,
-        agent: &AgentTrace,
-        phase: AgentPhase,
-        model: &str,
-        started: SystemTime,
-    ) -> ProviderTrace {
-        ProviderTrace(self.0.child(
+        let outcome = ProviderTraceOutcome::from(record.disposition);
+        let plan = planned.then(|| {
+            agent.span.child(
+                "plan arany.primary",
+                SpanKind::Internal,
+                identity("plan"),
+                Some(started),
+            )
+        });
+        ProviderTrace(plan.as_ref().unwrap_or(&agent.span).child(
             "chat arany.provider",
             SpanKind::Client,
-            agent.provider_attributes(phase, model, agent.provider),
+            attributes,
             Some(started),
         ))
+        .finish_at(outcome, at, record.input_tokens, record.output_tokens);
+        if let Some(plan) = plan {
+            plan.finish_at(outcome.into(), at);
+        }
     }
 
-    fn finish_at(self, outcome: TraceOutcome, ended: SystemTime) {
-        self.0.finish_at(outcome, ended);
+    /// A segment ends with its Run; a Goal still open stays open for a later segment, so only the
+    /// Goal's own terminal status overrides the Run outcome.
+    fn finish(mut self, goal: Option<&GoalView>) {
+        let (Some((run, run_ended)), Some(span)) = (self.run_end, self.goal.take()) else {
+            return;
+        };
+        let (status, ended) = self.goal_end.unwrap_or((GoalStatus::Running, run_ended));
+        if let Some(context) = &span.context {
+            context
+                .span()
+                .set_attribute(KeyValue::new("arany.goal.status", status.as_str()));
+            if let Some(goal) = goal {
+                for attribute in [
+                    KeyValue::new("arany.goal.provider_calls", i64::from(goal.provider_calls)),
+                    KeyValue::new("arany.goal.known_tokens", saturating_i64(goal.known_tokens)),
+                    KeyValue::new("arany.goal.token_usage_unknown", goal.token_usage_unknown),
+                    KeyValue::new("arany.goal.active_ms", saturating_i64(goal.active_ms)),
+                    KeyValue::new(
+                        "arany.goal.uncertain_active_ms",
+                        saturating_i64(goal.uncertain_active_ms),
+                    ),
+                ] {
+                    context.span().set_attribute(attribute);
+                }
+            }
+        }
+        let outcome = match status {
+            GoalStatus::Completed => TraceOutcome::Finished,
+            GoalStatus::Failed => TraceOutcome::Failed,
+            GoalStatus::Running | GoalStatus::Interrupted => run,
+        };
+        span.finish_at(outcome, ended);
     }
 }
 
 impl ProviderTrace {
-    /// Closes a call the Goal budget refused before dispatch; no usage was observed.
-    pub(crate) fn finish_refused(self) {
-        self.finish_with_usage(
-            ProviderTraceOutcome::Failed(TraceFailure::Rejected),
-            None,
-            None,
-        );
-    }
-
     pub(crate) fn finish_with_usage(
         self,
         outcome: ProviderTraceOutcome,
         input_tokens: Option<u32>,
         output_tokens: Option<u32>,
     ) {
-        self.set_usage(input_tokens, output_tokens);
-        self.set_error_type(outcome);
-        self.0.finish(outcome.trace_outcome());
+        self.finish_at(outcome, SystemTime::now(), input_tokens, output_tokens);
     }
 
     fn finish_at(
@@ -651,21 +697,12 @@ impl ProviderTrace {
         input_tokens: Option<u32>,
         output_tokens: Option<u32>,
     ) {
-        self.set_usage(input_tokens, output_tokens);
-        self.set_error_type(outcome);
-        self.0.finish_at(outcome.trace_outcome(), ended);
-    }
-
-    fn set_error_type(&self, outcome: ProviderTraceOutcome) {
-        if let (Some(context), Some(error_type)) = (&self.0.context, outcome.error_type()) {
-            context
-                .span()
-                .set_attribute(KeyValue::new("error.type", error_type));
-        }
-    }
-
-    fn set_usage(&self, input_tokens: Option<u32>, output_tokens: Option<u32>) {
         if let Some(context) = &self.0.context {
+            if let Some(error_type) = outcome.error_type() {
+                context
+                    .span()
+                    .set_attribute(KeyValue::new("error.type", error_type));
+            }
             if let Some(count) = input_tokens.filter(|count| *count <= MAX_REPORTED_INPUT_TOKENS) {
                 context
                     .span()
@@ -678,45 +715,7 @@ impl ProviderTrace {
                 ));
             }
         }
-    }
-}
-
-impl FirstProviderCall {
-    /// Closes a first call the Goal budget refused before dispatch; no usage was observed.
-    pub(crate) fn finish_refused(self, agent: &AgentTrace, model: &str) {
-        self.finish(
-            agent,
-            model,
-            false,
-            ProviderTraceOutcome::Failed(TraceFailure::Rejected),
-            None,
-            None,
-        );
-    }
-
-    pub(crate) fn finish(
-        self,
-        agent: &AgentTrace,
-        model: &str,
-        delegated: bool,
-        outcome: ProviderTraceOutcome,
-        input_tokens: Option<u32>,
-        output_tokens: Option<u32>,
-    ) {
-        let Some(started) = self.0 else {
-            return;
-        };
-        let ended = SystemTime::now();
-        if delegated {
-            let plan = agent.begin_plan_at(started);
-            plan.begin_provider_at(agent, AgentPhase::RootPlan, model, started)
-                .finish_at(outcome, ended, input_tokens, output_tokens);
-            plan.finish_at(outcome.trace_outcome(), ended);
-        } else {
-            agent
-                .begin_provider_at(AgentPhase::RootPlan, model, Some(started))
-                .finish_at(outcome, ended, input_tokens, output_tokens);
-        }
+        self.0.finish_at(outcome.into(), ended);
     }
 }
 
@@ -725,30 +724,38 @@ impl CompactionTrace {
         if self.span.context.is_none() {
             return ProviderTrace(TraceSpan::disabled());
         }
-        let mut attributes = vec![
-            KeyValue::new("arany.provider.phase", "compaction"),
-            KeyValue::new("gen_ai.provider.name", self.provider.name()),
-        ];
-        if let Some(address) = self.provider.server_address() {
-            attributes.push(KeyValue::new("server.address", address));
-        }
-        if let Some(model) = safe_model(model) {
-            attributes.push(KeyValue::new("gen_ai.request.model", model.to_owned()));
-        }
-        ProviderTrace(
-            self.span
-                .child("chat arany.compaction", SpanKind::Client, attributes, None),
-        )
+        ProviderTrace(self.span.child(
+            "chat arany.compaction",
+            SpanKind::Client,
+            self.provider.compaction_attributes(model),
+            None,
+        ))
     }
 
-    pub(crate) fn event_committed(&self, sequence: u64) {
-        self.span
-            .event_committed(sequence, TraceEventKind::ContextCompacted);
+    pub(crate) fn event_committed(&self, envelope: &EventEnvelope) {
+        self.span.marker(
+            envelope.sequence,
+            TraceEventKind::from(&envelope.event),
+            SystemTime::now(),
+            [],
+        );
     }
 
     pub(crate) fn finish(self, outcome: TraceOutcome) {
-        self.span.finish(outcome);
+        self.span.finish_at(outcome, SystemTime::now());
     }
+}
+
+fn child_of(
+    parent: Option<&TraceSpan>,
+    name: &'static str,
+    kind: SpanKind,
+    attributes: Vec<KeyValue>,
+    started: SystemTime,
+) -> TraceSpan {
+    parent.map_or_else(TraceSpan::disabled, |parent| {
+        parent.child(name, kind, attributes, Some(started))
+    })
 }
 
 impl TraceSpan {
@@ -757,15 +764,6 @@ impl TraceSpan {
             tracer: None,
             context: None,
         }
-    }
-
-    fn root(
-        tracer: &SdkTracer,
-        name: &'static str,
-        kind: SpanKind,
-        attributes: Vec<KeyValue>,
-    ) -> Self {
-        Self::root_at(tracer, name, kind, attributes, None)
     }
 
     fn root_at(
@@ -813,24 +811,24 @@ impl TraceSpan {
         }
     }
 
-    fn event_committed(&self, sequence: u64, kind: TraceEventKind) {
-        if let Some(context) = &self.context {
-            Self::event_committed_in(context, sequence, kind);
-        }
-    }
-
-    fn event_committed_in(context: &Context, sequence: u64, kind: TraceEventKind) {
-        context.span().add_event(
-            "arany.event.committed",
-            vec![
-                KeyValue::new("arany.event.sequence", sequence as i64),
-                KeyValue::new("arany.event.kind", kind.name()),
-            ],
-        );
-    }
-
-    fn finish(self, outcome: TraceOutcome) {
-        self.finish_at(outcome, SystemTime::now());
+    fn marker(
+        &self,
+        sequence: u64,
+        kind: TraceEventKind,
+        at: SystemTime,
+        extra: impl IntoIterator<Item = KeyValue>,
+    ) {
+        let (Some(context), Some(name)) = (&self.context, kind.name()) else {
+            return;
+        };
+        let mut attributes = vec![
+            KeyValue::new("arany.event.sequence", sequence as i64),
+            KeyValue::new("arany.event.kind", name),
+        ];
+        attributes.extend(extra);
+        context
+            .span()
+            .add_event_with_timestamp("arany.event.committed", at, attributes);
     }
 
     fn finish_at(mut self, outcome: TraceOutcome, ended: SystemTime) {
@@ -867,15 +865,69 @@ impl TraceOutcome {
     }
 }
 
-impl ProviderTraceOutcome {
-    fn trace_outcome(self) -> TraceOutcome {
-        match self {
-            Self::Finished => TraceOutcome::Finished,
-            Self::Failed(_) => TraceOutcome::Failed,
-            Self::Cancelled => TraceOutcome::Cancelled,
+impl From<AgentDisposition> for TraceOutcome {
+    fn from(disposition: AgentDisposition) -> Self {
+        match disposition {
+            AgentDisposition::Finished => Self::Finished,
+            AgentDisposition::Failed => Self::Failed,
+            AgentDisposition::Cancelled => Self::Cancelled,
         }
     }
+}
 
+impl From<RunDisposition> for TraceOutcome {
+    fn from(disposition: RunDisposition) -> Self {
+        match disposition {
+            RunDisposition::Finished => Self::Finished,
+            RunDisposition::Failed => Self::Failed,
+            RunDisposition::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<ProviderTraceOutcome> for TraceOutcome {
+    fn from(outcome: ProviderTraceOutcome) -> Self {
+        match outcome {
+            ProviderTraceOutcome::Finished => Self::Finished,
+            ProviderTraceOutcome::Failed(_) => Self::Failed,
+            ProviderTraceOutcome::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<ProviderCallDisposition> for ProviderTraceOutcome {
+    fn from(disposition: ProviderCallDisposition) -> Self {
+        match disposition {
+            ProviderCallDisposition::Finished
+            | ProviderCallDisposition::Delegated
+            | ProviderCallDisposition::ToolRequested => Self::Finished,
+            ProviderCallDisposition::Unavailable => Self::Failed(TraceFailure::Unavailable),
+            ProviderCallDisposition::Rejected => Self::Failed(TraceFailure::Rejected),
+            ProviderCallDisposition::InvalidResponse => Self::Failed(TraceFailure::InvalidResponse),
+            ProviderCallDisposition::OutputLimit => Self::Failed(TraceFailure::OutputLimit),
+            ProviderCallDisposition::TimedOut => Self::Failed(TraceFailure::Timeout),
+            ProviderCallDisposition::TaskPanic => Self::Failed(TraceFailure::TaskPanic),
+            ProviderCallDisposition::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<&CompactionStatus> for ProviderTraceOutcome {
+    fn from(status: &CompactionStatus) -> Self {
+        match status {
+            CompactionStatus::Succeeded { .. } => Self::Finished,
+            CompactionStatus::Failed { reason } => match reason {
+                CompactionFailure::Cancelled => Self::Cancelled,
+                CompactionFailure::ProviderUnavailable => Self::Failed(TraceFailure::Unavailable),
+                CompactionFailure::ProviderRejected => Self::Failed(TraceFailure::Rejected),
+                CompactionFailure::InvalidOutcome => Self::Failed(TraceFailure::InvalidResponse),
+                CompactionFailure::TimedOut => Self::Failed(TraceFailure::Timeout),
+            },
+        }
+    }
+}
+
+impl ProviderTraceOutcome {
     fn error_type(self) -> Option<&'static str> {
         match self {
             Self::Finished => None,
@@ -898,53 +950,61 @@ impl TraceFailure {
     }
 }
 
-impl TraceEventKind {
-    /// Goal lifecycle kinds are named with the `Goal` prefix, so the name is the single source.
-    fn is_goal_event(self) -> bool {
-        match self {
-            Self::GoalStarted
-            | Self::GoalRunLinked
-            | Self::GoalResumed
-            | Self::GoalPlanContractRecorded
-            | Self::GoalFinished
-            | Self::GoalProviderCallReserved
-            | Self::GoalCompactionCallReserved
-            | Self::GoalContextCompacted => true,
-            Self::MessageAccepted
-            | Self::RunStarted
-            | Self::AgentSpawned
-            | Self::ProviderCallRecorded
-            | Self::ToolStarted
-            | Self::ToolFinished
-            | Self::AgentFinished
-            | Self::MessageCommitted
-            | Self::RunFinished
-            | Self::ContextCompacted => false,
+impl From<&Event> for TraceEventKind {
+    fn from(event: &Event) -> Self {
+        let kind = event.kind();
+        match event {
+            Event::GoalStarted { .. }
+            | Event::GoalRunLinked { .. }
+            | Event::GoalResumed { .. }
+            | Event::GoalPlanContractRecorded { .. }
+            | Event::GoalFinished { .. }
+            | Event::GoalProviderCallReserved { .. }
+            | Event::GoalCompactionCallReserved { .. }
+            | Event::GoalContextCompacted { .. } => Self::Goal(kind),
+            Event::MessageAccepted { .. }
+            | Event::RunStarted { .. }
+            | Event::AgentSpawned { .. }
+            | Event::ProviderFallbackUsed { .. }
+            | Event::ProviderCallRecorded { .. }
+            | Event::ToolStarted { .. }
+            | Event::ToolFinished { .. }
+            | Event::AgentFinished { .. }
+            | Event::MessageCommitted { .. }
+            | Event::RunFinished { .. }
+            | Event::ContextCompacted { .. } => Self::Run(kind),
+            Event::AssistantDisplayRecorded { .. }
+            | Event::GoalSteeringNoteRecorded { .. }
+            | Event::SessionStarted { .. }
+            | Event::SessionDefaultChanged { .. }
+            | Event::SessionForked { .. }
+            | Event::SessionRenamed { .. } => Self::Unmarked,
         }
     }
+}
 
-    fn name(self) -> &'static str {
+impl TraceEventKind {
+    fn name(self) -> Option<&'static str> {
         match self {
-            Self::GoalStarted => "GoalStarted",
-            Self::GoalRunLinked => "GoalRunLinked",
-            Self::GoalResumed => "GoalResumed",
-            Self::GoalPlanContractRecorded => "GoalPlanContractRecorded",
-            Self::GoalFinished => "GoalFinished",
-            Self::GoalProviderCallReserved => "GoalProviderCallReserved",
-            Self::GoalCompactionCallReserved => "GoalCompactionCallReserved",
-            Self::GoalContextCompacted => "GoalContextCompacted",
-            Self::MessageAccepted => "MessageAccepted",
-            Self::RunStarted => "RunStarted",
-            Self::AgentSpawned => "AgentSpawned",
-            Self::ProviderCallRecorded => "ProviderCallRecorded",
-            Self::ToolStarted => "ToolStarted",
-            Self::ToolFinished => "ToolFinished",
-            Self::AgentFinished => "AgentFinished",
-            Self::MessageCommitted => "MessageCommitted",
-            Self::RunFinished => "RunFinished",
-            Self::ContextCompacted => "ContextCompacted",
+            Self::Goal(name) | Self::Run(name) => Some(name),
+            Self::Unmarked => None,
         }
     }
+}
+
+fn commit_time(created_at_ms: i64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(created_at_ms).unwrap_or(0))
+}
+
+fn unix_nanos(time: SystemTime) -> i64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX)
+        })
+}
+
+fn saturating_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn phase_name(phase: AgentPhase) -> &'static str {

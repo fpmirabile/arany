@@ -14,6 +14,7 @@ use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
 use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
 use opentelemetry_proto::transform::trace::tonic::group_spans_by_resource_and_scope;
 use opentelemetry_sdk::trace::InMemorySpanExporter;
+use opentelemetry_sdk::trace::SpanData;
 use prost::Message;
 use std::{
     collections::HashMap,
@@ -307,7 +308,7 @@ fn failed_child_aborts_sibling_provider_span_as_cancelled() {
                 .force_flush()
                 .expect("span flush");
             let spans = exporter.get_finished_spans().expect("finished spans");
-            assert_eq!(spans.len(), 10);
+            assert_eq!(spans.len(), 9);
             for (index, expected, error_type) in [
                 (1, "cancelled", "cancelled"),
                 (2, "failed", failed_error_type),
@@ -412,7 +413,7 @@ fn timed_out_provider_call_exports_closed_error_type() {
             .force_flush()
             .expect("span flush");
         let spans = exporter.get_finished_spans().expect("finished spans");
-        assert_eq!(spans.len(), 5);
+        assert_eq!(spans.len(), 4);
         let provider = spans
             .iter()
             .find(|span| span.name == "chat arany.provider")
@@ -440,64 +441,262 @@ fn assert_trace_call(actual: &ProviderRequest, phase: AgentPhase, objective: &st
     assert_eq!(actual.max_output_tokens, 4096, "trace call output cap");
 }
 
+/// A Goal segment fed synthetic committed Events; Event `n` commits at `1_000 + 10 n` ms.
+struct Segment {
+    trace: RunTrace,
+    session_id: SessionId,
+    goal_id: GoalId,
+    run_id: RunId,
+    sequence: u64,
+}
+
+impl Segment {
+    fn begin(telemetry: &Telemetry, context: (SystemTime, SystemTime)) -> Self {
+        Self::routed(telemetry, context, None)
+    }
+
+    /// Commits the segment's opening Events; `routes` pins per-role Providers in `RunStarted`.
+    fn routed(
+        telemetry: &Telemetry,
+        context: (SystemTime, SystemTime),
+        routes: Option<ProviderRoutes>,
+    ) -> Self {
+        let session_id = SessionId::new();
+        let goal_id = GoalId::new();
+        let mut segment = Self {
+            trace: telemetry
+                .trace_run(session_id, goal_id, context)
+                .expect("enabled telemetry"),
+            session_id,
+            goal_id,
+            run_id: RunId::new(),
+            sequence: 0,
+        };
+        segment.commit(Event::GoalRunLinked {
+            goal_id,
+            run_id: segment.run_id,
+            phase: crate::session::GoalPhase::Implementation,
+        });
+        segment.commit(Event::MessageAccepted {
+            run_id: segment.run_id,
+            text: "objective".into(),
+            images: Vec::new(),
+        });
+        segment.commit(Event::RunStarted {
+            run_id: segment.run_id,
+            config: run_config(routes),
+            active_deadline_ms: None,
+        });
+        segment
+    }
+
+    fn commit(&mut self, event: Event) -> u64 {
+        self.sequence += 1;
+        self.trace.committed(&EventEnvelope {
+            sequence: self.sequence,
+            session_id: self.session_id,
+            run_id: None,
+            agent_run_id: None,
+            event,
+            created_at_ms: commit_ms(self.sequence),
+        });
+        self.sequence
+    }
+
+    fn spawn(&mut self, role: AgentRole) -> AgentRunId {
+        let agent_run_id = AgentRunId::new();
+        self.commit(Event::AgentSpawned {
+            run_id: self.run_id,
+            agent_run_id,
+            role,
+            ordinal: 0,
+            objective: None,
+            grant: None,
+        });
+        agent_run_id
+    }
+
+    fn call(
+        &mut self,
+        agent_run_id: AgentRunId,
+        phase: AgentPhase,
+        disposition: ProviderCallDisposition,
+        usage: (Option<u32>, Option<u32>),
+    ) -> (u64, u64) {
+        let reserved = self.commit(Event::GoalProviderCallReserved {
+            goal_id: self.goal_id,
+            run_id: self.run_id,
+            agent_run_id,
+            active_ceiling_ms: 1,
+        });
+        let recorded = self.commit(Event::ProviderCallRecorded {
+            run_id: self.run_id,
+            agent_run_id,
+            record: provider_record(phase, disposition, usage),
+        });
+        (reserved, recorded)
+    }
+
+    fn finish_agent(&mut self, agent_run_id: AgentRunId, disposition: AgentDisposition) {
+        self.commit(Event::AgentFinished {
+            run_id: self.run_id,
+            agent_run_id,
+            disposition,
+            summary: None,
+            result: None,
+        });
+    }
+
+    fn finish(mut self, disposition: RunDisposition, goal: Option<&GoalView>) {
+        self.commit(Event::RunFinished {
+            run_id: self.run_id,
+            disposition,
+            active_ms: 1,
+        });
+        self.trace.finish(goal);
+    }
+}
+
+fn identity(profile: &str, model: &str) -> ProviderIdentity {
+    ProviderIdentity::new(profile, model, Provenance::native())
+}
+
+/// Primary, review and compaction stay on the default route; children use another Provider.
+fn child_routes() -> ProviderRoutes {
+    let mut routes = Providers::all(vec![identity("other", "model-1")]);
+    routes.child = vec![identity("anthropic", "child-model")];
+    routes
+}
+
+fn run_config(providers: Option<ProviderRoutes>) -> crate::session::RunConfig {
+    crate::session::RunConfig {
+        providers,
+        provider: "other".into(),
+        model: "model-1".into(),
+        effort: None,
+        custom_profile_provenance: None,
+        saved_api_account_id: None,
+        chatgpt_provenance: None,
+        output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
+        policy: CollaborationPolicy::Single,
+        output_token_cap: 4096,
+        provider_concurrency: 1,
+        workspace_device: 1,
+        workspace_inode: 1,
+        instruction_digest: None,
+        include_digests: Vec::new(),
+        history_run_ids: Vec::new(),
+        excluded_history_runs: 0,
+        context_usage: None,
+        compaction_event_sequence: None,
+        compaction_content_digest: None,
+        tool_policy: None,
+    }
+}
+
+fn provider_record(
+    phase: AgentPhase,
+    disposition: ProviderCallDisposition,
+    usage: (Option<u32>, Option<u32>),
+) -> ProviderCallRecord {
+    ProviderCallRecord {
+        phase,
+        disposition,
+        requested_tools: 0,
+        response_id: None,
+        input_tokens: usage.0,
+        output_tokens: usage.1,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        wire_provenance: None,
+        failure_reason: None,
+    }
+}
+
+fn commit_ms(sequence: u64) -> i64 {
+    1_000 + 10 * i64::try_from(sequence).expect("bounded sequence")
+}
+
+fn committed_at(sequence: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH
+        + Duration::from_millis(u64::try_from(commit_ms(sequence)).expect("positive time"))
+}
+
+fn finished_spans(telemetry: &Telemetry, exporter: &InMemorySpanExporter) -> Vec<SpanData> {
+    telemetry
+        .inner
+        .as_ref()
+        .expect("enabled")
+        .provider
+        .force_flush()
+        .expect("in-memory flush");
+    exporter.get_finished_spans().expect("finished spans")
+}
+
+fn has_attribute(span: &SpanData, key: &str, value: Value) -> bool {
+    span.attributes
+        .iter()
+        .any(|attribute| attribute.key.as_str() == key && attribute.value == value)
+}
+
+fn unit_context() -> (SystemTime, SystemTime) {
+    (
+        committed_at(0),
+        committed_at(0) + Duration::from_micros(250),
+    )
+}
+
 #[test]
 fn direct_and_team_span_trees_follow_admitted_agents() {
     for children in [0, 2, 8] {
         let (telemetry, exporter) = in_memory();
-        let session_id = SessionId::new();
-        let run_id = RunId::new();
-        let run = telemetry.begin_run(session_id, run_id, TraceProvider::Other, None);
-        let primary = run.begin_primary(AgentRunId::new());
-        let first = primary.begin_first_provider();
-        first.finish(
-            &primary,
-            "model-1",
-            children > 0,
-            ProviderTraceOutcome::Finished,
-            Some(12),
-            Some(4),
-        );
-        let mut child_spans = Vec::new();
-        for _ in 0..children {
-            let child = primary.begin_child(AgentRunId::new());
-            child
-                .begin_provider(
-                    AgentPhase::ChildWork,
-                    &ProviderIdentity::new("anthropic", "child-model", Provenance::native()),
-                )
-                .finish_with_usage(ProviderTraceOutcome::Finished, None, None);
-            child_spans.push(child);
+        let mut segment = Segment::routed(&telemetry, unit_context(), Some(child_routes()));
+        let primary = segment.spawn(AgentRole::Primary);
+        let first = if children > 0 {
+            ProviderCallDisposition::Delegated
+        } else {
+            ProviderCallDisposition::Finished
+        };
+        segment.call(primary, AgentPhase::RootPlan, first, (Some(12), Some(4)));
+        let spawned = (0..children)
+            .map(|_| segment.spawn(AgentRole::Child))
+            .collect::<Vec<_>>();
+        for child in &spawned {
+            segment.call(
+                *child,
+                AgentPhase::ChildWork,
+                ProviderCallDisposition::Finished,
+                (None, None),
+            );
         }
-        for child in child_spans.into_iter().rev() {
-            child.finish(TraceOutcome::Finished);
+        for child in spawned.into_iter().rev() {
+            segment.finish_agent(child, AgentDisposition::Finished);
         }
         if children > 0 {
-            primary
-                .begin_provider(
-                    AgentPhase::RootSynthesis,
-                    &ProviderIdentity::new("openai", "primary-model", Provenance::native()),
-                )
-                .finish_with_usage(ProviderTraceOutcome::Finished, None, None);
+            segment.call(
+                primary,
+                AgentPhase::RootSynthesis,
+                ProviderCallDisposition::Finished,
+                (None, None),
+            );
         }
-        primary.finish(TraceOutcome::Finished);
-        run.finish(TraceOutcome::Finished);
-        telemetry
-            .inner
-            .as_ref()
-            .expect("enabled")
-            .provider
-            .force_flush()
-            .expect("in-memory flush");
-        let spans = exporter.get_finished_spans().expect("finished spans");
+        segment.finish_agent(primary, AgentDisposition::Finished);
+        segment.finish(RunDisposition::Finished, None);
+        let spans = finished_spans(&telemetry, &exporter);
         assert_eq!(
             spans.len(),
-            if children == 0 { 3 } else { 5 + 2 * children }
+            if children == 0 { 4 } else { 6 + 2 * children }
         );
+        let goal = spans
+            .iter()
+            .find(|span| span.name == "invoke_workflow arany.goal")
+            .expect("Goal span");
+        assert_eq!(goal.parent_span_id, SpanId::INVALID);
         let root = spans
             .iter()
             .find(|span| span.name == "invoke_workflow arany.run")
             .expect("workflow span");
-        assert_eq!(root.parent_span_id, SpanId::INVALID);
+        assert_eq!(root.parent_span_id, goal.span_context.span_id());
         let primary = spans
             .iter()
             .find(|span| span.name == "invoke_agent arany.primary")
@@ -536,24 +735,29 @@ fn direct_and_team_span_trees_follow_admitted_agents() {
             .iter()
             .find(|span| {
                 span.name == "chat arany.provider"
-                    && span.attributes.iter().any(|attribute| {
-                        attribute.key.as_str() == "arany.provider.phase"
-                            && attribute.value == Value::String("primary_plan".into())
-                    })
+                    && has_attribute(span, "arany.provider.phase", "primary_plan".into())
             })
             .expect("primary Provider span");
-        assert!(first_provider.attributes.iter().any(|attribute| {
-            attribute.key.as_str() == "gen_ai.provider.name"
-                && attribute.value == Value::String("other".into())
-        }));
-        assert!(first_provider.attributes.iter().any(|attribute| {
-            attribute.key.as_str() == "gen_ai.usage.input_tokens"
-                && attribute.value == Value::I64(12)
-        }));
-        assert!(first_provider.attributes.iter().any(|attribute| {
-            attribute.key.as_str() == "gen_ai.usage.output_tokens"
-                && attribute.value == Value::I64(4)
-        }));
+        assert!(has_attribute(
+            first_provider,
+            "gen_ai.provider.name",
+            "other".into()
+        ));
+        assert!(has_attribute(
+            first_provider,
+            "gen_ai.request.model",
+            "model-1".into()
+        ));
+        assert!(has_attribute(
+            first_provider,
+            "gen_ai.usage.input_tokens",
+            Value::I64(12)
+        ));
+        assert!(has_attribute(
+            first_provider,
+            "gen_ai.usage.output_tokens",
+            Value::I64(4)
+        ));
         assert!(
             !first_provider
                 .attributes
@@ -562,27 +766,20 @@ fn direct_and_team_span_trees_follow_admitted_agents() {
         );
         for child_call in spans.iter().filter(|span| {
             span.name == "chat arany.provider"
-                && span.attributes.iter().any(|attribute| {
-                    attribute.key.as_str() == "arany.provider.phase"
-                        && attribute.value == Value::String("child_work".into())
-                })
+                && has_attribute(span, "arany.provider.phase", "child_work".into())
         }) {
-            assert!(
-                child_call
-                    .attributes
-                    .iter()
-                    .any(|attribute| attribute.key.as_str() == "gen_ai.provider.name"
-                        && attribute.value == Value::String("anthropic".into()))
-            );
-            assert!(
-                child_call
-                    .attributes
-                    .iter()
-                    .any(|attribute| attribute.key.as_str() == "gen_ai.request.model"
-                        && attribute.value == Value::String("child-model".into()))
-            );
+            assert!(has_attribute(
+                child_call,
+                "gen_ai.provider.name",
+                "anthropic".into()
+            ));
+            assert!(has_attribute(
+                child_call,
+                "gen_ai.request.model",
+                "child-model".into()
+            ));
         }
-        let trace_id = root.span_context.trace_id();
+        let trace_id = goal.span_context.trace_id();
         assert!(
             spans
                 .iter()
@@ -592,23 +789,341 @@ fn direct_and_team_span_trees_follow_admitted_agents() {
 }
 
 #[test]
+fn spans_start_and_end_at_their_events_commit_times() {
+    let (telemetry, exporter) = in_memory();
+    let context = unit_context();
+    let mut segment = Segment::begin(&telemetry, context);
+    let primary = segment.spawn(AgentRole::Primary);
+    let (reserved, recorded) = segment.call(
+        primary,
+        AgentPhase::RootPlan,
+        ProviderCallDisposition::Rejected,
+        (None, None),
+    );
+    segment.finish_agent(primary, AgentDisposition::Failed);
+    let finished = segment.sequence + 1;
+    let mut goal_view = goal_view();
+    goal_view.provider_calls = 1;
+    segment.finish(RunDisposition::Failed, Some(&goal_view));
+    let spans = finished_spans(&telemetry, &exporter);
+    let span = |name: &str| {
+        spans
+            .iter()
+            .find(|span| span.name == name)
+            .unwrap_or_else(|| panic!("{name} span"))
+    };
+    for (name, started, ended) in [
+        ("invoke_workflow arany.goal", 1, finished),
+        ("invoke_workflow arany.run", 2, finished),
+        ("invoke_agent arany.primary", 4, recorded + 1),
+        ("chat arany.provider", reserved, recorded),
+    ] {
+        assert_eq!(span(name).start_time, committed_at(started), "{name} start");
+        assert_eq!(span(name).end_time, committed_at(ended), "{name} end");
+    }
+    let provider = span("chat arany.provider");
+    assert!(has_attribute(
+        provider,
+        "error.type",
+        "provider_rejected".into()
+    ));
+    assert!(has_attribute(provider, "arany.outcome", "failed".into()));
+    let goal = span("invoke_workflow arany.goal");
+    assert!(has_attribute(goal, "arany.goal.status", "running".into()));
+    assert!(has_attribute(goal, "arany.outcome", "failed".into()));
+    assert!(has_attribute(
+        goal,
+        "arany.goal.provider_calls",
+        Value::I64(1)
+    ));
+    let marker = &goal.events[0];
+    assert_eq!(marker.timestamp, committed_at(1));
+    let nanos = |time: SystemTime| {
+        Value::I64(
+            i64::try_from(
+                time.duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("after epoch")
+                    .as_nanos(),
+            )
+            .expect("bounded nanos"),
+        )
+    };
+    let marker_value = |key: &str| {
+        marker
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key.as_str() == key)
+            .map(|attribute| attribute.value.clone())
+    };
+    assert_eq!(
+        marker_value("arany.event.kind"),
+        Some("GoalRunLinked".into())
+    );
+    assert_eq!(
+        marker_value("arany.context.started_unix_nano"),
+        Some(nanos(context.0)),
+        "context compilation rides on the next committed marker"
+    );
+    assert_eq!(
+        marker_value("arany.context.ended_unix_nano"),
+        Some(nanos(context.1))
+    );
+    assert!(
+        spans
+            .iter()
+            .flat_map(|span| span.events.iter().skip(usize::from(span.name == goal.name)))
+            .all(|event| event
+                .attributes
+                .iter()
+                .all(|attribute| !attribute.key.as_str().starts_with("arany.context."))),
+        "only the first marker carries the context timing"
+    );
+    let run = span("invoke_workflow arany.run");
+    assert_eq!(
+        run.events
+            .iter()
+            .map(|event| event.timestamp)
+            .collect::<Vec<_>>(),
+        [2, 3, 4, recorded, recorded + 1, finished].map(committed_at),
+        "Run markers are timestamped at commit"
+    );
+}
+
+#[test]
+fn a_segment_without_its_run_receipt_stays_abandoned() {
+    let (telemetry, exporter) = in_memory();
+    let mut segment = Segment::begin(&telemetry, unit_context());
+    let primary = segment.spawn(AgentRole::Primary);
+    segment.commit(Event::GoalProviderCallReserved {
+        goal_id: segment.goal_id,
+        run_id: segment.run_id,
+        agent_run_id: primary,
+        active_ceiling_ms: 1,
+    });
+    segment.trace.finish(None);
+    let spans = finished_spans(&telemetry, &exporter);
+    assert_eq!(
+        spans.len(),
+        3,
+        "no Provider span exists without its committed record"
+    );
+    assert!(
+        spans
+            .iter()
+            .all(|span| has_attribute(span, "arany.outcome", "abandoned".into()))
+    );
+}
+
+#[test]
+fn fallback_switches_mark_the_run_and_keep_each_call_on_its_requested_route() {
+    let (telemetry, exporter) = in_memory();
+    let mut routes = Providers::all(vec![identity("other", "model-1")]);
+    routes.primary = vec![
+        identity("openai", "primary-a"),
+        identity("anthropic", "primary-b"),
+    ];
+    routes.compaction = vec![
+        identity("openai", "compact-a"),
+        identity("anthropic", "compact-b"),
+    ];
+    let mut segment = Segment::routed(&telemetry, unit_context(), Some(routes.clone()));
+    let primary = segment.spawn(AgentRole::Primary);
+    let switch =
+        |role, from: &ProviderIdentity, to: &ProviderIdentity| crate::provider::ProviderFallback {
+            role,
+            call_index: 0,
+            failure: ProviderCallDisposition::Unavailable,
+            from: from.clone(),
+            to: to.clone(),
+        };
+    let reserved = segment.commit(Event::GoalProviderCallReserved {
+        goal_id: segment.goal_id,
+        run_id: segment.run_id,
+        agent_run_id: primary,
+        active_ceiling_ms: 1,
+    });
+    let switched = segment.commit(Event::ProviderFallbackUsed {
+        run_id: segment.run_id,
+        agent_run_id: primary,
+        fallback: switch(
+            ProviderRole::Primary,
+            &routes.primary[0],
+            &routes.primary[1],
+        ),
+    });
+    let recorded = segment.commit(Event::ProviderCallRecorded {
+        run_id: segment.run_id,
+        agent_run_id: primary,
+        record: provider_record(
+            AgentPhase::RootPlan,
+            ProviderCallDisposition::ToolRequested,
+            (None, None),
+        ),
+    });
+    segment.call(
+        primary,
+        AgentPhase::RootPlan,
+        ProviderCallDisposition::Finished,
+        (None, None),
+    );
+    segment.commit(Event::GoalCompactionCallReserved {
+        goal_id: segment.goal_id,
+        run_id: segment.run_id,
+        active_ceiling_ms: 1,
+    });
+    segment.commit(Event::ProviderFallbackUsed {
+        run_id: segment.run_id,
+        agent_run_id: primary,
+        fallback: switch(
+            ProviderRole::Compaction,
+            &routes.compaction[0],
+            &routes.compaction[1],
+        ),
+    });
+    let mut record = compaction_record(CompactionStatus::Failed {
+        reason: CompactionFailure::ProviderUnavailable,
+    });
+    record.provider = "anthropic".into();
+    record.model = "compact-b".into();
+    segment.commit(Event::GoalContextCompacted {
+        goal_id: segment.goal_id,
+        run_id: segment.run_id,
+        covered_tool_count: 1,
+        record,
+    });
+    segment.finish_agent(primary, AgentDisposition::Finished);
+    segment.finish(RunDisposition::Finished, None);
+    let spans = finished_spans(&telemetry, &exporter);
+    let routed = |name: &str, provider: &'static str, model: &'static str| {
+        spans.iter().any(|span| {
+            span.name == name
+                && has_attribute(span, "gen_ai.provider.name", provider.into())
+                && has_attribute(span, "gen_ai.request.model", model.into())
+        })
+    };
+    let first = spans
+        .iter()
+        .find(|span| {
+            span.start_time == committed_at(reserved) && span.name == "chat arany.provider"
+        })
+        .expect("first Provider span");
+    assert_eq!(first.end_time, committed_at(recorded));
+    assert!(
+        has_attribute(first, "gen_ai.request.model", "primary-a".into()),
+        "the logical call keeps the route it requested"
+    );
+    assert!(
+        routed("chat arany.provider", "anthropic", "primary-b"),
+        "the agent's next call follows the committed switch"
+    );
+    assert!(routed("chat arany.compaction", "openai", "compact-a"));
+    let run = spans
+        .iter()
+        .find(|span| span.name == "invoke_workflow arany.run")
+        .expect("Run span");
+    let fallback = run
+        .events
+        .iter()
+        .find(|event| event.timestamp == committed_at(switched))
+        .expect("fallback marker");
+    assert!(fallback.attributes.iter().any(|attribute| {
+        attribute.key.as_str() == "arany.event.kind"
+            && attribute.value == "ProviderFallbackUsed".into()
+    }));
+}
+
+fn goal_view() -> GoalView {
+    let session_id = SessionId::new();
+    let events = [
+        Event::SessionStarted {
+            title: "trace".into(),
+            workspace_identity: (1, 2),
+        },
+        Event::GoalStarted {
+            goal_id: GoalId::new(),
+            objective: "objective".into(),
+            workspace_identity: (1, 2),
+            budget: crate::session::GoalBudget::default(),
+            phase: crate::session::GoalPhase::Implementation,
+            autonomous: false,
+            resource_settings: crate::tools::ToolResourceSettings::default(),
+        },
+    ]
+    .into_iter()
+    .zip(1..)
+    .map(|(event, sequence)| EventEnvelope {
+        sequence,
+        session_id,
+        run_id: None,
+        agent_run_id: None,
+        event,
+        created_at_ms: commit_ms(sequence),
+    })
+    .collect::<Vec<_>>();
+    crate::session::SessionView::replay(session_id, &events)
+        .expect("replayed Goal")
+        .expect("Session")
+        .goals
+        .remove(0)
+}
+
+fn compaction_record(status: CompactionStatus) -> crate::session::CompactionRecord {
+    crate::session::CompactionRecord {
+        covered_run_id: RunId::new(),
+        covered_sequence: 1,
+        source_digest: [0; 32],
+        provider: "other".into(),
+        model: "model-1".into(),
+        prompt_version: 1,
+        schema_version: 1,
+        compiler_version: 3,
+        source_bytes: 1,
+        source_tokens_estimate: 1,
+        input_tokens: Some(7),
+        output_tokens: Some(3),
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        response_id: None,
+        wire_provenance: None,
+        chatgpt_provenance: None,
+        output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
+        status,
+    }
+}
+
+#[test]
 fn fullest_mapped_batch_fits_trace_body_limit() {
     let (telemetry, exporter) = in_memory();
-    for _ in 0..MAX_EXPORT_BATCH_SPANS {
-        let trace = telemetry.begin_run(SessionId::new(), RunId::new(), TraceProvider::Other, None);
-        for sequence in 1..=MAX_EVENTS_PER_SPAN {
-            trace.event_committed(u64::from(sequence), TraceEventKind::ContextCompacted);
+    let mut goal = goal_view();
+    goal.provider_calls = u32::MAX;
+    goal.known_tokens = u64::MAX;
+    goal.active_ms = u64::MAX;
+    goal.uncertain_active_ms = u64::MAX;
+    for _ in 0..MAX_EXPORT_BATCH_SPANS / 2 {
+        let mut segment = Segment::begin(&telemetry, unit_context());
+        let unknown = AgentRunId::new();
+        // Each span holds its cap of markers with the longest kind names.
+        for _ in 1..MAX_EVENTS_PER_SPAN {
+            segment.commit(Event::GoalCompactionCallReserved {
+                goal_id: segment.goal_id,
+                run_id: segment.run_id,
+                active_ceiling_ms: u64::MAX,
+            });
         }
-        trace.finish(TraceOutcome::Finished);
+        for _ in 3..MAX_EVENTS_PER_SPAN {
+            segment.commit(Event::ProviderCallRecorded {
+                run_id: segment.run_id,
+                agent_run_id: unknown,
+                record: provider_record(
+                    AgentPhase::RootSynthesis,
+                    ProviderCallDisposition::Finished,
+                    (None, None),
+                ),
+            });
+        }
+        segment.finish(RunDisposition::Cancelled, Some(&goal));
     }
-    telemetry
-        .inner
-        .as_ref()
-        .expect("enabled")
-        .provider
-        .force_flush()
-        .expect("in-memory flush");
-    let spans = exporter.get_finished_spans().expect("finished spans");
+    let spans = finished_spans(&telemetry, &exporter);
     assert_eq!(spans.len(), MAX_EXPORT_BATCH_SPANS);
     assert!(
         spans
@@ -626,24 +1141,76 @@ fn fullest_mapped_batch_fits_trace_body_limit() {
 }
 
 #[test]
+fn goal_context_compaction_spans_follow_its_reservation_and_receipt() {
+    let (telemetry, exporter) = in_memory();
+    let mut segment = Segment::begin(&telemetry, unit_context());
+    let reserved = segment.commit(Event::GoalCompactionCallReserved {
+        goal_id: segment.goal_id,
+        run_id: segment.run_id,
+        active_ceiling_ms: 1,
+    });
+    let compacted = segment.commit(Event::GoalContextCompacted {
+        goal_id: segment.goal_id,
+        run_id: segment.run_id,
+        covered_tool_count: 1,
+        record: compaction_record(CompactionStatus::Failed {
+            reason: CompactionFailure::TimedOut,
+        }),
+    });
+    segment.finish(RunDisposition::Finished, None);
+    let spans = finished_spans(&telemetry, &exporter);
+    let run = spans
+        .iter()
+        .find(|span| span.name == "invoke_workflow arany.run")
+        .expect("Run span");
+    let operation = spans
+        .iter()
+        .find(|span| span.name == "compact arany.goal_tool_context")
+        .expect("compaction span");
+    let provider = spans
+        .iter()
+        .find(|span| span.name == "chat arany.compaction")
+        .expect("compaction Provider span");
+    assert_eq!(operation.parent_span_id, run.span_context.span_id());
+    assert_eq!(provider.parent_span_id, operation.span_context.span_id());
+    for span in [operation, provider] {
+        assert_eq!(span.start_time, committed_at(reserved));
+        assert_eq!(span.end_time, committed_at(compacted));
+    }
+    assert!(has_attribute(provider, "error.type", "timeout".into()));
+    assert!(has_attribute(
+        provider,
+        "gen_ai.usage.input_tokens",
+        Value::I64(7)
+    ));
+    assert_eq!(operation.events.len(), 1);
+}
+
+#[test]
 fn compaction_has_its_own_operation_and_committed_receipt() {
     let (telemetry, exporter) = in_memory();
-    let trace = telemetry.begin_compaction(SessionId::new(), RunId::new(), TraceProvider::Other);
-    trace.begin_provider("model-1").finish_with_usage(
-        ProviderTraceOutcome::Failed(TraceFailure::InvalidResponse),
-        None,
-        None,
-    );
-    trace.event_committed(42);
-    trace.finish(TraceOutcome::Failed);
-    telemetry
-        .inner
-        .as_ref()
-        .expect("enabled")
-        .provider
-        .force_flush()
-        .expect("in-memory flush");
-    let spans = exporter.get_finished_spans().expect("finished spans");
+    let session_id = SessionId::new();
+    let trace = telemetry.begin_compaction(session_id, RunId::new(), TraceProvider::Other);
+    let status = CompactionStatus::Failed {
+        reason: CompactionFailure::InvalidOutcome,
+    };
+    let outcome = ProviderTraceOutcome::from(&status);
+    trace
+        .begin_provider("model-1")
+        .finish_with_usage(outcome, None, None);
+    trace.event_committed(&EventEnvelope {
+        sequence: 42,
+        session_id,
+        run_id: None,
+        agent_run_id: None,
+        event: Event::ContextCompacted {
+            record: compaction_record(status),
+            active_ms: None,
+        },
+        created_at_ms: commit_ms(42),
+    });
+    trace.finish(outcome.into());
+    let spans = finished_spans(&telemetry, &exporter);
     assert_eq!(spans.len(), 2);
     let operation = spans
         .iter()
@@ -654,10 +1221,11 @@ fn compaction_has_its_own_operation_and_committed_receipt() {
         .find(|span| span.name == "chat arany.compaction")
         .expect("compaction Provider span");
     assert_eq!(provider.parent_span_id, operation.span_context.span_id());
-    assert!(provider.attributes.iter().any(|attribute| {
-        attribute.key.as_str() == "error.type"
-            && attribute.value == Value::String("invalid_response".into())
-    }));
+    assert!(has_attribute(
+        provider,
+        "error.type",
+        "invalid_response".into()
+    ));
     assert_eq!(operation.events.len(), 1);
     assert_eq!(operation.events[0].name, "arany.event.committed");
 }
@@ -734,18 +1302,16 @@ fn loopback_export_is_protobuf_with_a_minimal_resource() {
         parse_endpoint(&format!("http://{address}"), false).expect("local endpoint"),
     )
     .expect("exporter construction");
-    let run = telemetry.begin_run(SessionId::new(), RunId::new(), TraceProvider::Other, None);
-    let primary = run.begin_primary(AgentRunId::new());
-    primary.begin_first_provider().finish(
-        &primary,
-        "model-1",
-        false,
-        ProviderTraceOutcome::Failed(TraceFailure::Rejected),
-        None,
-        None,
+    let mut segment = Segment::begin(&telemetry, unit_context());
+    let primary = segment.spawn(AgentRole::Primary);
+    segment.call(
+        primary,
+        AgentPhase::RootPlan,
+        ProviderCallDisposition::Rejected,
+        (None, None),
     );
-    primary.finish(TraceOutcome::Failed);
-    run.finish(TraceOutcome::Failed);
+    segment.finish_agent(primary, AgentDisposition::Failed);
+    segment.finish(RunDisposition::Failed, None);
     telemetry.shutdown();
     let (header, body) = collector.join().expect("Collector thread");
     assert!(header.starts_with("POST /v1/traces HTTP/1.1\r\n"));
@@ -782,7 +1348,7 @@ fn loopback_export_is_protobuf_with_a_minimal_resource() {
     assert_eq!(resource_spans.scope_spans.len(), 1);
     let scope = &resource_spans.scope_spans[0];
     assert_eq!(scope.scope.as_ref().expect("scope").name, "arany");
-    assert_eq!(scope.spans.len(), 3);
+    assert_eq!(scope.spans.len(), 4);
     let provider = scope
         .spans
         .iter()
@@ -824,9 +1390,7 @@ fn collector_redirect_is_not_followed() {
         parse_endpoint(&format!("http://{address}"), false).expect("source endpoint"),
     )
     .expect("exporter");
-    telemetry
-        .begin_run(SessionId::new(), RunId::new(), TraceProvider::Other, None)
-        .finish(TraceOutcome::Finished);
+    Segment::begin(&telemetry, unit_context()).finish(RunDisposition::Finished, None);
     telemetry.shutdown();
     collector.join().expect("source Collector thread");
     assert!(matches!(
@@ -852,9 +1416,7 @@ fn stalled_collector_cannot_hold_shutdown_open() {
         parse_endpoint(&format!("http://{address}"), false).expect("slow endpoint"),
     )
     .expect("exporter");
-    telemetry
-        .begin_run(SessionId::new(), RunId::new(), TraceProvider::Other, None)
-        .finish(TraceOutcome::Finished);
+    Segment::begin(&telemetry, unit_context()).finish(RunDisposition::Finished, None);
     let started = Instant::now();
     telemetry.shutdown();
     assert!(started.elapsed() < Duration::from_millis(800));
@@ -929,15 +1491,11 @@ fn trickling_collector_cannot_hold_the_export_worker() {
         parse_endpoint(&format!("http://{address}"), false).expect("local endpoint"),
     )
     .expect("exporter");
-    telemetry
-        .begin_run(SessionId::new(), RunId::new(), TraceProvider::Other, None)
-        .finish(TraceOutcome::Finished);
+    Segment::begin(&telemetry, unit_context()).finish(RunDisposition::Finished, None);
     first_seen_rx
         .recv_timeout(Duration::from_secs(3))
         .expect("first export started");
-    telemetry
-        .begin_run(SessionId::new(), RunId::new(), TraceProvider::Other, None)
-        .finish(TraceOutcome::Finished);
+    Segment::begin(&telemetry, unit_context()).finish(RunDisposition::Finished, None);
     let second_seen = collector.join().expect("Collector thread");
     telemetry.shutdown();
     assert!(second_seen, "trickling response held the export worker");

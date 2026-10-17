@@ -1,6 +1,7 @@
 use super::ledger::{Action, GoalLedger, duration_ms};
-use super::progress::{ProgressPublisher, RunScope, append_scoped};
+use super::progress::ProgressPublisher;
 use super::{EngineError, RunCancellation, RunSteering, STORE_ACTION_OVERHEAD};
+use crate::journal::Journal;
 use crate::provider::{
     AgentPhase, Finish, MAX_REPORTED_INPUT_TOKENS, PreviewText, Provider, ProviderFailureClass,
     ProviderFailureReason, ProviderOutcome, ProviderRequest, ProviderResponse, ResponsePreview,
@@ -12,8 +13,6 @@ use crate::session::{
     MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES,
     ProviderCallDisposition, ProviderCallRecord, RunDisposition, RunId, SessionId,
 };
-use crate::store::Store;
-use crate::telemetry::{AgentTrace, ProviderTraceOutcome, RunTrace, TraceFailure, TraceOutcome};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -100,7 +99,7 @@ impl DisplayCheckpoint {
 }
 
 pub(super) struct RunLoop<'a> {
-    store: &'a Store,
+    journal: &'a Journal,
     routing: super::routing::CallRouter<'a>,
     session_id: SessionId,
     run_id: RunId,
@@ -109,7 +108,6 @@ pub(super) struct RunLoop<'a> {
     controls: RunControls<'a>,
     ledger: &'a GoalLedger,
     progress: Option<&'a ProgressPublisher>,
-    trace: &'a RunTrace,
 }
 
 pub(super) struct RunControls<'a> {
@@ -131,22 +129,21 @@ pub(super) struct RunIdentity {
 
 impl<'a> RunLoop<'a> {
     pub(super) fn new(
-        store: &'a Store,
+        journal: &'a Journal,
         providers: crate::provider::AdmittedProviders,
         identity: RunIdentity,
         controls: RunControls<'a>,
         ledger: &'a GoalLedger,
         progress: Option<&'a ProgressPublisher>,
-        trace: &'a RunTrace,
     ) -> Self {
         Self {
             routing: super::routing::CallRouter {
                 providers,
-                store,
+                journal,
                 ledger,
                 publisher: progress,
             },
-            store,
+            journal,
             session_id: identity.session_id,
             run_id: identity.run_id,
             goal_id: identity.goal_id,
@@ -154,7 +151,6 @@ impl<'a> RunLoop<'a> {
             controls,
             ledger,
             progress,
-            trace,
         }
     }
 
@@ -162,27 +158,15 @@ impl<'a> RunLoop<'a> {
         self.ledger
     }
 
-    fn scope(&self) -> RunScope<'_> {
-        RunScope {
-            ledger: self.ledger,
-            publisher: self.progress,
-        }
-    }
-
     fn settle_result(&self, result: &CallResult) {
-        let (input, output) = call_trace_usage(result);
+        let (input, output) = call_usage(result);
         self.ledger().settle(input, output);
     }
 
     async fn append(&self, event: Event) -> Result<(), EngineError> {
-        let _ = append_scoped(
-            self.store,
-            self.scope(),
-            Some(self.trace),
-            self.session_id,
-            event,
-        )
-        .await?;
+        self.ledger
+            .append(self.journal, self.session_id, event)
+            .await?;
         Ok(())
     }
 
@@ -190,9 +174,10 @@ impl<'a> RunLoop<'a> {
     /// Tool, an open reservation or an unacknowledged action returns an error and leaves the Run
     /// for recovery; a cancellation, including a pause, cancels the primary; otherwise the Goal
     /// budget ran out and the primary fails.
-    async fn settle_stopped_primary(&self, primary: AgentTrace) -> Result<(), EngineError> {
+    async fn settle_stopped_primary(&self) -> Result<(), EngineError> {
         let view = self
-            .store
+            .journal
+            .store()
             .load_open_view(self.session_id)
             .await?
             .ok_or(EngineError::InvalidHistory)?;
@@ -242,9 +227,9 @@ impl<'a> RunLoop<'a> {
             return Err(EngineError::GoalBudgetExhausted);
         }
         if cancelled {
-            self.cancel_primary(primary).await
+            self.cancel_primary().await
         } else {
-            self.fail_primary(primary).await
+            self.fail_primary().await
         }
     }
 
@@ -295,8 +280,8 @@ impl<'a> RunLoop<'a> {
         pending_ms: u64,
     ) -> Result<(), EngineError> {
         let reservation = self.ledger().reserve(action).await?;
-        self.store
-            .admit_operation(
+        self.journal
+            .admit(
                 self.session_id,
                 action.max_events_for(&self.routing.providers),
                 action.tool_observations(),
@@ -379,8 +364,8 @@ impl<'a> RunLoop<'a> {
         if !self.ledger().can_narrow(&contract) {
             return Ok(false);
         }
-        self.store
-            .admit_operation(
+        self.journal
+            .admit(
                 self.session_id,
                 Action::Tool.remaining(0, &self.routing.providers),
                 Action::Tool.tool_observations(),
@@ -399,34 +384,17 @@ impl<'a> RunLoop<'a> {
         &self,
         mut root_request: ProviderRequest,
     ) -> Result<(), EngineError> {
-        let primary = self.trace.begin_primary(self.primary_id);
-        let mut first_call = true;
         loop {
             if self.pause_at_boundary() {
-                return self.settle_stopped_primary(primary).await;
+                return self.settle_stopped_primary().await;
             }
-            let call_provider = self
-                .routing
-                .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
-            root_request.model = call_provider.identity().model.clone();
-            let first_trace = first_call.then(|| primary.begin_first_provider());
-            let next_trace = (!first_call)
-                .then(|| primary.begin_provider(AgentPhase::RootPlan, call_provider.identity()));
-            first_call = false;
             let (first, active_segment) = match self.invoke_primary(&mut root_request).await {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
-                    if let Some(first_trace) = first_trace {
-                        first_trace.finish_refused(&primary, &root_request.model);
-                    }
-                    if let Some(next_trace) = next_trace {
-                        next_trace.finish_refused();
-                    }
-                    return self.settle_stopped_primary(primary).await;
+                    return self.settle_stopped_primary().await;
                 }
                 Err(error) => return Err(error),
             };
-            let (input_tokens, output_tokens) = call_trace_usage(&first);
             let valid_response = self.ledger().tokens_within_limit()
                 && match &first {
                     CallResult::Response(ProviderResponse {
@@ -446,29 +414,6 @@ impl<'a> RunLoop<'a> {
                     }) => self.valid_tools(requests),
                     _ => false,
                 };
-            if let Some(first_trace) = first_trace {
-                first_trace.finish(
-                    &primary,
-                    &root_request.model,
-                    matches!(
-                        &first,
-                        CallResult::Response(ProviderResponse {
-                            outcome: ProviderOutcome::Delegate(_),
-                            ..
-                        })
-                    ),
-                    call_trace_result(&first, valid_response),
-                    input_tokens,
-                    output_tokens,
-                );
-            }
-            if let Some(next_trace) = next_trace {
-                next_trace.finish_with_usage(
-                    call_trace_result(&first, valid_response),
-                    input_tokens,
-                    output_tokens,
-                );
-            }
             self.append(Event::ProviderCallRecorded {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
@@ -477,29 +422,29 @@ impl<'a> RunLoop<'a> {
             .await?;
             self.settle_active_segment(active_segment)?;
             if self.controls.cancellation.is_cancelled() {
-                return self.settle_stopped_primary(primary).await;
+                return self.settle_stopped_primary().await;
             }
             if matches!(&first, CallResult::Cancelled) {
-                return self.cancel_primary(primary).await;
+                return self.cancel_primary().await;
             }
             if self.ledger().active_time_exhausted() {
-                return self.settle_stopped_primary(primary).await;
+                return self.settle_stopped_primary().await;
             }
             match first {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
                     ..
-                }) if valid_response => return self.finish_primary(finish, primary).await,
+                }) if valid_response => return self.finish_primary(finish).await,
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Delegate(delegation),
                     turn,
                     ..
                 }) if valid_response => {
                     if self.pause_at_boundary() {
-                        return self.settle_stopped_primary(primary).await;
+                        return self.settle_stopped_primary().await;
                     }
                     return self
-                        .run_children(&mut root_request, delegation.children, turn, primary)
+                        .run_children(&mut root_request, delegation.children, turn)
                         .await;
                 }
                 CallResult::Response(ProviderResponse {
@@ -508,39 +453,38 @@ impl<'a> RunLoop<'a> {
                     ..
                 }) if valid_response => {
                     if self.pause_at_boundary() {
-                        return self.settle_stopped_primary(primary).await;
+                        return self.settle_stopped_primary().await;
                     }
                     let Some(request) = self.begin_tool_step(requests).await? else {
-                        return self.fail_primary(primary).await;
+                        return self.fail_primary().await;
                     };
                     let grant = Grant::Primary {
                         request: &mut root_request,
                         review_allowed: self.ledger().admits(Action::Review),
-                        trace: &primary,
                     };
                     let continuation = self.execute_step(grant, request, turn).await;
                     match continuation {
                         Ok(true) => {}
                         Ok(false) if self.controls.cancellation.is_cancelled() => {
-                            return self.settle_stopped_primary(primary).await;
+                            return self.settle_stopped_primary().await;
                         }
                         Ok(false) if self.ledger().active_time_exhausted() => {
-                            return self.settle_stopped_primary(primary).await;
+                            return self.settle_stopped_primary().await;
                         }
-                        Ok(false) => return self.fail_primary(primary).await,
+                        Ok(false) => return self.fail_primary().await,
                         Err(EngineError::GoalBudgetExhausted)
                             if self.controls.cancellation.is_cancelled() =>
                         {
-                            return self.settle_stopped_primary(primary).await;
+                            return self.settle_stopped_primary().await;
                         }
                         Err(EngineError::GoalBudgetExhausted) => {
-                            return self.settle_stopped_primary(primary).await;
+                            return self.settle_stopped_primary().await;
                         }
                         Err(error) => return Err(error),
                     }
                 }
-                CallResult::Cancelled => return self.cancel_primary(primary).await,
-                _ => return self.fail_primary(primary).await,
+                CallResult::Cancelled => return self.cancel_primary().await,
+                _ => return self.fail_primary().await,
             }
         }
     }
@@ -811,12 +755,12 @@ impl<'a> RunLoop<'a> {
         Ok(Some(request))
     }
 
-    async fn finish_primary(&self, finish: Finish, primary: AgentTrace) -> Result<(), EngineError> {
+    async fn finish_primary(&self, finish: Finish) -> Result<(), EngineError> {
         if self.controls.cancellation.is_cancelled() {
-            return self.cancel_primary(primary).await;
+            return self.cancel_primary().await;
         }
         if !self.ledger().success_criterion_satisfied() && !self.ledger().allows_next_run() {
-            return self.fail_primary(primary).await;
+            return self.fail_primary().await;
         }
         self.append(Event::AgentFinished {
             run_id: self.run_id,
@@ -837,13 +781,12 @@ impl<'a> RunLoop<'a> {
             active_ms: self.ledger().run_active_ms()?,
         })
         .await?;
-        primary.finish(TraceOutcome::Finished);
         Ok(())
     }
 
-    async fn fail_primary(&self, primary: AgentTrace) -> Result<(), EngineError> {
+    async fn fail_primary(&self) -> Result<(), EngineError> {
         if self.controls.cancellation.is_cancelled() {
-            return self.cancel_primary(primary).await;
+            return self.cancel_primary().await;
         }
         self.append(Event::AgentFinished {
             run_id: self.run_id,
@@ -859,11 +802,10 @@ impl<'a> RunLoop<'a> {
             active_ms: self.ledger().run_active_ms()?,
         })
         .await?;
-        primary.finish(TraceOutcome::Failed);
         Ok(())
     }
 
-    async fn cancel_primary(&self, primary: AgentTrace) -> Result<(), EngineError> {
+    async fn cancel_primary(&self) -> Result<(), EngineError> {
         self.append(Event::AgentFinished {
             run_id: self.run_id,
             agent_run_id: self.primary_id,
@@ -878,7 +820,6 @@ impl<'a> RunLoop<'a> {
             active_ms: self.ledger().run_active_ms()?,
         })
         .await?;
-        primary.finish(TraceOutcome::Cancelled);
         Ok(())
     }
 }
@@ -944,23 +885,7 @@ pub(super) async fn invoke_bounded_with_preview(
     }
 }
 
-fn call_trace_result(result: &CallResult, valid_response: bool) -> ProviderTraceOutcome {
-    match result {
-        CallResult::Response(_) if valid_response => ProviderTraceOutcome::Finished,
-        CallResult::Response(_) => ProviderTraceOutcome::Failed(TraceFailure::InvalidResponse),
-        CallResult::Failed(failure) => ProviderTraceOutcome::Failed(match failure {
-            CallFailure::Timeout => TraceFailure::Timeout,
-            CallFailure::Unavailable(_) => TraceFailure::Unavailable,
-            CallFailure::Rejected(_) => TraceFailure::Rejected,
-            CallFailure::InvalidResponse(_) => TraceFailure::InvalidResponse,
-            CallFailure::OutputLimit => TraceFailure::OutputLimit,
-            CallFailure::TaskPanic => TraceFailure::TaskPanic,
-        }),
-        CallResult::Cancelled => ProviderTraceOutcome::Cancelled,
-    }
-}
-
-fn call_trace_usage(result: &CallResult) -> (Option<u32>, Option<u32>) {
+fn call_usage(result: &CallResult) -> (Option<u32>, Option<u32>) {
     match result {
         CallResult::Response(response) => {
             (response.usage.input_tokens, response.usage.output_tokens)

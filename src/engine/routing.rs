@@ -1,13 +1,13 @@
 use super::ledger::{Action, GoalLedger};
-use super::progress::{ProgressPublisher, RunScope, append_scoped};
+use super::progress::ProgressPublisher;
 use super::run_loop::{CallResult, invoke_bounded_with_preview};
 use super::{EngineError, RunCancellation};
+use crate::journal::Journal;
 use crate::provider::{
     AdmittedProviders, MAX_PROVIDER_SWITCHES, Provider, ProviderError, ProviderFallback,
     ProviderIdentity, ProviderRequest, ProviderResponse, ProviderRole, ResponsePreview,
 };
 use crate::session::{AgentRunId, Event};
-use crate::store::Store;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -16,7 +16,7 @@ use tokio::time::Instant;
 
 pub(super) struct CallRouter<'a> {
     pub(super) providers: AdmittedProviders,
-    pub(super) store: &'a Store,
+    pub(super) journal: &'a Journal,
     pub(super) ledger: &'a GoalLedger,
     pub(super) publisher: Option<&'a ProgressPublisher>,
 }
@@ -247,28 +247,24 @@ impl CallRouter<'_> {
             ProviderRole::Review => Action::Review,
             ProviderRole::Compaction => Action::Compaction,
         };
-        self.store
-            .admit_operation(
+        self.journal
+            .admit(
                 session_id,
                 action.max_events_for(&self.providers) + 1,
                 action.tool_observations(),
             )
             .await?;
-        append_scoped(
-            self.store,
-            RunScope {
-                ledger: self.ledger,
-                publisher: self.publisher,
-            },
-            None,
-            session_id,
-            Event::ProviderFallbackUsed {
-                run_id,
-                agent_run_id,
-                fallback,
-            },
-        )
-        .await?;
+        self.ledger
+            .append(
+                self.journal,
+                session_id,
+                Event::ProviderFallbackUsed {
+                    run_id,
+                    agent_run_id,
+                    fallback,
+                },
+            )
+            .await?;
         if let Some(reservation) = reservation {
             reservation.commit()?;
         }

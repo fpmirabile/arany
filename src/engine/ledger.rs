@@ -1,8 +1,9 @@
 use super::{EngineError, STORE_ACTION_OVERHEAD};
+use crate::journal::Journal;
 use crate::provider::{GoalContextFacts, ProviderRole, Providers};
 use crate::session::{
     Event, EventEnvelope, GoalBudget, GoalId, GoalPlanContract, GoalUsage, GoalView,
-    MAX_CHILD_TOOL_CALLS, MAX_DISPLAY_CHUNKS, SessionView,
+    MAX_CHILD_TOOL_CALLS, MAX_DISPLAY_CHUNKS, SessionId, SessionView,
 };
 use std::sync::Mutex;
 use std::time::Duration;
@@ -186,11 +187,22 @@ impl GoalLedger {
         Ok(read(&state.view))
     }
 
-    pub(super) fn committed<T>(
+    /// Appends a Run's Event and feeds it to the ledger before any subscriber can see it, so budget
+    /// decisions never wait on an observer.
+    pub(super) async fn append(
         &self,
-        envelope: &EventEnvelope,
-        project: impl FnOnce(&SessionView) -> T,
-    ) -> Result<T, EngineError> {
+        journal: &Journal,
+        session_id: SessionId,
+        event: Event,
+    ) -> Result<u64, EngineError> {
+        let (committed, fed) = journal
+            .append_then(session_id, event, |envelope| self.committed(envelope))
+            .await?;
+        fed?;
+        Ok(committed.sequence)
+    }
+
+    fn committed(&self, envelope: &EventEnvelope) -> Result<(), EngineError> {
         let mut state = self
             .state
             .lock()
@@ -214,7 +226,7 @@ impl GoalLedger {
                 in_flight.unrecorded_unknown = in_flight.unrecorded_unknown.saturating_sub(1);
             }
         }
-        Ok(project(&state.view))
+        Ok(())
     }
 
     fn read<T>(&self, read: impl FnOnce(&GoalView, &InFlight) -> T) -> Result<T, EngineError> {

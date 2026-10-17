@@ -240,7 +240,6 @@ async fn run_with_provider<P: Provider + 'static>(
     {
         return Err("selected Provider changed before Workspace admission".into());
     }
-    let new_session = admission.session_id.is_none();
     let state = StateRoot::admit(&admission.state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     arany::enable_development_diagnostics(&state);
@@ -256,6 +255,15 @@ async fn run_with_provider<P: Provider + 'static>(
     engine
         .set_providers(providers)
         .map_err(|error| error.to_string())?;
+    run_on_engine(args, admission, engine).await
+}
+
+async fn run_on_engine(
+    args: ExecArgs,
+    admission: Admission,
+    mut engine: Engine,
+) -> Result<CommandOutput, String> {
+    let new_session = admission.session_id.is_none();
     if args.tools {
         if !native_protection_supported() {
             return Err(
@@ -547,7 +555,7 @@ mod tests {
     use super::*;
     use arany::{
         AgentPhase, Finish, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
-        RunId, SessionView,
+        RunId, SessionView, Tapped,
     };
     use std::{
         collections::VecDeque,
@@ -855,6 +863,78 @@ mod tests {
         .err()
         .expect("a closed Goal is not resumable");
         assert_eq!(error, "Goal is not available for explicit resume");
+    }
+
+    #[tokio::test]
+    async fn exec_jsonl_equals_the_event_stream() {
+        let temp = tempfile::tempdir().expect("private test root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state_dir = temp.path().join("state");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::open(
+            StateRoot::admit(&state_dir).expect("state"),
+            scripted(
+                Ok(Finish {
+                    summary: "stream summary".into(),
+                    result: "stream answer".into(),
+                }),
+                &observed,
+            ),
+        )
+        .expect("engine");
+        let mut stream = engine.subscribe();
+        let mut command = args(state_dir.clone(), workspace, "Stream the Run");
+        command.output = OutputArg::Jsonl;
+        let admission = command.admit().expect("valid JSONL command");
+        // The stream ends when exec closes its Engine.
+        let collect = async {
+            let mut streamed = Vec::new();
+            while let Some(tapped) = stream.next().await {
+                match tapped {
+                    Tapped::Committed(envelope) => streamed.push((*envelope).clone()),
+                    Tapped::Resync { .. } => panic!("one Run stays within the tap ring"),
+                }
+            }
+            streamed
+        };
+        let (report, streamed) = tokio::join!(run_on_engine(command, admission, engine), collect);
+        let report = report.expect("JSONL exec");
+        assert!(report.success);
+        let lines: Vec<serde_json::Value> = report
+            .stdout
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("JSONL Event"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            streamed.len(),
+            "each streamed Event is one line"
+        );
+        for (line, envelope) in lines.iter().zip(&streamed) {
+            assert_eq!(line["sequence"], envelope.sequence);
+            assert_eq!(line["created_at_ms"], envelope.created_at_ms);
+        }
+        let session_id = SessionId::from_str(lines[0]["session_id"].as_str().expect("Session ID"))
+            .expect("typed Session ID");
+        let store = Store::open_read_only(StateRoot::open_existing(&state_dir).expect("state"))
+            .expect("read-only reopen");
+        let view = store
+            .load_view(session_id)
+            .await
+            .expect("resolved Session")
+            .expect("Session exists");
+        store.close().await.expect("closed store");
+        assert_eq!(
+            report.stdout,
+            render_exec(
+                view.runs.last().expect("streamed Run"),
+                &streamed,
+                arany::Output::Jsonl,
+                true
+            ),
+            "exec JSONL renders exactly the committed stream"
+        );
     }
 
     #[tokio::test]

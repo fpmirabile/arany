@@ -9,7 +9,7 @@ use crate::session::{
     MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES, PreparedCompaction, RunStatus,
     SessionId, prefix_digest,
 };
-use crate::telemetry::{ProviderTraceOutcome, TraceFailure, TraceOutcome, TraceProvider};
+use crate::telemetry::{ProviderTraceOutcome, TraceProvider};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -50,7 +50,7 @@ impl Engine {
         let provider = std::sync::Arc::clone(&self.providers.compaction[0]);
         let identity = super::checked_identity(provider.as_ref())?;
         let mut session_lock = self.lock_session(session_id)?;
-        let (events, view) = self.store.load_resolved(session_id).await?;
+        let (events, view) = self.journal.store().load_resolved(session_id).await?;
         let view = view.ok_or(EngineError::MissingSession)?;
         session_lock.keep();
         let _lineage_locks = self.lock_lineage(&view).await?;
@@ -79,7 +79,8 @@ impl Engine {
         }
         let covered_run_id = last_run.id;
         let open_view = self
-            .store
+            .journal
+            .store()
             .load_open_view(session_id)
             .await?
             .ok_or(EngineError::MissingSession)?;
@@ -131,8 +132,8 @@ impl Engine {
         {
             return Ok(None);
         }
-        self.store
-            .admit_operation(
+        self.journal
+            .admit(
                 session_id,
                 Action::BoundaryCompaction {
                     goal: goal_id.is_some(),
@@ -204,8 +205,7 @@ impl Engine {
             u32::try_from(source_bytes).map_err(|_| EngineError::CompactionInputTooLarge)?;
         let active_started = Instant::now();
         if let (Some(goal_id), Some(active_ceiling_ms)) = (goal_id, active_reservation_ms) {
-            let reserved = self
-                .store
+            self.journal
                 .append(
                     session_id,
                     Event::GoalCompactionCallReserved {
@@ -215,7 +215,6 @@ impl Engine {
                     },
                 )
                 .await?;
-            crate::diagnostics::event_failure(&reserved.event);
         }
         let provider_deadline = active_reservation_ms
             .map_or(COMPACTION_CALL_DEADLINE, |reserved| {
@@ -239,9 +238,10 @@ impl Engine {
             Some((
                 super::routing::CallRouter {
                     providers: self.providers.clone(),
-                    store: &self.store,
+                    journal: &self.journal,
                     ledger: &super::ledger::GoalLedger::new(
-                        self.store
+                        self.journal
+                            .store()
                             .load_open_view(session_id)
                             .await?
                             .ok_or(EngineError::MissingSession)?,
@@ -304,26 +304,7 @@ impl Engine {
                 None,
             ),
         };
-        let trace_outcome = match &status {
-            CompactionStatus::Succeeded { .. } => TraceOutcome::Finished,
-            CompactionStatus::Failed {
-                reason: CompactionFailure::Cancelled,
-            } => TraceOutcome::Cancelled,
-            CompactionStatus::Failed { .. } => TraceOutcome::Failed,
-        };
-        let provider_outcome = match &status {
-            CompactionStatus::Succeeded { .. } => ProviderTraceOutcome::Finished,
-            CompactionStatus::Failed {
-                reason: CompactionFailure::Cancelled,
-            } => ProviderTraceOutcome::Cancelled,
-            CompactionStatus::Failed { reason } => ProviderTraceOutcome::Failed(match reason {
-                CompactionFailure::ProviderUnavailable => TraceFailure::Unavailable,
-                CompactionFailure::ProviderRejected => TraceFailure::Rejected,
-                CompactionFailure::InvalidOutcome => TraceFailure::InvalidResponse,
-                CompactionFailure::TimedOut => TraceFailure::Timeout,
-                CompactionFailure::Cancelled => unreachable!("handled above"),
-            }),
-        };
+        let provider_outcome = ProviderTraceOutcome::from(&status);
         provider_trace.finish_with_usage(provider_outcome, usage.input_tokens, usage.output_tokens);
         let record = CompactionRecord {
             covered_run_id,
@@ -347,7 +328,7 @@ impl Engine {
             status,
         };
         let committed = self
-            .store
+            .journal
             .append(
                 session_id,
                 Event::ContextCompacted {
@@ -356,9 +337,8 @@ impl Engine {
                 },
             )
             .await?;
-        crate::diagnostics::event_failure(&committed.event);
-        trace.event_committed(committed.sequence);
-        trace.finish(trace_outcome);
+        trace.event_committed(&committed);
+        trace.finish(provider_outcome.into());
         Ok(Some(record))
     }
 }

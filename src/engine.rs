@@ -1,3 +1,4 @@
+use crate::journal::{Journal, Subscription};
 use crate::provider::{
     AgentPhase, ImageAttachment, PromptRole, Provider, ProviderRequest, RunInput,
 };
@@ -9,7 +10,7 @@ use crate::session::{
     RunView, SessionId,
 };
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
-use crate::telemetry::{Telemetry, TraceOutcome};
+use crate::telemetry::Telemetry;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,8 +32,8 @@ pub use lifecycle::{
     set_session_defaults,
 };
 use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
+use progress::ProgressPublisher;
 pub use progress::{DisplayUpdate, RunPreview, RunProgress, RunUpdate};
-use progress::{ProgressPublisher, RunScope, append_observed, append_scoped};
 use report::goal_report;
 use run_loop::{RunControls, RunIdentity, RunLoop};
 
@@ -459,12 +460,12 @@ mod goal_workspace_lease_tests {
         let account_root = temp.path().join("account");
         let state = StateRoot::admit(&state_path).expect("private State root");
         let second_state = StateRoot::admit(&second_state_path).expect("second private State root");
-        let mut engine = Engine::open(state, NeverProvider).expect("Engine");
+        let engine = Engine::open(state, NeverProvider).expect("Engine");
         let session_id = SessionId::new();
         let goal_id = GoalId::new();
         let workspace_identity = (7, 11);
         engine
-            .store
+            .journal
             .append(
                 session_id,
                 Event::SessionStarted {
@@ -523,7 +524,8 @@ mod goal_workspace_lease_tests {
         // The call ends with its dropped future; the committed Goal is paused and no longer holds the writer lock.
         drop(leases);
         let view = engine
-            .store
+            .journal
+            .store()
             .load_view(session_id)
             .await
             .expect("canonical Session view")
@@ -534,7 +536,8 @@ mod goal_workspace_lease_tests {
             .expect("paused Goal releases the Workspace writer lock");
         drop(writer);
         let events = engine
-            .store
+            .journal
+            .store()
             .load_session(session_id)
             .await
             .expect("canonical Events");
@@ -553,7 +556,7 @@ mod goal_workspace_lease_tests {
         let session_id = SessionId::new();
         let workspace_identity = crate::tools::workspace_identity(&workspace).expect("identity");
         engine
-            .store
+            .journal
             .append(
                 session_id,
                 Event::SessionStarted {
@@ -605,7 +608,7 @@ mod goal_workspace_lease_tests {
         let goal_id = GoalId::new();
         let workspace_identity = crate::tools::workspace_identity(workspace).expect("identity");
         engine
-            .store
+            .journal
             .append(
                 session_id,
                 Event::SessionStarted {
@@ -616,7 +619,7 @@ mod goal_workspace_lease_tests {
             .await
             .expect("Session start");
         engine
-            .store
+            .journal
             .append(
                 session_id,
                 Event::GoalStarted {
@@ -678,7 +681,8 @@ mod goal_workspace_lease_tests {
             Ok(_) => panic!("Run resumed without a committed GoalResumed"),
         }
         let events = engine
-            .store
+            .journal
+            .store()
             .load_session(session_id)
             .await
             .expect("canonical Events");
@@ -814,7 +818,7 @@ fn resolve_goal_admission(
 
 pub struct Engine {
     state: StateRoot,
-    store: Store,
+    journal: Journal,
     providers: crate::provider::AdmittedProviders,
     telemetry: Telemetry,
     tools: Option<(crate::tools::config::Config, PathBuf)>,
@@ -846,7 +850,8 @@ impl Engine {
             lock.keep();
             locks.push(lock);
             let ancestor = self
-                .store
+                .journal
+                .store()
                 .load_view(id)
                 .await?
                 .ok_or(EngineError::InvalidHistory)?;
@@ -909,21 +914,28 @@ impl Engine {
     }
 
     async fn append_goal_lifecycle(
-        &mut self,
+        &self,
         session_id: SessionId,
-        scope: Option<RunScope<'_>>,
+        ledger: Option<&GoalLedger>,
         event: Event,
     ) -> Result<u64, EngineError> {
-        let appended = match scope {
-            Some(scope) => append_scoped(&self.store, scope, None, session_id, event.clone()).await,
-            None => append_observed(&self.store, None, session_id, event.clone())
+        let appended = match ledger {
+            Some(ledger) => {
+                ledger
+                    .append(&self.journal, session_id, event.clone())
+                    .await
+            }
+            None => self
+                .journal
+                .append(session_id, event.clone())
                 .await
-                .map(|committed| committed.sequence),
+                .map(|committed| committed.sequence)
+                .map_err(EngineError::from),
         };
         match appended {
             Ok(sequence) => Ok(sequence),
             // The Session lock is held, so a commit that lost its acknowledgment is the last Event.
-            Err(error) => match self.store.load_session(session_id).await {
+            Err(error) => match self.journal.store().load_session(session_id).await {
                 Ok(events)
                     if events
                         .last()
@@ -976,12 +988,12 @@ impl Engine {
         provider: impl Provider + 'static,
         telemetry: Telemetry,
     ) -> Result<Self, EngineError> {
-        let store = Store::open(state.try_clone()?)?;
+        let journal = Journal::new(Store::open(state.try_clone()?)?);
         let provider: Arc<dyn Provider> = Arc::new(provider);
         Ok(Self {
             state,
-            store,
-            providers: crate::provider::Providers::all(vec![Arc::clone(&provider)]),
+            journal,
+            providers: crate::provider::Providers::all(vec![provider]),
             telemetry,
             tools: None,
             workspace_permissions: None,
@@ -1007,8 +1019,13 @@ impl Engine {
     }
 
     pub async fn close(self) -> Result<(), EngineError> {
-        self.store.close().await?;
+        self.journal.close().await?;
         Ok(())
+    }
+
+    /// Events this Engine appends from now on, in commit order; see `Subscription` for its gaps.
+    pub fn subscribe(&self) -> Subscription {
+        self.journal.subscribe()
     }
 
     pub fn enable_tools(&mut self, guard_executable: PathBuf) -> Result<(), EngineError> {
@@ -1049,7 +1066,7 @@ impl Engine {
     ) -> Result<SessionId, EngineError> {
         fork_with_store(
             &self.state,
-            &self.store,
+            self.journal.store(),
             source_session_id,
             &workspace,
             title,
@@ -1230,7 +1247,7 @@ impl Engine {
         }
 
         if request.session_id.is_none() {
-            self.store
+            self.journal
                 .append(
                     session_id,
                     Event::SessionStarted {
@@ -1246,207 +1263,199 @@ impl Engine {
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
-        let trace_provider = crate::telemetry::TraceProvider::from_profile(&config.provider);
-        let goal_trace = self
+        let trace = self
             .telemetry
-            .begin_goal(session_id, goal.id, context_started);
+            .trace_run(session_id, goal.id, (context_started, context_ended));
         // Reduces the open state that appends validate; the closed view would reject this Run's links.
         let view = self
-            .store
+            .journal
+            .store()
             .load_open_view(session_id)
             .await?
             .ok_or(EngineError::InvalidHistory)?;
         let ledger = GoalLedger::new(view, goal.id);
         let publisher = progress.map(|progress| ProgressPublisher::new(progress, run_id));
-        let scope = RunScope {
-            ledger: &ledger,
-            publisher: publisher.as_ref(),
-        };
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
-        Self::retain_goal_workspace(
-            leases,
-            goal.id,
-            workspace_identity,
-            provisional_workspace_lock,
-        );
-        if goal.is_new {
-            let sequence = self
-                .append_goal_lifecycle(
+        // Subscribers follow the turn's Events and drain them when it ends; they never hold it back.
+        let progress_tap = publisher.as_ref().map(|_| self.journal.subscribe());
+        let trace_tap = trace.as_ref().map(|_| self.journal.subscribe());
+        let (end, _) = tokio::sync::watch::channel(());
+        let ended = |mut ended: tokio::sync::watch::Receiver<()>| async move {
+            let _ = ended.changed().await;
+        };
+        let follow_progress = {
+            let ended = ended(end.subscribe());
+            let (publisher, ledger) = (publisher.as_ref(), &ledger);
+            async move {
+                if let (Some(publisher), Some(tap)) = (publisher, progress_tap) {
+                    publisher.follow(tap, ended, ledger).await;
+                }
+            }
+        };
+        let follow_trace = {
+            let ended = ended(end.subscribe());
+            let (ledger, goal_id) = (&ledger, goal.id);
+            async move {
+                if let (Some(trace), Some(tap)) = (trace, trace_tap) {
+                    let goal = || {
+                        ledger
+                            .view(|view| view.goal(goal_id).cloned())
+                            .ok()
+                            .flatten()
+                    };
+                    trace.follow(tap, ended, goal).await;
+                }
+            }
+        };
+        let segment = async {
+            let turn = async {
+                Self::retain_goal_workspace(
+                    leases,
+                    goal.id,
+                    workspace_identity,
+                    provisional_workspace_lock,
+                );
+                if goal.is_new {
+                    self.append_goal_lifecycle(
+                        session_id,
+                        Some(&ledger),
+                        Event::GoalStarted {
+                            goal_id: goal.id,
+                            objective: objective.clone(),
+                            workspace_identity,
+                            budget: goal.budget,
+                            phase: goal.phase,
+                            autonomous: goal.autonomous,
+                            resource_settings: goal.resource_settings,
+                        },
+                    )
+                    .await?;
+                } else if goal.resume {
+                    self.append_goal_lifecycle(
+                        session_id,
+                        Some(&ledger),
+                        Event::GoalResumed { goal_id: goal.id },
+                    )
+                    .await?;
+                }
+                if cancellation.is_cancelled() {
+                    return Err(EngineError::CancelledBeforeStart);
+                }
+                // A link is an admission acknowledgment: a lost acknowledgment may still have committed it.
+                self.append_goal_lifecycle(
                     session_id,
-                    Some(scope),
-                    Event::GoalStarted {
+                    Some(&ledger),
+                    Event::GoalRunLinked {
                         goal_id: goal.id,
-                        objective: objective.clone(),
-                        workspace_identity,
-                        budget: goal.budget,
+                        run_id,
                         phase: goal.phase,
-                        autonomous: goal.autonomous,
-                        resource_settings: goal.resource_settings,
                     },
                 )
                 .await?;
-            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalStarted);
-        } else if goal.resume {
-            let sequence = self
-                .append_goal_lifecycle(
+                if cancellation.is_cancelled() {
+                    return Err(EngineError::CancelledBeforeStart);
+                }
+                let accepted = Event::MessageAccepted {
+                    run_id,
+                    text: objective.clone(),
+                    images: request.images,
+                };
+                ledger.append(&self.journal, session_id, accepted).await?;
+                let started = Event::RunStarted {
+                    run_id,
+                    config,
+                    active_deadline_ms: ledger.run_active_deadline()?,
+                };
+                ledger.append(&self.journal, session_id, started).await?;
+                let spawned = Event::AgentSpawned {
+                    run_id,
+                    agent_run_id,
+                    role: AgentRole::Primary,
+                    ordinal: 0,
+                    objective: None,
+                    grant: None,
+                };
+                ledger.append(&self.journal, session_id, spawned).await?;
+                let role = if tool_context.is_some() {
+                    PromptRole::Primary
+                } else {
+                    PromptRole::ReadOnly
+                };
+                let provider_request = ProviderRequest {
                     session_id,
-                    Some(scope),
-                    Event::GoalResumed { goal_id: goal.id },
+                    run_id,
+                    agent_run_id,
+                    phase: AgentPhase::RootPlan,
+                    collaboration: request.policy,
+                    model: identity.model.clone(),
+                    max_output_tokens: identity.limits.max_output_tokens,
+                    input: RunInput {
+                        images,
+                        goal_budget: Some(budget),
+                        goal_plan_contract: goal.plan_contract.clone(),
+                        workspace_guidance: inputs
+                            .instructions
+                            .map(|(_, snapshot)| snapshot.content),
+                        includes: inputs
+                            .includes
+                            .into_iter()
+                            .map(|snapshot| snapshot.model_include())
+                            .collect(),
+                        history,
+                        context_summary: summary,
+                        tools: tool_context,
+                        ..RunInput::new(role, objective)
+                    },
+                };
+                if let Some(steering) = &self.steering {
+                    steering.begin_run();
+                }
+                // Boxed: the Run loop's future is large and would overflow a small caller stack.
+                Box::pin(
+                    RunLoop::new(
+                        &self.journal,
+                        self.providers.clone(),
+                        RunIdentity {
+                            session_id,
+                            run_id,
+                            goal_id: goal.id,
+                            primary_id: agent_run_id,
+                        },
+                        RunControls {
+                            policy: request.policy,
+                            concurrency: provider_concurrency,
+                            goal_phase: goal.phase,
+                            cancellation,
+                            tools: tools.as_ref(),
+                            approvals: self.tool_approvals.as_ref(),
+                            steering: self.steering.clone(),
+                        },
+                        &ledger,
+                        publisher.as_ref(),
+                    )
+                    .execute(provider_request),
                 )
                 .await?;
-            goal_trace.event_committed(sequence, crate::telemetry::TraceEventKind::GoalResumed);
-        }
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-        // A link is an admission acknowledgment: a lost acknowledgment may still have committed it.
-        let linked_sequence = self
-            .append_goal_lifecycle(
-                session_id,
-                Some(scope),
-                Event::GoalRunLinked {
-                    goal_id: goal.id,
-                    run_id,
-                    phase: goal.phase,
-                },
-            )
-            .await?;
-        goal_trace.event_committed(
-            linked_sequence,
-            crate::telemetry::TraceEventKind::GoalRunLinked,
-        );
-        if cancellation.is_cancelled() {
-            return Err(EngineError::CancelledBeforeStart);
-        }
-        let accepted_sequence = append_scoped(
-            &self.store,
-            scope,
-            None,
-            session_id,
-            Event::MessageAccepted {
-                run_id,
-                text: objective.clone(),
-                images: request.images,
-            },
-        )
-        .await?;
-        let started_sequence = append_scoped(
-            &self.store,
-            scope,
-            None,
-            session_id,
-            Event::RunStarted {
-                run_id,
-                config,
-                active_deadline_ms: ledger.run_active_deadline()?,
-            },
-        )
-        .await?;
-        let trace = self.telemetry.begin_goal_run(
-            session_id,
-            run_id,
-            trace_provider,
-            &goal_trace,
-            Some((context_started, context_ended)),
-        );
-        trace.event_committed(
-            accepted_sequence,
-            crate::telemetry::TraceEventKind::MessageAccepted,
-        );
-        trace.event_committed(
-            started_sequence,
-            crate::telemetry::TraceEventKind::RunStarted,
-        );
-        append_scoped(
-            &self.store,
-            scope,
-            Some(&trace),
-            session_id,
-            Event::AgentSpawned {
-                run_id,
-                agent_run_id,
-                role: AgentRole::Primary,
-                ordinal: 0,
-                objective: None,
-                grant: None,
-            },
-        )
-        .await?;
-
-        let role = if tool_context.is_some() {
-            PromptRole::Primary
-        } else {
-            PromptRole::ReadOnly
+                self.settle_turn(
+                    StartedRun {
+                        session_id,
+                        run_id,
+                        goal: &goal,
+                        finish_after_run,
+                        workspace_identity,
+                    },
+                    leases,
+                )
+                .await
+            }
+            .await;
+            drop(end);
+            turn
         };
-        let provider_request = ProviderRequest {
-            session_id,
-            run_id,
-            agent_run_id,
-            phase: AgentPhase::RootPlan,
-            collaboration: request.policy,
-            model: identity.model.clone(),
-            max_output_tokens: identity.limits.max_output_tokens,
-            input: RunInput {
-                images,
-                goal_budget: Some(budget),
-                goal_plan_contract: goal.plan_contract.clone(),
-                workspace_guidance: inputs.instructions.map(|(_, snapshot)| snapshot.content),
-                includes: inputs
-                    .includes
-                    .into_iter()
-                    .map(|snapshot| snapshot.model_include())
-                    .collect(),
-                history,
-                context_summary: summary,
-                tools: tool_context,
-                ..RunInput::new(role, objective)
-            },
-        };
-        if let Some(steering) = &self.steering {
-            steering.begin_run();
-        }
-        // Boxed: the Run loop's future is large and would overflow a small caller stack.
-        Box::pin(
-            RunLoop::new(
-                &self.store,
-                self.providers.clone(),
-                RunIdentity {
-                    session_id,
-                    run_id,
-                    goal_id: goal.id,
-                    primary_id: agent_run_id,
-                },
-                RunControls {
-                    policy: request.policy,
-                    concurrency: provider_concurrency,
-                    goal_phase: goal.phase,
-                    cancellation,
-                    tools: tools.as_ref(),
-                    approvals: self.tool_approvals.as_ref(),
-                    steering: self.steering.clone(),
-                },
-                &ledger,
-                publisher.as_ref(),
-                &trace,
-            )
-            .execute(provider_request),
-        )
-        .await?;
-        self.settle_turn(
-            StartedRun {
-                session_id,
-                run_id,
-                goal: &goal,
-                finish_after_run,
-                workspace_identity,
-            },
-            leases,
-            trace,
-            goal_trace,
-        )
-        .await
+        let (turn, (), ()) = tokio::join!(segment, follow_progress, follow_trace);
+        turn
     }
 
     /// Resolves the Goal and takes the Session, lineage and Workspace admissions a Run needs.
@@ -1470,7 +1479,8 @@ impl Engine {
         let mut session_lock = self.lock_session(session_id)?;
         let history = if request.session_id.is_some() {
             Some(
-                self.store
+                self.journal
+                    .store()
                     .load_view(session_id)
                     .await?
                     .ok_or(EngineError::MissingSession)?,
@@ -1510,7 +1520,9 @@ impl Engine {
         let event_slots = RUN_START_EVENTS
             + first_action.max_events_for(&self.providers)
             + usize::from(request.session_id.is_none());
-        self.store.admit_run_start(session_id, event_slots).await?;
+        self.journal
+            .admit_run_start(session_id, event_slots)
+            .await?;
         let provisional_workspace_lock = if goal.phase == crate::session::GoalPhase::Implementation
             && self.tools.as_ref().is_some_and(|(config, _)| config.write)
         {
@@ -1688,8 +1700,6 @@ impl Engine {
         &self,
         started: StartedRun<'_>,
         leases: &mut WorkspaceLeases,
-        trace: crate::telemetry::RunTrace,
-        goal_trace: crate::telemetry::GoalTrace,
     ) -> Result<RunTurn, EngineError> {
         let StartedRun {
             session_id,
@@ -1699,7 +1709,8 @@ impl Engine {
             workspace_identity,
         } = started;
         let view = self
-            .store
+            .journal
+            .store()
             .load_view(session_id)
             .await?
             .ok_or(EngineError::InvalidHistory)?;
@@ -1731,29 +1742,28 @@ impl Engine {
         let mut goal_status = GoalStatus::Running;
         if let Some(status) = terminal {
             let report = goal_report(&view, &run, goal_view);
-            append_observed(
-                &self.store,
-                Some(&trace),
-                session_id,
-                Event::GoalFinished {
-                    goal_id: goal.id,
-                    status,
-                    active_ms: goal_view.active_ms,
-                    report,
-                },
-            )
-            .await?;
+            self.journal
+                .append(
+                    session_id,
+                    Event::GoalFinished {
+                        goal_id: goal.id,
+                        status,
+                        active_ms: goal_view.active_ms,
+                        report,
+                    },
+                )
+                .await?;
             Self::release_goal_workspace(leases, goal.id, workspace_identity);
             goal_status = status;
         }
-        let trace_outcome = match run.status {
-            crate::session::RunStatus::Finished => TraceOutcome::Finished,
-            crate::session::RunStatus::Failed => TraceOutcome::Failed,
-            crate::session::RunStatus::Cancelled => TraceOutcome::Cancelled,
-            _ => return Err(EngineError::InvalidHistory),
-        };
-        trace.finish(trace_outcome);
-        goal_trace.finish(goal_status, trace_outcome, goal_view);
+        if !matches!(
+            run.status,
+            crate::session::RunStatus::Finished
+                | crate::session::RunStatus::Failed
+                | crate::session::RunStatus::Cancelled
+        ) {
+            return Err(EngineError::InvalidHistory);
+        }
         Ok(RunTurn {
             outcome: RunOutcome {
                 session_id,

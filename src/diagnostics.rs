@@ -20,6 +20,10 @@ pub fn enable_development_diagnostics(root: &StateRoot) {
     }
 }
 
+pub(crate) fn enabled() -> bool {
+    cfg!(debug_assertions) && ROOT.get().is_some()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SubscriptionFailureStage {
     RequestTransport,
@@ -305,6 +309,16 @@ pub(crate) fn event_failure(event: &crate::session::Event) {
         }
         _ => return,
     }
+    record_local(record);
+}
+
+/// The diagnostics subscriber fell behind the Journal tap and skipped `missed` Events.
+pub(crate) fn tap_resync(missed: u64) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let mut record = BoundedRecord(String::new());
+    let _ = writeln!(record, "journal resync missed={missed}");
     record_local(record);
 }
 
