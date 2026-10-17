@@ -212,6 +212,7 @@ impl Config {
             config_digest: self.digest(),
             permissions_digest: None,
             max_context_bytes: MAX_TOOL_CONTEXT_BYTES as u32,
+            unguarded_rules_digest: None,
         }
     }
 
@@ -234,7 +235,7 @@ impl Config {
             | ToolCall::Mkdir { path }
             | ToolCall::Write { path, .. }
             | ToolCall::Edit { path, .. } => Some(path),
-            ToolCall::Command { program, .. } => {
+            ToolCall::Command { program, .. } | ToolCall::CommandUnguarded { program, .. } => {
                 return self.commands.iter().any(|value| &value.name == program);
             }
             ToolCall::ApplyChangeset { changeset, .. } => {

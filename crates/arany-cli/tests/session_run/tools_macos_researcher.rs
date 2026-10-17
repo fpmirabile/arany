@@ -484,6 +484,7 @@ done
                     );
                     assert_eq!(receipt.limits, observation.intent.limits);
                 }
+                Attestation::Unguarded(_) => panic!("researchers never run unguarded"),
             }
         }
         let output =

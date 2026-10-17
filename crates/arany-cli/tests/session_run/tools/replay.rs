@@ -34,6 +34,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         contract_version: 1,
         config_digest: [1; 32],
         max_context_bytes: 65536,
+        unguarded_rules_digest: None,
     };
     let config = RunConfig {
         providers: None,

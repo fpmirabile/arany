@@ -30,6 +30,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ToolCall::Write { path, .. } => format!("Write {path}"),
         ToolCall::Edit { path, .. } => format!("Edit {path}"),
         ToolCall::Command { program, .. } => format!("Command {program}"),
+        ToolCall::CommandUnguarded { program, .. } => format!("Unguarded command {program}"),
         ToolCall::ApplyChangeset { changeset, .. } => {
             format!("Publish {} command file changes", changeset.files.len())
         }
