@@ -486,15 +486,16 @@ async fn manager(
     let (status, stdout, _) = super::super::capture(
         command
             .spawn()
-            .map_err(|_| ToolError::ProtectionUnavailable)?,
+            .map_err(|_| ToolError::GuardRejected(GuardStage::NativeManager))?,
         4096,
         Duration::from_secs(3),
     )
-    .await?;
+    .await
+    .map_err(|_| ToolError::GuardRejected(GuardStage::NativeManager))?;
     if status.success() || (bootout && status.code() == Some(libc::ESRCH)) {
         Ok(stdout)
     } else {
-        Err(ToolError::ProtectionUnavailable)
+        Err(ToolError::GuardRejected(GuardStage::NativeManager))
     }
 }
 
@@ -816,7 +817,7 @@ pub(super) async fn execute(
         let mut stream = BufReader::new(
             tokio::time::timeout(CONNECT_DEADLINE, unit.connect(runtime))
                 .await
-                .map_err(|_| ToolError::Limit)??,
+                .map_err(|_| ToolError::GuardRejected(GuardStage::ConnectionDeadline))??,
         );
         capture.complete();
         let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
@@ -830,7 +831,7 @@ pub(super) async fn execute(
             read_line_capped(&mut stream, 2048).await
         })
         .await
-        .map_err(|_| ToolError::Limit)??;
+        .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
         if bytes == b"CACHE_READY\n" {
             let session = cache.as_ref().ok_or(ToolError::Operation)?;
             let transfer_deadline =
@@ -843,7 +844,7 @@ pub(super) async fn execute(
             .map_err(|_| ToolError::Limit)??;
             bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
                 .await
-                .map_err(|_| ToolError::Limit)??;
+                .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
         }
         if let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(&bytes) {
             return Err(ToolError::GuardBootstrap(failure));
@@ -1300,6 +1301,20 @@ mod tests {
     use crate::tools::ToolCall;
     use crate::tools::guard::read_capped;
     use std::io::Read;
+
+    #[tokio::test]
+    async fn native_manager_failures_keep_their_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let domain = format!("user/{}", rustix::process::geteuid().as_raw());
+        let label = format!("dev.arany.test.{}", uuid::Uuid::now_v7());
+        let missing = root.path().join("missing.plist");
+        for action in [ManagerAction::Bootstrap(&missing), ManagerAction::Kickstart] {
+            assert!(matches!(
+                manager(&domain, &label, action).await,
+                Err(ToolError::GuardRejected(GuardStage::NativeManager))
+            ));
+        }
+    }
 
     #[test]
     fn recovery_refuses_unowned_records_and_live_roots() {

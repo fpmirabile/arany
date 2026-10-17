@@ -56,6 +56,7 @@ struct Fixture {
     state: std::path::PathBuf,
     engine: Engine,
     command_maximum: Option<u32>,
+    settings: Option<Value>,
 }
 
 impl Fixture {
@@ -102,6 +103,7 @@ impl Fixture {
             state,
             engine,
             command_maximum: None,
+            settings: settings.cloned(),
         }
     }
 
@@ -160,17 +162,22 @@ impl Fixture {
         let unconsumed = provider.responses.lock().unwrap().len();
         assert!(
             unconsumed == 0,
-            "all expected calls consumed: {unconsumed} left, run {:?}, tools {:?}",
+            "all expected calls consumed: {unconsumed} left, fixture settings {:?}, run {:?}, tools {:?}",
+            self.settings,
             result.run.status,
             result
                 .run
                 .tools
                 .iter()
-                .map(|tool| tool.observation.as_ref().map(|observation| (
-                    observation.disposition,
-                    observation.attestation.is_some(),
-                    &observation.output
-                )))
+                .chain(result.run.agents.iter().flat_map(|agent| &agent.tools))
+                .map(|tool| (
+                    serde_json::to_value(&tool.intent.call).unwrap()["operation"].clone(),
+                    tool.observation.as_ref().map(|observation| (
+                        observation.disposition,
+                        observation.attestation.is_some(),
+                        &observation.output
+                    ))
+                ))
                 .collect::<Vec<_>>()
         );
         (result, requests, humans)

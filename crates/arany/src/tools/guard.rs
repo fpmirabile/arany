@@ -353,6 +353,8 @@ impl BootstrapFailure {
 /// A Guard stage that failed after bootstrap reported success, or outside its child.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GuardStage {
+    ConnectionDeadline,
+    PreparationDeadline,
     ResourceAttestation,
     ProcessCleanup,
     StorageCleanup,
@@ -366,6 +368,8 @@ pub enum GuardStage {
 impl GuardStage {
     pub(super) fn failure_stage(self) -> &'static str {
         match self {
+            Self::ConnectionDeadline => "connection deadline",
+            Self::PreparationDeadline => "preparation deadline",
             Self::ResourceAttestation => "resource attestation",
             Self::ProcessCleanup => "process cleanup",
             Self::StorageCleanup => "storage cleanup",

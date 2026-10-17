@@ -1431,6 +1431,42 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         );
         assert!(receipt.valid());
     }
+    for (stage, label) in [
+        (
+            super::guard::GuardStage::ConnectionDeadline,
+            "connection deadline",
+        ),
+        (
+            super::guard::GuardStage::PreparationDeadline,
+            "preparation deadline",
+        ),
+    ] {
+        let mut reserved = observation.intent.clone();
+        reserved.limits.result_bytes = 128;
+        let failed =
+            super::unstarted_observation(reserved.clone(), super::ToolError::GuardRejected(stage));
+        assert_eq!(failed.disposition, ToolDisposition::Failed);
+        assert!(failed.attestation.is_none());
+        assert!(failed.valid() && failed.stops_run());
+        assert_eq!(
+            failed.output,
+            format!("Guard {label} unavailable before dispatch; no operation was dispatched.")
+        );
+        let uncertain = super::uncertain_observation(
+            reserved,
+            super::ToolError::GuardRejected(stage),
+            crate::tools::CacheUpdate::NotApplicable,
+        );
+        assert_eq!(uncertain.disposition, ToolDisposition::Uncertain);
+        assert!(uncertain.attestation.is_none());
+        assert!(uncertain.valid() && uncertain.stops_run());
+        assert_eq!(
+            uncertain.output,
+            format!(
+                "Guard {label} unconfirmed; effects may have occurred. Do not retry automatically."
+            )
+        );
+    }
     for error in errors {
         let mut reserved = observation.intent.clone();
         reserved.limits.result_bytes = 128;
