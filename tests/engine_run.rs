@@ -6160,6 +6160,25 @@ async fn tool_step_events(
         .collect()
 }
 
+/// The Tool catalog's platform command contract differs on macOS, so only Linux pins exact
+/// result sizes.
+fn platform_events(events: &str) -> String {
+    if !cfg!(target_os = "macos") {
+        return events.to_owned();
+    }
+    events
+        .lines()
+        .map(|line| match line.split_once(" result_bytes=") {
+            Some((head, rest)) => {
+                let tail = rest.split_once(' ').map_or("", |(_, tail)| tail);
+                format!("{head} result_bytes=_ {tail}")
+            }
+            None => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn write_plan() -> arany::GoalPlanContract {
     arany::GoalPlanContract {
         mission: "Record a new fact".into(),
@@ -6253,7 +6272,11 @@ async fn primary_tool_step_events_match_the_snapshot() {
         ),
     ] {
         let events = tool_step_events(CollaborationPolicy::Single, outcomes, setup).await;
-        assert_eq!(events.join("\n"), expected, "primary {case} step");
+        assert_eq!(
+            platform_events(&events.join("\n")),
+            platform_events(expected),
+            "primary {case} step"
+        );
     }
 }
 
@@ -6300,7 +6323,11 @@ async fn researcher_tool_step_events_match_the_snapshot() {
             READ_ONLY,
         )
         .await;
-        assert_eq!(events.join("\n"), expected, "researcher {case} step");
+        assert_eq!(
+            platform_events(&events.join("\n")),
+            platform_events(expected),
+            "researcher {case} step"
+        );
     }
 }
 
