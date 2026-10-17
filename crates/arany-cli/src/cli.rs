@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 pub(crate) mod attached;
 pub(crate) mod exec;
+pub(crate) mod generate_schema;
 pub(crate) mod provider;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
