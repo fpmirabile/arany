@@ -222,7 +222,7 @@ impl AnthropicProvider {
                 {
                     ProviderError::Unavailable
                 } else {
-                    ProviderError::Rejected
+                    ProviderError::CallRejected
                 },
             );
         }
@@ -315,7 +315,7 @@ impl Provider for AnthropicProvider {
                 {
                     ProviderError::Unavailable
                 } else {
-                    ProviderError::Rejected
+                    ProviderError::CallRejected
                 },
             );
         }
@@ -324,7 +324,7 @@ impl Provider for AnthropicProvider {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|_| ProviderError::Unavailable)?
+            .map_err(|_| ProviderError::PartialTransport)?
         {
             if let Some(bytes) = decoder.feed(&chunk)? {
                 return self.decode_run(&bytes, &request, &conversation);

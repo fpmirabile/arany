@@ -18,6 +18,11 @@ mod native_check;
 mod openai;
 pub(crate) mod prompts;
 mod render;
+mod routing;
+pub use routing::{
+    AdmittedProviders, MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_SWITCHES, ProviderFallback,
+    ProviderRole, ProviderRoutes, Providers,
+};
 mod streaming;
 #[cfg(test)]
 mod test_support;
@@ -78,7 +83,7 @@ async fn read_identity_body(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| ProviderError::Unavailable)?
+        .map_err(|_| ProviderError::PartialTransport)?
     {
         if chunk.len() > max - bytes.len() {
             return Err(ProviderError::InvalidOutcome);
@@ -260,15 +265,20 @@ pub(crate) fn valid_saved_api_account_id(profile: &str, id: Option<Uuid>) -> boo
     })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Provenance {
-    Native { saved_api_account_id: Option<Uuid> },
+    Native {
+        #[serde(deserialize_with = "Option::deserialize")]
+        saved_api_account_id: Option<Uuid>,
+    },
     Custom(CustomProfileProvenance),
     ChatGpt(ChatGptProvenance),
 }
 
 /// Declared ceilings the Engine enforces for every call of one adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CallLimits {
     pub concurrency: u8,
     /// Output tokens a primary call requests; children and Tool review request smaller caps.
@@ -289,10 +299,12 @@ impl Default for CallLimits {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderIdentity {
     pub profile: String,
     pub model: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub effort: Option<Effort>,
     pub provenance: Provenance,
     pub limits: CallLimits,
@@ -652,8 +664,14 @@ fn tool_request_reflects_secret(request: &crate::tools::ToolRequest, secret: &st
 pub enum ProviderError {
     #[error("Provider unavailable")]
     Unavailable,
+    #[error("Provider transport failed after response admission")]
+    PartialTransport,
+    #[error("Provider call timed out")]
+    CallTimedOut,
     #[error("Provider rejected the request")]
     Rejected,
+    #[error("Provider rejected the call before output")]
+    CallRejected,
     #[error("Provider returned an invalid outcome")]
     InvalidOutcome,
     #[error("Provider stream was incomplete or malformed")]
@@ -691,6 +709,13 @@ pub enum ProviderFailureReason {
 }
 
 impl ProviderError {
+    pub(crate) fn allows_fallback(&self) -> bool {
+        matches!(
+            self,
+            Self::Unavailable | Self::CallRejected | Self::RemoteHttp(_)
+        )
+    }
+
     pub(crate) fn failure_reason(&self) -> Option<ProviderFailureReason> {
         match self {
             Self::InvalidStream => Some(ProviderFailureReason::StreamProtocol),
@@ -715,16 +740,20 @@ impl ProviderError {
 
     pub(crate) fn failure_class(&self) -> ProviderFailureClass {
         match self {
-            Self::Unavailable | Self::RemoteHttp(500..=599) => ProviderFailureClass::Unavailable,
+            Self::Unavailable
+            | Self::PartialTransport
+            | Self::CallTimedOut
+            | Self::RemoteHttp(500..=599) => ProviderFailureClass::Unavailable,
             Self::RemoteStreamCode(_)
                 if self.failure_reason()
                     == Some(ProviderFailureReason::UsageTemporarilyUnavailable) =>
             {
                 ProviderFailureClass::Unavailable
             }
-            Self::Rejected | Self::RemoteHttp(400..=499) | Self::RemoteStreamCode(_) => {
-                ProviderFailureClass::Rejected
-            }
+            Self::Rejected
+            | Self::CallRejected
+            | Self::RemoteHttp(400..=499)
+            | Self::RemoteStreamCode(_) => ProviderFailureClass::Rejected,
             Self::InvalidOutcome
             | Self::InvalidStream
             | Self::InvalidResponseContract
@@ -818,6 +847,29 @@ pub trait Provider: Send + Sync {
         _request: CompactionRequest,
     ) -> Result<CompactionResponse, ProviderError> {
         Err(ProviderError::Unavailable)
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: Provider + ?Sized> Provider for std::sync::Arc<T> {
+    fn identity(&self) -> &ProviderIdentity {
+        (**self).identity()
+    }
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        (**self).invoke(request).await
+    }
+    async fn invoke_with_preview(
+        &self,
+        request: ProviderRequest,
+        preview: ResponsePreview,
+    ) -> Result<ProviderResponse, ProviderError> {
+        (**self).invoke_with_preview(request, preview).await
+    }
+    async fn compact(
+        &self,
+        request: CompactionRequest,
+    ) -> Result<CompactionResponse, ProviderError> {
+        (**self).compact(request).await
     }
 }
 

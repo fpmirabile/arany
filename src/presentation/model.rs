@@ -423,6 +423,7 @@ mod tests {
             objective: "task".into(),
             images: Vec::new(),
             config: Some(RunConfig {
+                providers: None,
                 provider: "anthropic".into(),
                 model: "claude-sonnet-5".into(),
                 effort: None,
@@ -489,6 +490,7 @@ mod tests {
             tool_compaction_covered_count: 0,
             display: Vec::new(),
             steering_notes: Vec::new(),
+            provider_fallbacks: Vec::new(),
         });
         let model = PresentationModel::from_session(&view, 80);
         assert_eq!(model.draft_action, DraftAction::InspectRun);

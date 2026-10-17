@@ -263,6 +263,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         tool_compaction_covered_count: 0,
                         display: Vec::new(),
                         steering_notes: Vec::new(),
+                        provider_fallbacks: Vec::new(),
                     });
                     terminal.record_user_run(&view.runs[0]).unwrap();
                     for lines in [50, 100, 200] {
@@ -1596,6 +1597,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .await
             .expect("pending objective");
         let mut config = RunConfig {
+            providers: None,
             provider: "scripted".into(),
             model: "test-model".into(),
             effort: None,
@@ -2193,6 +2195,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
             let interrupted_run = RunId::new();
             let primary = AgentRunId::new();
             let config = RunConfig {
+                providers: None,
                 provider: "scripted".into(),
                 model: "test-model".into(),
                 effort: None,

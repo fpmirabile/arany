@@ -85,6 +85,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
             Event::RunStarted {
                 run_id,
                 config: RunConfig {
+                    providers: None,
                     provider: "scripted".into(),
                     model: "test-model".into(),
                     effort: None,

@@ -48,13 +48,13 @@ fn compaction_context_input(
     })
 }
 
-enum CallResult {
+pub(super) enum CallResult {
     Response(ProviderResponse),
     Failed(CallFailure),
     Cancelled,
 }
 
-enum CallFailure {
+pub(super) enum CallFailure {
     Timeout,
     Unavailable(Option<ProviderFailureReason>),
     Rejected(Option<ProviderFailureReason>),
@@ -119,14 +119,14 @@ impl DisplayCheckpoint {
 }
 
 pub(super) struct RunLoop<'a> {
-    store: &'a Store,
-    provider: Arc<dyn Provider>,
+    store: Arc<Store>,
+    routing: super::routing::CallRouter,
     session_id: SessionId,
     run_id: RunId,
     goal_id: crate::session::GoalId,
     primary_id: AgentRunId,
     controls: RunControls<'a>,
-    ledger: &'a GoalLedger,
+    ledger: Arc<GoalLedger>,
     progress: Option<&'a ProgressPublisher>,
     trace: &'a RunTrace,
 }
@@ -150,17 +150,22 @@ pub(super) struct RunIdentity {
 
 impl<'a> RunLoop<'a> {
     pub(super) fn new(
-        store: &'a Store,
-        provider: Arc<dyn Provider>,
+        store: Arc<Store>,
+        providers: crate::provider::AdmittedProviders,
         identity: RunIdentity,
         controls: RunControls<'a>,
-        ledger: &'a GoalLedger,
+        ledger: Arc<GoalLedger>,
         progress: Option<&'a ProgressPublisher>,
         trace: &'a RunTrace,
     ) -> Self {
         Self {
+            routing: super::routing::CallRouter {
+                providers,
+                store: Arc::clone(&store),
+                ledger: Arc::clone(&ledger),
+                publisher: progress.cloned(),
+            },
             store,
-            provider,
             session_id: identity.session_id,
             run_id: identity.run_id,
             goal_id: identity.goal_id,
@@ -173,12 +178,12 @@ impl<'a> RunLoop<'a> {
     }
 
     fn ledger(&self) -> &GoalLedger {
-        self.ledger
+        &self.ledger
     }
 
-    fn scope(&self) -> RunScope<'a> {
+    fn scope(&self) -> RunScope<'_> {
         RunScope {
-            ledger: self.ledger,
+            ledger: &self.ledger,
             publisher: self.progress,
         }
     }
@@ -190,7 +195,7 @@ impl<'a> RunLoop<'a> {
 
     async fn append(&self, event: Event) -> Result<(), EngineError> {
         let _ = append_scoped(
-            self.store,
+            &self.store,
             self.scope(),
             Some(self.trace),
             self.session_id,
@@ -419,9 +424,13 @@ impl<'a> RunLoop<'a> {
             if self.pause_at_boundary() {
                 return self.settle_stopped_primary(primary).await;
             }
+            let call_provider = self
+                .routing
+                .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
+            root_request.model = call_provider.identity().model.clone();
             let first_trace = first_call.then(|| primary.begin_first_provider());
             let next_trace = (!first_call)
-                .then(|| primary.begin_provider(AgentPhase::RootPlan, &root_request.model));
+                .then(|| primary.begin_provider(AgentPhase::RootPlan, call_provider.identity()));
             first_call = false;
             let (first, active_segment) = match self.invoke_primary(&mut root_request).await {
                 Ok(result) => result,
@@ -564,8 +573,14 @@ impl<'a> RunLoop<'a> {
         &self,
         root: &mut ProviderRequest,
     ) -> Result<(CallResult, ActiveSegment), EngineError> {
-        let active_segment =
-            self.reserve_active_segment(self.provider.identity().limits.deadline)?;
+        let provider = self
+            .routing
+            .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
+        root.model = provider.identity().model.clone();
+        root.max_output_tokens = root
+            .max_output_tokens
+            .min(provider.identity().limits.max_output_tokens);
+        let active_segment = self.reserve_active_segment(provider.identity().limits.deadline)?;
         let deadline = active_segment
             .deadline()
             .checked_sub(STORE_ACTION_OVERHEAD)
@@ -593,17 +608,14 @@ impl<'a> RunLoop<'a> {
         let request = root.clone();
         let context = self
             .progress
-            .map(|progress| progress.preview_context(self.ledger, self.primary_id))
+            .map(|progress| progress.preview_context(&self.ledger, self.primary_id))
             .transpose()?
             .flatten();
         let Some(context) = context else {
-            let result = invoke_bounded(
-                self.provider.as_ref(),
-                request,
-                deadline,
-                self.controls.cancellation.clone(),
-            )
-            .await;
+            let result = self
+                .routing
+                .invoke(request, deadline, self.controls.cancellation.clone(), None)
+                .await?;
             self.settle_result(&result);
             return Ok((result, active_segment));
         };
@@ -620,8 +632,7 @@ impl<'a> RunLoop<'a> {
             limited: false,
             limit_recorded: context.limit_recorded,
         };
-        let future = invoke_bounded_with_preview(
-            self.provider.as_ref(),
+        let future = self.routing.invoke(
             request,
             deadline,
             self.controls.cancellation.clone(),
@@ -631,7 +642,7 @@ impl<'a> RunLoop<'a> {
         let mut observing = true;
         let result = loop {
             tokio::select! {
-                result = &mut future => break result,
+                result = &mut future => break result?,
                 changed = receiver.changed(), if observing => {
                     if changed.is_err() { observing = false; continue; }
                     let text = checkpoint.filter(&receiver.borrow_and_update());
@@ -1245,16 +1256,20 @@ impl<'a> RunLoop<'a> {
             &selected_observations,
         ))
         .map_err(|_| EngineError::InvalidRequest)?;
+        let compaction_provider = self
+            .routing
+            .provider(crate::provider::ProviderRole::Compaction, self.primary_id)?;
         let compaction_request = CompactionRequest {
             session_id: self.session_id,
             covered_run_id: self.run_id,
-            model: request.model.clone(),
+            model: compaction_provider.identity().model.clone(),
             previous_summary,
             items: vec![CompactionItem::Completed(HistoryTurn {
                 user: compaction_user,
                 assistant,
             })],
-            max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS,
+            max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS
+                .min(compaction_provider.identity().limits.max_output_tokens),
         };
         let source_len = crate::provider::compaction_input_bytes(&compaction_request)
             .map_err(|_| EngineError::InvalidRequest)?;
@@ -1265,7 +1280,11 @@ impl<'a> RunLoop<'a> {
         }
         let source_bytes = u32::try_from(source_len).map_err(|_| EngineError::InvalidRequest)?;
 
-        let compaction_trace = self.trace.begin_context_compaction();
+        let compaction_trace =
+            self.trace
+                .begin_context_compaction(crate::telemetry::TraceProvider::from_profile(
+                    &compaction_provider.identity().profile,
+                ));
         let provider_trace = compaction_trace.begin_provider(&compaction_request.model);
         let call_deadline = active_segment
             .deadline()
@@ -1275,10 +1294,13 @@ impl<'a> RunLoop<'a> {
         let response = tokio::select! {
             biased;
             () = cancellation.cancelled() => None,
-            response = tokio::time::timeout(call_deadline, self.provider.compact(compaction_request)) => {
+            response = tokio::time::timeout(call_deadline, self.routing.compact(compaction_request, self.primary_id)) => {
                 Some(response)
             }
         };
+        let compaction_provider = self
+            .routing
+            .provider(crate::provider::ProviderRole::Compaction, self.primary_id)?;
         let (mut status, response_id, usage, wire_provenance) = match response {
             None => (
                 CompactionStatus::Failed {
@@ -1288,13 +1310,22 @@ impl<'a> RunLoop<'a> {
                 Usage::default(),
                 None,
             ),
-            Some(Ok(Ok(response))) => super::compaction::classify_response(response),
-            Some(Ok(Err(error))) => (
+            Some(Ok(Ok((Ok(response), _)))) => super::compaction::classify_response(response),
+            Some(Ok(Err(error))) => return Err(error),
+            Some(Ok(Ok((Err(error), _)))) => (
                 CompactionStatus::Failed {
-                    reason: match error.failure_class() {
-                        ProviderFailureClass::Unavailable => CompactionFailure::ProviderUnavailable,
-                        ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
-                        ProviderFailureClass::InvalidOutcome => CompactionFailure::InvalidOutcome,
+                    reason: if matches!(error, crate::provider::ProviderError::CallTimedOut) {
+                        CompactionFailure::TimedOut
+                    } else {
+                        match error.failure_class() {
+                            ProviderFailureClass::Unavailable => {
+                                CompactionFailure::ProviderUnavailable
+                            }
+                            ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
+                            ProviderFailureClass::InvalidOutcome => {
+                                CompactionFailure::InvalidOutcome
+                            }
+                        }
                     },
                 },
                 None,
@@ -1345,8 +1376,8 @@ impl<'a> RunLoop<'a> {
             covered_run_id: self.run_id,
             covered_sequence,
             source_digest,
-            provider: self.provider.identity().profile.clone(),
-            model: request.model.clone(),
+            provider: compaction_provider.identity().profile.clone(),
+            model: compaction_provider.identity().model.clone(),
             prompt_version: 1,
             schema_version: 1,
             compiler_version: 3,
@@ -1358,15 +1389,15 @@ impl<'a> RunLoop<'a> {
             cache_creation_input_tokens: usage.cache_creation_input_tokens,
             response_id,
             wire_provenance,
-            chatgpt_provenance: self.provider.identity().chatgpt_provenance().cloned(),
-            output_token_bound: self.provider.identity().limits.output_token_bound,
+            chatgpt_provenance: compaction_provider.identity().chatgpt_provenance().cloned(),
+            output_token_bound: compaction_provider.identity().limits.output_token_bound,
             status,
         };
         self.store
             .admit_operation(self.session_id, Action::Compaction.remaining(1), 0)
             .await?;
         let sequence = append_scoped(
-            self.store,
+            &self.store,
             self.scope(),
             Some(self.trace),
             self.session_id,
@@ -1724,14 +1755,17 @@ impl<'a> RunLoop<'a> {
         intent: &crate::tools::EffectIntent,
         primary: &AgentTrace,
     ) -> Result<bool, EngineError> {
+        let provider = self
+            .routing
+            .provider(crate::provider::ProviderRole::Review, self.primary_id)?;
         let mut review = ProviderRequest {
             session_id: request.session_id,
             run_id: request.run_id,
             agent_run_id: request.agent_run_id,
             phase: AgentPhase::ToolReview,
             collaboration: CollaborationPolicy::Single,
-            model: request.model.clone(),
-            max_output_tokens: 256,
+            model: provider.identity().model.clone(),
+            max_output_tokens: 256.min(provider.identity().limits.max_output_tokens),
             input: RunInput {
                 goal_budget: Some(self.ledger().effective_budget()?),
                 goal_plan_contract: self.ledger().plan_contract()?,
@@ -1742,7 +1776,7 @@ impl<'a> RunLoop<'a> {
                 )
             },
         };
-        let trace = primary.begin_provider(AgentPhase::ToolReview, &review.model);
+        let trace = primary.begin_provider(AgentPhase::ToolReview, provider.identity());
         let active_segment =
             self.reserve_active_segment(TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD)?;
         if let Err(error) = self
@@ -1762,17 +1796,19 @@ impl<'a> RunLoop<'a> {
             return Err(error);
         }
         review.input.goal_context_facts = Some(self.ledger().context_facts()?);
-        let result = invoke_bounded(
-            self.provider.as_ref(),
-            review,
-            active_segment
-                .deadline()
-                .checked_sub(STORE_ACTION_OVERHEAD)
-                .unwrap_or(active_segment.started)
-                .min(Instant::now() + TOOL_REVIEW_DEADLINE),
-            self.controls.cancellation.clone(),
-        )
-        .await;
+        let result = self
+            .routing
+            .invoke(
+                review,
+                active_segment
+                    .deadline()
+                    .checked_sub(STORE_ACTION_OVERHEAD)
+                    .unwrap_or(active_segment.started)
+                    .min(Instant::now() + TOOL_REVIEW_DEADLINE),
+                self.controls.cancellation.clone(),
+                None,
+            )
+            .await?;
         self.settle_result(&result);
         let valid = matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Finish(finish), .. }) if valid_finish(finish, 1024) && matches!(finish.result.as_str(), "approve" | "ask"));
         let valid = valid && self.ledger().tokens_within_limit();
@@ -1884,16 +1920,7 @@ fn tool_action_ms(runtime: &crate::tools::ToolRuntime, intent: &crate::tools::Ef
     duration_ms(tool_action_bound(runtime, intent).saturating_add(STORE_ACTION_OVERHEAD))
 }
 
-async fn invoke_bounded(
-    provider: &dyn Provider,
-    request: ProviderRequest,
-    run_deadline: Instant,
-    cancellation: RunCancellation,
-) -> CallResult {
-    invoke_bounded_with_preview(provider, request, run_deadline, cancellation, None).await
-}
-
-async fn invoke_bounded_with_preview(
+pub(super) async fn invoke_bounded_with_preview(
     provider: &dyn Provider,
     request: ProviderRequest,
     run_deadline: Instant,

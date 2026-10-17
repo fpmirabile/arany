@@ -30,6 +30,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         max_context_bytes: 65536,
     };
     let config = RunConfig {
+        providers: None,
         provider: "scripted".into(),
         model: "replay-model".into(),
         effort: None,

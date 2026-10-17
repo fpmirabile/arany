@@ -135,6 +135,7 @@ pub(super) struct RunScope<'a> {
     pub(super) publisher: Option<&'a ProgressPublisher>,
 }
 
+#[derive(Clone)]
 pub(super) struct ProgressPublisher {
     progress: RunProgress,
     run_id: RunId,
@@ -256,7 +257,8 @@ pub(super) async fn append_observed(
         Event::AgentFinished { .. } => Some(TraceEventKind::AgentFinished),
         Event::MessageCommitted { .. } => Some(TraceEventKind::MessageCommitted),
         Event::RunFinished { .. } => Some(TraceEventKind::RunFinished),
-        Event::AssistantDisplayRecorded { .. }
+        Event::ProviderFallbackUsed { .. }
+        | Event::AssistantDisplayRecorded { .. }
         | Event::GoalSteeringNoteRecorded { .. }
         | Event::SessionStarted { .. }
         | Event::SessionDefaultChanged { .. }
@@ -280,6 +282,7 @@ pub(super) async fn append_scoped(
     session_id: SessionId,
     event: Event,
 ) -> Result<u64, EngineError> {
+    let _journal = scope.ledger.journal().await;
     let committed = append_observed(store, trace, session_id, event).await?;
     let update = scope.ledger.committed(&committed, |view| {
         scope

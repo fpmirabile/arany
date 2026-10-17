@@ -76,6 +76,7 @@ pub enum RecordKind {
     ToolsConfig,
     WorkspacePermissions,
     ProviderProfiles,
+    ProviderRouting,
     SavedAccount,
     UiPreferences,
     ModelPreferences,
@@ -93,6 +94,7 @@ impl RecordKind {
                 Some("workspace-permissions.pending"),
                 64 * 1024,
             ),
+            Self::ProviderRouting => ("provider-routing.json", None, 16 * 1024),
             Self::ProviderProfiles => ("provider-profiles.json", None, 64 * 1024),
             Self::SavedAccount => (
                 "account-credentials.json",

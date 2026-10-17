@@ -16,7 +16,9 @@ pub(super) struct CustomTransport {
 #[derive(Clone, Copy)]
 pub(super) enum TransportError {
     Unavailable,
+    PartialTransport,
     Rejected,
+    CallRejected,
     InvalidOutcome,
 }
 
@@ -141,13 +143,17 @@ impl CustomTransport {
             return Err(if response.status().is_server_error() {
                 TransportError::Unavailable
             } else {
-                TransportError::Rejected
+                TransportError::CallRejected
             });
         }
         crate::provider::openai::read_streamed_reply(&mut response, &self.key, model, preview)
             .await
             .map_err(|error| {
-                if error.failure_class() == crate::provider::ProviderFailureClass::Unavailable {
+                if matches!(error, ProviderError::PartialTransport) {
+                    TransportError::PartialTransport
+                } else if error.failure_class()
+                    == crate::provider::ProviderFailureClass::Unavailable
+                {
                     TransportError::Unavailable
                 } else {
                     TransportError::InvalidOutcome
@@ -174,13 +180,14 @@ impl CustomTransport {
             return Err(if response.status().is_server_error() {
                 TransportError::Unavailable
             } else {
-                TransportError::Rejected
+                TransportError::CallRejected
             });
         }
         let bytes = super::super::read_identity_body(&mut response, MAX_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
                 ProviderError::Unavailable => TransportError::Unavailable,
+                ProviderError::PartialTransport => TransportError::PartialTransport,
                 _ => TransportError::InvalidOutcome,
             })?;
         if raw_reflects_secret(&bytes, &self.key) {

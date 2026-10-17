@@ -369,7 +369,7 @@ impl Default for Telemetry {
 }
 
 impl RunTrace {
-    pub(crate) fn begin_context_compaction(&self) -> CompactionTrace {
+    pub(crate) fn begin_context_compaction(&self, provider: TraceProvider) -> CompactionTrace {
         let span = self.span.child(
             "compact arany.goal_tool_context",
             SpanKind::Internal,
@@ -380,10 +380,7 @@ impl RunTrace {
             ],
             None,
         );
-        CompactionTrace {
-            span,
-            provider: self.provider,
-        }
+        CompactionTrace { span, provider }
     }
 
     fn context_compiled(&self, started: SystemTime, ended: SystemTime) {
@@ -536,11 +533,24 @@ impl AgentTrace {
         ))
     }
 
-    pub(crate) fn begin_provider(&self, phase: AgentPhase, model: &str) -> ProviderTrace {
+    pub(crate) fn begin_provider(
+        &self,
+        phase: AgentPhase,
+        identity: &crate::provider::ProviderIdentity,
+    ) -> ProviderTrace {
         if self.span.context.is_none() {
             return ProviderTrace(TraceSpan::disabled());
         }
-        self.begin_provider_at(phase, model, None)
+        ProviderTrace(self.span.child(
+            "chat arany.provider",
+            SpanKind::Client,
+            self.provider_attributes(
+                phase,
+                &identity.model,
+                TraceProvider::from_profile(&identity.profile),
+            ),
+            None,
+        ))
     }
 
     fn begin_provider_at(
@@ -552,7 +562,7 @@ impl AgentTrace {
         ProviderTrace(self.span.child(
             "chat arany.provider",
             SpanKind::Client,
-            self.provider_attributes(phase, model),
+            self.provider_attributes(phase, model, self.provider),
             started,
         ))
     }
@@ -566,14 +576,19 @@ impl AgentTrace {
         ]
     }
 
-    fn provider_attributes(&self, phase: AgentPhase, model: &str) -> Vec<KeyValue> {
+    fn provider_attributes(
+        &self,
+        phase: AgentPhase,
+        model: &str,
+        provider: TraceProvider,
+    ) -> Vec<KeyValue> {
         let mut attributes = self.attributes("chat");
         attributes.push(KeyValue::new("arany.provider.phase", phase_name(phase)));
-        attributes.push(KeyValue::new("gen_ai.provider.name", self.provider.name()));
-        if let Some(address) = self.provider.server_address() {
+        attributes.push(KeyValue::new("gen_ai.provider.name", provider.name()));
+        if let Some(address) = provider.server_address() {
             attributes.push(KeyValue::new("server.address", address));
         }
-        if matches!(self.provider, TraceProvider::OpenAi) {
+        if matches!(provider, TraceProvider::OpenAi) {
             attributes.push(KeyValue::new("openai.api.type", "responses"));
         }
         if let Some(model) = safe_model(model) {
@@ -598,7 +613,7 @@ impl PlanTrace {
         ProviderTrace(self.0.child(
             "chat arany.provider",
             SpanKind::Client,
-            agent.provider_attributes(phase, model),
+            agent.provider_attributes(phase, model, agent.provider),
             Some(started),
         ))
     }

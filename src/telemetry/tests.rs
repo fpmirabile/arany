@@ -2,7 +2,8 @@ use super::config::{parse_endpoint, resolve_endpoint};
 use super::*;
 use crate::engine::{Engine, RunRequest};
 use crate::provider::{
-    Delegate, Finish, Provider, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
+    Delegate, Finish, Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome,
+    ProviderRequest, ProviderResponse,
 };
 use crate::session::{AgentStatus, CollaborationPolicy, RunStatus};
 use crate::store::StateRoot;
@@ -460,7 +461,10 @@ fn direct_and_team_span_trees_follow_admitted_agents() {
         for _ in 0..children {
             let child = primary.begin_child(AgentRunId::new());
             child
-                .begin_provider(AgentPhase::ChildWork, "model-1")
+                .begin_provider(
+                    AgentPhase::ChildWork,
+                    &ProviderIdentity::new("anthropic", "child-model", Provenance::native()),
+                )
                 .finish_with_usage(ProviderTraceOutcome::Finished, None, None);
             child_spans.push(child);
         }
@@ -469,7 +473,10 @@ fn direct_and_team_span_trees_follow_admitted_agents() {
         }
         if children > 0 {
             primary
-                .begin_provider(AgentPhase::RootSynthesis, "model-1")
+                .begin_provider(
+                    AgentPhase::RootSynthesis,
+                    &ProviderIdentity::new("openai", "primary-model", Provenance::native()),
+                )
                 .finish_with_usage(ProviderTraceOutcome::Finished, None, None);
         }
         primary.finish(TraceOutcome::Finished);
@@ -553,6 +560,28 @@ fn direct_and_team_span_trees_follow_admitted_agents() {
                 .iter()
                 .any(|attribute| attribute.key.as_str() == "error.type")
         );
+        for child_call in spans.iter().filter(|span| {
+            span.name == "chat arany.provider"
+                && span.attributes.iter().any(|attribute| {
+                    attribute.key.as_str() == "arany.provider.phase"
+                        && attribute.value == Value::String("child_work".into())
+                })
+        }) {
+            assert!(
+                child_call
+                    .attributes
+                    .iter()
+                    .any(|attribute| attribute.key.as_str() == "gen_ai.provider.name"
+                        && attribute.value == Value::String("anthropic".into()))
+            );
+            assert!(
+                child_call
+                    .attributes
+                    .iter()
+                    .any(|attribute| attribute.key.as_str() == "gen_ai.request.model"
+                        && attribute.value == Value::String("child-model".into()))
+            );
+        }
         let trace_id = root.span_context.trace_id();
         assert!(
             spans

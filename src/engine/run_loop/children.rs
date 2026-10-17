@@ -1,6 +1,6 @@
 use super::{
     Action, CallFailure, CallResult, MAX_PRIMARY_RESULT_BYTES, RunLoop, TOOL_CLEANUP_OVERHEAD,
-    call_record, call_trace_result, call_trace_usage, duration_ms, invoke_bounded, valid_finish,
+    call_record, call_trace_result, call_trace_usage, duration_ms, valid_finish,
 };
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{
@@ -17,7 +17,6 @@ use crate::tools::{
     ToolRequest, ToolStep,
 };
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::{Id, JoinError, JoinSet};
 use tokio::time::Instant;
@@ -43,7 +42,7 @@ struct ChildWork {
 
 struct ChildQueue {
     pending: VecDeque<usize>,
-    calls: JoinSet<CallResult>,
+    calls: JoinSet<Result<CallResult, EngineError>>,
     active: HashMap<Id, ActiveChild>,
     parallel: usize,
 }
@@ -82,17 +81,24 @@ impl ChildQueue {
 
     async fn abort_and_drain(&mut self) -> Result<(), EngineError> {
         self.calls.abort_all();
+        let mut failure = None;
         let deadline = Instant::now() + CANCELLATION_DRAIN;
         while !self.calls.is_empty() {
             let joined = tokio::time::timeout_at(deadline, self.calls.join_next_with_id())
                 .await
                 .map_err(|_| EngineError::CancellationDrainTimeout)?
                 .ok_or(EngineError::CoordinatorFailed)?;
-            let (task_id, result) = classify_join(joined);
-            self.close_provider_span(task_id, &result, valid_child_response(&result));
+            match classify_join(joined) {
+                Ok((task_id, result)) => {
+                    self.close_provider_span(task_id, &result, valid_child_response(&result));
+                }
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
         }
         self.active.clear();
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 
     fn close_provider_span(
@@ -166,8 +172,11 @@ impl RunLoop<'_> {
                 .min(usize::from(self.controls.policy.max_children())),
         );
         let waves = objectives.len().div_ceil(parallel.max(1));
-        let active_bound =
-            delegation_active_bound(research, self.provider.identity().limits.deadline, waves);
+        let active_bound = delegation_active_bound(
+            research,
+            self.routing.providers.child[0].identity().limits.deadline,
+            waves,
+        );
         // Covers every child's calls, Tools and terminal facts plus the largest later admission, so a refusal precedes AgentSpawned.
         self.store
             .admit_operation(
@@ -240,7 +249,10 @@ impl RunLoop<'_> {
                 None => queue.calls.join_next_with_id().await,
             }
             .ok_or(EngineError::CoordinatorFailed)?;
-            let (task_id, result) = classify_join(joined);
+            let (task_id, result) = match classify_join(joined) {
+                Ok(result) => result,
+                Err(error) => return Err(queue.abort_with(error).await),
+            };
             let Some(index) = queue.active.get(&task_id).map(|active| active.index) else {
                 return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
             };
@@ -467,8 +479,12 @@ impl RunLoop<'_> {
             if self.pause_at_boundary() {
                 return self.settle_stopped_primary(primary).await;
             }
+            let provider = self
+                .routing
+                .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
+            root_request.model = provider.identity().model.clone();
             let synthesis_trace =
-                primary.begin_provider(AgentPhase::RootSynthesis, &root_request.model);
+                primary.begin_provider(AgentPhase::RootSynthesis, provider.identity());
             let (synthesis, active_segment) = match self.invoke_primary(root_request).await {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
@@ -592,7 +608,11 @@ impl RunLoop<'_> {
                     }
                 }
             }
-            let provider = Arc::clone(&self.provider);
+            let provider = self.routing.provider(
+                crate::provider::ProviderRole::Child,
+                children[index].agent_run_id,
+            )?;
+            let routing = self.routing.clone();
             let cancellation = self.controls.cancellation.clone();
             let researcher = children[index].tools.is_some();
             let root = &root_request.input;
@@ -602,8 +622,9 @@ impl RunLoop<'_> {
                 agent_run_id: children[index].agent_run_id,
                 phase: AgentPhase::ChildWork,
                 collaboration: CollaborationPolicy::Single,
-                model: root_request.model.clone(),
-                max_output_tokens: CHILD_OUTPUT_TOKEN_CAP.min(root_request.max_output_tokens),
+                model: provider.identity().model.clone(),
+                max_output_tokens: CHILD_OUTPUT_TOKEN_CAP
+                    .min(provider.identity().limits.max_output_tokens),
                 input: RunInput {
                     images: root
                         .images
@@ -642,10 +663,10 @@ impl RunLoop<'_> {
                 .trace
                 .as_ref()
                 .expect("child trace exists")
-                .begin_provider(AgentPhase::ChildWork, &request.model);
-            let handle = queue.calls.spawn(async move {
-                invoke_bounded(provider.as_ref(), request, deadline, cancellation).await
-            });
+                .begin_provider(AgentPhase::ChildWork, provider.identity());
+            let handle = queue
+                .calls
+                .spawn(async move { routing.invoke(request, deadline, cancellation, None).await });
             queue.active.insert(
                 handle.id(),
                 ActiveChild {
@@ -803,17 +824,19 @@ impl RunLoop<'_> {
     }
 }
 
-fn classify_join(joined: Result<(Id, CallResult), JoinError>) -> (Id, CallResult) {
+fn classify_join(
+    joined: Result<(Id, Result<CallResult, EngineError>), JoinError>,
+) -> Result<(Id, CallResult), EngineError> {
     match joined {
-        Ok((task_id, result)) => (task_id, result),
-        Err(error) => (
+        Ok((task_id, result)) => result.map(|result| (task_id, result)),
+        Err(error) => Ok((
             error.id(),
             if error.is_cancelled() {
                 CallResult::Cancelled
             } else {
                 CallResult::Failed(CallFailure::TaskPanic)
             },
-        ),
+        )),
     }
 }
 

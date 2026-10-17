@@ -122,7 +122,9 @@ impl Provider for CustomProvider {
 fn transport_error(error: TransportError) -> ProviderError {
     match error {
         TransportError::Unavailable => ProviderError::Unavailable,
+        TransportError::PartialTransport => ProviderError::PartialTransport,
         TransportError::Rejected => ProviderError::Rejected,
+        TransportError::CallRejected => ProviderError::CallRejected,
         TransportError::InvalidOutcome => ProviderError::InvalidOutcome,
     }
 }

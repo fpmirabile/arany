@@ -25,6 +25,9 @@ mod performance;
 #[path = "engine_run/goals.rs"]
 mod goals;
 
+#[path = "engine_run/routing.rs"]
+mod routing;
+
 #[cfg(unix)]
 #[path = "common/process.rs"]
 pub mod process;
@@ -47,6 +50,7 @@ fn tool_outcome(
 
 struct ScriptedProvider {
     identity: ProviderIdentity,
+    preview: Option<arany::PreviewText>,
     responses: Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>>,
     cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
     before_call: Option<(usize, Box<dyn Fn() + Send + Sync>)>,
@@ -69,6 +73,7 @@ impl ScriptedProvider {
                 },
                 ..ProviderIdentity::new("scripted", "test-model", arany::Provenance::native())
             },
+            preview: None,
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
             before_call: None,
@@ -205,6 +210,17 @@ impl Provider for ScriptedProvider {
             }),
             wire_provenance: None,
         })
+    }
+
+    async fn invoke_with_preview(
+        &self,
+        request: ProviderRequest,
+        preview: arany::ResponsePreview,
+    ) -> Result<ProviderResponse, ProviderError> {
+        if let Some(text) = &self.preview {
+            preview.publish(text.clone())?;
+        }
+        self.invoke(request).await
     }
 
     async fn compact(

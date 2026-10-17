@@ -83,6 +83,7 @@ pub(super) struct GoalLedger {
     goal_id: GoalId,
     state: Mutex<State>,
     admission: tokio::sync::Mutex<()>,
+    journal: tokio::sync::Mutex<()>,
 }
 
 struct State {
@@ -152,7 +153,12 @@ impl GoalLedger {
                 in_flight: InFlight::default(),
             }),
             admission: tokio::sync::Mutex::new(()),
+            journal: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub(super) async fn journal(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.journal.lock().await
     }
 
     pub(super) fn view<T>(&self, read: impl FnOnce(&SessionView) -> T) -> Result<T, EngineError> {

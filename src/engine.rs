@@ -21,6 +21,7 @@ mod ledger;
 mod lifecycle;
 mod progress;
 mod report;
+mod routing;
 mod run_loop;
 pub use crate::tools::Cancellation as RunCancellation;
 pub use ledger::Action;
@@ -808,8 +809,8 @@ fn resolve_goal_admission(
 
 pub struct Engine {
     state: StateRoot,
-    store: Store,
-    provider: Arc<dyn Provider>,
+    store: Arc<Store>,
+    providers: crate::provider::AdmittedProviders,
     telemetry: Telemetry,
     tools: Option<(crate::tools::config::Config, PathBuf)>,
     workspace_permissions: Option<crate::tools::WorkspacePermissions>,
@@ -971,10 +972,11 @@ impl Engine {
         telemetry: Telemetry,
     ) -> Result<Self, EngineError> {
         let store = Store::open(state.try_clone()?)?;
+        let provider: Arc<dyn Provider> = Arc::new(provider);
         Ok(Self {
             state,
-            store,
-            provider: Arc::new(provider),
+            store: Arc::new(store),
+            providers: crate::provider::Providers::all(vec![Arc::clone(&provider)]),
             telemetry,
             tools: None,
             workspace_permissions: None,
@@ -983,8 +985,27 @@ impl Engine {
         })
     }
 
+    pub fn set_providers(
+        &mut self,
+        providers: crate::provider::AdmittedProviders,
+    ) -> Result<(), EngineError> {
+        if !providers.identities().valid() {
+            return Err(EngineError::InvalidRequest);
+        }
+        for chain in providers.values() {
+            for provider in chain {
+                checked_identity(provider.as_ref())?;
+            }
+        }
+        self.providers = providers;
+        Ok(())
+    }
+
     pub async fn close(self) -> Result<(), EngineError> {
-        self.store.close().await?;
+        Arc::try_unwrap(self.store)
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .close()
+            .await?;
         Ok(())
     }
 
@@ -1134,8 +1155,34 @@ impl Engine {
             return Err(EngineError::CancelledBeforeStart);
         }
 
-        let provider = Arc::clone(&self.provider);
+        let provider = Arc::clone(&self.providers.primary[0]);
         let identity = checked_identity(provider.as_ref())?;
+        if !self.providers.identities().valid() {
+            return Err(EngineError::InvalidRequest);
+        }
+        for chain in self.providers.values() {
+            for candidate in chain {
+                checked_identity(candidate.as_ref())?;
+            }
+        }
+        if !request.images.is_empty()
+            && self.providers.values().iter().take(2).any(|chain| {
+                chain
+                    .iter()
+                    .any(|candidate| candidate.identity().custom_provenance().is_some())
+            })
+        {
+            return Err(EngineError::ImagesNotAdmitted);
+        }
+        if self.tools.is_some()
+            && self.providers.values().iter().take(2).any(|chain| {
+                chain
+                    .iter()
+                    .any(|candidate| candidate.identity().custom_provenance().is_some())
+            })
+        {
+            return Err(EngineError::InvalidRequest);
+        }
         let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
         let finish_after_run = request.goal.finish_after_run;
         let admitted = self
@@ -1196,7 +1243,7 @@ impl Engine {
             .load_open_view(session_id)
             .await?
             .ok_or(EngineError::InvalidHistory)?;
-        let ledger = GoalLedger::new(view, goal.id);
+        let ledger = Arc::new(GoalLedger::new(view, goal.id));
         let publisher = progress.map(|progress| ProgressPublisher::new(progress, run_id));
         let scope = RunScope {
             ledger: &ledger,
@@ -1350,8 +1397,8 @@ impl Engine {
         // Boxed: the Run loop's future is large and would overflow a small caller stack.
         Box::pin(
             RunLoop::new(
-                &self.store,
-                Arc::clone(&self.provider),
+                Arc::clone(&self.store),
+                self.providers.clone(),
                 RunIdentity {
                     session_id,
                     run_id,
@@ -1367,7 +1414,7 @@ impl Engine {
                     approvals: self.tool_approvals.as_ref(),
                     steering: self.steering.clone(),
                 },
-                &ledger,
+                Arc::clone(&ledger),
                 publisher.as_ref(),
                 &trace,
             )
@@ -1564,9 +1611,22 @@ impl Engine {
         let provider_concurrency = if budget.max_tokens.is_some() {
             1
         } else {
-            identity.limits.concurrency
+            identity.limits.concurrency.min(
+                self.providers
+                    .child
+                    .iter()
+                    .map(|provider| provider.identity().limits.concurrency)
+                    .min()
+                    .unwrap_or(1),
+            )
         };
+        let routes = self.providers.identities();
+        let inherited = routes
+            .values()
+            .iter()
+            .all(|chain| chain.len() == 1 && chain[0] == *identity);
         let config = RunConfig {
+            providers: (!inherited).then_some(routes),
             provider: identity.profile.clone(),
             model: identity.model.clone(),
             effort: identity.effort,

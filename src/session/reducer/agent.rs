@@ -152,6 +152,124 @@ impl SessionView {
 
 pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), ReplayError> {
     match event {
+        Event::ProviderFallbackUsed {
+            run_id,
+            agent_run_id,
+            fallback,
+        } => {
+            use crate::provider::{MAX_PROVIDER_SWITCHES, ProviderRole};
+            let compaction = fallback.role == ProviderRole::Compaction;
+            let run = current
+                .runs
+                .last()
+                .filter(|run| run.id == *run_id)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let active = run.status == super::RunStatus::Active;
+            if !active && !(compaction && run.status.is_terminal()) {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let goal = current
+                .goals
+                .iter()
+                .find(|goal| goal.run_ids.contains(run_id))
+                .ok_or(ReplayError::InvalidTransition)?;
+            let charge_goal = goal.status == GoalStatus::Running;
+            let goal_id = goal.id;
+            let reserved = if compaction {
+                goal.compaction_call_reserved == Some(*run_id)
+            } else {
+                goal.unobserved_provider_calls.contains(agent_run_id)
+            };
+            if (active || charge_goal)
+                && (!reserved
+                    || !charge_goal
+                    || goal.effective_budget().max_tokens.is_some()
+                    || goal
+                        .effective_budget()
+                        .max_provider_calls
+                        .is_some_and(|limit| goal.provider_calls >= limit))
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let agent = run
+                .agents
+                .iter()
+                .find(|agent| agent.id == *agent_run_id)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let valid_role = match fallback.role {
+                ProviderRole::Child => agent.role == AgentRole::Child,
+                ProviderRole::Review => {
+                    agent.role == AgentRole::Primary
+                        && run
+                            .tools
+                            .last()
+                            .is_some_and(|tool| tool.observation.is_none())
+                }
+                ProviderRole::Primary => {
+                    agent.role == AgentRole::Primary
+                        && run
+                            .tools
+                            .last()
+                            .is_none_or(|tool| tool.observation.is_some())
+                }
+                ProviderRole::Compaction => agent.role == AgentRole::Primary,
+            };
+            let index = if compaction {
+                if active {
+                    run.tools.len()
+                } else {
+                    current.compactions.len()
+                }
+            } else {
+                agent.provider_calls.len()
+            };
+            let chain = run
+                .config
+                .as_ref()
+                .and_then(|config| config.providers.as_ref())
+                .map(|providers| providers.get(fallback.role))
+                .ok_or(ReplayError::InvalidTransition)?;
+            let previous = run
+                .provider_fallbacks
+                .iter()
+                .rev()
+                .find(|(actor, prior)| actor == agent_run_id && prior.role == fallback.role)
+                .map(|(_, prior)| &prior.to)
+                .unwrap_or(&chain[0]);
+            let next = chain
+                .iter()
+                .position(|identity| identity == previous)
+                .and_then(|index| chain.get(index + 1));
+            if !valid_role
+                || active && agent.status != AgentStatus::Active
+                || usize::try_from(fallback.call_index).ok() != Some(index)
+                || previous != &fallback.from
+                || next != Some(&fallback.to)
+                || run.provider_fallbacks.len() >= MAX_PROVIDER_SWITCHES
+                || !compaction
+                    && agent.role == AgentRole::Primary
+                    && run
+                        .display
+                        .iter()
+                        .any(|chunk| chunk.call_index == fallback.call_index)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            current
+                .runs
+                .last_mut()
+                .ok_or(ReplayError::InvalidTransition)?
+                .provider_fallbacks
+                .push((*agent_run_id, fallback.clone()));
+            if charge_goal {
+                let goal = current_goal_mut(current, goal_id)?;
+                goal.provider_calls = goal
+                    .provider_calls
+                    .checked_add(1)
+                    .ok_or(ReplayError::InvalidTransition)?;
+                goal.token_usage_unknown = true;
+            }
+        }
         Event::AgentSpawned {
             run_id,
             agent_run_id,
@@ -231,6 +349,53 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 .position(|agent| agent.id == *agent_run_id)
                 .ok_or(ReplayError::InvalidTransition)?;
             let agent = &run.agents[index];
+            let call_index = u32::try_from(agent.provider_calls.len())
+                .map_err(|_| ReplayError::InvalidTransition)?;
+            if run
+                .provider_fallbacks
+                .iter()
+                .rev()
+                .find(|(actor, fallback)| {
+                    *actor == *agent_run_id
+                        && fallback.role != crate::provider::ProviderRole::Compaction
+                        && fallback.call_index == call_index
+                })
+                .is_some_and(|(_, fallback)| {
+                    fallback.role != crate::provider::ProviderRole::for_phase(record.phase)
+                })
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if let Some(routes) = run
+                .config
+                .as_ref()
+                .and_then(|config| config.providers.as_ref())
+            {
+                let role = crate::provider::ProviderRole::for_phase(record.phase);
+                let identity = run
+                    .provider_fallbacks
+                    .iter()
+                    .rev()
+                    .find(|(actor, fallback)| *actor == *agent_run_id && fallback.role == role)
+                    .map(|(_, fallback)| &fallback.to)
+                    .unwrap_or(&routes.get(role)[0]);
+                let cap = match role {
+                    crate::provider::ProviderRole::Primary => identity.limits.max_output_tokens,
+                    crate::provider::ProviderRole::Child => identity
+                        .limits
+                        .max_output_tokens
+                        .min(crate::provider::DEFAULT_OUTPUT_TOKEN_CAP),
+                    crate::provider::ProviderRole::Review => {
+                        identity.limits.max_output_tokens.min(256)
+                    }
+                    crate::provider::ProviderRole::Compaction => {
+                        return Err(ReplayError::InvalidTransition);
+                    }
+                };
+                if record.output_tokens.is_some_and(|tokens| tokens > cap) {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
             let tools_enabled = run
                 .config
                 .as_ref()

@@ -1173,6 +1173,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                providers: None,
                 provider: "scripted".into(),
                 model: "scripted-model".into(),
                 effort: None,
@@ -1640,7 +1641,7 @@ fn facts_plan(sha256: String) -> arany::GoalPlanContract {
     }
 }
 
-fn facts_workspace(root: &Path, text: &str) -> std::path::PathBuf {
+pub(super) fn facts_workspace(root: &Path, text: &str) -> std::path::PathBuf {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(workspace.join("notes/facts.txt"), text).expect("facts file");
@@ -1653,7 +1654,11 @@ fn write_facts(workspace: &Path, text: &'static str) -> impl Fn() + Send + Sync 
 }
 
 /// Opens the Engine with Guard-backed Read access to `notes/facts.txt`.
-fn facts_engine<P: Provider + 'static>(state: StateRoot, state_path: &Path, provider: P) -> Engine {
+pub(super) fn facts_engine<P: Provider + 'static>(
+    state: StateRoot,
+    state_path: &Path,
+    provider: P,
+) -> Engine {
     facts_engine_with_telemetry(state, state_path, provider, arany::Telemetry::disabled())
 }
 
@@ -4574,6 +4579,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                providers: None,
                 provider: "scripted".into(),
                 model: "scripted-model".into(),
                 effort: None,

@@ -118,8 +118,9 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "GoalFinished"
         | "AgentFinished"
         | "MessageCommitted" => Some(6),
+        "ProviderFallbackUsed" => Some(1),
         "ToolFinished" => Some(7),
-        "RunStarted" => Some(7),
+        "RunStarted" => Some(8),
         "RunFinished" => Some(7),
         "GoalProviderCallReserved" => Some(7),
         "GoalCompactionCallReserved" => Some(7),
@@ -1414,6 +1415,7 @@ mod account_default_tests {
     #[test]
     fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         let mut config = RunConfig {
+            providers: None,
             provider: "openai".into(),
             model: "gpt-5.4".into(),
             effort: None,
@@ -1436,6 +1438,20 @@ mod account_default_tests {
             tool_policy: None,
         };
         assert!(config.validate().is_ok());
+        let mut inherited = config.clone();
+        inherited.saved_api_account_id = None;
+        let event = Event::RunStarted {
+            run_id: RunId::new(),
+            config: inherited,
+            active_deadline_ms: Some(MAX_GOAL_ACTIVE_MS),
+        };
+        assert_eq!(
+            event.payload().unwrap(),
+            r#"{"config":{"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
+        );
+        assert_eq!(payload_version("RunStarted"), Some(8));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(6));
+        assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
         for (cap, valid) in [
@@ -1580,6 +1596,8 @@ impl ContextUsage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<crate::provider::ProviderRoutes>,
     pub provider: String,
     pub model: String,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -1620,7 +1638,7 @@ impl RunConfig {
         }) || self.history_run_ids.len() + 1 >= super::MAX_HISTORY_RUNS * 3 / 4
     }
 
-    fn identity(&self) -> Option<crate::provider::ProviderIdentity> {
+    pub(crate) fn identity(&self) -> Option<crate::provider::ProviderIdentity> {
         use crate::provider::Provenance;
         let provenance = match (
             &self.custom_profile_provenance,
@@ -1649,7 +1667,25 @@ impl RunConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
-        if !self.identity().is_some_and(|identity| identity.valid())
+        if self.providers.as_ref().is_some_and(|providers| {
+            !providers.valid()
+                || self.identity().is_none_or(|identity| {
+                    let primary = &providers.primary[0];
+                    identity.profile != primary.profile
+                        || identity.model != primary.model
+                        || identity.effort != primary.effort
+                        || identity.provenance != primary.provenance
+                        || identity.limits.max_output_tokens != primary.limits.max_output_tokens
+                        || identity.limits.output_token_bound != primary.limits.output_token_bound
+                        || self.provider_concurrency > primary.limits.concurrency
+                })
+                || self.tool_policy.is_some()
+                    && providers.values().iter().take(2).any(|chain| {
+                        chain
+                            .iter()
+                            .any(|identity| identity.custom_provenance().is_some())
+                    })
+        }) || !self.identity().is_some_and(|identity| identity.valid())
             || self
                 .tool_policy
                 .as_ref()
@@ -2436,6 +2472,11 @@ pub enum Event {
         objective: Option<String>,
         grant: Option<ChildGrant>,
     },
+    ProviderFallbackUsed {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        fallback: crate::provider::ProviderFallback,
+    },
     ProviderCallRecorded {
         run_id: RunId,
         agent_run_id: AgentRunId,
@@ -2692,6 +2733,7 @@ impl Event {
             Self::MessageAccepted { .. } => "MessageAccepted",
             Self::RunStarted { .. } => "RunStarted",
             Self::AgentSpawned { .. } => "AgentSpawned",
+            Self::ProviderFallbackUsed { .. } => "ProviderFallbackUsed",
             Self::ProviderCallRecorded { .. } => "ProviderCallRecorded",
             Self::GoalProviderCallReserved { .. } => "GoalProviderCallReserved",
             Self::GoalCompactionCallReserved { .. } => "GoalCompactionCallReserved",
@@ -2726,6 +2768,11 @@ impl Event {
             | Self::MessageCommitted { run_id, .. }
             | Self::RunFinished { run_id, .. } => (Some(*run_id), None),
             Self::AgentSpawned {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::ProviderFallbackUsed {
                 run_id,
                 agent_run_id,
                 ..
@@ -2860,6 +2907,7 @@ impl Event {
                 objective: objective.clone(),
                 grant: *grant,
             }),
+            Self::ProviderFallbackUsed { fallback, .. } => serialize(fallback),
             Self::ProviderCallRecorded { record, .. } => serialize(record),
             Self::GoalProviderCallReserved {
                 goal_id,
@@ -3041,6 +3089,13 @@ impl Event {
                     disposition: data.disposition,
                     summary: data.summary,
                     result: data.result,
+                }
+            }
+            "ProviderFallbackUsed" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::ProviderFallbackUsed {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    fallback: parse(payload)?,
                 }
             }
             "ProviderCallRecorded" if run_id.is_some() && agent_run_id.is_some() => {
@@ -3257,6 +3312,20 @@ impl Event {
                 ),
                 _ => Err(ReplayError::InvalidPayload),
             },
+            Self::ProviderFallbackUsed { fallback, .. } => {
+                if fallback.from.valid()
+                    && fallback.to.valid()
+                    && fallback.from != fallback.to
+                    && matches!(
+                        fallback.failure,
+                        ProviderCallDisposition::Unavailable | ProviderCallDisposition::Rejected
+                    )
+                {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
             Self::ProviderCallRecorded { record, .. } => record.validate(),
             Self::GoalProviderCallReserved { goal_id, .. } => {
                 if goal_id.valid() {
@@ -3550,6 +3619,7 @@ mod payload_version_tests {
         let agent = AgentRunId::new();
         let goal_id = GoalId::new();
         let config = RunConfig {
+            providers: None,
             provider: "openai".into(),
             model: "gpt-5.4".into(),
             effort: None,
@@ -3603,9 +3673,15 @@ mod payload_version_tests {
         for event in bumped {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
-            assert_eq!(event.version(), 7, "{}", event.kind());
+            let version = if matches!(event, Event::RunStarted { .. }) {
+                8
+            } else {
+                7
+            };
+            assert_eq!(event.version(), version, "{}", event.kind());
             assert_eq!(
-                Event::decode(event.kind(), 7, &payload, run_id, agent_run_id).expect("current"),
+                Event::decode(event.kind(), version, &payload, run_id, agent_run_id)
+                    .expect("current"),
                 event
             );
             assert!(matches!(

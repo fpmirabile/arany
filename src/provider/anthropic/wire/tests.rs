@@ -625,6 +625,32 @@ fn inbound_end_turn_requires_exactly_one_text_block_as_finish_or_delegate() {
 
 #[test]
 fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
+    for (phase, role, model) in [
+        (
+            AgentPhase::RootPlan,
+            crate::provider::PromptRole::ReadOnly,
+            "primary-model",
+        ),
+        (
+            AgentPhase::ChildWork,
+            crate::provider::PromptRole::ReadOnly,
+            "child-model",
+        ),
+        (
+            AgentPhase::ToolReview,
+            crate::provider::PromptRole::ToolReview,
+            "review-model",
+        ),
+    ] {
+        let mut role_request = read_only_request(model);
+        role_request.phase = phase;
+        role_request.collaboration = CollaborationPolicy::Single;
+        role_request.input.role = role;
+        if phase != AgentPhase::RootPlan {
+            role_request.input.goal_context_facts = None;
+        }
+        assert_eq!(body(&role_request, Effort::Low)["model"], model);
+    }
     let request = read_only_request(MODEL);
     let rendered = body(&request, Effort::Max);
     assert_eq!(rendered["model"], MODEL);

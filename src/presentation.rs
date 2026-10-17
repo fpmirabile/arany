@@ -360,7 +360,27 @@ pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> 
     ]
 }
 
+pub fn render_provider_fallbacks(run: &RunView) -> Option<String> {
+    let notices: Vec<_> = run
+        .provider_fallbacks
+        .iter()
+        .map(|(_, fallback)| escape_terminal(&fallback.notice()))
+        .collect();
+    (!notices.is_empty()).then(|| notices.join("\n"))
+}
+
 pub fn render_run_feedback(run: &RunView) -> Option<String> {
+    let feedback = run_feedback(run);
+    match render_provider_fallbacks(run) {
+        None => feedback,
+        Some(notices) => Some(match feedback {
+            Some(feedback) => format!("{notices}\n{feedback}"),
+            None => notices,
+        }),
+    }
+}
+
+fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {
@@ -800,6 +820,7 @@ mod exec_jsonl_tests {
             tool_compaction_covered_count: 0,
             display: Vec::new(),
             steering_notes: Vec::new(),
+            provider_fallbacks: Vec::new(),
         };
 
         let output = render_exec(&run, &events, Output::Jsonl, false);
