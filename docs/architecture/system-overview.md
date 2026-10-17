@@ -4,7 +4,7 @@
 
 **Design rule:** build a familiar durable harness, then deepen it without replacing its Engine
 
-This document owns physical architecture, data model and responsibility boundaries. [Product specs](../specs/README.md) own migrated observable contracts; other domains retain their existing module contracts. [The documentation map](../README.md) locates those owners, and [next steps](../../NEXT_STEPS.md) owns current defects and verification debt. Research and the [decision register](../research/next-step-decision-register.md) retain source evidence and rationale. Anything absent here is not an empty module waiting to be scaffolded.
+This document owns physical architecture, data model and responsibility boundaries. [Product specs](../specs/README.md) own observable contracts. [The documentation map](../README.md) locates those owners, and [next steps](../../NEXT_STEPS.md) owns current defects and verification debt. Research and the [decision register](../research/next-step-decision-register.md) retain source evidence and rationale. Anything absent here is not an empty module waiting to be scaffolded.
 
 Read the section for the affected boundary:
 [runtime ownership](#2-runtime-architecture), [module entry points](#3-physical-beta-shape),
@@ -32,112 +32,137 @@ The full product contract is successful when it proves all of these together:
 
 The current personal beta 1 implementation milestone is narrower: build a local Linux executable and complete the current OS user's ChatGPT account, model/effort, durable Engine and chat flows, plus an explicitly enabled local coding foundation for guarded file operations, offline commands, progressive Skills and stdio MCP. Automated synthetic evidence owns these implementation claims. Real sign-in, plan-consuming turns/tool loops, remaining native credential checks, and manual UX/accessibility testing belong to the final user handoff; they do not block implementation and remain unverified support claims until performed. The broader contract above is not a claim that beta 1 has cross-platform or redistribution evidence. Native macOS validation, portable distribution, and additional performance gates follow after beta 1; the [decision register](../research/next-step-decision-register.md) records the scope and Anthropic subscription authorization boundary.
 
-Startup resolves trusted user/process configuration, admits a private state root outside the Workspace, selects one ProviderProfile, and pins the caller-selected Workspace before consuming project-controlled input. Admission never executes or discovers Git/repository configuration, `.env`, hooks, plugins, packages, tests, or startup commands. Instruction and explicit include files remain bounded immutable no-follow snapshots. Explicit include data preserves its escaped relative path and raw-file SHA-256 alongside untrusted text; the full envelope counts toward context admission. Untrusted and ordinary headless Runs are read-only. Attached folder trust generates a user-owned, directory-pinned grant; `--tools` loads an explicit private grant. Both use the separate native Guard described in [local tools](../tools.md): Linux and macOS admit typed files, pinned Skill data, offline commands and local MCP through their separately attested native profiles. Unsupported native enforcement fails closed. The selected ChatGPT subscription has completed the reported resumed file edit; other live model workflows and native macOS remain unverified.
+Startup resolves trusted user/process configuration, admits a private state root outside the Workspace, admits [per-role Provider routes and configured fallback chains](../specs/provider.md#per-role-selection-and-fallback), and pins the caller-selected Workspace before consuming project-controlled input. Admission never executes or discovers Git/repository configuration, `.env`, hooks, plugins, packages, tests, or startup commands. Instruction and explicit include files remain bounded immutable no-follow snapshots. Explicit include data preserves its escaped relative path and raw-file SHA-256 alongside untrusted text; the full envelope counts toward context admission. Untrusted and ordinary headless Runs are read-only. Attached folder trust generates a user-owned, directory-pinned grant; `--tools` loads an explicit private grant. Both use the separate native Guard described in [local tools](../tools.md): Linux and macOS admit typed files, pinned Skill data, offline commands and local MCP through their separately attested native profiles. Unsupported native enforcement fails closed. The selected ChatGPT subscription has completed the reported resumed file edit; other live model workflows and native macOS remain unverified.
 
 Tools owns one private model-input projection shared by the native adapters. It exposes structured bounded catalog/output data and ordered call/disposition/workspace-effect facts, while keeping journal intent identities, enforcement digests, limits and receipts out of current Tool observations sent to the model. Canonical Tool observations retain all enforcement evidence; projection changes neither authority nor replay. OpenAI/ChatGPT coding requests encode catalog-available operations as strict native functions plus phase-available Finish/Delegate submissions, requiring one non-parallel call. The adapter reconstructs paired model action/result items with request-local correlation labels and carries each model-action observation only in its result item. Engine-generated integration outcomes use separate untrusted user-data records, with no fabricated model function or advertised integration operation. The adapter omits the duplicate observation list from the task-data envelope and translates completed model functions back to semantic Provider outcomes. Read-only requests, advisor children, compaction and Anthropic keep structured-text encoding; researcher children use the primary's encoding restricted to read-only operations. Provider instructions explain continuation and completion evidence independently of untrusted result text.
 
 ## 2. Runtime architecture
 
-There is one Rust package, one long-lived process, and one substitutable Engine behavior seam. Short-lived same-binary children isolate blocking OS-credential calls and effectful Tool execution at separate privilege boundaries; neither is a second Client or daemon.
+The workspace has two crates: the `arany` library owns the harness, and
+`arany-cli` produces the `arany` executable. One long-lived Engine serves each
+process. The CLI calls `Engine::open(state, EngineConfig)` once, then
+`submit(providers, request, controls) -> RunHandle` for each submission. The
+handle exposes cancel, steer, approvals and events; completion yields
+`RunResult { run, stopped }`. Per-role Provider chains are chosen per submission.
+A concurrent submission or compaction is refused with `EngineError::Busy`;
+Session and ancestor locks remain scoped to a Run, while the Store thread lives
+until the Engine is closed or dropped. The [execution contract](../specs/execution.md#admission-persistence-and-recovery)
+owns Engine lifetime and admission.
 
-Each OS keeps its Guard launch behind one adapter. Linux starts a transient
-systemd unit that runs Bubblewrap, then the Guard helper. macOS bootstraps a
-temporary launchd job that owns a distinct kernel coalition; its unit supervisor
-attaches two fixed-size disk images for command Workspace and scratch storage,
-then launches a separate Seatbelt worker for the payload. Both send the same
-Task, Ready, GO and observation protocol.
+The Engine owns admission, scheduling, context, Goal accounting and Run
+transitions. `GoalLedger` admits, reserves and settles actions over the reducer's
+`GoalView`, with `Action::max_events` owning Event headroom. Primary and
+researcher Tool steps share `execute_step`: reservation, committed intent,
+approval, dispatch, committed observation and continuation have one owner.
+Only the primary integrates changesets. The [execution contract](../specs/execution.md)
+and [Goal contract](../specs/goals.md) own lifecycle, budgets and recovery.
 
-The macOS Tool controller runs its bounded unit lifecycle on an awaited blocking
-owner with a private reactor. Native teardown, including synchronous unwind,
-does not occupy the terminal reactor. Abandoning that await cancels the owner;
-the dispatch marker still distinguishes pre-GO refusal from uncertain execution.
-
-macOS Tool admission owns one transient signature-checked system executable
-catalogue per command/MCP-enabled Run. Process intents bind that catalogue into
-their enforcement digest; the controller passes it through the authenticated
-unit Task channel, and each Seatbelt worker revalidates its no-follow metadata
-pins before Ready. File/Skill workers retain the compiled policy digest without
-carrying a catalogue. The [Tool spec](../specs/tools.md) owns cache and
-admission constraints.
+`Journal::append` publishes only committed Events to a bounded broadcast ring of
+256 envelopes. Progress, telemetry and diagnostics each subscribe to that tap;
+a lagging receiver gets `Resync { missed }` and rebuilds from the committed view.
+Observers never block control flow or authorize work. Provider previews remain
+separate provisional data. [Execution](../specs/execution.md#committed-event-stream),
+[telemetry](../specs/telemetry.md) and [diagnostics](../specs/diagnostics.md) own
+their observable contracts.
 
 ```mermaid
 flowchart LR
-    User([User or script]) --> CLI[Arany CLI]
+    User([User or script]) --> CLI[CLI + accounts]
 
-    subgraph Process[Main Arany process]
-        CLI --> Engine[Deep Engine]
-        CLI --> Terminal[Inline terminal or deterministic output]
-        Engine --> Session[Session lifecycle + context]
-        Session --> Goal[Durable Goal state]
-        Engine --> Loop[Primary coordination loop]
-        Loop --> Primary[Primary AgentRun]
-        Primary --> Children[Ordered 0..N one-call read-only children]
-        Primary --> Tools[Private Tool router + Policy]
-        Engine --> Store[(SQLite owner thread)]
-        Store --> Views[SessionView + RunView]
-        Views --> Presentation[Pure PresentationModel]
-        Presentation --> Terminal
-        Engine -. committed safe facts .-> OTLP[Private OTLP projection]
+    subgraph Edge[arany-cli: binary arany]
+        CLI --> Terminal[Terminal or deterministic output]
+        Presentation[Pure presentation] --> Terminal
     end
 
-    Loop --> Provider{Provider interface}
-    Provider --> Fake[Strict scripted Provider]
-    Provider --> OpenAI[Native OpenAI]
-    Provider --> Anthropic[Native Anthropic]
-    Provider --> Custom[Exact verified custom profile]
-    Engine --> Workspace[Pinned Workspace input]
-    Tools --> Guard[Bounded same-binary native Guard]
-    Guard -. Linux .-> Systemd[systemd unit + Bubblewrap]
-    Guard -. macOS .-> Launchd[launchd coalition unit + Seatbelt worker]
-    Guard --> Files[Typed preconditioned file operations]
-    Guard --> Snapshot[Offline command / Skill / MCP resources]
+    subgraph Harness[arany: library]
+        CLI --> Engine[Engine: open / submit]
+        Engine --> Loop[Primary loop + children]
+        Engine --> Ledger[GoalLedger over GoalView]
+        Loop --> Step[Shared execute_step]
+        Loop --> Provider[Provider interface]
+        Step --> Tools[ToolRuntime + Policy]
+        Engine --> Journal[Journal: append + subscribe]
+        Step --> Journal
+        Journal --> Store[(SQLite owner thread)]
+        Store --> Views[Reducer + committed views]
+        Views --> Ledger
+        Views --> Presentation
+        Journal -. committed Events .-> Tap[256-envelope broadcast ring + Resync]
+        Tap --> Progress[Progress]
+        Tap --> OTLP[Telemetry]
+        Tap --> Diagnostics[Diagnostics]
+        Progress --> Terminal
+        Tools --> Reads[In-process List / Read / Search]
+    end
+
+    Provider --> Adapters[OpenAI / Anthropic / custom / scripted]
+    Tools --> Guard[Same-binary native Guard]
+    Guard -. Linux .-> Systemd[systemd + Bubblewrap]
+    Guard -. macOS .-> Launchd[launchd + Seatbelt]
     OTLP -. opt-in .-> Collector[Loopback Collector]
-    CLI --> CredentialHelper[Bounded OS-credential helper]
+    CLI --> CredentialHelper[Same-binary credential helper]
     CredentialHelper --> Keyring[OS keyring]
 
     classDef deep fill:#173b34,color:#fff,stroke:#5eead4,stroke-width:2px;
     classDef canonical fill:#2b2346,color:#fff,stroke:#c4b5fd,stroke-width:2px;
-    class Engine,Session,Goal,Loop,Primary,Children deep;
-    class Store canonical;
+    class Engine,Loop,Ledger,Step deep;
+    class Journal,Store,Views canonical;
 ```
 
-Provider is the only substitutable Engine behavior because several implementations exist at release. Scheduling, Session/context compilation, SQLite, replay, Workspace input, reducers, terminal presentation, and telemetry are private Engine responsibilities. Native OpenAI and Anthropic are supported adapters. A custom profile is admitted only for one exact protocol/origin/model/capability-evidence tuple. A built-in constrained OpenRouter profile is deferred until its broker-route and privacy gates pass; Z.AI is not admitted while it lacks the required strict outcome contract.
+Provider is the substitutable semantic inference interface. Wire adapters stay
+behind it; SQLite, replay, reducers and Tool dispatch remain concrete owners.
+The CLI depends on `arany`; the library never depends on CLI, terminal,
+presentation or accounts, and has no ratatui, crossterm or keyring dependency.
+`accounts/` owns ChatGPT OAuth, saved API accounts and the credential helper.
+Terminal rendering and pure view projection belong to the binary.
 
-The current-thread Tokio coordinator owns async lifecycle. One named standard-library thread owns the sole synchronous SQLite connection. A bounded telemetry worker owns OTLP export. Neither storage nor telemetry blocks Provider progress on the coordinator.
+Children are direct read-only AgentRuns: without Tools they make one reasoning
+call; with Tools they may make up to 16 read-only Tool calls before reporting.
+The [researcher contract](../specs/execution.md#researcher-children) owns their
+catalog, budgets, ordering and failure rules; children never inherit a broader
+grant than their parent.
 
-Store and Guard share a private filesystem admission module for checked
-directory handles and native ACL validation. This module knows neither history
-nor Tool policy. Store creates its database, records and leases after admission;
-Guard admits its private capacity/settings directory and temporary control roots,
-retaining their checked handles independently of history.
-On Linux, the same Guard reservation owns host seed storage through checked
-deletion. Its stable lease excludes live controllers and competing recovery;
-separate bounded metadata commits preparation, root identity and native lifecycle.
-The Linux adapter supplies termination evidence, while admission owns storage
-retirement and the capacity charge. Shared snapshot copying has no independent
-temporary-root lifecycle. No recovery state enters Engine or canonical Events.
+List, Read and Search use the admitted directory capability in process.
+Observations carry `Attestation::{InProcess, Guard}`; the reducer validates the
+execution site. Mutations, typed Git reads, Skill loading and MCP stay behind
+the separate Guard. The [Tool contract](../specs/tools.md#in-process-reads) owns
+path checks, bounds and attestation; its [Linux](../specs/tools.md#linux-enforcement-and-compatibility)
+and [macOS](../specs/tools.md#macos-enforcement-and-compatibility) sections own
+native launch, supervision and recovery. Short-lived same-binary Guard and
+credential helpers are privilege boundaries, not Clients or daemons.
+
+The current-thread Tokio coordinator owns async lifecycle. One named
+standard-library thread owns the synchronous SQLite connection; a bounded
+worker owns OTLP export. Store and Guard share `private_fs` for directory-handle
+and ACL admission without sharing history or Tool policy. Native capacity and
+storage recovery remain private to Guard admission, outside canonical Events.
+The macOS Tool controller awaits a blocking lifecycle owner with a private
+reactor, keeping native teardown off the terminal reactor. Abandoning the await
+cancels that owner; the dispatch marker distinguishes pre-GO refusal from
+uncertain execution.
 
 ## 3. Physical beta shape
 
-The package's main boundaries are listed below. Follow source modules for their
-current private file layout; this document does not mirror the repository tree.
+These are responsibility entry points; private file layout follows the source
+modules.
 
-| Responsibility | Entry point | Editing rules |
+| Responsibility | Owner | Contract |
 |---|---|---|
-| CLI grammar and composition | [main](../../src/main.rs), [CLI](../../src/cli.rs) | [Terminal spec](../specs/terminal.md) |
-| Run and Session orchestration | [Engine](../../src/engine.rs) | [Execution spec](../specs/execution.md) |
-| Events, replay and context | [Session](../../src/session.rs) | [Session spec](../specs/session.md) |
-| Semantic inference and wire adapters | [Provider](../../src/provider.rs) | [Provider spec](../specs/provider.md) |
-| Saved API and subscription accounts | [Credentials](../../src/cli/credentials.rs), [ChatGPT](../../src/cli/chatgpt.rs) | [Credential spec](../specs/credentials.md), [ChatGPT spec](../specs/chatgpt.md) |
-| Tool admission, Policy and dispatch | [Tools](../../src/tools.rs) | [Tool spec](../specs/tools.md) |
-| Separate native effect enforcement | [Guard](../../src/tools/guard.rs) | [Tool spec](../specs/tools.md) |
-| Canonical SQLite and private records | [Store](../../src/store.rs) | [Execution spec](../specs/execution.md#admission-persistence-and-recovery) |
-| Shared no-follow and ACL admission | [Private filesystem](../../src/private_fs.rs) | [Credentials spec](../specs/credentials.md#account-scope-and-identity) |
-| Semantic presentation and terminal ownership | [Presentation](../../src/presentation.rs), [terminal](../../src/terminal.rs) | [Terminal spec](../specs/terminal.md) |
-| Lossy export and private failure inspection | [Telemetry](../../src/telemetry.rs), [diagnostics](../../src/diagnostics.rs) | [Telemetry spec](../specs/telemetry.md), [Diagnostics spec](../specs/diagnostics.md) |
-| Product acceptance and Engine evidence | [Session journey](../../tests/session_run.rs), [Engine corpus](../../tests/engine_run.rs) | [Testing](../../agents/testing.md) |
+| CLI grammar and composition | `crates/arany-cli/src/cli/`, `main.rs` | [Terminal](../specs/terminal.md) |
+| Terminal and pure view projection | `crates/arany-cli/src/terminal/`, `presentation/` | [Terminal](../specs/terminal.md) |
+| Saved API accounts, OAuth and credential helper | `crates/arany-cli/src/accounts/` | [Credentials](../specs/credentials.md), [ChatGPT](../specs/chatgpt.md) |
+| Run admission, Goal ledger and shared Tool step | `crates/arany/src/engine/` | [Execution](../specs/execution.md), [Goals](../specs/goals.md) |
+| Events, reducer, context and replay | `crates/arany/src/session/`, `store/` | [Session](../specs/session.md) |
+| Committed Event tap | `crates/arany/src/journal.rs` | [Execution](../specs/execution.md#committed-event-stream) |
+| Semantic inference and wire adapters | `crates/arany/src/provider/` | [Provider](../specs/provider.md) |
+| Tool admission, Policy, dispatch and native Guard | `crates/arany/src/tools/` | [Tools](../specs/tools.md) |
+| SQLite, private records and shared filesystem admission | `crates/arany/src/store/`, `private_fs/` | [Execution](../specs/execution.md#admission-persistence-and-recovery), [Credentials](../specs/credentials.md#account-scope-and-identity) |
+| Lossy export and private failure inspection | `crates/arany/src/telemetry/`, `diagnostics.rs` | [Telemetry](../specs/telemetry.md), [Diagnostics](../specs/diagnostics.md) |
 
-This remains one package and one long-lived process. OS credentials use a supervised same-binary helper; explicitly requested clipboard access uses a bounded trusted OS-client child under terminal ownership. Neither becomes an agent Tool. The private `tools` implementation is one concrete router with deterministic Policy and a native Guard privilege seam, not a generic execution framework or fakeable second Engine behavior seam. The `session/` files remain one deep module, and ChatGPT's stream remains private OpenAI implementation. `engine.rs` holds orchestration behind `Engine::submit`, keeping `lib.rs` readable. Add a crate only after measured release, privilege, ownership, dependency or compile pressure.
+[Testing](../../agents/testing.md#corpus-placement) owns corpus placement and
+shared support. [Library](../../agents/arany.md) and
+[binary](../../agents/arany-cli.md) editing notes route this work.
+Guard helper entry points remain reachable from the binary's `main.rs`.
 
 ## 4. Public command contract
 
@@ -346,7 +371,7 @@ OTLP is part of the beta milestone but added after the Session/team/provider pro
 
 Development-only local diagnostics are a separate private owner, not an OTLP extension or an Engine behavior seam. The CLI enables it after ordinary attached Session/`exec` admission and writes an activation marker. The Engine supplies failed Provider/Tool/Run/compaction facts and typed operation errors; CLI callers supply closed admission/catalog/setup/exit stages. The subscription adapter records compiled failure stages and numeric counters, including rejected Tool argument shape, with bounded local stack frames. StateRoot admits the private, fixed-size log with nonblocking locking. No content, credential, argument value, upstream text or source path is recorded or exported. Optimized builds leave it disabled, and canonical replay retains its existing coarse failure categories. [The diagnostic guide](../development-diagnostics.md) specifies retention and non-claims.
 
-Each admitted Run is one trace correlated by safe Session, Run, and AgentRun IDs. A Journal subscriber builds it from committed Events at their commit times; the preceding context compilation rides as attributes on the first committed marker. Dynamic bounded spans cover the Run, each AgentRun, each Provider call, and committed transition timing. Manual or automatic compaction is a separate Session operation trace with its Provider call and a marker only after `ContextCompacted` commits. The successful topology is derived from admitted agents and calls; it is not a fixed nine-span shape.
+The [telemetry contract](../specs/telemetry.md#spans) owns span topology, commit timing and failure isolation.
 
 Arany exports trace-only OTLP/HTTP protobuf to an explicit numeric-loopback Collector selected by `--otlp-endpoint`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` in that order. A trace-specific endpoint is exact; the other two append `/v1/traces`. Invalid explicit configuration is rejected before Workspace input. Objectives, Messages, prompts, instructions, summaries, results, paths, file contents, Event payloads, provider bodies, headers, and credentials are excluded by type. Resource attributes are limited to service and SDK identity; Provider identity is a closed category and custom destinations are not exported. Provider-call failures carry only a closed low-cardinality `error.type` (`timeout`, `provider_unavailable`, `provider_rejected`, `invalid_response`, `output_limit`, or `task_panic`); cancellation uses `cancelled`. The Collector owns remote TLS, authentication, vendor routing, buffering, and backend retry. Arany uses a fixed 256-span queue, 64-span batches, a 256 KiB body ceiling, a 500 ms complete-request deadline, a 750 ms shutdown timeout, and no exporter retry. Its private async Reqwest adapter runs on an owned current-thread Tokio runtime inside the bounded SDK batch worker; automatic decompression is disabled. Export remains lossy and failure-isolated; SQLite replay is canonical.
 

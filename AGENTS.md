@@ -34,6 +34,8 @@ Everything else (agent loop, wire formats, defaults, permission modes, hooks, ag
 | Behavior, fixes, tests, correctness or release claims, deferred evidence, handoff | [Testing](./agents/testing.md) |
 | Native, PTY, tmux, account, storage or process fixtures; CI reproduction | [Fixture procedures](./agents/references/testing-details.md) |
 | Documentation, instructions, development skills | [Documentation checks](./agents/testing.md#documentation-and-instruction-changes), [Project skills](./agents/skills/README.md) |
+| Library work in `crates/arany/` | [Library practice](./agents/arany.md) |
+| CLI, terminal, presentation or accounts work in `crates/arany-cli/` | [Binary practice](./agents/arany-cli.md) |
 | Architecture, data model, new seams; plans | [System overview](./docs/architecture/system-overview.md), [Planning](./planning/PLANNING.md) |
 | Behavior, scenarios, spec ownership | [Spec workflow](./docs/specs/README.md) and the owning spec below |
 | Providers, models, custom endpoints, streaming, usage | [Provider spec](./docs/specs/provider.md) |
@@ -64,7 +66,7 @@ Record a found invariant, failure or ownership decision once: behavior, limits a
 
 ## Module boundaries
 
-Read the [system overview](./docs/architecture/system-overview.md#2-runtime-architecture) and the owning spec before changing a boundary; the overview owns package and process shape, dependency direction and state ownership.
+Read the [system overview](./docs/architecture/system-overview.md#2-runtime-architecture), the [library](./agents/arany.md) or [binary](./agents/arany-cli.md) practice, and the owning spec before changing a boundary. The overview owns crate and process shape, dependency direction and state ownership.
 
 Create a module only once it has depth; a crate needs measured dependency, release, privilege, ownership or compile pressure. Add a daemon only for a second Client or detached execution. Effectful Tools require deterministic Policy and the separate Guard.
 

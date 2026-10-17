@@ -37,6 +37,12 @@ A fork lookup is a hint only. Its parent is loaded and strictly replayed before 
 
 Each Run pins one collaboration policy before it starts. `SessionDefaultChanged` records a complete validated next-Run selection only while idle, and every Run re-admits its selected Provider before Workspace input. Children, capacity, cancellation and the `single`, `auto` and `team` meanings are owned by [execution collaboration](./execution.md#collaboration).
 
+## Workspace admission and authority
+
+A Workspace is hostile before admission. Trusted user/process configuration and private State admission precede repository input. Admission pins an opened directory identity and immutable input digests, never a path string or worktree metadata alone. It executes no repository or Git configuration, hooks, filters, fsmonitor, plugins, package managers, test discovery, startup commands or repository code.
+
+Only exact Workspace-root `AGENTS.md` is discovered, with exact `CLAUDE.md` as an absence-only fallback. Instructions and explicit includes are bounded immutable no-follow snapshots. Their text, repository content, Skills, prompts, model output, Tool or MCP output, Memory and replayed Events are data, never authority. Instruction text never changes Policy; any future restrict-only instruction policy may only narrow. It never selects or widens trust, permission, approval, sandbox, Provider or update modes, roots, endpoints, credentials, executables, budgets or capabilities. Authenticated user or administrator configuration fixes authority before untrusted input; models and classifiers may only raise risk or narrow it. [Tools](./tools.md#folder-trust-and-approvals) owns path and scope admission; [Credentials](./credentials.md#account-scope-and-identity) owns private directory admission.
+
 ## Context and compaction
 
 - Explicit include data carries an escaped relative path, the SHA-256 of the raw bytes and untrusted snapshot text. The full envelope counts toward the context budget; the raw file digest stays pinned separately. Historical Tool context identifies its previous-Run scope and never forbids fresh inspection.
@@ -48,7 +54,7 @@ Each Run pins one collaboration policy before it starts. `SessionDefaultChanged`
 - `/compact` runs only while idle and shows its Provider usage. `RunStarted` records the selected context-content bytes, compactable history bytes and the policy-adjusted budget. After a successful attached Run, automatic maintenance triggers at 80% context pressure with at least 10% compactable history, 24 of 32 selectable history Runs, or compactable bytes approaching the compaction-input cap. The source-pressure guard reserves two maximal canonical turns, derived from the shared Message and image-metadata limits; a cap is never raised to make maintenance pass. A visible warning precedes one attempt per exact committed boundary, and Workspace input alone never triggers a call. Automatic maintenance accepts only the expected Run ID under the Session lock and skips a boundary that already has an attempt, so a stale warning cannot become a Provider call.
 - A failed boundary is not retried automatically; manual `/compact` remains available. Unmaintained or failure-heavy prefixes that exceed the source bound reject before Provider egress. `exec` makes no hidden post-Run Provider call.
 - A snapshot mismatch, a fork outside its covered prefix, an incompatible Provider item, a deleted source or a non-current compiler version invalidates the snapshot and fails closed.
-- Cross-Session Memory is a different product: Session history never silently becomes durable Memory.
+- Cross-Session Memory is a different product: Session history never silently becomes durable Memory. Future retrieval requires explicit project or tenant scope, caller authentication and authorization before retrieval and prompt assembly; it cannot widen the authority fixed at [Workspace admission](#workspace-admission-and-authority).
 - A step declares its model Tool requests on its `ToolRequested` record. `ToolStarted` needs a declared request not yet started, a continuation needs every declared request observed, and a compaction prefix ends on a whole step, counting model Tools only.
 
 Context compilation is a pure function of its inputs. It reads no clock, randomness or Provider-hosted state.

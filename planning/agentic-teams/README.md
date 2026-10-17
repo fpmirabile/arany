@@ -93,10 +93,10 @@ the user-owned checks in [next steps](../../NEXT_STEPS.md).
   120-second default command time; Build settings allow up to 4 GiB memory,
   1 GiB project storage and 600 seconds. Snapshots hold 2,048 entries and edit
   strings 8 KiB ([limits](../../docs/specs/tools.md#limits-and-failure-behavior)).
-- A Run pins one ProviderProfile: the primary and every child share one
-  account, model and effort
-  ([system overview](../../docs/architecture/system-overview.md)). Mixed
-  saved access is chosen on every new start
+- A Run pins per-role Provider routes and configured fallback chains for primary,
+  child, review and compaction calls
+  ([Provider contract](../../docs/specs/provider.md#per-role-selection-and-fallback)).
+  Unconfigured roles inherit the primary chain. Mixed saved access is chosen on every new start
   ([D-20](../../docs/research/next-step-decision-register.md#d-20--mixed-saved-access-is-chosen-on-every-new-start)).
 - `.git` stays excluded from every file grant. Typed Git status/diff/log reads
   are Linux-only, read-only and primary-only

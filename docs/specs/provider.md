@@ -5,7 +5,7 @@
 This contract owns Provider selection and pinning, native and custom admission, outcome and Tool encoding, egress, usage provenance and provisional display. Accepted outcomes and deadlines belong to the [execution contract](./execution.md#accepted-outcomes), saved-account storage to the [credential contract](./credentials.md), ChatGPT-plan OAuth and its output bound to the [ChatGPT contract](./chatgpt.md), and plan contracts to the [goals contract](./goals.md#initial-plan-contract-and-success-receipt). The ChatGPT-plan trade-off is recorded in [D-18](../research/next-step-decision-register.md#d-18--explicitly-accepted-chatgpt-plan-route-is-beta-scope). Editing constraints: [security rules](../../agents/security.md).
 
 - Each role has an explicitly selected profile, model, reasoning profile, privacy profile, outcome encoding and call limits pinned before Workspace input and `RunStarted`, including every configured fallback. A Session changes its defaults only between Runs. Unconfigured roles inherit the primary route; [role routing](#per-role-selection-and-fallback) defines the bounded chains and journal representation.
-- Provider is the only Engine behavior seam. Requests and responses carry Arany semantics, never wire objects or a generic parameter bag.
+- Provider is the substitutable semantic inference interface. Requests and responses carry Arany semantics, never wire objects or a generic parameter bag.
 - A primary Goal call may carry a bounded typed `GoalContextFacts` projection. It is context, not a grant or budget override; children never receive it.
 - `Provider::compact` is a separate semantic call, not a synthetic AgentRun. It receives bounded accepted outcomes and an optional prior summary, never Workspace instructions or includes. API-key and custom routes enforce the output cap remotely; the ChatGPT-plan route records a local-only cap. The summary is untrusted data, portable only with its provenance.
 - Rollout is staged: native OpenAI and Anthropic first; exact custom profiles after data-free conformance; OpenRouter stays deferred behind its route and privacy gate; Z.AI stays unadmitted until an exact profile passes a strict outcome contract.
@@ -89,7 +89,7 @@ Native adapters validate attachment count, aggregate bytes and objective or hist
 - Operating-system TLS trust uses Reqwest's platform verifier with chain and server-name checks intact. Certificate and revocation connections the operating system makes during trust evaluation are not Provider destinations and never carry content, files or credentials.
 - Each adapter owns authentication, request encoding, error mapping, usage, privacy and parsing. Endpoint authorization is not content authorization: omitted-input canaries prove withheld data never reaches a payload.
 
-Provider HTTP clients follow no redirects, use no ambient proxy or cookies, and disable automatic protocol retries.
+Provider HTTP clients follow no redirects, use no ambient proxy or cookies, and disable automatic protocol retries. Any future network grant must bind the typed operation, audience, method, destination, redirect policy, payload schema, data class and limits. A destination allowlist never authorizes arbitrary upload or proves data-loss prevention.
 
 ## Custom destinations and routing
 
