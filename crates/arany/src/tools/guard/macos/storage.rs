@@ -1,4 +1,4 @@
-use super::super::{CAPTURE_BYTES, TEARDOWN_WAIT, retry_transient};
+use super::super::{CAPTURE_BYTES, CleanupCheck, TEARDOWN_WAIT, retry_transient};
 use super::system_program;
 use crate::private_fs::open_directory;
 use crate::tools::toolchains::RuntimeGrant;
@@ -7,6 +7,7 @@ use cap_std::fs::MetadataExt as _;
 use core_foundation::{base::CFType, dictionary::CFDictionary, string::CFString};
 use nix::libc;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -16,7 +17,7 @@ pub(super) const STORAGE_BYTES_CAP: u64 = crate::tools::types::SCRATCH_BYTES;
 const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
 const STORAGE_NAMES: [&str; 3] = ["workspace", "scratch", "cache"];
-const CLEANUP_ATTEMPTS: usize = 3;
+const CLEANUP_ATTEMPTS: usize = 8;
 const CLEANUP_PAUSE: Duration = Duration::from_millis(250);
 pub(super) const STORAGE_PENDING: &str = "storage.pending";
 
@@ -385,21 +386,39 @@ pub(super) fn storage_mounted(root: &Path) -> Result<bool, ToolError> {
     Ok(false)
 }
 
-pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
+#[derive(Debug)]
+pub(super) struct CleanupFailed {
+    pub(super) error: ToolError,
+    pub(super) check: CleanupCheck,
+}
+
+impl From<CleanupFailed> for ToolError {
+    fn from(failed: CleanupFailed) -> Self {
+        failed.error
+    }
+}
+
+pub(super) async fn cleanup_storage(root: &Path) -> Result<(), CleanupFailed> {
     cleanup_storage_until(root, tokio::time::Instant::now() + TEARDOWN_WAIT).await
 }
 
 pub(super) async fn cleanup_storage_until(
     root: &Path,
     deadline: tokio::time::Instant,
-) -> Result<(), ToolError> {
+) -> Result<(), CleanupFailed> {
+    let check = Cell::new(CleanupCheck::Inspection);
     retry_transient(CLEANUP_ATTEMPTS, CLEANUP_PAUSE, deadline, || {
-        cleanup_storage_once(root)
+        cleanup_storage_once(root, &check)
     })
     .await
+    .map_err(|error| CleanupFailed {
+        error,
+        check: check.get(),
+    })
 }
 
-async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
+async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result<(), ToolError> {
+    check.set(CleanupCheck::Inspection);
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
     let mut has_images = false;
@@ -415,6 +434,7 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
         }
     }
     if !has_images {
+        check.set(CleanupCheck::MountStillPresent);
         return if !storage_mounted(root)?
             && !super::ffi::mounts()?
                 .iter()
@@ -432,8 +452,10 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
         Err(_) => return Err(ToolError::Path),
     };
     let mut admitted_image = false;
+    check.set(CleanupCheck::ListingUnavailable);
     let attached = disk_command(root, &["info", "-plist"]).await?;
     let owned_attachments = attachments(&attached, root)?;
+    check.set(CleanupCheck::Inspection);
     if let Some(pending) = &pending {
         if pending.version != 1 || !STORAGE_NAMES.contains(&pending.image.as_str()) {
             return Err(ToolError::ProtectionUnavailable);
@@ -472,6 +494,7 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
             .find(|attachment| attachment.name == name);
         if let Some(attachment) = owned {
             verify_image(&directory, name)?;
+            check.set(CleanupCheck::MountStillPresent);
             let mounts = super::ffi::mounts()?;
             for (device, target) in &mounts {
                 if device == &attachment.device && target != &root.join(name) {
@@ -487,11 +510,13 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
             } else if mounts.iter().any(|(_, target)| target == &root.join(name)) {
                 return Err(ToolError::ProtectionUnavailable);
             }
+            check.set(CleanupCheck::Inspection);
             devices.push(attachment.device.clone());
         } else if metadata.dev() != parent.0 {
             return Err(ToolError::ProtectionUnavailable);
         }
     }
+    check.set(CleanupCheck::MountStillPresent);
     if super::ffi::mounts()?.iter().any(|(_, target)| {
         target.starts_with(root) && !STORAGE_NAMES.iter().any(|name| target == &root.join(name))
     }) {
@@ -507,13 +532,14 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
     }
     for device in devices {
         // Recheck OS ownership immediately before acting on a potentially reused disk number.
+        check.set(CleanupCheck::ListingUnavailable);
         let current = disk_command(root, &["info", "-plist"]).await?;
-        if !attachments(&current, root)?
-            .iter()
-            .any(|attachment| attachment.device == device)
-        {
+        let current = attachments(&current, root)?;
+        check.set(CleanupCheck::Inspection);
+        if !current.iter().any(|attachment| attachment.device == device) {
             return Err(ToolError::ChangedInput);
         }
+        check.set(CleanupCheck::DetachFailed);
         disk_command(
             root,
             &[
@@ -528,15 +554,29 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
     if pending.is_some() && !admitted_image {
         return Err(ToolError::ProtectionUnavailable);
     }
+    confirm_detached(root, &directory, pending.is_some(), check).await
+}
+
+async fn confirm_detached(
+    root: &Path,
+    directory: &cap_std::fs::Dir,
+    pending: bool,
+    check: &Cell<CleanupCheck>,
+) -> Result<(), ToolError> {
+    check.set(CleanupCheck::ListingUnavailable);
     let remaining = disk_command(root, &["info", "-plist"]).await?;
-    if !attachments(&remaining, root)?.is_empty() {
+    let remaining = attachments(&remaining, root)?;
+    check.set(CleanupCheck::ImageStillListed);
+    if !remaining.is_empty() {
         return Err(ToolError::ProtectionUnavailable);
     }
-    if pending.is_some() {
+    if pending {
+        check.set(CleanupCheck::Inspection);
         directory
             .remove_file(STORAGE_PENDING)
             .map_err(|_| ToolError::Operation)?;
     }
+    check.set(CleanupCheck::MountStillPresent);
     if storage_mounted(root)? {
         Err(ToolError::ProtectionUnavailable)
     } else {
@@ -761,6 +801,8 @@ mod tests {
                 assert_eq!(result.unwrap()[0].device, Path::new(device));
             }
         }
+        let pathless = "<plist version=\"1.0\"><dict><key>images</key><array><dict><key>system-entities</key><array/></dict></array></dict></plist>";
+        assert!(attachments(pathless.as_bytes(), root).is_err());
         for bytes in [
             b"not a plist".as_slice(),
             b"<plist><dict/></plist>",
