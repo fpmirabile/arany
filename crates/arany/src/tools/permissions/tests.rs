@@ -994,3 +994,43 @@ fn bash_restrictions_cover_word_boundary_suffixes_without_expanding_allows() {
         Decision::Ask
     );
 }
+
+#[test]
+fn unguarded_commands_match_bash_deny_and_ask_but_never_allow() {
+    let unguarded = ToolCall::CommandUnguarded {
+        program: "sh".into(),
+        args: vec!["-c".into(), "cargo test".into()],
+        cwd: String::new(),
+        justification: "Run the failed command once".into(),
+    };
+    let guarded = command("sh", &["-c", "cargo test"]);
+    let allow = config(json!({"allow": ["Bash", "command_unguarded", "Bash(sh -c *)"]}));
+    assert_eq!(allow.decision(&guarded), Decision::Allow);
+    for mode in ["default", "acceptEdits", "auto"] {
+        let parsed = config(json!({
+            "defaultMode": mode,
+            "allow": ["Bash", "command_unguarded", "Bash(sh -c *)"]
+        }));
+        assert_eq!(parsed.decision(&unguarded), Decision::Ask, "{mode}");
+    }
+    assert_eq!(
+        config(json!({"defaultMode": "plan", "allow": ["Bash"]})).decision(&unguarded),
+        Decision::Deny
+    );
+    assert_eq!(
+        config(json!({"defaultMode": "dontAsk", "allow": ["Bash"]})).decision(&unguarded),
+        Decision::Deny
+    );
+    let deny = config(json!({"deny": ["Bash"]})).evaluate(&unguarded);
+    assert_eq!((deny.0, deny.1), (Decision::Deny, PermissionSource::Rule));
+    let ask = config(json!({"ask": ["Bash(sh -c *)"]})).evaluate(&unguarded);
+    assert_eq!((ask.0, ask.1), (Decision::Ask, PermissionSource::Rule));
+    let bare_name = config(json!({"deny": ["command_unguarded"]})).evaluate(&unguarded);
+    assert_eq!(bare_name.0, Decision::Deny);
+    assert_eq!(
+        config(json!({"deny": ["Bash"]})).decision(&guarded),
+        Decision::Deny
+    );
+    assert_eq!(unguarded.label(), "command_unguarded");
+    assert_eq!(peer_name(&unguarded), "Bash");
+}

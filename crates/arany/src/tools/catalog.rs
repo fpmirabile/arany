@@ -16,7 +16,11 @@ pub(crate) enum Family {
 pub enum Site {
     InProcess,
     Guard,
+    Unguarded,
 }
+
+// Flips to true when the approved host run is wired end to end (plan slice 4).
+const OFFER_UNGUARDED: bool = false;
 
 #[derive(Debug)]
 pub(crate) struct OperationFacts {
@@ -82,7 +86,7 @@ const fn write_row(name: &'static str, order: u8, description: &'static str) -> 
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 14] = [
+pub(crate) static ALL: [OperationFacts; 15] = [
     read_row(
         "list",
         Family::File,
@@ -178,6 +182,18 @@ pub(crate) static ALL: [OperationFacts; 14] = [
         5,
         "List up to max_count commits (hash, parents, author, Unix time, subject) from revision or HEAD that touch a path, newest first. Read-only.",
     ),
+    OperationFacts {
+        site: Site::Unguarded,
+        spawns_process: true,
+        asks_approval: true,
+        goal_success: true,
+        ..facts_row(
+            "command_unguarded",
+            Family::Process,
+            14,
+            "Ask the user to run a command that already failed inside the Guard again on the host with no sandbox. Use only after a `command` with identical program, args and cwd failed in this Run; put a one-sentence question for the user in `justification`. The user may refuse; never retry on your own.",
+        )
+    },
 ];
 
 impl ToolCall {
@@ -195,6 +211,7 @@ impl ToolCall {
             Self::Edit { .. } => &ALL[5],
             Self::Command { .. } => &ALL[6],
             Self::ApplyChangeset { .. } => &ALL[7],
+            Self::CommandUnguarded { .. } => &ALL[14],
             Self::Skill { .. } => &ALL[8],
             Self::McpList { .. } => &ALL[9],
             Self::McpCall { .. } => &ALL[10],
@@ -236,7 +253,7 @@ impl OperationFacts {
     fn schema(&self) -> Option<Vec<(&'static str, Value)>> {
         match self.family {
             Family::File => fs::schema(self.name),
-            Family::Process => process::schema(),
+            Family::Process => process::schema(self.name),
             Family::Skill => skills::schema(),
             Family::Mcp => mcp::schema(self.name),
             Family::Git => git::schema(self.name),
@@ -252,8 +269,12 @@ pub(crate) fn nullable() -> Value {
     json!({"type": ["string", "null"]})
 }
 
+fn offered(facts: &OperationFacts) -> bool {
+    OFFER_UNGUARDED || facts.site != Site::Unguarded
+}
+
 pub(crate) fn call_schemas() -> Vec<Value> {
-    let mut offered: Vec<_> = ALL.iter().collect();
+    let mut offered: Vec<_> = ALL.iter().filter(|facts| offered(facts)).collect();
     offered.sort_by_key(|facts| facts.order);
     offered
         .into_iter()
@@ -463,6 +484,12 @@ mod tests {
                 revision: None,
                 max_count: 1,
             },
+            ToolCall::CommandUnguarded {
+                program: "cargo".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+                justification: "Run the failed command once on the host".into(),
+            },
         ]
     }
 
@@ -482,6 +509,17 @@ mod tests {
 
     #[test]
     fn only_file_reads_run_in_process() {
+        assert!(
+            ToolCall::CommandUnguarded {
+                program: "cargo".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+                justification: "run".into(),
+            }
+            .facts()
+            .site
+                == Site::Unguarded
+        );
         let in_process: Vec<_> = ALL
             .iter()
             .filter(|facts| facts.site == Site::InProcess)
@@ -496,11 +534,20 @@ mod tests {
     }
 
     #[test]
+    fn the_unguarded_operation_is_not_offered_before_its_slice_lands() {
+        assert!(
+            !call_schemas()
+                .iter()
+                .any(|call| { facts_of(call).is_some_and(|facts| facts.site == Site::Unguarded) })
+        );
+    }
+
+    #[test]
     fn every_offered_operation_has_one_schema_and_one_description() {
         let schemas = call_schemas();
         let offered: Vec<_> = ALL
             .iter()
-            .filter(|facts| !facts.description.is_empty())
+            .filter(|facts| !facts.description.is_empty() && super::offered(facts))
             .collect();
         assert_eq!(schemas.len(), offered.len());
         for call in &schemas {

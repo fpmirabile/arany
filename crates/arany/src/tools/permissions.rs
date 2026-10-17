@@ -40,6 +40,7 @@ pub enum PermissionSource {
     AiReview,
     UnavailableApproval,
     PinnedGrant,
+    ExactCommandRule,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -47,7 +48,8 @@ pub enum PermissionSource {
 pub struct PermissionVerdict {
     pub intent_digest: [u8; 32],
     pub decision: Decision,
-    pub mode: PermissionMode,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub mode: Option<PermissionMode>,
     pub basis: PermissionSource,
     pub source: PermissionSource,
     pub approved: bool,
@@ -185,7 +187,8 @@ impl PermissionConfig {
             && (facts.asks_approval
                 || facts.spawns_process
                 || matches!(facts.family, Family::Mcp | Family::Git));
-        let allow_skips_approval = !auto_review
+        let allow_skips_approval = !call.is_unguarded()
+            && !auto_review
             && !(self.mode == PermissionMode::AcceptEdits && facts.asks_approval && !facts.mutates);
         let matched = self.rules.iter().find_map(|(decision, rule)| {
             if *decision == Decision::Allow && !allow_skips_approval {
@@ -439,7 +442,8 @@ impl Rule {
             return true;
         };
         match call {
-            ToolCall::Command { program, args, .. } => {
+            ToolCall::Command { program, args, .. }
+            | ToolCall::CommandUnguarded { program, args, .. } => {
                 if !std::iter::once(program).chain(args).all(|word| {
                     !word.is_empty()
                         && word.bytes().all(|byte| {
@@ -504,7 +508,7 @@ pub(super) fn peer_name(call: &ToolCall) -> Cow<'_, str> {
 
 fn peer_operation_name(name: &str) -> &str {
     match name {
-        "command" => "Bash",
+        "command" | "command_unguarded" => "Bash",
         "read" => "Read",
         "list" => "Glob",
         "search" => "Grep",

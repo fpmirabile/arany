@@ -1054,7 +1054,7 @@ mod tests {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
             let version = match line["kind"].as_str() {
-                Some("RunStarted") => 9,
+                Some("RunStarted") => 10,
                 Some("GoalProviderCallReserved" | "RunFinished") => 7,
                 _ => 6,
             };

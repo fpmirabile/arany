@@ -168,6 +168,7 @@ mod goal_replay_tests {
                 contract_version: 1,
                 config_digest: [1; 32],
                 max_context_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES as u32,
+                unguarded_rules_digest: None,
             }),
         }
     }
@@ -2864,7 +2865,7 @@ mod goal_replay_tests {
                 verdict: PermissionVerdict {
                     intent_digest: intent.digest(),
                     decision: Decision::Deny,
-                    mode: PermissionMode::Default,
+                    mode: Some(PermissionMode::Default),
                     basis: PermissionSource::Rule,
                     source: PermissionSource::Rule,
                     approved: false,
@@ -2873,7 +2874,7 @@ mod goal_replay_tests {
             assert_eq!(
                 Event::decode(
                     "ToolPermissionDecided",
-                    1,
+                    2,
                     &verdict.payload().unwrap(),
                     Some(run),
                     Some(agent)
@@ -2894,7 +2895,7 @@ mod goal_replay_tests {
                 let mut unreviewed = verdict.clone();
                 if let Event::ToolPermissionDecided { verdict, .. } = &mut unreviewed {
                     verdict.decision = Decision::Ask;
-                    verdict.mode = mode;
+                    verdict.mode = Some(mode);
                     verdict.basis = PermissionSource::Mode;
                     verdict.source = PermissionSource::AiReview;
                     verdict.approved = true;
@@ -2923,6 +2924,115 @@ mod goal_replay_tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn unguarded_operation_has_no_replay_admission_until_its_gate_lands() {
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        view.goals[0]
+            .plan_contract
+            .as_mut()
+            .unwrap()
+            .commands
+            .push("sh".into());
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let args = || vec!["-c".to_owned(), "exit 7".to_owned()];
+        let guarded = child_intent(
+            run,
+            agent,
+            ToolCall::Command {
+                program: "sh".into(),
+                args: args(),
+                cwd: String::new(),
+            },
+        );
+        let host = child_intent(
+            run,
+            agent,
+            ToolCall::CommandUnguarded {
+                program: "sh".into(),
+                args: args(),
+                cwd: String::new(),
+                justification: "Run the failed command once".into(),
+            },
+        );
+        let mut control = view.clone();
+        apply(&mut control, tool_started(run, agent, &guarded))
+            .expect("the guarded control is admitted by the same plan");
+        assert!(rejected(&view, tool_started(run, agent, &host)));
+        assert!(rejected(&view, tool_finished(run, agent, &host, b"ok")));
+    }
+
+    #[test]
+    fn verdict_mode_and_exact_rule_are_pinned_by_the_policy_receipt() {
+        use crate::tools::permissions::{
+            Decision, PermissionMode, PermissionSource, PermissionVerdict,
+        };
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let intent = read_intent(run, agent, "src/lib.rs");
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        let verdict = |mode, decision, basis, source, approved| Event::ToolPermissionDecided {
+            run_id: run,
+            agent_run_id: agent,
+            verdict: PermissionVerdict {
+                intent_digest: intent.digest(),
+                decision,
+                mode,
+                basis,
+                source,
+                approved,
+            },
+        };
+        let exact = |approved| {
+            verdict(
+                Some(PermissionMode::Default),
+                Decision::Allow,
+                PermissionSource::ExactCommandRule,
+                PermissionSource::ExactCommandRule,
+                approved,
+            )
+        };
+        let ordinary = verdict(
+            Some(PermissionMode::Default),
+            Decision::Deny,
+            PermissionSource::Rule,
+            PermissionSource::Rule,
+            false,
+        );
+        assert!(rejected(
+            &view,
+            verdict(
+                None,
+                Decision::Deny,
+                PermissionSource::Rule,
+                PermissionSource::Rule,
+                false
+            )
+        ));
+        assert!(rejected(&view, exact(true)));
+        let mut pinned = view.clone();
+        pinned.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .unguarded_rules_digest = Some([5; 32]);
+        assert!(rejected(&pinned, exact(true)));
+        assert!(!rejected(&view, ordinary.clone()));
+        apply(&mut view, ordinary).expect("the ordinary verdict is admitted");
     }
 
     fn tool_started(run: RunId, agent: AgentRunId, intent: &EffectIntent) -> Event {

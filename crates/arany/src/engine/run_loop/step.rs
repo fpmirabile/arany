@@ -574,7 +574,7 @@ impl RunLoop<'_> {
                 verdict: PermissionVerdict {
                     intent_digest: digest,
                     decision,
-                    mode: config.mode(),
+                    mode: Some(config.mode()),
                     basis,
                     source,
                     approved,

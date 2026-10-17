@@ -149,13 +149,13 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "AgentFinished"
         | "MessageCommitted" => Some(6),
         "ProviderFallbackUsed" => Some(1),
-        "ToolPermissionDecided" => Some(1),
-        "ToolFinished" => Some(8),
-        "RunStarted" => Some(9),
+        "ToolPermissionDecided" => Some(2),
+        "ToolFinished" => Some(9),
+        "RunStarted" => Some(10),
         "RunFinished" => Some(7),
         "GoalProviderCallReserved" => Some(7),
         "GoalCompactionCallReserved" => Some(7),
-        "ToolStarted" => Some(7),
+        "ToolStarted" => Some(8),
         "ContextCompacted" => Some(7),
         _ => None,
     }
