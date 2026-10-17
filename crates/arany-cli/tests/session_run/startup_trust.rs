@@ -198,6 +198,47 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
 fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_trust() {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::io::Write;
+    // The full-frame copy spans several pages at 80x24; each page is reviewed before the choices.
+    fn review_consent_pages(
+        output: &mut std::process::ChildStdout,
+        input: &mut std::process::ChildStdin,
+        transcript: &mut Vec<u8>,
+        answered: &mut crate::session_picker::PtyResponses,
+    ) {
+        fn settle(
+            output: &mut std::process::ChildStdout,
+            input: &mut std::process::ChildStdin,
+            transcript: &mut Vec<u8>,
+            answered: &mut crate::session_picker::PtyResponses,
+        ) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !super::session_picker::screen_contains(transcript, 80, 24, "Ctrl+C exit") {
+                super::session_picker::pump(output, input, transcript, answered);
+                assert!(
+                    Instant::now() < deadline,
+                    "consent page did not settle: {}",
+                    super::session_picker::tail(transcript)
+                );
+                thread::yield_now();
+            }
+        }
+        settle(output, input, transcript, answered);
+        while super::session_picker::screen_contains(transcript, 80, 24, "Enter/PgDn") {
+            let before = super::session_picker::screen_rows(transcript, 80, 24);
+            input.write_all(b"\r").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while super::session_picker::screen_rows(transcript, 80, 24) == before {
+                super::session_picker::pump(output, input, transcript, answered);
+                assert!(
+                    Instant::now() < deadline,
+                    "consent page did not advance: {}",
+                    super::session_picker::tail(transcript)
+                );
+                thread::yield_now();
+            }
+            settle(output, input, transcript, answered);
+        }
+    }
     for linear in [false, true] {
         for (trust, startup_escape, unconfigured) in [
             (false, false, false),
@@ -299,6 +340,9 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 0,
                 b"Do you trust this folder?",
             );
+            if !linear {
+                review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
+            }
             let from = transcript.len();
             input
                 .write_all(if unconfigured {
@@ -388,7 +432,16 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                         .write_all(format!("trust {runtime_number}\r").as_bytes())
                         .unwrap();
                 } else {
-                    input.write_all(b"\t\r\t\r").unwrap();
+                    review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
+                    for &key in b"\t\r\t\r" {
+                        input.write_all(&[key]).unwrap();
+                        super::session_picker::pump(
+                            &mut output,
+                            &mut input,
+                            &mut transcript,
+                            &mut answered,
+                        );
+                    }
                 }
                 wait(
                     &mut output,
@@ -484,7 +537,16 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 if linear {
                     input.write_all(b"trust none\r").unwrap();
                 } else {
-                    input.write_all(b"\t\r\t\r").unwrap();
+                    review_consent_pages(&mut output, &mut input, &mut transcript, &mut answered);
+                    for &key in b"\t\r\t\r" {
+                        input.write_all(&[key]).unwrap();
+                        super::session_picker::pump(
+                            &mut output,
+                            &mut input,
+                            &mut transcript,
+                            &mut answered,
+                        );
+                    }
                 }
                 wait(
                     &mut output,
