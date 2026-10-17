@@ -61,11 +61,10 @@ const MUTATION: u64 = ACL_WRITE_DATA
 const ACL_FIRST_ENTRY: i32 = 0;
 const ACL_NEXT_ENTRY: i32 = -1;
 
-/// An entry borrowed from its owning `Acl`; the pointer is non-null and valid for `'a`.
+// The non-null entry pointer borrows its owning ACL for 'a.
 struct AclEntry<'a>(*mut c_void, PhantomData<&'a Acl>);
 
 impl Acl {
-    /// Reads the extended ACL of `fd`; `Ok(None)` means the object has no extended ACL.
     fn from_fd(fd: BorrowedFd<'_>) -> Result<Option<Self>, std::io::Error> {
         // The descriptor stays borrowed for the call; a non-null result is owned by the caller.
         let raw = unsafe { acl_get_fd_np(fd.as_raw_fd(), ACL_TYPE_EXTENDED) };
@@ -94,7 +93,7 @@ impl Acl {
         self.entry(ACL_NEXT_ENTRY)
     }
 
-    /// `Ok(None)` marks the end of the entries (EINVAL); any other failure or null entry is `Err`.
+    // Darwin reports EINVAL when ACL entry iteration reaches its end.
     fn entry(&self, which: i32) -> Result<Option<AclEntry<'_>>, ()> {
         let mut entry = ptr::null_mut();
         // `self.0` is live and `entry` is a valid out-pointer; the entry borrows from the ACL.

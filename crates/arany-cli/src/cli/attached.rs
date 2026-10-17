@@ -1632,8 +1632,6 @@ async fn start_session(admission: &Admission) -> Result<(SessionId, SessionView)
     }
 }
 
-// A State without history is a missing source, not an unsafe State; ownership and
-// permission failures keep the unsafe message.
 fn open_source_state(state_dir: &Path, id: Option<SessionId>) -> Result<StateRoot, String> {
     StateRoot::open_existing(state_dir).map_err(|error| match error {
         StoreError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {

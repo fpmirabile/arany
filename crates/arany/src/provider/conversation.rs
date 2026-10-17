@@ -73,7 +73,7 @@ impl RunInput {
     }
 }
 
-/// Text that may be `system`: nothing else can ever become system text.
+// Only compiled system blocks may become system text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SystemBlock {
     Prompt(&'static str),
@@ -100,13 +100,11 @@ pub(crate) enum Role {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Block {
-    /// User text or a labelled data block.
     Text(String),
     Image {
         label: String,
         image: super::ImageAttachment,
     },
-    /// Exact replay of a previous model turn; the only content an assistant message carries.
     AssistantTurn(ProviderTurn),
     ToolResult {
         id: ToolUseId,
@@ -124,10 +122,8 @@ pub(crate) struct Message {
 #[derive(Clone, Debug)]
 pub(crate) struct Conversation {
     pub system: Vec<SystemBlock>,
-    /// `Some` when the call offers native Tools; the set never changes within a Run.
     pub tools: Option<Vec<ToolSpec>>,
     pub messages: Vec<Message>,
-    /// Finish and Delegate JSON schema restricted by phase and policy.
     pub outcome: Value,
 }
 
@@ -149,8 +145,6 @@ impl ToolUseId {
     }
 }
 
-/// A turn is bounded by what the model could have generated: 8 bytes per output token plus 64 KiB
-/// of item framing and ciphertext overhead, never above the response bound.
 pub(crate) fn max_turn_bytes(max_output_tokens: u32) -> usize {
     (8 * max_output_tokens as usize + 64 * 1024).min(MAX_RESPONSE_BYTES)
 }
@@ -176,7 +170,6 @@ impl std::fmt::Debug for ProviderTurn {
 }
 
 impl ProviderTurn {
-    /// Admits a turn after bounds and credential reflection over the raw bytes and every decoded string.
     pub(crate) fn new(
         adapter: &'static str,
         json: &str,
@@ -212,8 +205,7 @@ impl ProviderTurn {
         }
     }
 
-    /// Drops Anthropic thinking blocks, whose signatures bind the history before them. Compaction
-    /// rewrites that history, so the kept turns must stop carrying them.
+    // Compaction changes signed history, invalidating Anthropic thinking signatures.
     pub(crate) fn without_thinking(&mut self) {
         if self.adapter != "anthropic" {
             return;
@@ -245,7 +237,6 @@ impl ProviderTurn {
                 .map_or(true, |value| reflects_secret(&value, secret))
     }
 
-    /// The items to splice into a request of `adapter`; `None` for a turn of another route.
     pub(crate) fn items(&self, adapter: &'static str) -> Option<Vec<Value>> {
         if self.adapter != adapter {
             return None;

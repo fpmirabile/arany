@@ -83,7 +83,6 @@ const MAX_GIT_RUNTIME: Duration = Duration::from_secs(20);
 pub(super) const VIEW: &str = "git-view";
 pub(super) const HOME: &str = "git-home";
 const VIEW_CONFIG: &[u8] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\thooksPath = /dev/null\n\tuntrackedCache = false\n";
-/// Repository data the view links as `(entry, directory, required)`; nothing else in `.git` is read.
 const LINKED: [(&str, bool, bool); 5] = [
     ("objects", true, true),
     ("refs", true, true),
@@ -95,7 +94,6 @@ const NO_REPOSITORY: &str = "The Workspace root has no .git directory; typed Git
 const UNSUPPORTED_LAYOUT: &str = "The Workspace .git is not a plain repository directory (linked worktree, submodule checkout, gitfile, symlink or missing data); typed Git reads do not support it.";
 const UNSUPPORTED_FORMAT: &str = "The repository uses Git extensions (such as SHA-256 objects, reftable refs or partial clone) that typed Git reads do not support.";
 
-/// Reads a pinned executable that is a regular, non-set-ID, non-writable native executable within the snapshot bound.
 fn executable_bytes(executable: &str) -> Result<Vec<u8>, ToolError> {
     use std::os::unix::fs::MetadataExt;
     let file = super::fs::open_absolute(executable)?;
@@ -123,7 +121,7 @@ fn verify_pin(git: &Program) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// Host-side admission also requires root ownership; inside the user namespace root appears unmapped.
+// Check root ownership on the host because root appears unmapped inside the user namespace.
 pub(super) fn verify_host_executable(git: &Program) -> Result<(), ToolError> {
     use std::os::unix::fs::MetadataExt;
     let metadata =
@@ -134,7 +132,6 @@ pub(super) fn verify_host_executable(git: &Program) -> Result<(), ToolError> {
     verify_pin(git)
 }
 
-/// The system Git that folder trust pins; `None` reports typed Git reads unavailable.
 pub(super) fn discover() -> Option<Program> {
     EXECUTABLES.git.iter().find_map(|candidate| {
         let executable = std::fs::canonicalize(candidate.path).ok()?;
@@ -157,11 +154,9 @@ pub(super) fn discover() -> Option<Program> {
 
 enum Prepared {
     Ready,
-    /// The repository is not supported; the message is reported without running Git.
     Unsupported(&'static str),
 }
 
-/// Builds the private repository view for `workspace`.
 fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
     let root = super::fs::open_directory(workspace)?;
     match root.symlink_metadata(".git") {
@@ -253,7 +248,6 @@ fn uses_extensions(config: &[u8]) -> bool {
         })
 }
 
-/// A positive literal pathspec for `path` (none for the root), then exclusions for every secret component.
 fn pathspecs(path: &str) -> Vec<String> {
     let mut specs = Vec::with_capacity(1 + 2 * (FORBIDDEN_NAMES.len() + 1));
     if !path.is_empty() && path != "." {
@@ -270,7 +264,6 @@ fn owned(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_owned()).collect()
 }
 
-/// One argument vector per Git invocation; `git_diff` runs a numstat pass, then a patch pass.
 fn invocations(call: &ToolCall) -> Result<Vec<Vec<String>>, ToolError> {
     let mut runs = Vec::new();
     match call {
@@ -345,7 +338,6 @@ fn invocations(call: &ToolCall) -> Result<Vec<Vec<String>>, ToolError> {
     Ok(runs)
 }
 
-/// The complete environment; Git starts from an empty one.
 fn environment(view: &Path, workspace: &Path, scratch: &Path) -> Vec<(&'static str, OsString)> {
     vec![
         ("GIT_DIR", view.into()),
@@ -371,8 +363,7 @@ struct Captured {
     overflow: bool,
 }
 
-/// Keeps at most `cap` bytes. Without `drain` it then drops the pipe so an over-long writer stops with
-/// EPIPE (stdout). With `drain` it discards the rest so a verbose writer is never killed (stderr).
+// Drain excess stderr to avoid killing a verbose writer; cut stdout off to stop overlong output.
 async fn read_prefix(
     mut reader: impl tokio::io::AsyncRead + Unpin,
     cap: usize,
@@ -442,7 +433,6 @@ async fn spawn_git(
     }
 }
 
-/// Runs one typed Git read; Git failures and unsupported repositories return `{"failed": ..}` output.
 pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let git = site.config.git.as_ref().ok_or(ToolError::Configuration)?;
     #[cfg(target_os = "linux")]
@@ -509,8 +499,6 @@ pub(super) async fn execute(
     Ok(text)
 }
 
-/// `{"failed": message}` plus `"stderr"` only when bounded diagnostics remain after dropping lines
-/// that name a secret path component.
 fn failure(message: &str, stderr: &[u8], max_bytes: usize) -> String {
     let stderr = String::from_utf8_lossy(stderr)
         .lines()
@@ -539,7 +527,7 @@ fn failure(message: &str, stderr: &[u8], max_bytes: usize) -> String {
     }
 }
 
-/// Splits on everything outside a file-name alphabet, so `(.env)`, `.env,` and `path=.env` all match.
+// Split outside the filename alphabet so punctuation cannot hide a protected path component.
 fn mentions_forbidden(line: &str) -> bool {
     line.split(|character: char| {
         !(character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
@@ -562,7 +550,6 @@ impl Rows {
         }
     }
 
-    /// Adds a row while the serialized rows stay within the byte budget and the row cap.
     fn push(&mut self, row: Value) -> bool {
         let size = row.to_string().len() + 1;
         if self.rows.len() == MAX_ROWS || self.used + size > self.budget {
@@ -574,7 +561,6 @@ impl Rows {
     }
 }
 
-/// Splits terminated records; after an overflow the last, possibly partial, record is dropped.
 fn records(raw: &[u8], terminator: u8, overflow: bool) -> Result<Vec<&[u8]>, ToolError> {
     let mut records: Vec<&[u8]> = raw.split(|byte| *byte == terminator).collect();
     let tail = records.pop().unwrap_or_default();
@@ -592,7 +578,6 @@ fn clipped(text: &str, chars: usize) -> String {
     text.chars().take(chars).collect()
 }
 
-/// `XY` and the path of a porcelain v2 changed (`parts == 8`) or unmerged (`parts == 10`) record body.
 fn entry(rest: &str, parts: usize) -> Result<(&str, &str), ToolError> {
     let fields: Vec<&str> = rest.splitn(parts, ' ').collect();
     match fields.as_slice() {

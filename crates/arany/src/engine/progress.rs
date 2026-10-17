@@ -203,8 +203,7 @@ impl ProgressPublisher {
             }));
     }
 
-    /// Publishes the ledger's view after each tapped Event. The run-scoped append feeds the ledger
-    /// before the tap, so the view already holds every Event received, and a Resync recovers from it.
+    // The append feeds the ledger before the tap, so Resync can rebuild from the ledger's committed view.
     pub(super) async fn follow(
         &self,
         subscription: Subscription,

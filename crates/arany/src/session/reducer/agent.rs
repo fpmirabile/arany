@@ -17,7 +17,6 @@ pub(super) fn child_tool_requests(agent: &AgentView) -> usize {
         .count()
 }
 
-/// A child step follows the previous step's finished Tool, or is the child's first step.
 pub(super) fn is_child_step(agent: &AgentView, record: &ProviderCallRecord) -> bool {
     agent.role == AgentRole::Child
         && record.phase == AgentPhase::ChildWork
@@ -111,7 +110,6 @@ impl SessionView {
         Ok(())
     }
 
-    /// A child's Tool that the Goal plan contract refuses is journaled as `Denied` without dispatch.
     pub(super) fn finish_child_tool(
         &mut self,
         run_id: RunId,

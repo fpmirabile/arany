@@ -349,7 +349,6 @@ fn parse_linear_selection(
     }
 }
 
-/// Keeps at most one profile per runtime kind; a checked profile replaces its siblings.
 fn toggle_profile(selected: &mut [bool], options: &[arany::RuntimeProfileOption], index: usize) {
     let check = !selected[index];
     let group = options[index].group;

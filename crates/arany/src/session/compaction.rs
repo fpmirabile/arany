@@ -4,7 +4,6 @@ use crate::provider::{CompactionItem, HistoryTurn, UnansweredStatus};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-/// The largest serialized compaction input whose adapter request still fits the request ceiling.
 pub(crate) const MAX_COMPACTION_INPUT_BYTES: usize = (crate::provider::MAX_PROVIDER_REQUEST_BYTES
     - crate::provider::COMPACTION_REQUEST_ENVELOPE_BYTES)
     / crate::provider::COMPACTION_INPUT_EXPANSION;

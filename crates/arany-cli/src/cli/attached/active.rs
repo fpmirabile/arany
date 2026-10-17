@@ -15,7 +15,6 @@ use std::time::Duration;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 pub(super) enum RunSubmission {
-    /// The bool records a preview already printed; the optional reason says why the autonomous Goal stopped.
     Completed(Box<RunOutcome>, bool, Option<String>),
     InterruptedBeforeRun,
     Shutdown(String),
@@ -52,14 +51,10 @@ pub(super) fn validate_objective_inputs(
         .map_err(|error| error.to_string())
 }
 
-/// How an idle submission starts or continues its Goal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GoalStart {
-    /// A plain message: one Run in a new Goal.
     Plain,
-    /// `/goal OBJECTIVE`: a new Goal that the Engine keeps running until it stops.
     Autonomous,
-    /// Continues the interrupted Goal of the Session with its pinned objective.
     Resume,
 }
 
@@ -88,7 +83,6 @@ pub(super) fn goal_request(
     })
 }
 
-/// Names what a draft typed during an admitted Run waits for.
 fn draft_retained_notice(autonomous: bool) -> &'static str {
     if autonomous {
         "Draft retained; press Enter after this Goal to submit"
@@ -97,8 +91,6 @@ fn draft_retained_notice(autonomous: bool) -> &'static str {
     }
 }
 
-/// How the attached Run answers a stop request: `/goal pause` waits for a step boundary; Ctrl+C cancels now,
-/// and in raw-key presentations Escape does too (canonical linear input cannot send Escape).
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ActiveStop {
     Running,
@@ -120,8 +112,6 @@ fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
     }
 }
 
-/// Consumes a note the Engine recorded since the last check. The composer clears only while it
-/// still holds the offered text; an edited draft stays as the user's retained text.
 fn settle_recorded_note(
     delivered: u64,
     seen: &mut u64,
@@ -141,8 +131,6 @@ fn settle_recorded_note(
     true
 }
 
-/// Maps Escape during a Run: a pending clipboard read takes it first, otherwise it cancels only
-/// when nothing is focused and no cancellation is already under way.
 fn active_escape(
     input: TerminalInput,
     menu_open: bool,
@@ -159,8 +147,6 @@ fn active_escape(
     }
 }
 
-/// The one notice a Run's end shows about retained text. A note that did not return to the
-/// composer is named as dropped, so no notice claims it was kept.
 fn run_end_notice(sent: bool, note_returned: bool, restored: bool) -> Option<&'static str> {
     if !restored {
         return Some(if note_returned {
@@ -178,7 +164,6 @@ fn run_end_notice(sent: bool, note_returned: bool, restored: bool) -> Option<&'s
     }
 }
 
-/// The undelivered note goes ahead of a held draft it was offered before; the result returns to the composer.
 fn retained_linear_draft(note: Option<String>, held: Option<HeldDraft>) -> Option<HeldDraft> {
     match (note, held) {
         (Some(note), Some((text, images))) => Some((format!("{note}\n{text}"), images)),
@@ -187,10 +172,9 @@ fn retained_linear_draft(note: Option<String>, held: Option<HeldDraft>) -> Optio
     }
 }
 
-/// A linear draft kept aside during a Run, where the composer is not drawn.
 type HeldDraft = (String, Vec<ImageAttachment>);
 
-/// Moves a refused linear draft out of the composer so later lines cannot be appended to it.
+// Move a refused linear draft aside so later lines cannot be appended to it.
 fn hold_draft(composer: &mut Composer) -> Option<HeldDraft> {
     if composer.is_empty() {
         return None;
@@ -198,7 +182,6 @@ fn hold_draft(composer: &mut Composer) -> Option<HeldDraft> {
     Some((composer.take(), composer.take_images()))
 }
 
-/// Returns a held draft at Run end, ahead of newer text. If both do not fit, the newer draft stays and this returns false.
 fn release_held_draft(composer: &mut Composer, (text, images): HeldDraft) -> bool {
     let typed = composer.take();
     let typed_images = composer.take_images();
@@ -228,7 +211,6 @@ fn release_held_draft(composer: &mut Composer, (text, images): HeldDraft) -> boo
     fits
 }
 
-/// Checks an idle run before any Session or Goal state is created. Returns the notice to show.
 pub(super) fn preflight_idle_run(
     admission: &Admission,
     view: &SessionView,
@@ -395,8 +377,7 @@ pub(super) async fn submit_objective(
                 let had_offer = offered.is_some();
                 let sent = settle_recorded_note(steering.delivered_notes(), &mut seen_delivered, &mut offered, composer);
                 let had_held = held.is_some();
-                // The undelivered note was offered before any held draft, so it joins ahead of that draft.
-                // Linear offers left the composer empty; the note always returns here, never dropped.
+                // The undelivered note predates the held draft, so restore it ahead of that draft.
                 let note = steering.withdraw_note().filter(|_| terminal.is_linear());
                 let withdrawn = note.is_some();
                 let pending = retained_linear_draft(note, held.take());
@@ -1053,7 +1034,7 @@ fn compaction_notice(record: &CompactionRecord) -> String {
     }
 }
 
-/// Goals are appended in start order, so `goals.last()` is the newest Goal; a known Goal is replaced in place.
+// Preserve Goal start order so goals.last() remains the newest Goal.
 fn upsert_goal(goals: &mut Vec<arany::GoalView>, goal: arany::GoalView) {
     match goals.iter_mut().find(|known| known.id == goal.id) {
         Some(known) => *known = goal,

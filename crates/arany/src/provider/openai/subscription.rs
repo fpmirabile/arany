@@ -150,7 +150,6 @@ impl Provider for ChatGptProvider {
     }
 }
 
-/// Performs potentially billable synthetic calls. Account/catalog admission and cost consent belong to the caller.
 pub(super) async fn probe_model(
     access_token: &str,
     model: &str,

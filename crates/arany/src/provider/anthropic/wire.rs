@@ -27,7 +27,6 @@ pub(super) struct MessageStream<'a> {
     closed: Vec<bool>,
     delta_seen: bool,
     stopped: bool,
-    /// Tool input fragments of the open `tool_use` block; never previewed.
     tool_input: String,
     preview_failed: bool,
 }
@@ -65,8 +64,7 @@ impl<'a> MessageStream<'a> {
         Ok(None)
     }
 
-    /// Text beside a Tool call need not be the structured answer, so a preview that cannot decode
-    /// it stops previewing. The assembled message is still scanned for the credential at its end.
+    // Tool-adjacent text need not be the structured answer, so failed preview decoding stops only the preview.
     fn publish_preview(&mut self, fragment: &str) {
         if self.preview_failed {
             return;
@@ -320,12 +318,10 @@ pub(super) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> 
     Ok(body)
 }
 
-/// What a response must satisfy before any outcome is read from it.
 pub(super) struct RunScope<'a> {
     pub(super) model: &'a str,
     pub(super) output_cap: u32,
     pub(super) secret: &'a str,
-    /// The native Tools this request offered.
     pub(super) offered: &'a [ToolSpec],
 }
 
@@ -383,7 +379,7 @@ pub(super) fn decode_compaction(
     })
 }
 
-/// The request body: Tools first, then system, then messages, so every earlier request is a prefix.
+// Put stable Tools and system blocks first so later requests preserve the earlier prefix.
 pub(crate) fn run_body(
     request: &ProviderRequest,
     conversation: &Conversation,
@@ -402,8 +398,7 @@ pub(crate) fn run_body(
         "output_config": {"format": {"type": "json_schema", "schema": conversation.outcome}, "effort": effort.as_str()},
         "stream": false,
     });
-    // Tool definitions are not strict: the plan-contract unions would exceed the strict-schema
-    // complexity limit, and the Engine validates every call. Only the outcome format is strict.
+    // Plan-contract unions exceed strict Tool-schema limits; the Engine validates calls instead.
     let exhausted = request
         .input
         .tools
@@ -548,7 +543,6 @@ enum Stop {
     ToolUse,
 }
 
-/// A response that passed envelope, usage and stop-reason checks; any other stop reason is rejected.
 struct Admitted {
     id: String,
     usage: Usage,
@@ -649,7 +643,6 @@ impl WireResponse {
 }
 
 impl Admitted {
-    /// The one text block of an `end_turn` answer, which may follow thinking blocks only.
     fn single_text(&self) -> Result<String, ProviderError> {
         let mut text = None;
         for block in &self.content {
@@ -662,8 +655,6 @@ impl Admitted {
         text.ok_or(ProviderError::InvalidOutcome)
     }
 
-    /// The `tool_use` blocks of a Tool stop, in model order. Text and thinking stay in the replayed
-    /// turn and are never parsed.
     fn tool_requests(&self, offered: &[ToolSpec]) -> Result<ProviderOutcome, ProviderError> {
         let mut requests = Vec::new();
         for block in &self.content {

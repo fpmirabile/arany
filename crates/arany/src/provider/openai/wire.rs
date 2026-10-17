@@ -23,12 +23,10 @@ pub(crate) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> 
     Ok(body)
 }
 
-/// What a response must satisfy before any outcome is read from it.
 pub(crate) struct RunScope<'a> {
     pub(crate) model: &'a str,
     pub(crate) output_cap: u32,
     pub(crate) secret: &'a str,
-    /// Names of the Tool and outcome functions the request offered; `None` for a text-only request.
     functions: Option<Vec<String>>,
 }
 
@@ -533,7 +531,7 @@ struct WireUsage {
     input_tokens_details: Option<WireInputTokensDetails>,
 }
 
-/// `input_tokens` already includes the cached part; cache writes are not reported on this route.
+// Input tokens already include cache reads; do not add them again.
 #[derive(Deserialize)]
 struct WireInputTokensDetails {
     cached_tokens: u32,
@@ -562,8 +560,7 @@ impl WireItem {
     }
 }
 
-/// Completed output items of a streamed response are kept raw beside their typed view, so the
-/// replayed turn carries everything the Provider sent, including opaque reasoning ciphertext.
+// Keep raw completed items so replay preserves opaque reasoning ciphertext.
 pub(super) fn reconcile_streamed_output(
     bytes: &[u8],
     response_id: &str,
@@ -590,7 +587,6 @@ pub(super) fn reconcile_streamed_output(
     serde_json::to_vec(&event).map_err(|_| ResponseError::Envelope)
 }
 
-/// The one completed function call of a Tool-enabled response.
 struct FunctionCall {
     name: String,
     arguments: String,

@@ -6,7 +6,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
-/// Returns the boot identity used to keep persisted coalitions out of later boots.
+// Bind persisted coalitions to this boot so recovery cannot signal identities from a later boot.
 pub(super) fn boot_session() -> Result<uuid::Uuid, ToolError> {
     let mut bytes = [0_u8; 37];
     let mut length = bytes.len();
@@ -28,7 +28,6 @@ pub(super) fn boot_session() -> Result<uuid::Uuid, ToolError> {
     uuid::Uuid::try_parse_ascii(&bytes[..36]).map_err(|_| ToolError::ProtectionUnavailable)
 }
 
-/// Copies the kernel mount table into a bounded, caller-owned buffer.
 pub(super) fn mounts() -> Result<Vec<(std::path::PathBuf, std::path::PathBuf)>, ToolError> {
     use std::os::unix::ffi::OsStringExt;
     const MOUNT_CAP: usize = 4096;
@@ -66,7 +65,6 @@ pub(super) fn mounts() -> Result<Vec<(std::path::PathBuf, std::path::PathBuf)>, 
         .collect()
 }
 
-/// Parses bounded OS-produced plist output, transferring its Create ownership once.
 pub(super) fn property_list(bytes: &[u8]) -> Result<core_foundation::base::CFType, ToolError> {
     use core_foundation::data::CFData;
     use core_foundation::propertylist::{create_with_data, kCFPropertyListImmutable};
@@ -175,7 +173,6 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-/// Returns the calling process's open descriptor numbers.
 pub(super) fn open_descriptors() -> Result<Vec<i32>, ToolError> {
     let mut descriptors = [libc::proc_fdinfo {
         proc_fd: 0,
@@ -205,7 +202,6 @@ pub(super) fn open_descriptors() -> Result<Vec<i32>, ToolError> {
     )
 }
 
-/// Restores the default SIGXCPU action and unblocks it for the calling thread.
 pub(super) fn reset_cpu_signal() -> bool {
     // Darwin's C signal structures have no invalid all-zero representation.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -221,7 +217,6 @@ pub(super) fn reset_cpu_signal() -> bool {
     }
 }
 
-/// Returns true when Seatbelt rejects ignoring or blocking SIGXCPU with `EPERM`.
 pub(super) fn cpu_signal_changes_denied() -> bool {
     // C signal structures are initialized before use and no callback is installed on success.
     let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
@@ -241,7 +236,6 @@ pub(super) fn cpu_signal_changes_denied() -> bool {
     }
 }
 
-/// Installs a Seatbelt profile on the calling process; native diagnostics are discarded.
 pub(super) fn install_sandbox(profile: &CStr) -> bool {
     let mut error = std::ptr::null_mut();
     // The profile lives through the call; the native error allocation is released exactly once.
@@ -254,7 +248,6 @@ pub(super) fn install_sandbox(profile: &CStr) -> bool {
     }
 }
 
-/// Returns the raw Seatbelt verdict for an unfiltered operation: 0 allows, 1 denies.
 pub(super) fn sandbox_verdict(operation: &CStr) -> i32 {
     // Unfiltered queries retain no pointer and inspect only the calling process.
     unsafe { sandbox_check(std::process::id() as i32, operation.as_ptr(), 0) }
@@ -272,7 +265,6 @@ pub(super) fn syscall_denied(syscall: i32) -> bool {
     }
 }
 
-/// Clears the inherited bootstrap and registered Mach ports and confirms the null bootstrap.
 pub(super) fn detach_bootstrap_ports() -> bool {
     let mut bootstrap = u32::MAX;
     // Mach ports are 32-bit SDK names; these calls retain no borrowed memory or service right.
@@ -284,7 +276,6 @@ pub(super) fn detach_bootstrap_ports() -> bool {
     }
 }
 
-/// Returns whether code carries no entitlements, or `None` when Security cannot determine it.
 pub(super) fn unentitled_code(path: &Path) -> Result<Option<bool>, ToolError> {
     use core_foundation::base::{CFType, TCFType};
     use core_foundation::dictionary::CFDictionary;
@@ -341,7 +332,6 @@ pub(super) fn task_info(pid: u32) -> Result<libc::proc_taskinfo, ToolError> {
     Ok(unsafe { info.assume_init() })
 }
 
-/// Returns true only when BSD metadata, including zombies, positively shows `pid` exiting.
 pub(super) fn exited(pid: u32) -> bool {
     let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
     // The live local buffer is writable for exactly the size passed; the kernel writes at most that.
@@ -409,7 +399,7 @@ fn process_info_error(bytes: i32) -> ToolError {
     }
 }
 
-/// Signals the exact PID/version pair atomically; an already-exited target is success.
+// Signal the exact PID/version pair atomically so a reused PID cannot receive the signal.
 pub(super) fn signal(pid: u32, version: u32, signal: i32) -> Result<(), ToolError> {
     let mut token = [0_u32; 8];
     token[AUDIT_TOKEN_PID] = pid;
@@ -453,7 +443,6 @@ pub(super) fn max_processes() -> Result<i32, ToolError> {
     Ok(maximum)
 }
 
-/// Fills `pids` with every current process ID and returns the written prefix.
 pub(super) fn list_pids(pids: &mut [i32]) -> Result<&[i32], ToolError> {
     // `pids` is a live, writable, i32-aligned buffer and its exact byte length is passed.
     let bytes = unsafe {
@@ -485,7 +474,6 @@ pub(super) fn rusage(pid: u32) -> Result<libc::rusage_info_v0, ToolError> {
     Ok(unsafe { usage.assume_init() })
 }
 
-/// Returns the connected peer's PID and credentials, rejecting partial native output.
 pub(super) fn peer_credentials(stream: &UnixStream) -> Result<(i32, libc::xucred), ToolError> {
     let mut pid = 0_i32;
     let mut credentials = MaybeUninit::<libc::xucred>::uninit();

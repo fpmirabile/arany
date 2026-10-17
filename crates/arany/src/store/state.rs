@@ -249,8 +249,6 @@ impl StateRoot {
         Self::open(path, false)
     }
 
-    /// Re-admits this root's path and requires it to still name the held directory, so a
-    /// renamed or swapped directory fails closed.
     pub(crate) fn readmit(&self) -> Result<(), StoreError> {
         let current = Self::open_existing(&self.path)?;
         #[cfg(unix)]

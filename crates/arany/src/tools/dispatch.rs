@@ -23,7 +23,6 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     }
 }
 
-/// Whether a delivered output reports a failed operation rather than a result.
 pub(super) fn failed(call: &ToolCall, output: &str) -> bool {
     let value = || serde_json::from_str::<serde_json::Value>(output);
     match call {
@@ -34,7 +33,6 @@ pub(super) fn failed(call: &ToolCall, output: &str) -> bool {
     }
 }
 
-/// The journaled disposition and output of one executed call; output over its budget is a `Limit`.
 pub(super) fn outcome(
     intent: &EffectIntent,
     result: Result<String, ToolError>,

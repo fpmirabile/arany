@@ -24,7 +24,6 @@ pub enum Action {
 }
 
 impl Action {
-    /// Base Event bound before configured Provider switches.
     pub fn max_events(self) -> usize {
         match self {
             // A finishing call: its reservation, record, an optional steering note and display chunks,

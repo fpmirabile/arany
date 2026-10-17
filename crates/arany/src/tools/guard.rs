@@ -350,7 +350,6 @@ impl BootstrapFailure {
     }
 }
 
-/// A Guard stage that failed after bootstrap reported success, or outside its child.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GuardStage {
     ConnectionDeadline,
@@ -502,7 +501,6 @@ pub(super) async fn execute(
     }
 }
 
-/// Waits briefly for the launcher's bounded stderr; `None` means it did not reach EOF.
 pub(super) async fn drain_stderr(
     task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
 ) -> Option<Vec<u8>> {
@@ -691,8 +689,7 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     Ok(CacheCandidate::Received)
 }
 
-/// Consumes exactly `length` archive bytes, writing them while `staged` is present. A write
-/// failure drops the writer but keeps draining so the stream stays aligned.
+// Keep draining after a staging write failure so the archive stream stays aligned.
 async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write>(
     reader: &mut R,
     length: u64,
@@ -719,9 +716,7 @@ async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write>(
     Ok(staged)
 }
 
-/// Reaps a child this process owns. On macOS it closes stdin first and polls `try_wait`
-/// at the supervision interval, because Seatbelt blocks Tokio's signal wake socket;
-/// elsewhere it awaits exit.
+// Seatbelt blocks Tokio's signal wake socket, so macOS closes stdin and polls try_wait when reaping.
 pub(super) async fn reap_owned_child(
     child: &mut Child,
 ) -> std::io::Result<std::process::ExitStatus> {
@@ -798,7 +793,6 @@ fn read_task(reader: &mut std::io::BufReader<impl Read>) -> Result<Task, ToolErr
     serde_json::from_slice(&task).map_err(|_| ToolError::Configuration)
 }
 
-/// Returns the payload root and the Workspace this helper's call operates on.
 #[cfg(target_os = "macos")]
 fn bootstrap_locations(
     task: &Task,
@@ -1140,7 +1134,6 @@ fn load_skill_bytes(task: &Task) -> Result<Vec<u8>, ToolError> {
     Ok(bytes)
 }
 
-/// Toolchain `bin` directories in grant order, then the system bins; both platforms mount toolchains at their host path.
 pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, ToolError> {
     let mut paths = Vec::new();
     for grant in runtime_grants

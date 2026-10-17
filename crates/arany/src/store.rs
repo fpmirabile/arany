@@ -42,7 +42,7 @@ const MAX_GOAL_STARTED_BYTES: usize = MAX_ESCAPED_OBJECTIVE_BYTES + 16 * 1024;
 const MAX_MESSAGE_ACCEPTED_BYTES: usize =
     MAX_ESCAPED_OBJECTIVE_BYTES + crate::provider::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 16 * 1024;
 const MAX_TOOL_FINISHED_BYTES: usize = crate::tools::types::MAX_TOOL_OBSERVATION_BYTES;
-/// Run start writes one `GoalStarted` and one `MessageAccepted` beyond the per-slot bound.
+// Run start needs extra headroom because GoalStarted and MessageAccepted exceed the ordinary Event bound.
 const RUN_START_EXTRA_BYTES: usize =
     MAX_GOAL_STARTED_BYTES + MAX_MESSAGE_ACCEPTED_BYTES - 2 * MAX_EVENT_BYTES;
 fn event_payload_limit(kind: &str, version: i64) -> usize {
@@ -426,7 +426,6 @@ impl Store {
         self.call(|reply| Request::Load { session_id, reply }).await
     }
 
-    /// Admits `event_slots` Events, of which up to `tool_observations` are `ToolFinished`.
     pub(crate) async fn admit_operation(
         &self,
         session_id: SessionId,
@@ -437,7 +436,7 @@ impl Store {
             .await
     }
 
-    /// Admits the Run start, the only operation that precedes `GoalStarted` and `MessageAccepted`, so it reserves their objective and image envelopes.
+    // Reserve objective and image envelopes before the first GoalStarted and MessageAccepted.
     pub(crate) async fn admit_run_start(
         &self,
         session_id: SessionId,
@@ -476,7 +475,6 @@ impl Store {
             .await
     }
 
-    /// The Session as the append path validates it: an open Run or Goal is not projected as interrupted.
     pub(crate) async fn load_open_view(
         &self,
         session_id: SessionId,

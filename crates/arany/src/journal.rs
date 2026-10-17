@@ -7,7 +7,6 @@ use tokio::sync::broadcast::{
     error::{RecvError, TryRecvError},
 };
 
-/// Committed Events the tap retains for a slow subscriber before it must resync.
 pub(crate) const TAP_CAPACITY: usize = 256;
 
 /// One item of the ordered committed Event stream.
@@ -36,7 +35,6 @@ impl Subscription {
         tapped(self.0.blocking_recv())
     }
 
-    /// Feeds `observe` every Event committed before `end` resolves.
     pub(crate) async fn follow(
         mut self,
         end: impl Future<Output = ()>,
@@ -71,7 +69,6 @@ fn tapped(received: Result<Arc<EventEnvelope>, RecvError>) -> Option<Tapped> {
     }
 }
 
-/// The Engine's append path: each committed Event is tapped to subscribers, which never block it.
 pub(crate) struct Journal {
     store: Store,
     tap: broadcast::Sender<Arc<EventEnvelope>>,
@@ -122,7 +119,7 @@ impl Journal {
         Ok(self.append_then(session_id, event, |_| ()).await?.0)
     }
 
-    /// Commits `event` and lets `first` read it before any subscriber can.
+    // Feed the committed Event to the ledger before any subscriber can observe it.
     pub(crate) async fn append_then<T>(
         &self,
         session_id: SessionId,
@@ -136,7 +133,6 @@ impl Journal {
         Ok((envelope, read))
     }
 
-    /// Admits `event_slots` Events, of which up to `tool_observations` are `ToolFinished`.
     pub(crate) async fn admit(
         &self,
         session_id: SessionId,

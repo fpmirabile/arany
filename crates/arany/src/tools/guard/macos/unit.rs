@@ -413,8 +413,7 @@ async fn recover_root(root: &Path) -> Result<(), ToolError> {
     Ok(())
 }
 
-// An unlocked liveness lock was left by a finished or crashed owner. A root without the
-// lock is still being created or was abandoned before it could hold storage.
+// Only an unlocked liveness lock proves its owner finished or crashed; a missing lock may be unpublished.
 fn is_retained(root: &Path) -> Result<bool, ToolError> {
     let directory = match open_directory(root, false) {
         Ok(directory) => directory,

@@ -82,7 +82,6 @@ impl GoalView {
         self.budget.effective(self.plan_contract.as_ref())
     }
 
-    /// Whether the settled usage of this Goal admits another Run under its effective budget.
     pub(crate) fn admits_next_run(&self) -> bool {
         self.effective_budget().admits_next_run(GoalUsage {
             runs: self.run_ids.len(),
@@ -93,7 +92,6 @@ impl GoalView {
         })
     }
 
-    /// A crash charges the last started action's ceiling, capped by the Run deadline and plan narrowing.
     pub(crate) fn unsettled_active_charge_ms(&self) -> u64 {
         let ceiling = self
             .active_deadline
@@ -108,9 +106,6 @@ impl GoalView {
             })
     }
 
-    /// Usage that decides whether an explicit resume admits another Run. Resume charges unsettled
-    /// active time as spent and counts unobserved calls as unknown tokens; an unaccepted trailing link
-    /// is not a Run. Saturation fails admission closed.
     pub(crate) fn resume_usage(&self, view: &SessionView) -> GoalUsage {
         let unaccepted_link = self
             .run_ids
@@ -235,7 +230,6 @@ fn is_integration_tool(tool: &ToolView) -> bool {
     )
 }
 
-/// Model Tool requests declared by an AgentRun's ToolRequested calls.
 fn requested_tool_total(agent: &AgentView) -> usize {
     agent
         .provider_calls
@@ -245,7 +239,6 @@ fn requested_tool_total(agent: &AgentView) -> usize {
         .sum()
 }
 
-/// Declared model Tool requests whose observation has not been journaled yet.
 fn pending_tool_requests(run: &RunView) -> Option<usize> {
     requested_tool_total(run.primary()?).checked_sub(model_tool_count(run))
 }
@@ -328,7 +321,6 @@ pub struct CompactionView {
 }
 
 impl RunView {
-    /// The objective, then the steering notes the user sent during this Run, as labelled user text.
     pub(crate) fn history_user_text(&self) -> String {
         let mut text = self.objective.clone();
         if !self.steering_notes.is_empty() {
@@ -635,7 +627,6 @@ impl SessionView {
             .find(|goal| goal.status == GoalStatus::Running)
     }
 
-    /// The most recent unfinished Goal; explicit resume continues only this one, and older paused Goals stay history.
     pub(crate) fn resumable_goal_index(&self) -> Option<usize> {
         self.goals
             .iter()
@@ -675,9 +666,7 @@ fn current_goal_mut(view: &mut SessionView, id: GoalId) -> Result<&mut GoalView,
         .ok_or(ReplayError::InvalidTransition)
 }
 
-/// A failed or cancelled end of the Run is valid while a plan wait is open: the engine
-/// ends the Run when a Tool is refused before `ToolStarted`, and that refusal leaves no
-/// pending plan to record.
+// A refusal before ToolStarted leaves no pending plan, so failure and cancellation must still close the Run.
 fn closes_run_without_plan(event: &Event) -> bool {
     matches!(
         event,

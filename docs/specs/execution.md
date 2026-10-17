@@ -22,6 +22,8 @@ Child authority is the intersection of global policy, parent effective authority
 
 Child identities and assignments retain ordinal order even when calls finish out of order. Synthesis receives results in assignment order after all terminal dispositions. Child failure drains siblings before primary failure. Cancellation reaches every admitted child and preserves already observed calls and terminal facts.
 
+A delegation abort preserves its original failure when sibling draining also fails; the drain failure is diagnostic only.
+
 ## Researcher children
 
 One delegation active-time segment covers child calls and child Tools, including their shared Guard capacity waits. Pause also takes effect before each child step.

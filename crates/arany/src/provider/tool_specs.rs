@@ -15,8 +15,6 @@ pub(crate) fn name_of(operation: &str) -> String {
     format!("{NAME_PREFIX}{operation}")
 }
 
-/// Model Tools the catalog admits for `role`. Primary Tools carry a nullable `plan_contract`;
-/// Researchers are limited to read-only research calls.
 pub(crate) fn specs(catalog: &Value, role: PromptRole) -> Vec<ToolSpec> {
     let mut calls = catalog_call_schemas(catalog);
     if role == PromptRole::Researcher {
@@ -41,7 +39,6 @@ pub(crate) fn specs(catalog: &Value, role: PromptRole) -> Vec<ToolSpec> {
         .collect()
 }
 
-/// Finish and Delegate as functions, for routes that select every outcome through function calls.
 pub(crate) fn outcome_specs(outcome: &Value) -> Vec<ToolSpec> {
     outcome["properties"]["outcome"]["anyOf"]
         .as_array()
