@@ -58,7 +58,7 @@ jobs:
           import subprocess
 
           def non_code(path):
-              if path.startswith((b".github/workflows/", b"crates/", b"src/", b"tests/", b"scripts/")):
+              if path.startswith((b".github/workflows/", b"crates/", b"scripts/")):
                   return False
               return (
                   path.endswith(b".md")
