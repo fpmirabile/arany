@@ -2,6 +2,7 @@ use super::{
     Action, ActiveSegment, CallFailure, CallResult, Grant, MAX_PRIMARY_RESULT_BYTES, RunLoop,
     call_record, valid_finish,
 };
+use crate::engine::routing::CallScope;
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
 use crate::provider::{
     AgentPhase, ChildResult, Finish, PromptRole, ProviderOutcome, ProviderRequest,
@@ -261,6 +262,10 @@ impl RunLoop<'_> {
         }))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep child retry and settlement ordering together"
+    )]
     async fn drive_children(
         &self,
         children: &mut [ChildWork],
@@ -307,7 +312,11 @@ impl RunLoop<'_> {
                     if self
                         .routing
                         .switch(
-                            (self.session_id, self.run_id, active.request.agent_run_id),
+                            CallScope {
+                                session_id: self.session_id,
+                                run_id: self.run_id,
+                                agent_run_id: active.request.agent_run_id,
+                            },
                             role,
                             provider.identity(),
                             Some(&active.request),
