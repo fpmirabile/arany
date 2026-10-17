@@ -1578,8 +1578,8 @@ mod tests {
         outputs.push(missing.to_string());
 
         for output in &outputs {
-            for secret in [".env", "SECRET_CANARY", ".ssh"] {
-                assert!(!output.contains(secret), "{secret} leaked in {output}");
+            for canary in [".env", "SECRET_CANARY", ".ssh"] {
+                assert!(!output.contains(canary), "{canary} leaked into Tool output");
             }
         }
         assert_eq!(std::fs::read_dir(&markers).unwrap().count(), 0);
