@@ -1834,8 +1834,15 @@ mod goal_replay_tests {
                 unresolved: Vec::new(),
                 cached_input_tokens: 0,
             };
+            let mut unflagged = view.clone();
             let receipt =
-                view.finish_goal(&goal_id, &GoalStatus::Failed, &settled, &report, false, 0);
+                view.finish_goal(&goal_id, &GoalStatus::Failed, &settled, &report, true, 0);
+            assert!(
+                unflagged
+                    .finish_goal(&goal_id, &GoalStatus::Failed, &settled, &report, false, 0)
+                    .is_err(),
+                "a budget close of a Finished Run must carry exhausted"
+            );
             assert_eq!(
                 receipt.is_ok(),
                 accepted,
@@ -1905,6 +1912,14 @@ mod goal_replay_tests {
             },
             exhausted: false,
         });
+        let mut forged = events.clone();
+        if let Some(Event::GoalFinished { exhausted, .. }) = forged.last_mut() {
+            *exhausted = true;
+        }
+        assert!(
+            SessionView::replay_open(session_id, &journal(session_id, forged)).is_err(),
+            "exhausted is refused while the Goal still admits a Run"
+        );
 
         let view = SessionView::replay_open(session_id, &journal(session_id, events))
             .expect("a terminal failure closes the plan wait")

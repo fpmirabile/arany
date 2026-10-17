@@ -990,6 +990,46 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
     store.close().await.expect("Store shutdown");
 }
 
+#[tokio::test]
+async fn invalid_response_on_the_last_allowed_call_is_a_failure_not_a_budget_close() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
+        Finish {
+            summary: String::new(),
+            result: "invalid finish".into(),
+        },
+    )]));
+    let engine = Engine::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
+    let mut input = request(&workspace, "Fail on the last call");
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_provider_calls: Some(1),
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    let outcome = run_to_end(&engine, &provider, input)
+        .await
+        .expect("failed Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Failed);
+    assert_eq!(goal.provider_calls, 1);
+    assert!(!goal.budget_closed);
+    assert!(view.continuable_goal().is_none());
+}
+
 struct FiniteTokenTeam {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
 }
@@ -1964,6 +2004,14 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert!(
+        goal.budget_closed,
+        "a budget close is journaled as exhausted"
+    );
+    assert_eq!(
+        view.continuable_goal().map(|source| source.id),
+        Some(goal.id)
+    );
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert_eq!(goal.run_ids.len(), 2);
     assert!(goal.report.is_some(), "exhausted Goal keeps its report");
@@ -2013,6 +2061,14 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert!(
+        goal.budget_closed,
+        "a budget close is journaled as exhausted"
+    );
+    assert_eq!(
+        view.continuable_goal().map(|source| source.id),
+        Some(goal.id)
+    );
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert_eq!(goal.provider_calls, 3);
     assert!(goal.report.is_some(), "exhausted Goal keeps its report");
@@ -2103,6 +2159,14 @@ async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report(
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert!(
+        goal.budget_closed,
+        "a budget close is journaled as exhausted"
+    );
+    assert_eq!(
+        view.continuable_goal().map(|source| source.id),
+        Some(goal.id)
+    );
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert_eq!(goal.provider_calls, 2, "no third Provider call is reserved");
     assert_eq!(goal.known_tokens, 10);
@@ -2382,6 +2446,14 @@ async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_r
     .id;
     let (events, view) = replayed(&state_path, session_id).await;
     let goal = view.goals.last().expect("Goal");
+    assert!(
+        goal.budget_closed,
+        "a budget close is journaled as exhausted"
+    );
+    assert_eq!(
+        view.continuable_goal().map(|source| source.id),
+        Some(goal.id)
+    );
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert!(goal.report.is_some());
     assert_eq!(

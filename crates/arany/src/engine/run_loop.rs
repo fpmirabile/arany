@@ -237,9 +237,14 @@ impl<'a> RunLoop<'a> {
         if cancelled {
             self.cancel_primary().await
         } else {
-            self.ledger().mark_budget_stopped();
-            self.fail_primary().await
+            self.fail_for_budget().await
         }
+    }
+
+    // Journals `exhausted` only when settlement agrees the Goal admits no next Run.
+    async fn fail_for_budget(&self) -> Result<(), EngineError> {
+        self.ledger().mark_budget_stopped();
+        self.fail_primary().await
     }
 
     fn reserve_active_segment(&self, action_bound: Duration) -> Result<ActiveSegment, EngineError> {
@@ -445,6 +450,7 @@ impl<'a> RunLoop<'a> {
             if self.ledger().active_time_exhausted() {
                 return self.settle_stopped_primary().await;
             }
+            let over_tokens = !self.ledger().tokens_within_limit();
             match first {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
@@ -485,7 +491,7 @@ impl<'a> RunLoop<'a> {
                         Ok(false) if self.ledger().active_time_exhausted() => {
                             return self.settle_stopped_primary().await;
                         }
-                        Ok(false) => return self.fail_primary().await,
+                        Ok(false) => return self.fail_for_budget().await,
                         Err(EngineError::GoalBudgetExhausted) => {
                             return self.settle_stopped_primary().await;
                         }
@@ -493,6 +499,7 @@ impl<'a> RunLoop<'a> {
                     }
                 }
                 CallResult::Cancelled => return self.cancel_primary().await,
+                CallResult::Response(_) if over_tokens => return self.fail_for_budget().await,
                 _ => return self.fail_primary().await,
             }
         }
@@ -764,7 +771,7 @@ impl<'a> RunLoop<'a> {
             return self.cancel_primary().await;
         }
         if !self.ledger().success_criterion_satisfied() && !self.ledger().allows_next_run() {
-            return self.fail_primary().await;
+            return self.fail_for_budget().await;
         }
         self.append(Event::AgentFinished {
             run_id: self.run_id,

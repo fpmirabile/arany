@@ -415,7 +415,9 @@ impl SessionView {
         }
         let goal = current_goal_mut(self, *goal_id)?;
         goal.active_ms = *active_ms;
-        if exhausted && (*status != GoalStatus::Failed || goal.admits_next_run()) {
+        if exhausted && (*status != GoalStatus::Failed || goal.admits_next_run())
+            || (exhausted_after_finish && *status == GoalStatus::Failed && !exhausted)
+        {
             return Err(ReplayError::InvalidTransition);
         }
         goal.budget_closed = exhausted;
