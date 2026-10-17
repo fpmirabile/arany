@@ -1,7 +1,9 @@
 use super::ToolError;
 use super::catalog::string;
 use super::config::Config;
-use super::guard::{drain_stderr, payload, read_capped, read_line_capped, reap_owned_child};
+use super::guard::{
+    TEARDOWN_WAIT, drain_stderr, payload, read_capped, read_line_capped, reap_owned_child,
+};
 use super::skills::parse_json;
 use super::types::{
     MAX_TOOL_RESULT_BYTES, ToolCall, hex_digest, parse_mcp_arguments, valid_digest, valid_name,
@@ -257,11 +259,7 @@ pub(super) async fn execute(
     }).await.unwrap_or(Err(ToolError::Limit));
     let _ = connection.writer.shutdown().await;
     let _ = connection.child.start_kill();
-    let reaped = tokio::time::timeout(
-        Duration::from_secs(2),
-        reap_owned_child(&mut connection.child),
-    )
-    .await;
+    let reaped = tokio::time::timeout(TEARDOWN_WAIT, reap_owned_child(&mut connection.child)).await;
     let drained = drain_stderr(&mut stderr_task).await;
     if !matches!(reaped, Ok(Ok(_))) || drained.is_none() {
         return Err(ToolError::Operation);

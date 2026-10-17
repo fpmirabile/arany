@@ -16,6 +16,8 @@ pub(super) const STORAGE_BYTES_CAP: u64 = crate::tools::types::SCRATCH_BYTES;
 const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
 const STORAGE_NAMES: [&str; 3] = ["workspace", "scratch", "cache"];
+const CLEANUP_ATTEMPTS: usize = 3;
+const CLEANUP_PAUSE: Duration = Duration::from_millis(250);
 pub(super) const STORAGE_PENDING: &str = "storage.pending";
 
 pub(super) use super::super::admission::{read_record, write_record};
@@ -384,6 +386,13 @@ pub(super) fn storage_mounted(root: &Path) -> Result<bool, ToolError> {
 }
 
 pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
+    super::super::retry_transient(CLEANUP_ATTEMPTS, CLEANUP_PAUSE, || {
+        cleanup_storage_once(root)
+    })
+    .await
+}
+
+async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
     let mut has_images = false;
@@ -580,10 +589,14 @@ fn attachments(bytes: &[u8], root: &Path) -> Result<Vec<Attachment>, ToolError> 
     let mut result = Vec::new();
     for image in images.iter() {
         let image = super::ffi::dictionary(&image)?;
-        let image_path = value(&image, "image-path")?
-            .downcast::<CFString>()
-            .ok_or(ToolError::ProtectionUnavailable)?
-            .to_string();
+        // Images attached by concurrent processes may be listed mid-transition; only ours are pinned by path.
+        let Some(image_path) = image
+            .find(CFString::new("image-path"))
+            .and_then(|path| path.downcast::<CFString>())
+            .map(|path| path.to_string())
+        else {
+            continue;
+        };
         if image_path.len() > 4096 {
             return Err(ToolError::Limit);
         }

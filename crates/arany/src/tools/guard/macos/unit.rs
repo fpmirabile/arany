@@ -4,7 +4,8 @@ use super::storage::{
     cleanup_storage, prepare_command_storage, read_record, storage_mounted, write_record,
 };
 use super::{
-    CPU_LIMIT, PREPARATION_DEADLINE, SUPERVISION_INTERVAL, bootstrap, ffi, system_program,
+    CPU_LIMIT, PREPARATION_DEADLINE, SUPERVISION_INTERVAL, TEARDOWN_WAIT, bootstrap, ffi,
+    system_program,
 };
 use crate::private_fs::{PrivateDirectory, open_directory};
 use crate::tools::Cancellation;
@@ -212,13 +213,12 @@ impl Scope {
         let mut memory = 0_u64;
         let mut threads = 0_u64;
         for member in self.members()? {
-            let sample = (|| {
-                let task = match ffi::task_info(member.pid) {
-                    Ok(task) => task,
-                    Err(_) if !super::check_process_resources(member.pid)? => return Ok(None),
-                    Err(error) => return Err(error),
-                };
-                Ok(Some((task, ffi::rusage(member.pid)?)))
+            let sample = (|| match ffi::task_info(member.pid)
+                .and_then(|task| Ok((task, ffi::rusage(member.pid)?)))
+            {
+                Ok(sample) => Ok(Some(sample)),
+                Err(_) if !super::check_process_resources(member.pid)? => Ok(None),
+                Err(error) => Err(error),
             })();
             // Revalidate even failed samples: a reaped member has no remaining task metadata.
             match identity(member.pid) {
@@ -258,21 +258,27 @@ impl Scope {
     }
 
     pub(super) async fn stop(&mut self, except: Option<u32>) -> Result<(), ToolError> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + TEARDOWN_WAIT;
         loop {
-            let members = self.members()?;
-            let members: Vec<_> = members
-                .into_iter()
-                .filter(|member| Some(member.pid) != except)
-                .collect();
-            if members.is_empty() {
-                return Ok(());
-            }
-            for member in &members {
-                member.signal(libc::SIGSTOP)?;
-            }
-            for member in &members {
-                member.signal(libc::SIGKILL)?;
+            match self.members() {
+                Ok(members) => {
+                    let members: Vec<_> = members
+                        .into_iter()
+                        .filter(|member| Some(member.pid) != except)
+                        .collect();
+                    if members.is_empty() {
+                        return Ok(());
+                    }
+                    for member in &members {
+                        member.signal(libc::SIGSTOP)?;
+                    }
+                    for member in &members {
+                        member.signal(libc::SIGKILL)?;
+                    }
+                }
+                // A member caught mid-exit can fail one enumeration; only an unobserved deadline fails.
+                Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+                Err(_) => {}
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(ToolError::ProtectionUnavailable);

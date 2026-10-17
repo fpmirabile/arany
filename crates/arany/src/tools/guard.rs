@@ -15,6 +15,8 @@ use tokio::process::{Child, Command};
 const CAPTURE_BYTES: usize = 48 * 1024;
 const TASK_BYTES_CAP: usize = 96 * 1024;
 pub(super) const RUNTIME_ROOT: &str = "/usr";
+// Loaded CI hosts stall teardown for seconds; this only widens the wait for termination evidence.
+pub(super) const TEARDOWN_WAIT: Duration = Duration::from_secs(10);
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -504,13 +506,31 @@ pub(super) async fn execute(
 pub(super) async fn drain_stderr(
     task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
 ) -> Option<Vec<u8>> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut *task).await {
+    match tokio::time::timeout(TEARDOWN_WAIT, &mut *task).await {
         Ok(Ok(Ok(stderr))) => Some(stderr),
         Ok(_) => None,
         Err(_) => {
             task.abort();
             let _ = task.await;
             None
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<T, ToolError>>>(
+    attempts: usize,
+    pause: Duration,
+    mut operation: impl FnMut() -> Fut,
+) -> Result<T, ToolError> {
+    let mut attempt = 1;
+    loop {
+        match operation().await {
+            Err(ToolError::ProtectionUnavailable | ToolError::Operation) if attempt < attempts => {
+                tokio::time::sleep(pause * attempt as u32).await;
+                attempt += 1;
+            }
+            result => return result,
         }
     }
 }
@@ -1218,6 +1238,42 @@ pub(super) fn payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn transient_retry_is_bounded_and_keeps_terminal_errors() {
+        let calls = std::cell::Cell::new(0);
+        let recovered = retry_transient(3, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            let attempt = calls.get();
+            async move {
+                if attempt < 3 {
+                    Err(ToolError::ProtectionUnavailable)
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await;
+        assert!(matches!(recovered, Ok(3)));
+
+        calls.set(0);
+        let exhausted: Result<(), _> = retry_transient(3, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            async { Err(ToolError::Operation) }
+        })
+        .await;
+        assert!(matches!(exhausted, Err(ToolError::Operation)));
+        assert_eq!(calls.get(), 3);
+
+        calls.set(0);
+        let terminal: Result<(), _> = retry_transient(3, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            async { Err(ToolError::Path) }
+        })
+        .await;
+        assert!(matches!(terminal, Err(ToolError::Path)));
+        assert_eq!(calls.get(), 1);
+    }
 
     #[cfg(unix)]
     #[tokio::test]
