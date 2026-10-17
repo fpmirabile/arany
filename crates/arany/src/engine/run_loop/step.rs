@@ -504,7 +504,24 @@ impl RunLoop<'_> {
         } else {
             basis
         };
-        let (verdict, source) = if decision == Decision::Deny {
+        let timeout_limit = match grant {
+            Grant::Primary { .. } => self.ledger().command_timeout_limit(&intent.call)?,
+            Grant::Researcher { .. } => None,
+        };
+        let (verdict, source) = if let Some((requested, maximum)) = timeout_limit {
+            (
+                Verdict::Deny(Answer {
+                    observation: not_dispatched(
+                        intent,
+                        ToolDisposition::Limit,
+                        crate::tools::types::command_timeout_limit_message(requested, maximum),
+                    ),
+                    refused: false,
+                    active_time: None,
+                }),
+                source,
+            )
+        } else if decision == Decision::Deny {
             (
                 Verdict::Deny(Answer {
                     observation: not_dispatched(
@@ -589,17 +606,6 @@ impl RunLoop<'_> {
         } else {
             permission.basis
         };
-        if let Some((requested, maximum)) = self.ledger().command_timeout_limit(&intent.call)? {
-            let output = crate::tools::types::command_timeout_limit_message(requested, maximum);
-            return Ok((
-                Verdict::Deny(Answer {
-                    observation: not_dispatched(intent, ToolDisposition::Limit, output),
-                    refused: false,
-                    active_time: None,
-                }),
-                source,
-            ));
-        }
         let goal_allows = self.ledger().allows_tool(&intent.call);
         let mut approved = true;
         let mut active_time_exhausted = false;
