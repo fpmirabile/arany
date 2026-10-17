@@ -1,8 +1,9 @@
 use super::{ResolvedSession, StoreError, event_payload_limit};
 use crate::session::ForkInheritance;
 use crate::session::{
-    AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, RunConfig, RunDisposition,
-    RunId, SessionDefaults, SessionId, SessionListItem, SessionView, prefix_digest,
+    AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, ForkLineage, RunConfig,
+    RunDisposition, RunId, SessionDefaults, SessionId, SessionListItem, SessionView, prefix_digest,
+    validate_compaction_references,
 };
 use rusqlite::{Connection, types::ValueRef};
 use std::collections::HashMap;
@@ -384,7 +385,6 @@ fn resolve_view_with_mode(
     Ok((events, view))
 }
 
-/// Replays a Session's own Events; a fork first inherits its source's history through the fork boundary.
 pub(super) fn replay_through(
     connection: &Connection,
     session_id: SessionId,
@@ -393,14 +393,14 @@ pub(super) fn replay_through(
     total_events: &mut usize,
     close_history: bool,
 ) -> Result<Option<SessionView>, StoreError> {
-    let fork = match events.first().map(|envelope| &envelope.event) {
+    let lineage = match events.first().map(|envelope| &envelope.event) {
         Some(Event::SessionForked {
             title: _,
             source_session_id,
             source_run_id,
             source_sequence,
             prefix_digest,
-        }) if *source_session_id != session_id => ForkFields {
+        }) if *source_session_id != session_id => ForkLineage {
             source_session_id: *source_session_id,
             source_run_id: *source_run_id,
             source_sequence: *source_sequence,
@@ -412,11 +412,13 @@ pub(super) fn replay_through(
             } else {
                 SessionView::replay_open(session_id, events)?
             };
+            if let Some(view) = &view {
+                validate_compaction_references(view)?;
+            }
             return Ok(view);
         }
     };
-    let source_sequence = fork.source_sequence;
-    let (inherited, source) = fork_projection(connection, fork, depth, total_events)?;
+    let (inherited, source) = fork_projection(connection, lineage, depth, total_events)?;
     let mut view = SessionView::replay_forked(session_id, events, close_history, &inherited)?
         .ok_or(StoreError::InvalidHistory)?;
     if view
@@ -426,22 +428,14 @@ pub(super) fn replay_through(
         return Err(StoreError::InvalidHistory);
     }
     view.workspace_identity = source.workspace_identity;
-    view.inherited_title = Some(source.generated_title_through(source_sequence));
+    view.inherited_title = Some(source.generated_title_through(lineage.source_sequence));
+    validate_compaction_references(&view)?;
     Ok(Some(view))
 }
 
-struct ForkFields {
-    source_session_id: SessionId,
-    source_run_id: RunId,
-    source_sequence: u64,
-    prefix_digest: [u8; 32],
-}
-
-/// The source's Runs and compactions as they stood at the fork boundary, reduced from the source's
-/// Events through that boundary only, so later source Events never alter an inherited Run.
 fn fork_projection(
     connection: &Connection,
-    fork: ForkFields,
+    fork: ForkLineage,
     depth: usize,
     total_events: &mut usize,
 ) -> Result<(ForkInheritance, SessionView), StoreError> {
@@ -484,7 +478,15 @@ fn fork_projection(
     )?
     .ok_or(StoreError::InvalidHistory)?;
     let inherited = ForkInheritance {
-        runs: source.runs.clone(),
+        runs: source
+            .runs
+            .iter()
+            .filter(|run| {
+                run.finished_sequence
+                    .is_some_and(|sequence| sequence <= fork.source_sequence)
+            })
+            .cloned()
+            .collect(),
         compactions: source.compactions.clone(),
     };
     if inherited
