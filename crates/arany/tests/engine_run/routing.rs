@@ -231,6 +231,28 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
     );
 }
 
+fn goal_request(workspace: &Path) -> RunRequest {
+    let mut request = input(workspace);
+    request.goal = arany::GoalRequest::new(
+        arany::GoalBudget {
+            max_provider_calls: Some(4),
+            ..arany::GoalBudget::default()
+        },
+        arany::GoalPhase::Implementation,
+    );
+    request.goal.finish_after_run = false;
+    request
+}
+
+fn summary_response() -> Result<CompactionResponse, ProviderError> {
+    Ok(CompactionResponse {
+        summary: "compacted".into(),
+        response_id: None,
+        usage: arany::Usage::default(),
+        wire_provenance: None,
+    })
+}
+
 #[tokio::test]
 async fn exhausted_compaction_routes_settle_the_reservation_for_the_next_compaction() {
     let temp = tempfile::tempdir().unwrap();
@@ -239,23 +261,21 @@ async fn exhausted_compaction_routes_settle_the_reservation_for_the_next_compact
     let state = temp.path().join("state");
     let primary =
         route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
-    let summary = || {
-        Ok(CompactionResponse {
-            summary: "compacted".into(),
-            response_id: None,
-            usage: arany::Usage::default(),
-            wire_provenance: None,
-        })
-    };
     let compaction = route(
         ScriptedProvider::new(vec![])
             .with_profile("scripted", "compact")
-            .with_compactions(vec![Err(ProviderError::RemoteHttp(503)), summary()]),
+            .with_compactions(vec![
+                Err(ProviderError::RemoteHttp(503)),
+                summary_response(),
+            ]),
     );
     let compaction_fallback = route(
         ScriptedProvider::new(vec![])
             .with_profile("scripted", "compact-fallback")
-            .with_compactions(vec![Err(ProviderError::RemoteHttp(503)), summary()]),
+            .with_compactions(vec![
+                Err(ProviderError::RemoteHttp(503)),
+                summary_response(),
+            ]),
     );
     let mut bindings = routes(&primary);
     bindings.compaction = vec![compaction.clone(), compaction_fallback.clone()];
@@ -263,7 +283,7 @@ async fn exhausted_compaction_routes_settle_the_reservation_for_the_next_compact
     let result = run_routed(
         &engine,
         bindings.clone(),
-        input(&workspace),
+        goal_request(&workspace),
         RunControls::default(),
     )
     .await
@@ -282,6 +302,106 @@ async fn exhausted_compaction_routes_settle_the_reservation_for_the_next_compact
         "a settled reservation must admit the next compaction"
     );
     engine.close().await.unwrap();
+    let (events, view) = reopen(&state, result.session_id).await;
+    assert_eq!(view.goals[0].compaction_call_reserved, None);
+    let kinds = events
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            Event::GoalCompactionCallReserved { .. } => Some("reserved"),
+            Event::ProviderFallbackUsed { fallback, .. }
+                if fallback.role == ProviderRole::Compaction =>
+            {
+                Some("fallback")
+            }
+            Event::ContextCompacted { record, .. } => Some(match record.status {
+                CompactionStatus::Failed { .. } => "failed",
+                CompactionStatus::Succeeded { .. } => "saved",
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        ["reserved", "fallback", "failed", "reserved", "saved"]
+    );
+}
+
+#[tokio::test]
+async fn refused_fallback_admission_settles_the_known_compaction_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let primary =
+        route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
+    let compaction = route(
+        ScriptedProvider::new(vec![])
+            .with_profile("scripted", "compact")
+            .with_compactions(vec![Err(ProviderError::RemoteHttp(503))]),
+    );
+    let compaction_fallback = route(
+        ScriptedProvider::new(vec![])
+            .with_profile("scripted", "compact-fallback")
+            .with_compactions(vec![summary_response()]),
+    );
+    let mut bindings = routes(&primary);
+    bindings.compaction = vec![compaction.clone(), compaction_fallback.clone()];
+    let engine = open(&state);
+    let result = run_routed(
+        &engine,
+        bindings.clone(),
+        goal_request(&workspace),
+        RunControls::default(),
+    )
+    .await
+    .unwrap();
+    engine.close().await.unwrap();
+    // Fill the Session so only the boundary compaction's own admission fits; the fallback's larger
+    // admission is then refused by the Store.
+    let slots = arany::Action::BoundaryCompaction { goal: true }.max_events_for(&bindings);
+    let mut connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let last: i64 = transaction
+        .query_row("SELECT COALESCE(MAX(sequence), 0) FROM events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    for sequence in last + 1..=10_000 - i64::try_from(slots).unwrap() {
+        transaction
+            .execute(
+                "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)",
+                rusqlite::params![sequence, result.session_id.to_string()],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    let engine = open(&state);
+    let failed = engine
+        .compact_session(&bindings, result.session_id, workspace)
+        .await
+        .unwrap();
+    assert!(matches!(
+        failed.status,
+        CompactionStatus::Failed {
+            reason: CompactionFailure::ProviderUnavailable
+        }
+    ));
+    engine.close().await.unwrap();
+    // Padding rows are not Actions, so `reopen`'s action-bound check does not apply here.
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    let events = store.load_session(result.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let view = SessionView::replay(result.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.goals[0].compaction_call_reserved, None);
+    assert!(
+        compaction_fallback
+            .compact_requests
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

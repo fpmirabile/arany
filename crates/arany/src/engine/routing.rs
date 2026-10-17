@@ -8,6 +8,7 @@ use crate::provider::{
     ProviderIdentity, ProviderRequest, ProviderResponse, ProviderRole, ResponsePreview,
 };
 use crate::session::{AgentRunId, Event};
+use crate::store::StoreError;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -270,13 +271,20 @@ impl CallRouter<'_> {
             ProviderRole::Review => Action::Review,
             ProviderRole::Compaction => Action::Compaction,
         };
-        self.journal
+        // A refused admission declines the fallback, so the known failure settles as its own outcome.
+        match self
+            .journal
             .admit(
                 session_id,
                 action.max_events_for(&self.providers) + 1,
                 action.tool_observations(),
             )
-            .await?;
+            .await
+        {
+            Ok(()) => {}
+            Err(StoreError::ReplayLimit | StoreError::StorageFull) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
         self.ledger
             .append(
                 self.journal,
