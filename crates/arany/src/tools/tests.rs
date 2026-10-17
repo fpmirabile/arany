@@ -37,6 +37,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
     };
     let runtime = ToolRuntime {
         permissions: None,
+        unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
         config,
@@ -1947,6 +1948,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
 
     let runtime = |config: Config| ToolRuntime {
         permissions: None,
+        unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
         config,
@@ -2053,6 +2055,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
     });
     let runtime = ToolRuntime {
         permissions: None,
+        unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
         config: serde_json::from_value(value).unwrap(),
@@ -2108,6 +2111,7 @@ fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::Tool
     let root = super::fs::open_directory(workspace).unwrap();
     super::ToolRuntime {
         permissions: None,
+        unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
         config: serde_json::from_value(config).unwrap(),
@@ -2125,6 +2129,49 @@ fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::Tool
         system_programs: None,
         process_enforcement_digest: [1; 32],
     }
+}
+
+#[test]
+fn unguarded_rules_snapshot_does_not_see_a_rule_recorded_later() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let mut runtime = in_process_runtime(&workspace, config_value());
+    runtime.cache_state = Some(std::sync::Arc::new(state));
+    let call = |cwd: &str| ToolCall::CommandUnguarded {
+        program: "sh".into(),
+        args: vec!["-c".into(), "cargo test".into()],
+        cwd: cwd.into(),
+        justification: "Allow this exact command?".into(),
+    };
+    assert!(!runtime.matches_exact_command_rule(&call("")));
+    assert_eq!(runtime.receipt().unguarded_rules_digest, None);
+    runtime.record_exact_command_rule(&call("")).unwrap();
+    let state = runtime.cache_state.as_deref().unwrap();
+    runtime.unguarded_rules = super::ToolRuntime::load_exact_command_rules(state).unwrap();
+    let admitted_digest = runtime.receipt().unguarded_rules_digest.unwrap();
+    assert!(runtime.matches_exact_command_rule(&call("")));
+    runtime.record_exact_command_rule(&call("src")).unwrap();
+    assert!(!runtime.matches_exact_command_rule(&call("src")));
+    assert_eq!(
+        runtime.receipt().unguarded_rules_digest,
+        Some(admitted_digest)
+    );
+    let mut refreshed = runtime.clone();
+    refreshed.unguarded_rules =
+        super::ToolRuntime::load_exact_command_rules(runtime.cache_state.as_deref().unwrap())
+            .unwrap();
+    assert!(refreshed.matches_exact_command_rule(&call("src")));
+    assert_ne!(
+        refreshed.receipt().unguarded_rules_digest,
+        Some(admitted_digest)
+    );
+    refreshed.workspace_identity.inode = refreshed.workspace_identity.inode.wrapping_add(1);
+    assert!(!refreshed.matches_exact_command_rule(&call("")));
+    let mut another_path = runtime;
+    another_path.workspace = temp.path().join("another-workspace");
+    assert!(!another_path.matches_exact_command_rule(&call("")));
 }
 
 async fn run_in_process(runtime: &super::ToolRuntime, call: ToolCall) -> ToolObservation {

@@ -1256,12 +1256,16 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 cache_transfer_failed = transfer.is_err();
             }
             drop(storage);
+            let mut storage_check = None;
             let storage_cleanup = if cleanup.is_ok() {
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorDetach);
                 let result =
                     cleanup_storage_until(path.parent().ok_or(ToolError::Path)?, teardown).await;
                 capture.finish(result.is_ok());
-                result
+                result.map_err(|failed| {
+                    storage_check = Some(failed.check);
+                    failed.error
+                })
             } else {
                 Err(ToolError::ProtectionUnavailable)
             };
@@ -1289,7 +1293,11 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 }
             };
             let result = match (cleanup.and(storage_cleanup).and(result), teardown_stage) {
-                (Err(_), Some(stage)) => Err(ToolError::GuardBootstrap(BootstrapFailure { stage })),
+                (Err(_), Some(stage)) => {
+                    let check = storage_check
+                        .filter(|_| matches!(stage, super::super::BootstrapStage::StorageCleanup));
+                    Err(ToolError::GuardBootstrap(BootstrapFailure { stage, check }))
+                }
                 (result, _) => result,
             };
             if response_sent {
@@ -1300,6 +1308,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                             ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
                             _ => serde_json::to_vec(&BootstrapFailure {
                                 stage: super::super::BootstrapStage::StorageCleanup,
+                                check: None,
                             }),
                         }
                         .map_err(|_| ToolError::Operation)?;
@@ -1316,6 +1325,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     Err(ToolError::GuardBootstrap(failure)) => serde_json::to_vec(failure),
                     Err(_) => serde_json::to_vec(&BootstrapFailure {
                         stage: stage.clone(),
+                        check: None,
                     }),
                 }
                 .map_err(|_| ToolError::Operation)?;
@@ -1337,7 +1347,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
     {
         let failure = match error {
             ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
-            _ => serde_json::to_vec(&BootstrapFailure { stage }),
+            _ => serde_json::to_vec(&BootstrapFailure { stage, check: None }),
         };
         if let Ok(mut bytes) = failure {
             bytes.push(b'\n');
@@ -1724,6 +1734,7 @@ done
         .unwrap();
         ToolRuntime {
             permissions: None,
+            unguarded_rules: None,
             context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
             queue_progress: None,
             active_action_gate: None,

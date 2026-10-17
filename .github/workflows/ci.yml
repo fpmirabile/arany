@@ -39,7 +39,7 @@ env:
 jobs:
   changes:
     name: Detect code changes
-    if: github.event_name == 'pull_request'
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
@@ -52,95 +52,63 @@ jobs:
       - name: Verify code change detection
         run: python3 scripts/test-ci-changes.py
       - id: diff
-        run: |
-          python3 - <<'PY'
-          import os
-          import subprocess
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_BEFORE: ${{ github.event.before }}
+        run: python3 scripts/ci-changes.py
 
-          def non_code(path):
-              if path.startswith((b".github/workflows/", b"crates/", b"scripts/")):
-                  return False
-              return (
-                  path.endswith(b".md")
-                  or path.startswith((b"docs/", b"planning/", b"agents/", b".agents/", b".claude/", b".github/ISSUE_TEMPLATE/"))
-                  or path == b"skills-lock.json"
-              )
-
-          paths = subprocess.check_output([
-              "git", "diff", "--no-renames", "--name-only", "-z", "HEAD^1", "HEAD",
-          ]).split(b"\0")[:-1]
-          code_changed = not paths or any(not non_code(path) for path in paths)
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"code-changed={str(code_changed).lower()}\n")
-          PY
-
-  # Keep all standard checks present; skip Rust steps only on an explicit non-code result.
   format-and-clippy:
     name: Clippy
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.changes.outputs.code-changed != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - if: needs.changes.outputs.code-changed != 'false'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install repository Rust toolchain
-        if: needs.changes.outputs.code-changed != 'false'
         run: rustup show
-      - if: needs.changes.outputs.code-changed != 'false'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - if: needs.changes.outputs.code-changed != 'false'
-        run: cargo fmt --all --check
-      - if: needs.changes.outputs.code-changed != 'false'
-        run: cargo fetch --locked
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --all --check
+      - run: cargo fetch --locked
       - name: Check library dependency boundary
-        if: needs.changes.outputs.code-changed != 'false'
         run: |
           cargo tree -p arany -e normal --target all --locked --offline > "$RUNNER_TEMP/arany-library-tree.txt"
           if grep -E 'ratatui|crossterm|keyring' "$RUNNER_TEMP/arany-library-tree.txt"; then
             exit 1
           fi
-      - if: needs.changes.outputs.code-changed != 'false'
-        run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 
-  tests:
-    name: Linux Tests (${{ matrix.profile }})
+  linux-debug:
+    name: Linux Tests (debug)
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.changes.outputs.code-changed != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: [debug, release]
     steps:
-      - if: needs.changes.outputs.code-changed != 'false'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install repository Rust toolchain
-        if: needs.changes.outputs.code-changed != 'false'
-        run: rustup show
-      - if: needs.changes.outputs.code-changed != 'false'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/ci-tests
         with:
-          key: ${{ matrix.profile }}
-      - name: Prepare isolated Linux terminal fixtures
-        if: needs.changes.outputs.code-changed != 'false'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap iproute2 util-linux
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          test -x /usr/sbin/ip
-          bwrap --unshare-user --unshare-net --ro-bind / / -- true
-      - if: needs.changes.outputs.code-changed != 'false'
-        run: cargo fetch --locked
-      - if: needs.changes.outputs.code-changed != 'false'
-        run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
+          profile: debug
+
+  linux-release:
+    name: Linux Tests (release)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code-changed != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/ci-tests
+        with:
+          profile: release
       - name: Measure native long-history behavior
-        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.history_benchmark && matrix.profile == 'release' }}
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.history_benchmark }}
         shell: bash
         run: |
           sudo apt-get install --yes tmux
@@ -274,35 +242,30 @@ jobs:
           run_exact_parent active_terminal::tmux::fullscreen_steering_note_and_pause_in_tmux || result=1
           exit "$result"
 
-  macos-tests:
-    name: macOS Tests (${{ matrix.profile }})
+  macos-debug:
+    name: macOS Tests (debug)
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.changes.outputs.code-changed != 'false' }}
     runs-on: macos-15
     timeout-minutes: 30
-    env:
-      TMPDIR: /private/tmp
-      ARANY_TEST_EXE: ${{ github.workspace }}/target/${{ matrix.profile }}/arany
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: [debug, release]
     steps:
-      - if: needs.changes.outputs.code-changed != 'false'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install repository Rust toolchain
-        if: needs.changes.outputs.code-changed != 'false'
-        run: rustup show
-      - if: needs.changes.outputs.code-changed != 'false'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/ci-tests
         with:
-          key: ${{ matrix.profile }}
-      - if: needs.changes.outputs.code-changed != 'false'
-        run: cargo fetch --locked
-      - name: Clippy on macOS
-        if: matrix.profile == 'debug' && needs.changes.outputs.code-changed != 'false'
-        run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
-      - if: needs.changes.outputs.code-changed != 'false'
-        run: cargo test --workspace --locked --offline ${{ matrix.profile == 'release' && '--release' || '' }}
+          profile: debug
+
+  macos-release:
+    name: macOS Tests (release)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code-changed != 'false' }}
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/ci-tests
+        with:
+          profile: release

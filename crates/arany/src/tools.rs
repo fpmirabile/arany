@@ -17,6 +17,7 @@ pub(crate) mod toolchains;
 pub(crate) mod types;
 #[cfg_attr(not(test), expect(dead_code, reason = "wired in slice 4"))]
 mod unguarded;
+pub(crate) mod unguarded_rules;
 mod workspace;
 
 #[cfg(test)]
@@ -96,6 +97,8 @@ pub enum ToolError {
     MissingConfiguration,
     #[error("Tool configuration is invalid or unsafe")]
     Configuration,
+    #[error("another process is updating private account state; retry when that update finishes")]
+    AccountBusy,
     #[error("required native Tool protection is unavailable")]
     ProtectionUnavailable,
     #[error("Guard waiting queue is full; retry when capacity is available")]
@@ -130,6 +133,7 @@ pub(crate) struct PermissionSnapshot {
 pub(crate) struct ToolRuntime {
     config: Config,
     permissions: Option<PermissionSnapshot>,
+    unguarded_rules: Option<unguarded_rules::ExactCommandRules>,
     workspace: PathBuf,
     // Set at admission; `None` only in a runtime rebuilt inside a Guard unit, which never reads in process.
     reads: Option<InProcessReads>,
@@ -315,9 +319,16 @@ impl ToolRuntime {
             .transpose()
     }
 
+    pub(crate) fn load_exact_command_rules(
+        state: &StateRoot,
+    ) -> Result<Option<unguarded_rules::ExactCommandRules>, ToolError> {
+        unguarded_rules::ExactCommandRules::load(state)
+    }
+
     pub(crate) fn admit(
         mut config: Config,
         permissions: Option<PermissionSnapshot>,
+        unguarded_rules: Option<unguarded_rules::ExactCommandRules>,
         workspace: &Path,
         state: &StateRoot,
         guard_executable: PathBuf,
@@ -378,6 +389,7 @@ impl ToolRuntime {
         Ok(Self {
             config,
             permissions,
+            unguarded_rules,
             queue_progress: None,
             active_action_gate: None,
             cache_state: Some(std::sync::Arc::new(
@@ -404,6 +416,7 @@ impl ToolRuntime {
         let mut receipt = self.config.receipt();
         receipt.max_context_bytes = self.context_limit_bytes as u32;
         receipt.permissions_digest = self.permissions.as_ref().map(|snapshot| snapshot.digest);
+        receipt.unguarded_rules_digest = self.exact_command_rules().map(|rules| rules.digest);
         receipt
     }
 
@@ -411,6 +424,37 @@ impl ToolRuntime {
         self.permissions
             .as_ref()
             .map(|snapshot| snapshot.config.as_ref())
+    }
+
+    fn exact_command_rules(&self) -> Option<&unguarded_rules::ExactCommandRules> {
+        self.unguarded_rules.as_ref()
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the unguarded approval integration")
+    )]
+    pub(crate) fn matches_exact_command_rule(&self, call: &ToolCall) -> bool {
+        self.exact_command_rules()
+            .is_some_and(|rules| rules.matches(call, self.workspace_identity, &self.workspace))
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the unguarded approval integration")
+    )]
+    pub(crate) fn record_exact_command_rule(&self, call: &ToolCall) -> Result<(), ToolError> {
+        fs::validate_workspace(self)?;
+        let state = self
+            .cache_state
+            .as_deref()
+            .ok_or(ToolError::Configuration)?;
+        unguarded_rules::ExactCommandRules::record(
+            state,
+            &self.workspace,
+            self.workspace_identity,
+            call,
+        )
     }
 
     fn skill_rows(&self) -> Vec<serde_json::Value> {
@@ -672,6 +716,13 @@ pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
         ToolError::ProtectionUnavailable => "native protection",
         ToolError::Limit | ToolError::QueueFull => "resource limit",
         _ => "execution",
+    }
+}
+
+pub(crate) fn failure_check(error: &ToolError) -> Option<&'static str> {
+    match error {
+        ToolError::GuardBootstrap(failure) => failure.check(),
+        _ => None,
     }
 }
 

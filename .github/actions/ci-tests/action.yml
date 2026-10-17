@@ -1,0 +1,52 @@
+name: Run CI tests
+description: Run the full release suite or debug unit and Session coverage on a native runner.
+inputs:
+  profile:
+    description: debug or release
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Configure test profile
+      shell: bash
+      env:
+        CI_PROFILE: ${{ inputs.profile }}
+      run: |
+        case "$CI_PROFILE" in
+          debug|release) ;;
+          *) echo 'Unsupported test profile' >&2; exit 1 ;;
+        esac
+        if [ "$RUNNER_OS" = macOS ]; then
+          echo 'TMPDIR=/private/tmp' >> "$GITHUB_ENV"
+          echo "ARANY_TEST_EXE=$GITHUB_WORKSPACE/target/$CI_PROFILE/arany" >> "$GITHUB_ENV"
+        fi
+    - name: Install repository Rust toolchain
+      shell: bash
+      run: rustup show
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        shared-key: native-tests-${{ inputs.profile }}
+    - name: Prepare isolated Linux terminal fixtures
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes bubblewrap iproute2 util-linux
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        test -x /usr/sbin/ip
+        bwrap --unshare-user --unshare-net --ro-bind / / -- true
+    - name: Fetch locked Rust dependencies
+      shell: bash
+      run: cargo fetch --locked
+    - name: Clippy on macOS
+      if: runner.os == 'macOS' && inputs.profile == 'debug'
+      shell: bash
+      run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+    - name: Run debug unit and Session tests
+      if: inputs.profile == 'debug'
+      shell: bash
+      run: cargo test --workspace --lib --bins --test session_run --locked --offline
+    - name: Run full release suite
+      if: inputs.profile == 'release'
+      shell: bash
+      run: cargo test --workspace --release --locked --offline

@@ -24,7 +24,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
     }
 }
 
-fn valid_command(program: &str, args: &[String], cwd: &str) -> bool {
+pub(super) fn valid_command(program: &str, args: &[String], cwd: &str) -> bool {
     valid_name(program)
         && valid_relative(cwd, true)
         && args.len() <= 64

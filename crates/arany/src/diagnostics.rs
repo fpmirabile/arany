@@ -378,9 +378,12 @@ pub(crate) fn tool_failure(site: &'static str, error: &crate::tools::ToolError) 
     let mut record = BoundedRecord(String::new());
     let _ = writeln!(
         record,
-        "{} stage={}",
+        "{} stage={}{}",
         site.to_ascii_lowercase(),
-        crate::tools::failure_stage(error)
+        crate::tools::failure_stage(error),
+        crate::tools::failure_check(error)
+            .map(|check| format!(" check={check}"))
+            .unwrap_or_default()
     );
     record_local(record);
 }

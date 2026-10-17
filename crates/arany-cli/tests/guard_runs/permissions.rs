@@ -50,6 +50,24 @@ fn call(kind: &str) -> arany::ToolCall {
     }
 }
 
+fn diagnostics_log() -> &'static Path {
+    static LOG: std::sync::OnceLock<(tempfile::TempDir, std::path::PathBuf)> =
+        std::sync::OnceLock::new();
+    &LOG.get_or_init(|| {
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        arany::enable_development_diagnostics(&root);
+        let log = root.path().join("development.log");
+        (temp, log)
+    })
+    .1
+}
+
+fn diagnostics_tail() -> String {
+    let bytes = std::fs::read(diagnostics_log()).unwrap_or_default();
+    String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(4096)..]).into_owned()
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     workspace: std::path::PathBuf,
@@ -62,6 +80,7 @@ struct Fixture {
 
 impl Fixture {
     fn new(settings: Option<&Value>, write: bool) -> Self {
+        diagnostics_log();
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
@@ -164,7 +183,7 @@ impl Fixture {
         let unconsumed = provider.responses.lock().unwrap().len();
         assert!(
             unconsumed == 0,
-            "all expected calls consumed: {unconsumed} left, fixture settings {:?}, run {:?}, tools {:?}",
+            "all expected calls consumed: {unconsumed} left, fixture settings {:?}, run {:?}, tools {:?}, diagnostics {}",
             self.settings,
             result.run.status,
             result
@@ -180,7 +199,8 @@ impl Fixture {
                         &observation.output
                     ))
                 ))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            diagnostics_tail()
         );
         (result, requests, humans)
     }

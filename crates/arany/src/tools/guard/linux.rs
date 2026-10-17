@@ -2157,7 +2157,7 @@ mod tests {
             let grants = std::slice::from_ref(&grant);
             let mut stage = super::super::BootstrapStage::Workspace;
             if super::super::attest_runtime_mounts(&call, grants, false, &mut stage).is_err() {
-                let failure = super::super::BootstrapFailure { stage };
+                let failure = super::super::BootstrapFailure { stage, check: None };
                 std::fs::write(
                     result_path,
                     serde_json::to_vec(&failure).expect("bounded stage encoding"),
