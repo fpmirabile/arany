@@ -33,7 +33,7 @@ Read-only research steps of child AgentRuns keep Child Tool facts in the child's
 | Children per delegation | existing policy, ≤ 8 | invalid delegation |
 | Child objective / report | 2 KiB objective; 16 KiB result, 2 KiB summary | invalid response, child Failed |
 | Child Tool calls | `min(16, ((remaining calls − children − 1) / 2) / children)`, 16 if calls are unlimited; replay cap 16 | catalog `tool_calls_remaining: 0`, only Finish offered; a further Tool is an invalid response |
-| Child Tool result | `min(16 KiB, (context limit − context − intent − 512) / 6)`; Tools offered only while at least 4.6 KiB fits | only Finish offered; safety net stops the child |
+| Child Tool result | `min([Tool result ceiling](tools.md#limits-and-failure-behavior), (context limit − context − intent − 512) / 6)`; Tools offered only while at least 4.6 KiB fits | only Finish offered; safety net stops the child |
 | Delegation time | one active segment, at most 20 min and at most the remaining Goal active time | calls time out, child Failed, Run fails |
 | Child Tool time | runtime at most half of (deadline − preparation − cleanup − Store overhead); the Guard capacity wait ends at `expires_at_ms` = start + runtime (Guard returns `Limit` before dispatch, Linux and macOS) | runtime 0: the child stops before `ToolStarted` |
 | Events per delegation | child Events at most 928 (8 × (7 × 16 + 4)), admitted with an 8-Event tail plus configured route-switch bounds before the first spawn | Store admission refusal before `AgentSpawned` |
@@ -93,7 +93,7 @@ A CLI process opens one Engine: the attached terminal after its Session starts, 
 | Event payload, default | 64 KiB | append refused |
 | `MessageAccepted` | 656 KiB, with inline PNG bytes (an empty list for text) | append refused |
 | `GoalStarted` | 400 KiB | append refused |
-| `ToolFinished` | 144 KiB: twice the 64 KiB Tool result plus the 16 KiB argument bound; admission reserves it only for the `ToolFinished` slots an action may append | append refused |
+| `ToolFinished` | 144 KiB: twice the [Tool result ceiling](tools.md#limits-and-failure-behavior) plus the [Tool argument ceiling](tools.md#limits-and-failure-behavior); admission reserves it only for the `ToolFinished` slots an action may append | append refused |
 | Steering note per Run | 8 KiB, including history labels | offer refused; the caller keeps its text |
 | Requested Tools per model step | 0, or 1 to 4 for a `ToolRequested` disposition | replay refused |
 | Evidence caches | 32 custom Provider rows and 256 native rows; native rows expire after 24 hours | expired rows are removed first; a new row beyond the bound is refused as storage full |
