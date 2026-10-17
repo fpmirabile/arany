@@ -35,7 +35,10 @@ pub(super) enum CallResult {
 
 pub(super) enum CallFailure {
     Timeout,
-    Unavailable(Option<ProviderFailureReason>),
+    Unavailable {
+        reason: Option<ProviderFailureReason>,
+        fallback: bool,
+    },
     Rejected(Option<ProviderFailureReason>),
     InvalidResponse(Option<ProviderFailureReason>),
     OutputLimit,
@@ -857,7 +860,10 @@ pub(super) async fn invoke_bounded_with_preview(
             }) => CallResult::Failed(CallFailure::InvalidResponse(None)),
             Ok(Ok(response)) => CallResult::Response(response),
             Ok(Err(error)) => match error.failure_class() {
-                ProviderFailureClass::Unavailable => CallResult::Failed(CallFailure::Unavailable(error.failure_reason())),
+                ProviderFailureClass::Unavailable => CallResult::Failed(CallFailure::Unavailable {
+                    reason: error.failure_reason(),
+                    fallback: error.allows_fallback(),
+                }),
                 ProviderFailureClass::Rejected => CallResult::Failed(CallFailure::Rejected(error.failure_reason())),
                 ProviderFailureClass::InvalidOutcome => {
                     CallResult::Failed(CallFailure::InvalidResponse(error.failure_reason()))
@@ -894,7 +900,7 @@ fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> 
         CallResult::Response(_) => ProviderCallDisposition::InvalidResponse,
         CallResult::Failed(failure) => match failure {
             CallFailure::Timeout => ProviderCallDisposition::TimedOut,
-            CallFailure::Unavailable(_) => ProviderCallDisposition::Unavailable,
+            CallFailure::Unavailable { .. } => ProviderCallDisposition::Unavailable,
             CallFailure::Rejected(_) => ProviderCallDisposition::Rejected,
             CallFailure::InvalidResponse(_) => ProviderCallDisposition::InvalidResponse,
             CallFailure::OutputLimit => ProviderCallDisposition::OutputLimit,
@@ -930,7 +936,7 @@ fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> 
         wire_provenance,
         failure_reason: match result {
             CallResult::Failed(
-                CallFailure::Unavailable(reason)
+                CallFailure::Unavailable { reason, .. }
                 | CallFailure::Rejected(reason)
                 | CallFailure::InvalidResponse(reason),
             ) => *reason,

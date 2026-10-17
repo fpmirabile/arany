@@ -1,18 +1,15 @@
 use super::ledger::{Action, GoalLedger};
 use super::progress::ProgressPublisher;
-use super::run_loop::{CallResult, invoke_bounded_with_preview};
+use super::run_loop::{CallFailure, CallResult, invoke_bounded_with_preview};
 use super::{EngineError, RunCancellation};
 use crate::journal::Journal;
 use crate::provider::{
     AdmittedProviders, MAX_PROVIDER_SWITCHES, Provider, ProviderError, ProviderFallback,
-    ProviderIdentity, ProviderRequest, ProviderResponse, ProviderRole, ResponsePreview,
+    ProviderIdentity, ProviderRequest, ProviderRole, ResponsePreview,
 };
 use crate::session::{AgentRunId, Event, RunId, SessionId};
 use crate::store::StoreError;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 use tokio::time::Instant;
 
 pub(super) struct CompactionOutcome {
@@ -339,40 +336,6 @@ impl CallRouter<'_> {
     }
 }
 
-struct Attempt<'a> {
-    provider: &'a dyn Provider,
-    retryable: AtomicBool,
-}
-
-#[async_trait::async_trait]
-impl Provider for Attempt<'_> {
-    fn identity(&self) -> &ProviderIdentity {
-        self.provider.identity()
-    }
-
-    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        let result = self.provider.invoke(request).await;
-        self.retryable.store(
-            result.as_ref().is_err_and(ProviderError::allows_fallback),
-            Ordering::Relaxed,
-        );
-        result
-    }
-
-    async fn invoke_with_preview(
-        &self,
-        request: ProviderRequest,
-        preview: ResponsePreview,
-    ) -> Result<ProviderResponse, ProviderError> {
-        let result = self.provider.invoke_with_preview(request, preview).await;
-        self.retryable.store(
-            result.as_ref().is_err_and(|error| error.allows_fallback()),
-            Ordering::Relaxed,
-        );
-        result
-    }
-}
-
 pub(super) struct AttemptResult {
     pub(super) result: CallResult,
     pub(super) eligible: bool,
@@ -385,12 +348,8 @@ pub(super) async fn invoke_attempt(
     cancellation: RunCancellation,
     preview: Option<ResponsePreview>,
 ) -> AttemptResult {
-    let attempt = Attempt {
-        provider,
-        retryable: AtomicBool::new(false),
-    };
     let result = invoke_bounded_with_preview(
-        &attempt,
+        provider,
         request,
         deadline,
         cancellation.clone(),
@@ -398,10 +357,12 @@ pub(super) async fn invoke_attempt(
     )
     .await;
     AttemptResult {
-        result,
-        eligible: attempt.retryable.load(Ordering::Relaxed)
-            && preview.as_ref().is_none_or(|preview| !preview.has_output())
+        eligible: matches!(
+            result,
+            CallResult::Failed(CallFailure::Unavailable { fallback: true, .. })
+        ) && preview.as_ref().is_none_or(|preview| !preview.has_output())
             && !cancellation.is_cancelled()
             && Instant::now() < deadline,
+        result,
     }
 }
