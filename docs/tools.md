@@ -13,6 +13,8 @@ Submitting work can consume Provider usage. The [Tool contract](./specs/tools.md
 
 See the [trust and approval contract](./specs/tools.md#folder-trust-and-approvals) for remembered folder identity, Shift+Tab modes, one-use human approvals and AI-review fallback. Untrusted folders remain read-only.
 
+After a command fails inside the Guard, the model may ask to run that exact command again on your machine with no sandbox; see the [unguarded re-run contract](./specs/tools.md#unguarded-re-run-after-a-guard-failure). Choosing "Always allow this exact command in this project" writes an entry to the private `unguarded-commands.json` beside `tools.json` (at most 128 entries); delete the file or an entry to revoke it, and it applies from your next message. To forbid the feature, add `"deny": ["command_unguarded"]` to `permissions.json`.
+
 ## Private grants
 
 Use the [minimal file-only configuration](./specs/tools.md#private-grants) to create owner-only `tools.json` outside the Workspace. `--state-dir` selects this configuration root without moving saved accounts. Review selected paths and resources before granting access; Tool observations may reach the selected Provider and private journal.

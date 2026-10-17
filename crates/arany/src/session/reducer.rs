@@ -207,6 +207,19 @@ pub struct ToolView {
     pub finished_sequence: Option<u64>,
 }
 
+impl ToolView {
+    /// A host run that may have had effects: attested, or left uncertain.
+    pub fn ran_unguarded(&self) -> bool {
+        self.intent.call.is_unguarded()
+            && self.observation.as_ref().is_some_and(|observation| {
+                matches!(
+                    observation.attestation,
+                    Some(crate::tools::Attestation::Unguarded(_))
+                ) || observation.disposition == crate::tools::ToolDisposition::Uncertain
+            })
+    }
+}
+
 fn all_children_finished(run: &RunView) -> bool {
     run.agents.len() > 1
         && run
@@ -296,6 +309,13 @@ fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCal
 }
 
 impl RunView {
+    pub fn unguarded_tools(&self) -> usize {
+        self.tools
+            .iter()
+            .filter(|tool| tool.ran_unguarded())
+            .count()
+    }
+
     pub fn primary_tool_limit_reached(&self) -> bool {
         self.config
             .as_ref()

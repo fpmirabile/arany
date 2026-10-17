@@ -505,16 +505,16 @@ impl AttachedTerminal {
                         &lines,
                         view::PermissionFrameState {
                             choices: if configured && frame.area().width < 24 {
-                                ("Use config", "Trust folder")
+                                &["Use config", "Trust folder"]
                             } else if configured {
-                                ("Use explicit config", "Trust this folder")
+                                &["Use explicit config", "Trust this folder"]
                             } else if frame.area().width < 24 {
-                                ("Read only", "Trust folder")
+                                &["Read only", "Trust folder"]
                             } else {
-                                ("Continue read only", "Trust this folder")
+                                &["Continue read only", "Trust this folder"]
                             },
                             page,
-                            allow: trust,
+                            focus: usize::from(trust),
                             profile_start,
                             profile_count: options.len(),
                             focused_profile,
@@ -535,14 +535,18 @@ impl AttachedTerminal {
     }
     pub fn draw_tool_approval(
         &mut self,
-        intent: &arany::EffectIntent,
+        approval: &arany::ToolApproval,
         page: usize,
-        allow: bool,
+        choice: usize,
     ) -> Result<bool, TerminalError> {
         self.cancel_clipboard_paste();
+        let lines = match &approval.unguarded {
+            Some(prompt) => crate::presentation::unguarded_approval_lines(&approval.intent, prompt),
+            None => crate::presentation::tool_approval_lines(&approval.intent),
+        };
         if let Some(linear) = &mut self.linear {
             linear
-                .draw_tool_approval(intent)
+                .draw_tool_approval(approval.intent.id, &lines, approval.unguarded.is_some())
                 .map_err(TerminalError::Io)?;
             return Ok(false);
         }
@@ -553,20 +557,31 @@ impl AttachedTerminal {
             .expect("inline terminal")
             .draw(|frame| {
                 if frame.area().width >= 16 && frame.area().height >= 8 {
+                    let width = frame.area().width;
+                    let choices: &[&str] = match (approval.unguarded.is_some(), width) {
+                        (false, _) => &["Deny", "Allow once"],
+                        (true, 68..) => &[
+                            "Deny",
+                            "Allow once (unguarded)",
+                            "Always allow this exact command in this project (unguarded)",
+                        ],
+                        (true, 40..) => &["Deny", "Allow once", "Always allow exact command here"],
+                        (true, _) => &["Deny", "Allow once", "Always allow"],
+                    };
                     more = view::draw_permission_frame(
                         frame,
-                        &crate::presentation::tool_approval_lines(intent),
+                        &lines,
                         view::PermissionFrameState {
-                            choices: ("Deny", "Allow once"),
+                            choices,
                             page,
-                            allow,
+                            focus: choice,
                             profile_start: None,
                             profile_count: 0,
                             focused_profile: None,
                             profile_selection_enabled: None,
-                            footer: Some(if frame.area().width < 24 {
+                            footer: Some(if width < 24 {
                                 "↑↓ Enter Esc"
-                            } else if frame.area().width < 50 {
+                            } else if width < 50 {
                                 "↑↓ Enter · Esc denies"
                             } else {
                                 "↑↓ choose · Enter confirm · Esc denies"

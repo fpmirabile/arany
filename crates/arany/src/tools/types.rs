@@ -236,7 +236,7 @@ impl ToolCall {
         self.facts().spawns_process
     }
 
-    pub(crate) fn is_unguarded(&self) -> bool {
+    pub fn is_unguarded(&self) -> bool {
         matches!(self, Self::CommandUnguarded { .. })
     }
 
@@ -717,11 +717,33 @@ pub struct ToolObservation {
     pub cache_update: CacheUpdate,
 }
 
+const GUARD_ALIASES: [&str; 8] = [
+    "/workspace",
+    "/scratch",
+    "/cache",
+    "/seed",
+    "/programs",
+    "/inputs",
+    "/skills",
+    "/arany",
+];
+
+// Inside the Guard these roots name private mounts; on the host the same bytes name other or no paths.
+pub(crate) fn uses_guard_alias(args: &[String]) -> bool {
+    let name_byte = |byte: u8| byte.is_ascii_alphanumeric() || b"_-.".contains(&byte);
+    args.iter().any(|arg| {
+        let bytes = arg.as_bytes();
+        GUARD_ALIASES.iter().any(|alias| {
+            arg.match_indices(alias).any(|(at, _)| {
+                let before = at.checked_sub(1).map(|index| bytes[index]);
+                let after = bytes.get(at + alias.len()).copied();
+                !before.is_some_and(name_byte) && !after.is_some_and(name_byte)
+            })
+        })
+    })
+}
+
 /// The latest Guard-attested observation of the identical command, when it qualifies for an unguarded re-run.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the Engine gate lands in the next slice")
-)]
 pub(crate) fn qualifying_guard_failure<'a>(
     call: &ToolCall,
     observations: impl Iterator<Item = &'a ToolObservation>,
@@ -732,6 +754,9 @@ pub(crate) fn qualifying_guard_failure<'a>(
     else {
         return None;
     };
+    if uses_guard_alias(args) {
+        return None;
+    }
     observations
         .filter(|observation| {
             matches!(&observation.intent.call,
@@ -1230,5 +1255,31 @@ mod unguarded_vocabulary_tests {
             Some(later_failure.intent.id)
         );
         assert!(!qualifies(&command(&["-c", "exit 7"], ""), &[failed]));
+    }
+
+    #[test]
+    fn guard_path_aliases_in_argv_never_qualify_for_a_host_rerun() {
+        let owned = |args: &[&str]| args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        for args in [
+            &["/workspace"][..],
+            &["-c", "cd /workspace && make"],
+            &["--out=/scratch/x"],
+            &["/inputs/sh/data"],
+            &["a:/programs/b"],
+        ] {
+            assert!(uses_guard_alias(&owned(args)), "{args:?}");
+            let call = unguarded(args, "");
+            let failed = guarded(command(args, ""), ToolDisposition::Failed, None);
+            assert!(qualifying_guard_failure(&call, [&failed].into_iter()).is_none());
+        }
+        for args in [
+            &["/home/me/workspace/x"][..],
+            &["./workspace"],
+            &["/workspaces/x"],
+            &["$ARANY_TOOL_WORKSPACE/x"],
+            &["src/cache"],
+        ] {
+            assert!(!uses_guard_alias(&owned(args)), "{args:?}");
+        }
     }
 }

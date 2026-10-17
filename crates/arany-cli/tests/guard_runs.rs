@@ -23,6 +23,9 @@ use engine_support::{run_to_end, run_with};
 #[path = "guard_runs/permissions.rs"]
 mod permissions;
 
+#[path = "guard_runs/unguarded.rs"]
+mod unguarded;
+
 async fn wait_for_child_finish(store: &Store, session_id: SessionId, objective: &str) {
     loop {
         // The Engine's journal commit can briefly lock this observer's separate connection.
@@ -1772,7 +1775,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62443 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=62426 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1790,7 +1793,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62447 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=62431 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1809,7 +1812,7 @@ AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
 GoalPlanContractRecorded
-ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1827,7 +1830,7 @@ AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
 GoalPlanContractRecorded
-ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1846,7 +1849,7 @@ AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
 GoalPlanContractRecorded
-ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 GoalProviderCallReserved
 ProviderCallRecorded ToolReview
 ToolFinished Succeeded
@@ -1867,7 +1870,7 @@ AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
 GoalPlanContractRecorded
-ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan

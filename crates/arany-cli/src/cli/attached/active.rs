@@ -28,6 +28,35 @@ pub(super) enum CompactionOutcome {
     Shutdown(ShutdownSignal),
 }
 
+fn approval_choices(pending: &Option<arany::ToolApproval>) -> usize {
+    if pending
+        .as_ref()
+        .is_some_and(|approval| approval.unguarded.is_some())
+    {
+        3
+    } else {
+        2
+    }
+}
+
+fn approval_reply(choice: usize) -> arany::ApprovalReply {
+    match choice {
+        0 => arany::ApprovalReply::Deny,
+        1 => arany::ApprovalReply::AllowOnce,
+        _ => arany::ApprovalReply::AllowAlwaysInProject,
+    }
+}
+
+fn linear_approval_reply(answer: &str, unguarded: bool) -> Option<arany::ApprovalReply> {
+    use arany::ApprovalReply::{AllowAlwaysInProject, AllowOnce, Deny};
+    match (answer, unguarded) {
+        ("" | "deny", _) | ("no", false) => Some(Deny),
+        ("allow", _) | ("yes", false) => Some(AllowOnce),
+        ("always", true) => Some(AllowAlwaysInProject),
+        _ => None,
+    }
+}
+
 pub(super) fn objective_includes(
     admission: &Admission,
     objective: &str,
@@ -303,7 +332,7 @@ pub(super) async fn submit_objective(
         arany::ToolApprovals::new(composer.approval_mode().unwrap_or_default());
     let mut pending: Option<arany::ToolApproval> = None;
     let mut approval_page = 0usize;
-    let mut approval_allow = false;
+    let mut approval_choice = 0usize;
     let mut approval_answer = Composer::default();
     let include_paths = objective_includes(admission, &objective)?;
     let execution_settings = super::controls::restore_settings(admission).await?;
@@ -354,7 +383,7 @@ pub(super) async fn submit_objective(
     let shutdown_reason = loop {
         let approval_more = match &pending {
             Some(approval) => terminal
-                .draw_tool_approval(&approval.intent, approval_page, approval_allow)
+                .draw_tool_approval(approval, approval_page, approval_choice)
                 .map_err(|error| error.to_string())?,
             None => false,
         };
@@ -362,7 +391,7 @@ pub(super) async fn submit_objective(
             approval = inbox.next(), if pending.is_none() => {
                 pending = approval;
                 approval_page = 0;
-                approval_allow = false;
+                approval_choice = 0;
                 approval_answer.clear();
             }
             result = &mut future => {
@@ -458,30 +487,35 @@ pub(super) async fn submit_objective(
                             approvals.set_mode(composer.approval_mode().unwrap_or_default());
                         }
                         TerminalInput::Escape | TerminalInput::EndOfInput => {
-                            pending.take().expect("pending action").decide(false);
+                            pending.take().expect("pending action").decide(arany::ApprovalReply::Deny);
                             terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
                         }
-                        TerminalInput::Tab if !approval_more => approval_allow = !approval_allow,
-                        TerminalInput::Up if !approval_more => approval_allow = false,
-                        TerminalInput::Down if !approval_more => approval_allow = true,
+                        TerminalInput::Tab if !approval_more => approval_choice = (approval_choice + 1) % approval_choices(&pending),
+                        TerminalInput::Up if !approval_more => approval_choice = approval_choice.saturating_sub(1),
+                        TerminalInput::Down if !approval_more => approval_choice = (approval_choice + 1).min(approval_choices(&pending) - 1),
                         TerminalInput::Down | TerminalInput::PageDown if approval_more => approval_page += 1,
-                        TerminalInput::Up | TerminalInput::PageUp => { approval_page = approval_page.saturating_sub(1); approval_allow = false; }
-                        TerminalInput::Resize => { approval_page = 0; approval_allow = false; }
+                        TerminalInput::Up | TerminalInput::PageUp => { approval_page = approval_page.saturating_sub(1); approval_choice = 0; }
+                        TerminalInput::Resize => { approval_page = 0; approval_choice = 0; }
                         TerminalInput::Suspend => {
                             terminal.suspend_and_resume(composer.text().len()).map_err(|error| error.to_string())?;
                             approval_page = 0;
-                            approval_allow = false;
+                            approval_choice = 0;
                         }
                         TerminalInput::Character(character) if terminal.is_linear() => { approval_answer.apply(TerminalInput::Character(character)); }
                         TerminalInput::Backspace if terminal.is_linear() => { approval_answer.apply(TerminalInput::Backspace); }
                         TerminalInput::Submit if approval_more => approval_page += 1,
                         TerminalInput::Submit => {
-                            let answer = approval_answer.text().trim().to_ascii_lowercase();
-                            if terminal.is_linear() {
-                                approval_allow = matches!(answer.as_str(), "allow" | "yes");
-                                if !matches!(answer.as_str(), "" | "deny" | "no" | "allow" | "yes") { approval_answer.clear(); continue; }
-                            }
-                            pending.take().expect("pending action").decide(approval_allow);
+                            let reply = if terminal.is_linear() {
+                                let answer = approval_answer.text().trim().to_ascii_lowercase();
+                                let Some(reply) = linear_approval_reply(&answer, approval_choices(&pending) == 3) else {
+                                    approval_answer.clear();
+                                    continue;
+                                };
+                                reply
+                            } else {
+                                approval_reply(approval_choice)
+                            };
+                            pending.take().expect("pending action").decide(reply);
                             terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
                         }
                         _ => {}
@@ -1498,5 +1532,37 @@ mod escape_tests {
             idle(TerminalInput::Interrupt, false, false, ActiveStop::Running),
             TerminalInput::Interrupt
         );
+    }
+}
+
+#[cfg(test)]
+mod approval_reply_tests {
+    use super::{approval_reply, linear_approval_reply};
+    use arany::ApprovalReply::{AllowAlwaysInProject, AllowOnce, Deny};
+
+    #[test]
+    fn linear_words_are_exact_and_always_exists_only_for_unguarded_runs() {
+        for (answer, unguarded, expected) in [
+            ("", true, Some(Deny)),
+            ("deny", true, Some(Deny)),
+            ("allow", true, Some(AllowOnce)),
+            ("always", true, Some(AllowAlwaysInProject)),
+            ("yes", true, None),
+            ("no", true, None),
+            ("alway", true, None),
+            ("always", false, None),
+            ("yes", false, Some(AllowOnce)),
+            ("no", false, Some(Deny)),
+            ("allow", false, Some(AllowOnce)),
+        ] {
+            assert_eq!(
+                linear_approval_reply(answer, unguarded),
+                expected,
+                "{answer}"
+            );
+        }
+        assert_eq!(approval_reply(0), Deny);
+        assert_eq!(approval_reply(1), AllowOnce);
+        assert_eq!(approval_reply(2), AllowAlwaysInProject);
     }
 }

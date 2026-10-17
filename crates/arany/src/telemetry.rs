@@ -79,6 +79,7 @@ pub(crate) struct RunTrace {
     compaction_requested: Option<ProviderIdentity>,
     run_end: Option<(TraceOutcome, SystemTime)>,
     goal_end: Option<(GoalStatus, SystemTime)>,
+    unguarded_effects: i64,
 }
 
 struct AgentSpan {
@@ -211,6 +212,7 @@ impl Telemetry {
             compaction_requested: None,
             run_end: None,
             goal_end: None,
+            unguarded_effects: 0,
         })
     }
 
@@ -494,6 +496,16 @@ impl RunTrace {
                 record,
                 ..
             } => self.provider_call(*agent_run_id, record, at),
+            Event::ToolFinished { observation, .. }
+                if observation.intent.call.is_unguarded()
+                    && (matches!(
+                        observation.attestation,
+                        Some(crate::tools::Attestation::Unguarded(_))
+                    ) || observation.disposition
+                        == crate::tools::ToolDisposition::Uncertain) =>
+            {
+                self.unguarded_effects += 1;
+            }
             Event::AgentFinished {
                 agent_run_id,
                 disposition,
@@ -551,6 +563,12 @@ impl RunTrace {
             } if self.run_id() == Some(*run_id) => {
                 let outcome = TraceOutcome::from(*disposition);
                 if let Some((_, span)) = self.run.take() {
+                    if let Some(context) = &span.context {
+                        context.span().set_attribute(KeyValue::new(
+                            "arany.run.unguarded_effects",
+                            self.unguarded_effects,
+                        ));
+                    }
                     span.finish_at(outcome, at);
                 }
                 self.run_end = Some((outcome, at));
@@ -656,6 +674,7 @@ impl RunTrace {
                         "arany.goal.uncertain_active_ms",
                         saturating_i64(goal.uncertain_active_ms),
                     ),
+                    KeyValue::new("arany.goal.unguarded_effects", self.unguarded_effects),
                 ] {
                     context.span().set_attribute(attribute);
                 }
