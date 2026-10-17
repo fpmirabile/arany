@@ -232,6 +232,59 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
 }
 
 #[tokio::test]
+async fn exhausted_compaction_routes_settle_the_reservation_for_the_next_compaction() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let primary =
+        route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
+    let summary = || {
+        Ok(CompactionResponse {
+            summary: "compacted".into(),
+            response_id: None,
+            usage: arany::Usage::default(),
+            wire_provenance: None,
+        })
+    };
+    let compaction = route(
+        ScriptedProvider::new(vec![])
+            .with_profile("scripted", "compact")
+            .with_compactions(vec![Err(ProviderError::RemoteHttp(503)), summary()]),
+    );
+    let compaction_fallback = route(
+        ScriptedProvider::new(vec![])
+            .with_profile("scripted", "compact-fallback")
+            .with_compactions(vec![Err(ProviderError::RemoteHttp(503)), summary()]),
+    );
+    let mut bindings = routes(&primary);
+    bindings.compaction = vec![compaction.clone(), compaction_fallback.clone()];
+    let engine = open(&state);
+    let result = run_routed(
+        &engine,
+        bindings.clone(),
+        input(&workspace),
+        RunControls::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    let failed = engine
+        .compact_session(&bindings, result.session_id, workspace.clone())
+        .await
+        .unwrap();
+    assert!(matches!(failed.status, CompactionStatus::Failed { .. }));
+    let next = engine
+        .compact_session(&bindings, result.session_id, workspace)
+        .await;
+    assert!(
+        next.is_ok(),
+        "a settled reservation must admit the next compaction"
+    );
+    engine.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn tool_enabled_fallback_between_models_of_one_chatgpt_account_is_admitted() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
