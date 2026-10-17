@@ -681,6 +681,7 @@ async fn native_file_journey_helper() {
                 );
                 assert_eq!(receipt.limits, observation.intent.limits);
             }
+            arany::Attestation::Unguarded(_) => panic!("macOS journeys never run unguarded"),
         }
     }
     let command: serde_json::Value =
