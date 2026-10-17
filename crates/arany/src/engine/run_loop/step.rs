@@ -646,13 +646,15 @@ impl RunLoop<'_> {
             {
                 match self.reserve_active_pause() {
                     Ok(pause) => {
-                        source = PermissionSource::Human;
                         let mut cancellation = self.controls.cancellation.clone();
                         let expires = intent.expires_at_ms.saturating_sub(crate::tools::now_ms());
                         approved = tokio::select! {
                             biased;
                             () = cancellation.cancelled() => false,
-                            result = tokio::time::timeout(Duration::from_millis(expires), approvals.ask(&intent)) => result.unwrap_or(false),
+                            result = tokio::time::timeout(Duration::from_millis(expires), approvals.ask(&intent)) => {
+                                source = PermissionSource::Human;
+                                result.unwrap_or(false)
+                            }
                         };
                         let resume_at = approved.then(Instant::now);
                         self.settle_active_pause(pause, resume_at)?;
@@ -898,17 +900,19 @@ impl RunLoop<'_> {
         // A sibling Provider call keeps the shared delegation interval active.
         let idle = self.ledger().in_flight_children() == 0;
         let started = Instant::now();
-        let approved = tokio::select! {
+        let (approved, source) = tokio::select! {
             biased;
-            () = cancellation.cancelled() => false,
-            result = tokio::time::timeout_at(deadline.min(Instant::now() + expires), approvals.ask(intent)) => result.unwrap_or(false),
+            () = cancellation.cancelled() => (false, PermissionSource::UnavailableApproval),
+            result = tokio::time::timeout_at(deadline.min(Instant::now() + expires), approvals.ask(intent)) => {
+                (result.unwrap_or(false), PermissionSource::Human)
+            }
         };
         if idle {
             self.ledger().exclude_idle_approval(started.elapsed())?;
         }
         Ok((
             approved && !self.pause_requested() && !self.controls.cancellation.is_cancelled(),
-            PermissionSource::Human,
+            source,
         ))
     }
 
