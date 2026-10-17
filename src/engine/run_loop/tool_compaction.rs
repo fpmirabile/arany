@@ -104,15 +104,14 @@ impl RunLoop<'_> {
         if !self.ledger().admits(Action::Compaction) {
             return Ok(());
         }
-        let active_segment = self
-            .reserve_active_segment(COMPACTION_CALL_DEADLINE, Action::Compaction)
-            .await?;
+        let active_segment = self.reserve_active_segment(COMPACTION_CALL_DEADLINE)?;
         self.store
-            .admit_operation(self.session_id, Action::Compaction.remaining(1), 0)
+            .admit_operation(self.session_id, Action::Compaction.max_events(), 0)
             .await?;
         self.append(Event::GoalCompactionCallReserved {
             goal_id: self.goal_id,
             run_id: self.run_id,
+            active_ceiling_ms: self.ledger().active_ceiling(0)?,
         })
         .await?;
         reservation.commit()?;
@@ -121,7 +120,7 @@ impl RunLoop<'_> {
             .summarize(request, &window, active_segment.deadline(), context_limit)
             .await?;
         self.record_compaction(request, window, summary).await?;
-        self.settle_active_segment(active_segment).await?;
+        self.settle_active_segment(active_segment)?;
         if self.ledger().active_time_exhausted() {
             return Err(EngineError::GoalBudgetExhausted);
         }
@@ -386,7 +385,7 @@ impl RunLoop<'_> {
             status: summary.status,
         };
         self.store
-            .admit_operation(self.session_id, Action::Compaction.remaining(2), 0)
+            .admit_operation(self.session_id, Action::Compaction.remaining(1), 0)
             .await?;
         let sequence = append_scoped(
             self.store,

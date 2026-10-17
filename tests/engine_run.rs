@@ -742,7 +742,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             .load_session(first.session_id)
             .await
             .expect("durable journal");
-        assert_eq!(events.len(), 27);
+        assert_eq!(events.len(), 23);
         assert_eq!(
             events
                 .iter()
@@ -924,23 +924,15 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 .count(),
             events
                 .iter()
-                .filter(|event| matches!(event.event, Event::GoalActiveTimeReserved { .. }))
-                .count(),
-            events
-                .iter()
                 .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
-                .count(),
-            events
-                .iter()
-                .filter(|event| matches!(event.event, Event::GoalActiveTimeSettled { .. }))
                 .count(),
             events
                 .iter()
                 .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
                 .count(),
         ];
-        // Each Provider call reserves and settles its own active time; the Run lifecycle reserves its own tail once at Run start.
-        assert_eq!(goal_event_counts, [5, 5, 7, 7, 7, 5]);
+        // Each Provider call reserves its call; each Run settles its active time once in RunFinished.
+        assert_eq!(goal_event_counts, [5, 5, 7, 5]);
         let non_goal_events = events
             .iter()
             .filter(|event| {
@@ -948,15 +940,13 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                     event.event,
                     Event::GoalStarted { .. }
                         | Event::GoalRunLinked { .. }
-                        | Event::GoalActiveTimeReserved { .. }
                         | Event::GoalProviderCallReserved { .. }
-                        | Event::GoalActiveTimeSettled { .. }
                         | Event::GoalFinished { .. }
                 )
             })
             .count();
         assert_eq!(non_goal_events, 41);
-        assert_eq!(events.len(), 77);
+        assert_eq!(events.len(), 63);
         let view = SessionView::replay(first.session_id, &events).unwrap().unwrap();
         for (run_id, phase) in [
             (first.run.id, AgentPhase::RootPlan),
@@ -1147,7 +1137,7 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         assert_eq!(view.runs[0].config.as_ref(), Some(config));
         assert!(events.iter().any(|event| matches!(
             &event.event,
-            Event::ContextCompacted { record }
+            Event::ContextCompacted { record, .. }
                 if record.chatgpt_provenance == config.chatgpt_provenance
                     && record.output_token_bound == OutputTokenBound::LocalAcceptanceOnly
         )));
@@ -1548,10 +1538,10 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
             .collect();
         let snapshot_line = lines.last().expect("visible compaction receipt");
         assert_eq!(snapshot_line["kind"], "ContextCompacted");
-        assert_eq!(snapshot_line["payload"]["input_tokens"], 100);
-        assert_eq!(snapshot_line["payload"]["output_tokens"], 8);
+        assert_eq!(snapshot_line["payload"]["record"]["input_tokens"], 100);
+        assert_eq!(snapshot_line["payload"]["record"]["output_tokens"], 8);
         assert_eq!(
-            snapshot_line["payload"]["status"]["summary"],
+            snapshot_line["payload"]["record"]["status"]["summary"],
             "Derived summary"
         );
         let view = store
@@ -1809,8 +1799,9 @@ fn invalid_compaction_snapshot_corpus_fails_before_provider_disclosure() {
                     |row| row.get(0),
                 )
                 .expect("snapshot payload");
-            let mut document: serde_json::Value =
+            let mut payload: serde_json::Value =
                 serde_json::from_str(&payload).expect("valid snapshot JSON");
+            let document = &mut payload["record"];
             match fault {
                 "source_digest" => {
                     let value = document["source_digest"][0].as_u64().expect("digest byte");
@@ -1828,7 +1819,7 @@ fn invalid_compaction_snapshot_corpus_fails_before_provider_disclosure() {
             connection
                 .execute(
                     "UPDATE events SET payload=?1 WHERE session_id=?2 AND kind='ContextCompacted'",
-                    [document.to_string(), first.session_id.to_string()],
+                    [payload.to_string(), first.session_id.to_string()],
                 )
                 .expect("injected invalid snapshot");
             drop(connection);
@@ -1915,7 +1906,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
             .load_session(session_id)
             .await
             .expect("durable Events");
-        assert_eq!(events.len(), 131);
+        assert_eq!(events.len(), 111);
         assert_eq!(
             events
                 .iter()
@@ -2382,18 +2373,18 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
         // Each admitted action reserves its worst-case Event envelope before dispatch; the boundary is the
-        // largest prefix that still admits the Run: 13 Events for a single plain Run, 23 for one Team child.
+        // largest prefix that still admits the Run: 11 Events for a single plain Run, 17 for one Team child.
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
-            (9988, CollaborationPolicy::Single, false, false, false, false),
-            (9987, CollaborationPolicy::Single, true, false, false, false),
-            (9978, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
-            (9977, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
-            (9988, CollaborationPolicy::Single, false, true, false, false),
-            (9987, CollaborationPolicy::Single, true, true, false, false),
-            (9987, CollaborationPolicy::Single, false, false, true, false),
-            (9986, CollaborationPolicy::Single, true, false, true, false),
-            (9924, CollaborationPolicy::Single, false, false, false, true),
-            (9923, CollaborationPolicy::Single, true, false, false, true),
+            (9990, CollaborationPolicy::Single, false, false, false, false),
+            (9989, CollaborationPolicy::Single, true, false, false, false),
+            (9984, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
+            (9983, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
+            (9990, CollaborationPolicy::Single, false, true, false, false),
+            (9989, CollaborationPolicy::Single, true, true, false, false),
+            (9989, CollaborationPolicy::Single, false, false, true, false),
+            (9988, CollaborationPolicy::Single, true, false, true, false),
+            (9926, CollaborationPolicy::Single, false, false, false, true),
+            (9925, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
@@ -2464,13 +2455,13 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
             let expected_event_count = if branch {
                 // The fork's own Event plus the Single Run's admitted or refused prefix.
-                if admitted { 14 } else { 1 }
+                if admitted { 12 } else { 1 }
             } else if admitted {
                 prefix as usize
                     + if matches!(policy, CollaborationPolicy::Single) {
-                        13
+                        11
                     } else {
-                        23
+                        17
                     }
             } else {
                 // A Single Run refused at Run start commits nothing; a Team refused at its child wave keeps its
@@ -2478,7 +2469,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 prefix as usize
                     + match policy {
                         CollaborationPolicy::Single => 0,
-                        _ => 9,
+                        _ => 7,
                     }
             };
             assert_eq!(
@@ -2496,8 +2487,8 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             }
             store.close().await.unwrap();
         }
-        // Two children in two slots form one wave with a 4N+10 = 18 Event tail: 9973 admits to exactly 10,000 Events.
-        for (prefix, admitted) in [(9973_i64, true), (9974, false)] {
+        // Two children in two slots form one wave with a 4N+6 = 14 Event tail: 9979 admits to exactly 10,000 Events.
+        for (prefix, admitted) in [(9979_i64, true), (9980, false)] {
             let path = temp.path().join(format!("two-child-{prefix}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
             let mut engine = Engine::open(StateRoot::admit(&path).unwrap(), ScriptedProvider::new(vec![finish()])).unwrap();
@@ -2549,7 +2540,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let events = store.load_session(id).await.unwrap();
             let spawned = events.iter().filter(|event| matches!(event.event, Event::AgentSpawned { role: arany::AgentRole::Child, .. })).count();
             assert_eq!(spawned, if admitted { 2 } else { 0 }, "two children at {prefix}: AgentSpawned");
-            assert_eq!(events.len(), if admitted { 10_000 } else { prefix as usize + 9 }, "two children at {prefix}: committed Events");
+            assert_eq!(events.len(), if admitted { 10_000 } else { prefix as usize + 7 }, "two children at {prefix}: committed Events");
             store.close().await.unwrap();
         }
         for (index, (prefix, prior_forks, admitted)) in [
@@ -2723,7 +2714,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
         engine.close().await.unwrap();
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         let events = store.load_session(id).await.unwrap();
-        assert_eq!(events.len(), 14);
+        assert_eq!(events.len(), 12);
         assert_eq!(
             events
                 .iter()
@@ -2811,22 +2802,14 @@ fn database_capacity_is_admitted_before_provider_usage() {
                 .count(),
             events
                 .iter()
-                .filter(|event| matches!(event.event, Event::GoalActiveTimeReserved { .. }))
-                .count(),
-            events
-                .iter()
                 .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
-                .count(),
-            events
-                .iter()
-                .filter(|event| matches!(event.event, Event::GoalActiveTimeSettled { .. }))
                 .count(),
             events
                 .iter()
                 .filter(|event| matches!(event.event, Event::GoalFinished { .. }))
                 .count(),
         ];
-        assert_eq!(goal_event_counts, [2; 6]);
+        assert_eq!(goal_event_counts, [2; 4]);
         let non_goal_events = events
             .iter()
             .filter(|event| {
@@ -2834,15 +2817,13 @@ fn database_capacity_is_admitted_before_provider_usage() {
                     event.event,
                     Event::GoalStarted { .. }
                         | Event::GoalRunLinked { .. }
-                        | Event::GoalActiveTimeReserved { .. }
                         | Event::GoalProviderCallReserved { .. }
-                        | Event::GoalActiveTimeSettled { .. }
                         | Event::GoalFinished { .. }
                 )
             })
             .count();
         assert_eq!(non_goal_events, 16);
-        assert_eq!(events.len(), 28);
+        assert_eq!(events.len(), 24);
         let view = store.load_view(id).await.unwrap().unwrap();
         assert_eq!(view.runs.len(), 2);
         assert!(view.runs.iter().all(|run| run.status == RunStatus::Finished));
@@ -3191,8 +3172,8 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             .load_session(outcome.session_id)
             .await
             .expect("durable Events");
-        // Each action reserves and settles its own active time: primary, child wave and synthesis.
-        assert_eq!(events.len(), 24);
+        // Primary, child wave and synthesis each journal their call; the Run settles active time once.
+        assert_eq!(events.len(), 18);
         assert_eq!(
             events
                 .iter()
@@ -3802,9 +3783,10 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
                                 assert_eq!(value["kind"], "RunFinished");
                                 assert_eq!(value["payload"]["disposition"], serde_json::to_value(disposition).expect("Run disposition"));
                             }
-                            Event::ContextCompacted { record } => {
+                            Event::ContextCompacted { record, active_ms } => {
                                 assert_eq!(value["kind"], "ContextCompacted");
-                                assert_eq!(value["payload"], serde_json::to_value(record).expect("compaction fact"));
+                                assert_eq!(value["payload"]["record"], serde_json::to_value(record).expect("compaction fact"));
+                                assert_eq!(value["payload"]["active_ms"], serde_json::json!(active_ms));
                             }
                             _ => {}
                         }
@@ -5072,7 +5054,10 @@ fn provider_declared_call_deadline_times_out_and_settles_its_active_reservation(
             .expect("replayed Session")
             .expect("Session view");
         let goal = view.goal(outcome.goal_id).expect("Goal");
-        assert_eq!(goal.reserved_active_ms, None, "the reservation is settled");
+        assert_eq!(
+            goal.active_deadline, None,
+            "the Run settled its active time"
+        );
         assert!(
             goal.active_ms <= 1_000,
             "the call is charged its declared 50 ms, not the 120 s default"
@@ -6326,18 +6311,12 @@ GoalRunLinked
 MessageAccepted
 RunStarted
 AgentSpawned
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 ToolStarted result_bytes=62443 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-GoalActiveTimeReserved
 ToolFinished Succeeded
-GoalActiveTimeSettled
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 AgentFinished
 MessageCommitted
 RunFinished
@@ -6350,18 +6329,12 @@ GoalRunLinked
 MessageAccepted
 RunStarted
 AgentSpawned
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 ToolStarted result_bytes=62447 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-GoalActiveTimeReserved
-GoalActiveTimeSettled
 ToolFinished Denied
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 AgentFinished
 MessageCommitted
 RunFinished
@@ -6374,19 +6347,13 @@ GoalRunLinked
 MessageAccepted
 RunStarted
 AgentSpawned
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 GoalPlanContractRecorded
 ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-GoalActiveTimeReserved
-GoalActiveTimeSettled
 ToolFinished Denied
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 AgentFinished
 RunFinished
 GoalFinished";
@@ -6398,21 +6365,13 @@ GoalRunLinked
 MessageAccepted
 RunStarted
 AgentSpawned
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 GoalPlanContractRecorded
 ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-GoalActiveTimeReserved
-GoalActiveTimeSettled
-GoalActiveTimeReserved
 ToolFinished Succeeded
-GoalActiveTimeSettled
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 AgentFinished
 MessageCommitted
 RunFinished
@@ -6425,25 +6384,15 @@ GoalRunLinked
 MessageAccepted
 RunStarted
 AgentSpawned
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 GoalPlanContractRecorded
 ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded ToolReview
-GoalActiveTimeSettled
-GoalActiveTimeReserved
-GoalActiveTimeSettled
-GoalActiveTimeReserved
 ToolFinished Succeeded
-GoalActiveTimeSettled
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 AgentFinished
 MessageCommitted
 RunFinished
@@ -6456,23 +6405,13 @@ GoalRunLinked
 MessageAccepted
 RunStarted
 AgentSpawned
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 GoalPlanContractRecorded
 ToolStarted result_bytes=62440 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-GoalActiveTimeReserved
-GoalActiveTimeSettled
-GoalActiveTimeReserved
-GoalActiveTimeSettled
-GoalActiveTimeReserved
 ToolFinished Succeeded
-GoalActiveTimeSettled
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
 AgentFinished
 MessageCommitted
 RunFinished
@@ -6485,11 +6424,8 @@ GoalRunLinked
 MessageAccepted
 RunStarted
 AgentSpawned
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
-GoalActiveTimeReserved
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
@@ -6498,11 +6434,8 @@ ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
 AgentFinished
-GoalActiveTimeSettled
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootSynthesis
-GoalActiveTimeSettled
 AgentFinished
 MessageCommitted
 RunFinished
@@ -6515,11 +6448,8 @@ GoalRunLinked
 MessageAccepted
 RunStarted
 AgentSpawned
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalActiveTimeSettled
-GoalActiveTimeReserved
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
@@ -6528,11 +6458,8 @@ ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
 AgentFinished
-GoalActiveTimeSettled
-GoalActiveTimeReserved
 GoalProviderCallReserved
 ProviderCallRecorded RootSynthesis
-GoalActiveTimeSettled
 AgentFinished
 MessageCommitted
 RunFinished

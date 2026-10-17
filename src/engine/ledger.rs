@@ -2,7 +2,7 @@ use super::{EngineError, STORE_ACTION_OVERHEAD};
 use crate::provider::GoalContextFacts;
 use crate::session::{
     Event, EventEnvelope, GoalBudget, GoalId, GoalPlanContract, GoalUsage, GoalView,
-    MAX_CHILD_TOOL_CALLS, MAX_DISPLAY_CHUNKS, MAX_GOAL_ACTION_ACTIVE_MS, SessionView,
+    MAX_CHILD_TOOL_CALLS, MAX_DISPLAY_CHUNKS, SessionView,
 };
 use std::sync::Mutex;
 use std::time::Duration;
@@ -10,9 +10,6 @@ use tokio::time::Instant;
 
 #[cfg(test)]
 mod tests;
-
-/// Events a carried-time checkpoint appends ahead of the action it precedes.
-const CHECKPOINT_EVENTS: usize = 2;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Action {
@@ -22,8 +19,6 @@ pub enum Action {
     Review,
     Compaction,
     BoundaryCompaction { goal: bool },
-    Pause,
-    Stop,
     Delegation { children: usize, research: bool },
 }
 
@@ -31,32 +26,23 @@ impl Action {
     /// Upper bound of the Events the action may append after its first admission.
     pub fn max_events(self) -> usize {
         match self {
-            // Both ends of a finishing call: its active-time pair, reservation, record, an optional
-            // steering note and display chunks, then the terminal Events through the Goal receipt.
+            // A finishing call: its reservation, record, an optional steering note and display chunks,
+            // then the terminal Events through the Goal receipt.
             Self::ProviderCall { previews, steering } => {
-                8 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
+                6 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
             }
-            Self::Child { in_flight } => 12_usize.saturating_add(
+            Self::Child { in_flight } => 9_usize.saturating_add(
                 usize::try_from(in_flight)
                     .unwrap_or(usize::MAX)
                     .saturating_mul(2),
             ),
-            Self::Tool => 11,
-            Self::Review | Self::Compaction => 8,
-            Self::BoundaryCompaction { goal } => {
-                if goal {
-                    4
-                } else {
-                    1
-                }
-            }
-            Self::Pause => 13,
-            Self::Stop => 5,
+            Self::Tool | Self::Review | Self::Compaction => 6,
+            Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
             Self::Delegation { children, research } => {
                 if research {
-                    children * (4 * MAX_CHILD_TOOL_CALLS + 4) + 10
+                    children * (4 * MAX_CHILD_TOOL_CALLS + 4) + 6
                 } else {
-                    4 * children + 10
+                    4 * children + 6
                 }
             }
         }
@@ -65,9 +51,9 @@ impl Action {
     /// `ToolFinished` Events among `max_events`, which Store admission sizes at their larger bound.
     pub(super) fn tool_observations(self) -> usize {
         match self {
-            // A Tool step, and the review or pause inside it, ends with its observation and any
-            // integration observation.
-            Self::Tool | Self::Review | Self::Pause => 2,
+            // A Tool step, and the review inside it, ends with its observation and any integration
+            // observation.
+            Self::Tool | Self::Review => 2,
             Self::Child { in_flight } => usize::try_from(in_flight)
                 .unwrap_or(usize::MAX)
                 .saturating_add(1),
@@ -78,7 +64,6 @@ impl Action {
             Self::ProviderCall { .. }
             | Self::Compaction
             | Self::BoundaryCompaction { .. }
-            | Self::Stop
             | Self::Delegation { .. } => 0,
         }
     }
@@ -86,10 +71,6 @@ impl Action {
     /// What is left of the bound once `appended` of the action's Events are committed.
     pub(super) fn remaining(self, appended: usize) -> usize {
         self.max_events().saturating_sub(appended)
-    }
-
-    pub(super) fn checkpointed_events(self) -> usize {
-        self.max_events().saturating_add(CHECKPOINT_EVENTS)
     }
 }
 
@@ -115,6 +96,10 @@ struct InFlight {
     // Settled Provider results whose ProviderCallRecorded is not appended yet.
     unrecorded_tokens: u64,
     unrecorded_unknown: u32,
+    // This Run's settled active time, journaled once by RunFinished.
+    run_active_ms: u64,
+    // The open action's active-time reservation.
+    reserved_ms: Option<u64>,
     // Start of the active time since the last settlement.
     origin: Option<Instant>,
 }
@@ -124,6 +109,19 @@ impl InFlight {
         self.origin.map_or(0, |origin| {
             duration_ms(Instant::now().saturating_duration_since(origin))
         })
+    }
+
+    /// The Goal's active time with this Run's settled and carried time, excluding an open reservation.
+    fn spent_ms(&self, goal: &GoalView) -> u64 {
+        goal.active_ms
+            .saturating_add(self.run_active_ms)
+            .saturating_add(self.pending_ms())
+    }
+
+    /// Active time spent or held, counting an open reservation as spent.
+    fn consumed_ms(&self, goal: &GoalView) -> u64 {
+        self.spent_ms(goal)
+            .saturating_add(self.reserved_ms.unwrap_or_default())
     }
 }
 
@@ -178,6 +176,12 @@ impl GoalLedger {
             .view
             .apply_committed(envelope)
             .map_err(|_| EngineError::InvalidHistory)?;
+        if let Event::RunFinished { .. } = &envelope.event {
+            let in_flight = &mut state.in_flight;
+            in_flight.run_active_ms = 0;
+            in_flight.reserved_ms = None;
+            in_flight.origin = None;
+        }
         if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
             let in_flight = &mut state.in_flight;
             in_flight.unrecorded_tokens = in_flight
@@ -210,6 +214,19 @@ impl GoalLedger {
         Ok(update(&mut state.in_flight))
     }
 
+    fn update<T>(
+        &self,
+        update: impl FnOnce(&GoalView, &mut InFlight) -> T,
+    ) -> Result<T, EngineError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        let State { view, in_flight } = &mut *state;
+        let goal = view.goal(self.goal_id).ok_or(EngineError::InvalidHistory)?;
+        Ok(update(goal, in_flight))
+    }
+
     pub(super) fn in_flight_children(&self) -> u32 {
         self.read(|_, in_flight| in_flight.children).unwrap_or(0)
     }
@@ -229,7 +246,7 @@ impl GoalLedger {
                 self.remaining_calls()
                     .is_none_or(|remaining| remaining >= needed)
             }
-            Action::BoundaryCompaction { .. } | Action::Pause | Action::Stop => true,
+            Action::BoundaryCompaction { .. } => true,
         }
     }
 
@@ -354,17 +371,25 @@ impl GoalLedger {
         self.read(|goal, in_flight| {
             let usage = admission_usage(goal, in_flight, goal.run_ids.len().saturating_sub(1));
             contract.budget.admits_next_run(GoalUsage {
-                active_ms: usage
-                    .active_ms
-                    .saturating_sub(goal.reserved_active_ms.unwrap_or_default()),
+                active_ms: in_flight.spent_ms(goal),
                 ..usage
             })
         })
         .unwrap_or(false)
     }
 
-    pub(super) fn active_reservation(&self, action_ms: u64) -> Result<(Instant, u64), EngineError> {
-        self.read(|goal, in_flight| {
+    /// The active time a starting Run may spend: what remains of the effective budget.
+    pub(super) fn run_active_deadline(&self) -> Result<Option<u64>, EngineError> {
+        self.read(|goal, _| {
+            goal.effective_budget()
+                .max_active_ms
+                .map(|limit| limit.saturating_sub(goal.active_ms))
+        })
+    }
+
+    /// Reserves an action's active interval in memory, with the time carried since the last settlement.
+    pub(super) fn reserve_active(&self, action_ms: u64) -> Result<(Instant, u64), EngineError> {
+        self.update(|goal, in_flight| {
             let now = Instant::now();
             let started = in_flight.origin.unwrap_or(now);
             let carried_ms = duration_ms(now.saturating_duration_since(started));
@@ -378,7 +403,7 @@ impl GoalLedger {
                     requested_ms.min(
                         limit
                             .saturating_sub(goal.active_ms)
-                            .saturating_sub(goal.reserved_active_ms.unwrap_or_default()),
+                            .saturating_sub(in_flight.run_active_ms),
                     )
                 });
             let minimum_reservation = carried_ms.saturating_add(if action_ms == 0 {
@@ -386,78 +411,66 @@ impl GoalLedger {
             } else {
                 duration_ms(STORE_ACTION_OVERHEAD)
             });
-            if reservation <= minimum_reservation || reservation > MAX_GOAL_ACTION_ACTIVE_MS {
+            if in_flight.reserved_ms.is_some() {
+                return Err(EngineError::CoordinatorFailed);
+            }
+            if reservation <= minimum_reservation {
                 return Err(EngineError::GoalBudgetExhausted);
             }
+            in_flight.reserved_ms = Some(reservation);
+            in_flight.origin = None;
             Ok((started, reservation))
         })?
     }
 
-    pub(super) fn needs_carried_time_checkpoint(
+    /// Settles the open reservation; `origin` starts the next carried time.
+    pub(super) fn settle_active(
         &self,
-        action_ms: u64,
-    ) -> Result<bool, EngineError> {
-        if action_ms == 0 {
-            return Ok(false);
-        }
-        self.read(|_, in_flight| {
-            let Some(started) = in_flight.origin else {
-                return false;
-            };
-            let carried_ms = duration_ms(Instant::now().saturating_duration_since(started));
-            let action_with_store = action_ms.saturating_add(duration_ms(STORE_ACTION_OVERHEAD));
-            action_with_store <= MAX_GOAL_ACTION_ACTIVE_MS
-                && action_with_store.saturating_add(carried_ms) > MAX_GOAL_ACTION_ACTIVE_MS
+        active_ms: u64,
+        origin: Option<Instant>,
+    ) -> Result<(), EngineError> {
+        self.in_flight(|in_flight| {
+            in_flight.run_active_ms = in_flight.run_active_ms.saturating_add(active_ms);
+            in_flight.reserved_ms = None;
+            in_flight.origin = origin;
         })
     }
 
-    pub(super) fn pending_active_reservation(&self) -> Result<Option<(Instant, u64)>, EngineError> {
-        self.read(|goal, in_flight| {
-            let Some(started) = in_flight.origin else {
-                return Ok(None);
-            };
-            let pending_ms = duration_ms(Instant::now().saturating_duration_since(started));
-            if pending_ms == 0 || goal.reserved_active_ms.unwrap_or_default() > 0 {
-                return Ok(None);
-            }
-            let reserved_ms = goal
-                .effective_budget()
-                .max_active_ms
-                .map_or(pending_ms, |limit| {
-                    pending_ms.min(limit.saturating_sub(goal.active_ms))
-                });
-            if reserved_ms == 0 {
-                return Ok(None);
-            }
-            if reserved_ms > MAX_GOAL_ACTION_ACTIVE_MS {
-                return Err(EngineError::GoalBudgetExhausted);
-            }
-            Ok(Some((started, reserved_ms)))
-        })?
+    /// The Run's active-time bound through the open reservation, or carried time, plus `pending_ms`.
+    pub(super) fn active_ceiling(&self, pending_ms: u64) -> Result<u64, EngineError> {
+        self.in_flight(|in_flight| {
+            // With no reservation open, the Store tail allows for work before the next one starts.
+            let open_ms = in_flight.reserved_ms.unwrap_or_else(|| {
+                in_flight
+                    .pending_ms()
+                    .saturating_add(duration_ms(STORE_ACTION_OVERHEAD))
+            });
+            in_flight
+                .run_active_ms
+                .saturating_add(open_ms)
+                .saturating_add(pending_ms)
+        })
     }
 
-    /// The reservation Event is appended: the carried time now belongs to the segment.
-    pub(super) fn active_segment_reserved(&self) -> Result<(), EngineError> {
-        self.in_flight(|in_flight| in_flight.origin = None)
+    pub(super) fn active_reserved(&self) -> bool {
+        self.in_flight(|in_flight| in_flight.reserved_ms.is_some())
+            .unwrap_or(true)
     }
 
-    /// The settlement Event is appended; `origin` starts the next carried time.
-    pub(super) fn active_segment_settled(
-        &self,
-        origin: Option<Instant>,
-    ) -> Result<(), EngineError> {
-        self.in_flight(|in_flight| in_flight.origin = origin)
+    /// This Run's active time so far, carried time included, as RunFinished records it.
+    pub(super) fn run_active_ms(&self) -> Result<u64, EngineError> {
+        self.in_flight(|in_flight| {
+            in_flight
+                .run_active_ms
+                .saturating_add(in_flight.pending_ms())
+        })
     }
 
     pub(super) fn active_remaining_ms(&self) -> Option<u64> {
         self.read(|goal, in_flight| {
-            goal.effective_budget().max_active_ms.map(|limit| {
-                limit.saturating_sub(
-                    goal.active_ms
-                        .saturating_add(goal.reserved_active_ms.unwrap_or_default())
-                        .saturating_add(in_flight.pending_ms()),
-                )
-            })
+            goal.effective_budget()
+                .max_active_ms
+                .map(|limit| limit.saturating_sub(in_flight.consumed_ms(goal)))
         })
         .unwrap_or(Some(0))
     }
@@ -467,10 +480,7 @@ impl GoalLedger {
             let Some(limit) = goal.effective_budget().max_active_ms else {
                 return false;
             };
-            let consumed_ms = goal
-                .active_ms
-                .saturating_add(goal.reserved_active_ms.unwrap_or_default())
-                .saturating_add(in_flight.pending_ms());
+            let consumed_ms = in_flight.consumed_ms(goal);
             consumed_ms >= limit
                 || limit.saturating_sub(consumed_ms) <= duration_ms(STORE_ACTION_OVERHEAD)
         })
@@ -482,8 +492,8 @@ impl GoalLedger {
             provider_calls: goal.provider_calls,
             known_tokens: known_tokens(goal, in_flight),
             token_usage_unknown: usage_unknown(goal, in_flight),
-            active_ms: goal.active_ms,
-            reserved_active_ms: goal.reserved_active_ms.unwrap_or_default(),
+            active_ms: goal.active_ms.saturating_add(in_flight.run_active_ms),
+            reserved_active_ms: in_flight.reserved_ms.unwrap_or_default(),
             uncertain_active_ms: goal.uncertain_active_ms,
             success_criterion_satisfied: goal
                 .plan_contract
@@ -536,10 +546,7 @@ fn admission_usage(goal: &GoalView, in_flight: &InFlight, runs: usize) -> GoalUs
     GoalUsage {
         runs,
         provider_calls: goal.provider_calls,
-        active_ms: goal
-            .active_ms
-            .saturating_add(goal.reserved_active_ms.unwrap_or_default())
-            .saturating_add(in_flight.pending_ms()),
+        active_ms: in_flight.consumed_ms(goal),
         known_tokens: known_tokens(goal, in_flight),
         token_usage_unknown: usage_unknown(goal, in_flight),
     }

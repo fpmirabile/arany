@@ -23,7 +23,7 @@ use std::{
 const HISTORY_RUNS: usize = 800;
 const GOAL_RUNS: usize = 16;
 const HISTORY_GOALS: usize = HISTORY_RUNS / GOAL_RUNS;
-const EVENTS_PER_RUN: usize = 11;
+const EVENTS_PER_RUN: usize = 9;
 const EXPECTED_HISTORY_EVENTS: usize = 1 + HISTORY_RUNS * EVENTS_PER_RUN + HISTORY_GOALS * 2;
 const MAX_LINEAGE_EVENTS: usize = 10_000;
 const MIN_EVENT_HEADROOM: usize = 1_000;
@@ -230,6 +230,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         compaction_content_digest: None,
                         tool_policy: None,
                     },
+                    active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                 },
                 Event::AgentSpawned {
                     run_id,
@@ -239,15 +240,11 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     objective: None,
                     grant: None,
                 },
-                Event::GoalActiveTimeReserved {
-                    goal_id,
-                    run_id,
-                    reserved_ms: 1,
-                },
                 Event::GoalProviderCallReserved {
                     goal_id,
                     run_id,
                     agent_run_id,
+                    active_ceiling_ms: 0,
                 },
                 Event::ProviderCallRecorded {
                     run_id,
@@ -265,11 +262,6 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         cache_creation_input_tokens: None,
                     },
                 },
-                Event::GoalActiveTimeSettled {
-                    goal_id,
-                    run_id,
-                    active_ms: 1,
-                },
                 Event::AgentFinished {
                     run_id,
                     agent_run_id,
@@ -284,6 +276,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                 Event::RunFinished {
                     run_id,
                     disposition: RunDisposition::Finished,
+                    active_ms: 0,
                 },
             ] {
                 store.append(session_id, event).await.expect("valid Event");

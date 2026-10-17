@@ -104,29 +104,27 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         "SessionStarted"
         | "SessionDefaultChanged"
         | "SessionForked"
-        | "ContextCompacted"
         | "SessionRenamed"
         | "GoalStarted"
         | "GoalRunLinked"
         | "GoalResumed"
-        | "GoalActiveTimeReserved"
-        | "GoalActiveTimeSettled"
         | "GoalPlanContractRecorded"
-        | "GoalFinished"
         | "MessageAccepted"
-        | "RunStarted"
         | "AgentSpawned"
         | "ProviderCallRecorded"
-        | "GoalProviderCallReserved"
-        | "GoalCompactionCallReserved"
         | "GoalContextCompacted"
         | "GoalSteeringNoteRecorded"
         | "AssistantDisplayRecorded"
-        | "ToolStarted"
+        | "GoalFinished"
         | "AgentFinished"
-        | "MessageCommitted"
-        | "RunFinished" => Some(6),
+        | "MessageCommitted" => Some(6),
         "ToolFinished" => Some(7),
+        "RunStarted" => Some(7),
+        "RunFinished" => Some(7),
+        "GoalProviderCallReserved" => Some(7),
+        "GoalCompactionCallReserved" => Some(7),
+        "ToolStarted" => Some(7),
+        "ContextCompacted" => Some(7),
         _ => None,
     }
 }
@@ -134,7 +132,6 @@ pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
 /// Model Tool requests one Provider step may declare. Engine and adapters emit one until fan-out lands.
 pub(crate) const MAX_STEP_TOOL_CALLS: u8 = 4;
 const _: () = assert!(MAX_STEP_TOOL_CALLS as u32 <= u8::MAX as u32);
-pub(crate) const MAX_GOAL_ACTION_ACTIVE_MS: u64 = 31 * 60 * 1000;
 pub const MAX_GOAL_RUNS: u8 = 16;
 pub const MAX_GOAL_PLAN_PATHS: usize = 64;
 pub const MAX_GOAL_PLAN_COMMANDS: usize = 8;
@@ -556,25 +553,6 @@ mod goal_success_tests {
     }
 
     #[test]
-    fn bounded_macos_build_reservation_fits_the_action_ceiling() {
-        let goal_id = GoalId::new();
-        let run_id = RunId::new();
-        let reserve = Event::GoalActiveTimeReserved {
-            goal_id,
-            run_id,
-            reserved_ms: 1_850_000,
-        };
-        let settle = Event::GoalActiveTimeSettled {
-            goal_id,
-            run_id,
-            active_ms: 1_850_000,
-        };
-        assert!(reserve.validate().is_ok());
-        assert!(settle.validate().is_ok());
-        assert!(GoalBudget::default().validate().is_ok());
-    }
-
-    #[test]
     fn later_failed_receipt_invalidates_an_earlier_matching_call() {
         let call = ToolCall::Read {
             path: "src/main.rs".into(),
@@ -813,18 +791,6 @@ mod goal_success_tests {
             ),
         ];
         assert!(!matches_success(&contract, &observations));
-    }
-
-    #[test]
-    fn active_time_segments_are_bounded_per_run() {
-        let (goal_id, run_id) = (GoalId::new(), RunId::new());
-        let reserve = |reserved_ms| Event::GoalActiveTimeReserved {
-            goal_id,
-            run_id,
-            reserved_ms,
-        };
-        assert!(reserve(MAX_GOAL_ACTION_ACTIVE_MS).validate().is_ok());
-        assert!(reserve(MAX_GOAL_ACTION_ACTIVE_MS + 1).validate().is_err());
     }
 
     #[test]
@@ -2416,6 +2382,8 @@ pub enum Event {
     },
     ContextCompacted {
         record: CompactionRecord,
+        /// The Goal compaction call's settled active time; `None` outside a Goal.
+        active_ms: Option<u64>,
     },
     SessionRenamed {
         title: String,
@@ -2438,16 +2406,6 @@ pub enum Event {
     GoalResumed {
         goal_id: GoalId,
     },
-    GoalActiveTimeReserved {
-        goal_id: GoalId,
-        run_id: RunId,
-        reserved_ms: u64,
-    },
-    GoalActiveTimeSettled {
-        goal_id: GoalId,
-        run_id: RunId,
-        active_ms: u64,
-    },
     GoalPlanContractRecorded {
         goal_id: GoalId,
         run_id: RunId,
@@ -2467,6 +2425,8 @@ pub enum Event {
     RunStarted {
         run_id: RunId,
         config: RunConfig,
+        /// Active time the Run may spend: the Goal's remaining time at start; `None` when unlimited.
+        active_deadline_ms: Option<u64>,
     },
     AgentSpawned {
         run_id: RunId,
@@ -2485,10 +2445,13 @@ pub enum Event {
         goal_id: GoalId,
         run_id: RunId,
         agent_run_id: AgentRunId,
+        /// Upper bound of the Run's active time until the next action starts; a crash charges it.
+        active_ceiling_ms: u64,
     },
     GoalCompactionCallReserved {
         goal_id: GoalId,
         run_id: RunId,
+        active_ceiling_ms: u64,
     },
     GoalContextCompacted {
         goal_id: GoalId,
@@ -2510,6 +2473,7 @@ pub enum Event {
         run_id: RunId,
         agent_run_id: AgentRunId,
         intent: crate::tools::EffectIntent,
+        active_ceiling_ms: u64,
     },
     ToolFinished {
         run_id: RunId,
@@ -2530,6 +2494,7 @@ pub enum Event {
     RunFinished {
         run_id: RunId,
         disposition: RunDisposition,
+        active_ms: u64,
     },
 }
 
@@ -2616,12 +2581,6 @@ struct GoalRunPayload {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GoalActiveTimePayload {
-    goal_id: GoalId,
-    active_ms: u64,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct GoalIdPayload {
     goal_id: GoalId,
 }
@@ -2643,6 +2602,20 @@ struct GoalFinishedPayload {
 #[serde(deny_unknown_fields)]
 struct GoalProviderCallPayload {
     goal_id: GoalId,
+    active_ceiling_ms: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolStartedPayload {
+    intent: crate::tools::EffectIntent,
+    active_ceiling_ms: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextCompactedPayload {
+    record: CompactionRecord,
+    #[serde(deserialize_with = "Option::deserialize")]
+    active_ms: Option<u64>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2680,6 +2653,14 @@ struct AgentFinishedPayload {
 #[serde(deny_unknown_fields)]
 struct RunFinishedPayload {
     disposition: RunDisposition,
+    active_ms: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunStartedPayload {
+    config: RunConfig,
+    #[serde(deserialize_with = "Option::deserialize")]
+    active_deadline_ms: Option<u64>,
 }
 
 impl Event {
@@ -2706,8 +2687,6 @@ impl Event {
             Self::GoalStarted { .. } => "GoalStarted",
             Self::GoalRunLinked { .. } => "GoalRunLinked",
             Self::GoalResumed { .. } => "GoalResumed",
-            Self::GoalActiveTimeReserved { .. } => "GoalActiveTimeReserved",
-            Self::GoalActiveTimeSettled { .. } => "GoalActiveTimeSettled",
             Self::GoalPlanContractRecorded { .. } => "GoalPlanContractRecorded",
             Self::GoalFinished { .. } => "GoalFinished",
             Self::MessageAccepted { .. } => "MessageAccepted",
@@ -2738,8 +2717,6 @@ impl Event {
             | Self::GoalResumed { .. }
             | Self::GoalFinished { .. } => (None, None),
             Self::GoalRunLinked { run_id, .. }
-            | Self::GoalActiveTimeReserved { run_id, .. }
-            | Self::GoalActiveTimeSettled { run_id, .. }
             | Self::GoalPlanContractRecorded { run_id, .. }
             | Self::GoalCompactionCallReserved { run_id, .. }
             | Self::GoalContextCompacted { run_id, .. }
@@ -2814,7 +2791,10 @@ impl Event {
                 source_sequence: *source_sequence,
                 prefix_digest: *prefix_digest,
             }),
-            Self::ContextCompacted { record } => serialize(record),
+            Self::ContextCompacted { record, active_ms } => serialize(&ContextCompactedPayload {
+                record: record.clone(),
+                active_ms: *active_ms,
+            }),
             Self::GoalStarted {
                 goal_id,
                 objective,
@@ -2838,20 +2818,6 @@ impl Event {
                 phase: *phase,
             }),
             Self::GoalResumed { goal_id } => serialize(&GoalIdPayload { goal_id: *goal_id }),
-            Self::GoalActiveTimeReserved {
-                goal_id,
-                reserved_ms,
-                ..
-            } => serialize(&GoalActiveTimePayload {
-                goal_id: *goal_id,
-                active_ms: *reserved_ms,
-            }),
-            Self::GoalActiveTimeSettled {
-                goal_id, active_ms, ..
-            } => serialize(&GoalActiveTimePayload {
-                goal_id: *goal_id,
-                active_ms: *active_ms,
-            }),
             Self::GoalPlanContractRecorded {
                 goal_id, contract, ..
             } => serialize(&GoalContractPayload {
@@ -2874,7 +2840,14 @@ impl Event {
                 images: images.clone(),
             }),
             Self::MessageCommitted { text, .. } => serialize(&TextPayload { text: text.clone() }),
-            Self::RunStarted { config, .. } => serialize(config),
+            Self::RunStarted {
+                config,
+                active_deadline_ms,
+                ..
+            } => serialize(&RunStartedPayload {
+                config: config.clone(),
+                active_deadline_ms: *active_deadline_ms,
+            }),
             Self::AgentSpawned {
                 role,
                 ordinal,
@@ -2888,12 +2861,19 @@ impl Event {
                 grant: *grant,
             }),
             Self::ProviderCallRecorded { record, .. } => serialize(record),
-            Self::GoalProviderCallReserved { goal_id, .. } => {
-                serialize(&GoalProviderCallPayload { goal_id: *goal_id })
+            Self::GoalProviderCallReserved {
+                goal_id,
+                active_ceiling_ms,
+                ..
             }
-            Self::GoalCompactionCallReserved { goal_id, .. } => {
-                serialize(&GoalIdPayload { goal_id: *goal_id })
-            }
+            | Self::GoalCompactionCallReserved {
+                goal_id,
+                active_ceiling_ms,
+                ..
+            } => serialize(&GoalProviderCallPayload {
+                goal_id: *goal_id,
+                active_ceiling_ms: *active_ceiling_ms,
+            }),
             Self::GoalContextCompacted {
                 goal_id,
                 covered_tool_count,
@@ -2911,7 +2891,14 @@ impl Event {
                 })
             }
             Self::AssistantDisplayRecorded { chunk, .. } => serialize(chunk),
-            Self::ToolStarted { intent, .. } => serialize(intent),
+            Self::ToolStarted {
+                intent,
+                active_ceiling_ms,
+                ..
+            } => serialize(&ToolStartedPayload {
+                intent: intent.clone(),
+                active_ceiling_ms: *active_ceiling_ms,
+            }),
             Self::ToolFinished { observation, .. } => serialize(observation),
             Self::AgentFinished {
                 disposition,
@@ -2923,8 +2910,13 @@ impl Event {
                 summary: summary.clone(),
                 result: result.clone(),
             }),
-            Self::RunFinished { disposition, .. } => serialize(&RunFinishedPayload {
+            Self::RunFinished {
+                disposition,
+                active_ms,
+                ..
+            } => serialize(&RunFinishedPayload {
                 disposition: *disposition,
+                active_ms: *active_ms,
             }),
         }
     }
@@ -2963,8 +2955,10 @@ impl Event {
                 }
             }
             "ContextCompacted" if run_id.is_none() && agent_run_id.is_none() => {
+                let data: ContextCompactedPayload = parse(payload)?;
                 Self::ContextCompacted {
-                    record: parse(payload)?,
+                    record: data.record,
+                    active_ms: data.active_ms,
                 }
             }
             "SessionRenamed" if run_id.is_none() && agent_run_id.is_none() => {
@@ -2995,22 +2989,6 @@ impl Event {
             "GoalResumed" if run_id.is_none() && agent_run_id.is_none() => Self::GoalResumed {
                 goal_id: parse::<GoalIdPayload>(payload)?.goal_id,
             },
-            "GoalActiveTimeReserved" if run_id.is_some() && agent_run_id.is_none() => {
-                let data: GoalActiveTimePayload = parse(payload)?;
-                Self::GoalActiveTimeReserved {
-                    goal_id: data.goal_id,
-                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                    reserved_ms: data.active_ms,
-                }
-            }
-            "GoalActiveTimeSettled" if run_id.is_some() && agent_run_id.is_none() => {
-                let data: GoalActiveTimePayload = parse(payload)?;
-                Self::GoalActiveTimeSettled {
-                    goal_id: data.goal_id,
-                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                    active_ms: data.active_ms,
-                }
-            }
             "GoalPlanContractRecorded" if run_id.is_some() && agent_run_id.is_none() => {
                 let data: GoalContractPayload = parse(payload)?;
                 Self::GoalPlanContractRecorded {
@@ -3036,10 +3014,14 @@ impl Event {
                     images: data.images,
                 }
             }
-            "RunStarted" if run_id.is_some() && agent_run_id.is_none() => Self::RunStarted {
-                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                config: parse(payload)?,
-            },
+            "RunStarted" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: RunStartedPayload = parse(payload)?;
+                Self::RunStarted {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    config: data.config,
+                    active_deadline_ms: data.active_deadline_ms,
+                }
+            }
             "AgentSpawned" if run_id.is_some() && agent_run_id.is_some() => {
                 let data: SpawnPayload = parse(payload)?;
                 Self::AgentSpawned {
@@ -3069,16 +3051,20 @@ impl Event {
                 }
             }
             "GoalProviderCallReserved" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: GoalProviderCallPayload = parse(payload)?;
                 Self::GoalProviderCallReserved {
-                    goal_id: parse::<GoalProviderCallPayload>(payload)?.goal_id,
+                    goal_id: data.goal_id,
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                     agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    active_ceiling_ms: data.active_ceiling_ms,
                 }
             }
             "GoalCompactionCallReserved" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalProviderCallPayload = parse(payload)?;
                 Self::GoalCompactionCallReserved {
-                    goal_id: parse::<GoalIdPayload>(payload)?.goal_id,
+                    goal_id: data.goal_id,
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    active_ceiling_ms: data.active_ceiling_ms,
                 }
             }
             "GoalContextCompacted" if run_id.is_some() && agent_run_id.is_none() => {
@@ -3098,11 +3084,15 @@ impl Event {
                     text: data.text,
                 }
             }
-            "ToolStarted" if run_id.is_some() && agent_run_id.is_some() => Self::ToolStarted {
-                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
-                intent: parse(payload)?,
-            },
+            "ToolStarted" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: ToolStartedPayload = parse(payload)?;
+                Self::ToolStarted {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    intent: data.intent,
+                    active_ceiling_ms: data.active_ceiling_ms,
+                }
+            }
             "AssistantDisplayRecorded" if run_id.is_some() && agent_run_id.is_some() => {
                 Self::AssistantDisplayRecorded {
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
@@ -3121,10 +3111,14 @@ impl Event {
                     text: parse::<TextPayload>(payload)?.text,
                 }
             }
-            "RunFinished" if run_id.is_some() && agent_run_id.is_none() => Self::RunFinished {
-                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                disposition: parse::<RunFinishedPayload>(payload)?.disposition,
-            },
+            "RunFinished" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: RunFinishedPayload = parse(payload)?;
+                Self::RunFinished {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    disposition: data.disposition,
+                    active_ms: data.active_ms,
+                }
+            }
             "SessionStarted"
             | "SessionDefaultChanged"
             | "SessionForked"
@@ -3133,8 +3127,6 @@ impl Event {
             | "GoalStarted"
             | "GoalRunLinked"
             | "GoalResumed"
-            | "GoalActiveTimeReserved"
-            | "GoalActiveTimeSettled"
             | "GoalPlanContractRecorded"
             | "GoalFinished"
             | "MessageAccepted"
@@ -3163,8 +3155,6 @@ impl Event {
             Self::GoalStarted { goal_id, .. }
             | Self::GoalRunLinked { goal_id, .. }
             | Self::GoalResumed { goal_id }
-            | Self::GoalActiveTimeReserved { goal_id, .. }
-            | Self::GoalActiveTimeSettled { goal_id, .. }
             | Self::GoalPlanContractRecorded { goal_id, .. }
             | Self::GoalCompactionCallReserved { goal_id, .. }
             | Self::GoalContextCompacted { goal_id, .. }
@@ -3186,7 +3176,7 @@ impl Event {
                 ..
             } if *source_sequence > 0 => bounded(title, 128),
             Self::SessionForked { .. } => Err(ReplayError::InvalidPayload),
-            Self::ContextCompacted { record } => record.validate(),
+            Self::ContextCompacted { record, .. } => record.validate(),
             Self::GoalStarted {
                 objective,
                 workspace_identity: (_, inode),
@@ -3204,18 +3194,6 @@ impl Event {
                 Ok(())
             }
             Self::GoalRunLinked { .. } | Self::GoalResumed { .. } => Ok(()),
-            Self::GoalActiveTimeReserved { reserved_ms, .. } => {
-                if *reserved_ms == 0 || *reserved_ms > MAX_GOAL_ACTION_ACTIVE_MS {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                Ok(())
-            }
-            Self::GoalActiveTimeSettled { active_ms, .. } => {
-                if *active_ms > MAX_GOAL_ACTION_ACTIVE_MS {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                Ok(())
-            }
             Self::GoalCompactionCallReserved { .. } => Ok(()),
             Self::GoalContextCompacted {
                 covered_tool_count,
@@ -3255,7 +3233,16 @@ impl Event {
             Self::MessageCommitted { text, .. } => {
                 bounded(text, super::MAX_ASSISTANT_MESSAGE_BYTES)
             }
-            Self::RunStarted { config, .. } => config.validate(),
+            Self::RunStarted {
+                config,
+                active_deadline_ms,
+                ..
+            } => {
+                if active_deadline_ms.is_some_and(|ms| ms == 0 || ms > MAX_GOAL_ACTIVE_MS) {
+                    return Err(ReplayError::InvalidPayload);
+                }
+                config.validate()
+            }
             Self::AgentSpawned {
                 role,
                 ordinal,
@@ -3283,6 +3270,7 @@ impl Event {
                 run_id,
                 agent_run_id,
                 intent,
+                ..
             } => {
                 if intent.valid()
                     && intent.run_id == *run_id
@@ -3490,7 +3478,7 @@ mod payload_version_tests {
     }
 
     #[test]
-    fn a_tool_finished_bump_rejects_its_previous_version_while_run_started_still_decodes() {
+    fn a_tool_finished_bump_rejects_its_previous_version() {
         let run = RunId::new();
         let agent = AgentRunId::new();
         let finished = Event::ToolFinished {
@@ -3508,38 +3496,6 @@ mod payload_version_tests {
             Event::decode("ToolFinished", 6, &payload, Some(run), Some(agent)),
             Err(ReplayError::UnknownEvent)
         ));
-
-        let started = Event::RunStarted {
-            run_id: run,
-            config: RunConfig {
-                provider: "openai".into(),
-                model: "gpt-5.4".into(),
-                effort: None,
-                custom_profile_provenance: None,
-                saved_api_account_id: None,
-                chatgpt_provenance: None,
-                output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
-                policy: CollaborationPolicy::Single,
-                output_token_cap: 4096,
-                provider_concurrency: 1,
-                workspace_device: 1,
-                workspace_inode: 2,
-                instruction_digest: None,
-                include_digests: Vec::new(),
-                history_run_ids: Vec::new(),
-                excluded_history_runs: 0,
-                context_usage: None,
-                compaction_event_sequence: None,
-                compaction_content_digest: None,
-                tool_policy: None,
-            },
-        };
-        let payload = started.payload().expect("payload");
-        assert_eq!(payload_version("RunStarted"), Some(6));
-        assert_eq!(
-            Event::decode("RunStarted", 6, &payload, Some(run), None).expect("unbumped kind"),
-            started
-        );
     }
 
     #[test]
@@ -3586,5 +3542,123 @@ mod payload_version_tests {
             },
         ));
         assert!(!guarded_read.valid(), "reads attest only in process");
+    }
+
+    #[test]
+    fn ledger_diet_kinds_reject_their_stale_version_while_unbumped_kinds_decode() {
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        let goal_id = GoalId::new();
+        let config = RunConfig {
+            provider: "openai".into(),
+            model: "gpt-5.4".into(),
+            effort: None,
+            custom_profile_provenance: None,
+            saved_api_account_id: None,
+            chatgpt_provenance: None,
+            output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
+            policy: CollaborationPolicy::Single,
+            output_token_cap: 4096,
+            provider_concurrency: 1,
+            workspace_device: 1,
+            workspace_inode: 2,
+            instruction_digest: None,
+            include_digests: Vec::new(),
+            history_run_ids: Vec::new(),
+            excluded_history_runs: 0,
+            context_usage: None,
+            compaction_event_sequence: None,
+            compaction_content_digest: None,
+            tool_policy: None,
+        };
+        let bumped = [
+            Event::RunStarted {
+                run_id: run,
+                config: config.clone(),
+                active_deadline_ms: Some(MAX_GOAL_ACTIVE_MS),
+            },
+            Event::RunFinished {
+                run_id: run,
+                disposition: RunDisposition::Finished,
+                active_ms: 1_234,
+            },
+            Event::GoalProviderCallReserved {
+                goal_id,
+                run_id: run,
+                agent_run_id: agent,
+                active_ceiling_ms: 605_000,
+            },
+            Event::GoalCompactionCallReserved {
+                goal_id,
+                run_id: run,
+                active_ceiling_ms: 125_000,
+            },
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: agent,
+                intent: read_observation(run, agent).intent,
+                active_ceiling_ms: 610_000,
+            },
+        ];
+        for event in bumped {
+            let (run_id, agent_run_id) = event.scope();
+            let payload = event.payload().expect("payload");
+            assert_eq!(event.version(), 7, "{}", event.kind());
+            assert_eq!(
+                Event::decode(event.kind(), 7, &payload, run_id, agent_run_id).expect("current"),
+                event
+            );
+            assert!(matches!(
+                Event::decode(event.kind(), 6, &payload, run_id, agent_run_id),
+                Err(ReplayError::UnknownEvent)
+            ));
+        }
+        let unbumped = [
+            Event::GoalFinished {
+                goal_id,
+                status: GoalStatus::Completed,
+                active_ms: 1_234,
+                report: GoalReport {
+                    summary: "done".into(),
+                    changes: Vec::new(),
+                    evidence: Vec::new(),
+                    unresolved: Vec::new(),
+                    cached_input_tokens: 0,
+                },
+            },
+            Event::SessionRenamed {
+                title: "renamed".into(),
+            },
+            Event::GoalSteeringNoteRecorded {
+                goal_id,
+                run_id: run,
+                text: "steer".into(),
+            },
+        ];
+        for event in unbumped {
+            let (run_id, agent_run_id) = event.scope();
+            let payload = event.payload().expect("payload");
+            assert_eq!(
+                Event::decode(event.kind(), 6, &payload, run_id, agent_run_id).expect("unbumped"),
+                event
+            );
+        }
+        for deleted in ["GoalActiveTimeReserved", "GoalActiveTimeSettled"] {
+            assert_eq!(payload_version(deleted), None);
+            let payload = format!(r#"{{"goal_id":"{goal_id}","active_ms":1}}"#);
+            assert!(matches!(
+                Event::decode(deleted, 6, &payload, Some(run), None),
+                Err(ReplayError::UnknownEvent)
+            ));
+        }
+        let unbounded = Event::RunStarted {
+            run_id: run,
+            config,
+            active_deadline_ms: Some(MAX_GOAL_ACTIVE_MS + 1),
+        };
+        assert!(
+            unbounded.payload().is_err(),
+            "a deadline beyond the Goal maximum"
+        );
     }
 }

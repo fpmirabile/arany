@@ -32,8 +32,8 @@ pub use events::{
     ProviderCallRecord, RunConfig, RunDisposition, RunId, SessionDefaults, SessionId,
 };
 pub(crate) use events::{
-    GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_GOAL_ACTION_ACTIVE_MS,
-    MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, ReplayError, payload_version,
+    GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_GOAL_PLAN_CONTRACT_BYTES,
+    MAX_STEP_TOOL_CALLS, ReplayError, payload_version,
 };
 pub(crate) use lineage::prefix_digest;
 pub use reducer::{

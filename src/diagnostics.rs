@@ -295,7 +295,9 @@ pub(crate) fn event_failure(event: &crate::session::Event) {
         Event::RunFinished { disposition, .. } if *disposition != RunDisposition::Finished => {
             let _ = writeln!(record, "run disposition={disposition:?}");
         }
-        Event::ContextCompacted { record: compaction } => {
+        Event::ContextCompacted {
+            record: compaction, ..
+        } => {
             let CompactionStatus::Failed { reason } = compaction.status else {
                 return;
             };
@@ -556,6 +558,7 @@ mod tests {
         event_failure(&crate::session::Event::RunFinished {
             run_id: Default::default(),
             disposition: crate::session::RunDisposition::Failed,
+            active_ms: 0,
         });
         let failure_log = std::fs::read_to_string(&path).unwrap();
         for detail in [

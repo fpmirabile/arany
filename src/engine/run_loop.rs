@@ -223,8 +223,7 @@ impl<'a> RunLoop<'a> {
         }
         if goal.status != crate::session::GoalStatus::Running
             || goal.active_run != Some(self.run_id)
-            || goal.reserved_active_run.is_some()
-            || goal.reserved_active_ms.is_some()
+            || self.ledger().active_reserved()
             || !goal.unobserved_provider_calls.is_empty()
             || goal.compaction_call_reserved.is_some()
             || run.status != crate::session::RunStatus::Active
@@ -237,8 +236,6 @@ impl<'a> RunLoop<'a> {
         if !cancelled && !actions_acknowledged {
             return Err(EngineError::GoalBudgetExhausted);
         }
-        self.checkpoint_pending_active_time(Action::Stop.max_events(), 0)
-            .await?;
         if cancelled {
             self.cancel_primary(primary).await
         } else {
@@ -246,118 +243,57 @@ impl<'a> RunLoop<'a> {
         }
     }
 
-    async fn checkpoint_pending_active_time(
-        &self,
-        event_tail: usize,
-        tool_observations: usize,
-    ) -> Result<(), EngineError> {
-        let Some((started, reserved_ms)) = self.ledger().pending_active_reservation()? else {
-            return Ok(());
-        };
-        self.store
-            .admit_operation(self.session_id, event_tail, tool_observations)
-            .await?;
-        self.append(Event::GoalActiveTimeReserved {
-            goal_id: self.goal_id,
-            run_id: self.run_id,
-            reserved_ms,
-        })
-        .await?;
-        self.ledger().active_segment_reserved()?;
-        self.settle_active_segment(ActiveSegment {
-            started,
-            reserved_ms,
-        })
-        .await
-    }
-
-    async fn reserve_active_segment(
-        &self,
-        action_bound: Duration,
-        action: Action,
-    ) -> Result<ActiveSegment, EngineError> {
-        let event_tail = action.max_events();
-        let action_ms = duration_ms(action_bound);
-        if self.ledger().needs_carried_time_checkpoint(action_ms)? {
-            self.checkpoint_pending_active_time(
-                action.checkpointed_events(),
-                action.tool_observations(),
-            )
-            .await?;
-        }
-        let (started, reserved_ms) = self.ledger().active_reservation(action_ms)?;
-        self.store
-            .admit_operation(self.session_id, event_tail, action.tool_observations())
-            .await?;
-        self.append(Event::GoalActiveTimeReserved {
-            goal_id: self.goal_id,
-            run_id: self.run_id,
-            reserved_ms,
-        })
-        .await?;
-        self.ledger().active_segment_reserved()?;
+    fn reserve_active_segment(&self, action_bound: Duration) -> Result<ActiveSegment, EngineError> {
+        let (started, reserved_ms) = self.ledger().reserve_active(duration_ms(action_bound))?;
         Ok(ActiveSegment {
             started,
             reserved_ms,
         })
     }
 
-    async fn settle_active_segment(&self, segment: ActiveSegment) -> Result<(), EngineError> {
+    fn settle_active_segment(&self, segment: ActiveSegment) -> Result<(), EngineError> {
         let sampled_at = Instant::now();
         self.settle_active_segment_at(segment, sampled_at, Some(sampled_at))
-            .await
     }
 
-    async fn settle_active_segment_at(
+    fn settle_active_segment_at(
         &self,
         segment: ActiveSegment,
         sampled_at: Instant,
         active_origin: Option<Instant>,
     ) -> Result<(), EngineError> {
-        let active_ms = segment.active_ms(sampled_at);
-        if active_ms > crate::session::MAX_GOAL_ACTION_ACTIVE_MS {
-            return Err(EngineError::GoalBudgetExhausted);
-        }
-        self.append(Event::GoalActiveTimeSettled {
-            goal_id: self.goal_id,
-            run_id: self.run_id,
-            active_ms,
-        })
-        .await?;
-        self.ledger().active_segment_settled(active_origin)
+        self.ledger()
+            .settle_active(segment.active_ms(sampled_at), active_origin)
     }
 
-    async fn reserve_active_pause(&self) -> Result<ActivePause, EngineError> {
-        let segment = self
-            .reserve_active_segment(Duration::ZERO, Action::Pause)
-            .await?;
+    fn reserve_active_pause(&self) -> Result<ActivePause, EngineError> {
+        let segment = self.reserve_active_segment(Duration::ZERO)?;
         Ok(ActivePause {
             segment,
             paused_at: Instant::now(),
         })
     }
 
-    async fn settle_active_pause(
+    fn settle_active_pause(
         &self,
         pause: ActivePause,
         resume_at: Option<Instant>,
     ) -> Result<(), EngineError> {
         self.settle_active_segment_at(pause.segment, pause.paused_at, resume_at)
-            .await
     }
 
+    /// `pending_ms` bounds an action still to run once this call settles, such as a reviewed Tool.
     async fn reserve_provider_call(
         &self,
         agent_run_id: AgentRunId,
         action: Action,
+        pending_ms: u64,
     ) -> Result<(), EngineError> {
         let reservation = self.ledger().reserve(action).await?;
-        // A primary or review call follows its active-time reservation.
-        let appended = usize::from(!matches!(action, Action::Child { .. }));
         self.store
             .admit_operation(
                 self.session_id,
-                action.remaining(appended),
+                action.max_events(),
                 action.tool_observations(),
             )
             .await?;
@@ -365,6 +301,7 @@ impl<'a> RunLoop<'a> {
             goal_id: self.goal_id,
             run_id: self.run_id,
             agent_run_id,
+            active_ceiling_ms: self.ledger().active_ceiling(pending_ms)?,
         })
         .await?;
         reservation.commit()
@@ -529,7 +466,7 @@ impl<'a> RunLoop<'a> {
                 record: call_record(AgentPhase::RootPlan, &first, valid_response),
             })
             .await?;
-            self.settle_active_segment(active_segment).await?;
+            self.settle_active_segment(active_segment)?;
             if self.controls.cancellation.is_cancelled() {
                 return self.settle_stopped_primary(primary).await;
             }
@@ -604,22 +541,18 @@ impl<'a> RunLoop<'a> {
         &self,
         root: &mut ProviderRequest,
     ) -> Result<(CallResult, ActiveSegment), EngineError> {
-        let active_segment = self
-            .reserve_active_segment(
-                self.provider.identity().limits.deadline,
-                self.primary_call(),
-            )
-            .await?;
+        let active_segment =
+            self.reserve_active_segment(self.provider.identity().limits.deadline)?;
         let deadline = active_segment
             .deadline()
             .checked_sub(STORE_ACTION_OVERHEAD)
             .unwrap_or(active_segment.started);
         if let Err(error) = self
-            .reserve_provider_call(self.primary_id, self.primary_call())
+            .reserve_provider_call(self.primary_id, self.primary_call(), 0)
             .await
         {
             if matches!(error, EngineError::GoalBudgetExhausted) {
-                self.settle_active_segment(active_segment).await?;
+                self.settle_active_segment(active_segment)?;
             }
             return Err(error);
         }
@@ -890,6 +823,7 @@ impl<'a> RunLoop<'a> {
         self.append(Event::RunFinished {
             run_id: self.run_id,
             disposition: RunDisposition::Finished,
+            active_ms: self.ledger().run_active_ms()?,
         })
         .await?;
         primary.finish(TraceOutcome::Finished);
@@ -911,6 +845,7 @@ impl<'a> RunLoop<'a> {
         self.append(Event::RunFinished {
             run_id: self.run_id,
             disposition: RunDisposition::Failed,
+            active_ms: self.ledger().run_active_ms()?,
         })
         .await?;
         primary.finish(TraceOutcome::Failed);
@@ -929,6 +864,7 @@ impl<'a> RunLoop<'a> {
         self.append(Event::RunFinished {
             run_id: self.run_id,
             disposition: RunDisposition::Cancelled,
+            active_ms: self.ledger().run_active_ms()?,
         })
         .await?;
         primary.finish(TraceOutcome::Cancelled);

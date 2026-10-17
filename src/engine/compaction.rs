@@ -77,29 +77,23 @@ impl Engine {
                 && goal.run_ids.last() == Some(&covered_run_id)
         });
         let goal_id = goal.map(|goal| goal.id);
+        // The call's interval is bounded by the remaining Goal time and settles in ContextCompacted.
         let active_reservation_ms = goal
             .map(|goal| {
                 if goal.active_run.is_some()
-                    || goal.reserved_active_run.is_some()
-                    || goal.reserved_active_ms.is_some()
+                    || goal.active_deadline.is_some()
                     || goal.compaction_call_reserved.is_some()
                 {
                     return Err(EngineError::CompactionNotIdle);
                 }
                 let action_ms = duration_ms(COMPACTION_CALL_DEADLINE + STORE_ACTION_OVERHEAD);
-                let active_limit = goal
-                    .plan_contract
-                    .as_ref()
-                    .map_or(goal.budget.max_active_ms, |plan| plan.budget.max_active_ms);
-                let remaining =
-                    active_limit.map_or(action_ms, |limit| limit.saturating_sub(goal.active_ms));
-                let reserved_ms = action_ms.min(remaining);
-                let store_tail_ms = duration_ms(STORE_ACTION_OVERHEAD);
-                if reserved_ms <= store_tail_ms
-                    || goal.active_ms.checked_add(reserved_ms).is_none()
-                    || active_limit
-                        .is_some_and(|limit| goal.active_ms.saturating_add(reserved_ms) > limit)
-                {
+                let reserved_ms = goal
+                    .effective_budget()
+                    .max_active_ms
+                    .map_or(action_ms, |limit| {
+                        action_ms.min(limit.saturating_sub(goal.active_ms))
+                    });
+                if reserved_ms <= duration_ms(STORE_ACTION_OVERHEAD) {
                     return Err(EngineError::GoalBudgetExhausted);
                 }
                 Ok(reserved_ms)
@@ -155,7 +149,7 @@ impl Engine {
                 known_tokens: goal.known_tokens,
                 token_usage_unknown: goal.token_usage_unknown,
                 active_ms: goal.active_ms,
-                reserved_active_ms: goal.reserved_active_ms.unwrap_or_default(),
+                reserved_active_ms: 0,
                 uncertain_active_ms: goal.uncertain_active_ms,
                 success_criterion_satisfied: goal
                     .plan_contract
@@ -197,8 +191,8 @@ impl Engine {
         }
         let source_bytes =
             u32::try_from(source_bytes).map_err(|_| EngineError::CompactionInputTooLarge)?;
-        let active_started = active_reservation_ms.map(|_| Instant::now());
-        if let Some(goal_id) = goal_id {
+        let active_started = Instant::now();
+        if let (Some(goal_id), Some(active_ceiling_ms)) = (goal_id, active_reservation_ms) {
             let reserved = self
                 .store
                 .append(
@@ -206,34 +200,22 @@ impl Engine {
                     Event::GoalCompactionCallReserved {
                         goal_id,
                         run_id: covered_run_id,
-                    },
-                )
-                .await?;
-            crate::diagnostics::event_failure(&reserved.event);
-            let reserved = self
-                .store
-                .append(
-                    session_id,
-                    Event::GoalActiveTimeReserved {
-                        goal_id,
-                        run_id: covered_run_id,
-                        reserved_ms: active_reservation_ms.ok_or(EngineError::InvalidHistory)?,
+                        active_ceiling_ms,
                     },
                 )
                 .await?;
             crate::diagnostics::event_failure(&reserved.event);
         }
-        let provider_trace = trace.begin_provider(&identity.model);
         let provider_deadline =
             active_reservation_ms.map_or(COMPACTION_CALL_DEADLINE, |reserved| {
-                let elapsed = active_started.map_or(0, |started| duration_ms(started.elapsed()));
                 Duration::from_millis(
                     reserved
-                        .saturating_sub(elapsed)
+                        .saturating_sub(duration_ms(active_started.elapsed()))
                         .saturating_sub(duration_ms(STORE_ACTION_OVERHEAD)),
                 )
                 .min(COMPACTION_CALL_DEADLINE)
             });
+        let provider_trace = trace.begin_provider(&identity.model);
         let response =
             tokio::time::timeout(provider_deadline, self.provider.compact(request)).await;
         let (status, response_id, usage, wire_provenance) = match response {
@@ -307,31 +289,12 @@ impl Engine {
                 session_id,
                 Event::ContextCompacted {
                     record: record.clone(),
+                    active_ms: goal_id.map(|_| duration_ms(active_started.elapsed())),
                 },
             )
             .await?;
         crate::diagnostics::event_failure(&committed.event);
         trace.event_committed(committed.sequence);
-        if let (Some(goal_id), Some(started), Some(_reserved_ms)) =
-            (goal_id, active_started, active_reservation_ms)
-        {
-            let active_ms = duration_ms(started.elapsed());
-            if active_ms > crate::session::MAX_GOAL_ACTION_ACTIVE_MS {
-                return Err(EngineError::GoalBudgetExhausted);
-            }
-            let settled = self
-                .store
-                .append(
-                    session_id,
-                    Event::GoalActiveTimeSettled {
-                        goal_id,
-                        run_id: covered_run_id,
-                        active_ms,
-                    },
-                )
-                .await?;
-            crate::diagnostics::event_failure(&settled.event);
-        }
         trace.finish(trace_outcome);
         Ok(Some(record))
     }

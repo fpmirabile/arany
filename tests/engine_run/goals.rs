@@ -56,8 +56,6 @@ async fn goal_lifecycle_bounds_report_and_requires_goal_replay_linkage() {
                 &event.event,
                 Event::GoalStarted { .. }
                     | Event::GoalRunLinked { .. }
-                    | Event::GoalActiveTimeReserved { .. }
-                    | Event::GoalActiveTimeSettled { .. }
                     | Event::GoalProviderCallReserved { .. }
                     | Event::GoalFinished { .. }
             )
@@ -319,6 +317,37 @@ async fn compact_read_only_goal_prefix(objective: &str) {
         .await
         .expect("Events");
     assert_action_bounds(&events, false, false);
+    // One Tool step journals its call reservation and record, then the Tool's start and finish.
+    let reservations: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, envelope)| matches!(envelope.event, Event::GoalProviderCallReserved { .. }))
+        .map(|(index, _)| index)
+        .collect();
+    let tool_steps: Vec<usize> = reservations
+        .windows(2)
+        .map(|pair| &events[pair[0]..pair[1]])
+        .filter(|step| {
+            step.iter()
+                .any(|envelope| matches!(envelope.event, Event::ToolStarted { .. }))
+        })
+        .map(|step| {
+            step.iter()
+                .filter(|envelope| {
+                    !matches!(
+                        envelope.event,
+                        Event::GoalCompactionCallReserved { .. }
+                            | Event::GoalContextCompacted { .. }
+                    )
+                })
+                .count()
+        })
+        .collect();
+    assert!(tool_steps.len() >= READS - 1, "{tool_steps:?}");
+    assert!(
+        tool_steps.iter().all(|&events| events <= 4),
+        "{tool_steps:?}"
+    );
     let compacted = events
         .iter()
         .filter_map(|envelope| match &envelope.event {
@@ -575,64 +604,50 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
         .position(|envelope| {
             matches!(
                 &envelope.event,
-                Event::GoalCompactionCallReserved { goal_id, run_id }
+                Event::GoalCompactionCallReserved { goal_id, run_id, .. }
                     if *goal_id == initial.goal_id && *run_id == initial.run.id
             )
         })
         .expect("durable in-Goal compaction call reservation");
-    assert!(matches!(
-        &events[compaction_call + 1].event,
-        Event::GoalActiveTimeReserved { goal_id, run_id, .. }
-            if *goal_id == initial.goal_id && *run_id == initial.run.id
-    ));
-    assert!(matches!(
-        &events[compaction_call + 2].event,
-        Event::ContextCompacted { record }
-            if record.source_bytes as usize == compacted_input_bytes
-    ));
-    assert!(matches!(
-        &events[compaction_call + 3].event,
-        Event::GoalActiveTimeSettled { goal_id, run_id, .. }
-            if *goal_id == initial.goal_id && *run_id == initial.run.id
-    ));
-    SessionView::replay(initial.session_id, &events)
-        .expect("strict replay settles only after the compaction receipt commits");
-    let reserved_ms = match &events[compaction_call + 1].event {
-        Event::GoalActiveTimeReserved { reserved_ms, .. } => *reserved_ms,
-        _ => panic!("active compaction reservation"),
-    };
-    let settled_ms = reserved_ms.checked_add(1).unwrap();
-    let Event::GoalActiveTimeSettled {
-        active_ms: original_ms,
-        ..
-    } = &events[compaction_call + 3].event
+    let Event::ContextCompacted {
+        record,
+        active_ms: Some(compaction_ms),
+    } = &events[compaction_call + 1].event
     else {
-        panic!("active compaction settlement");
+        panic!("the Goal compaction records its settled active time");
     };
-    let original_ms = *original_ms;
-    let mut delayed_ack = events.clone();
-    let Event::GoalActiveTimeSettled { active_ms, .. } =
-        &mut delayed_ack[compaction_call + 3].event
-    else {
-        panic!("active compaction settlement");
-    };
-    *active_ms = settled_ms;
-    // The terminal receipt records the Goal total, which the overrun shifts by the same delta.
-    let total_ms = match &mut delayed_ack.last_mut().expect("terminal Goal receipt").event {
-        Event::GoalFinished { active_ms, .. } => {
-            *active_ms = active_ms
-                .checked_sub(original_ms)
-                .and_then(|prior| prior.checked_add(settled_ms))
-                .unwrap();
-            *active_ms
-        }
-        _ => panic!("terminal Goal receipt"),
-    };
-    let replay = SessionView::replay(initial.session_id, &delayed_ack)
-        .expect("bounded acknowledged compaction overrun is settled rather than left reserved")
+    assert_eq!(record.source_bytes as usize, compacted_input_bytes);
+    let run_active_ms = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::RunFinished { active_ms, .. } => Some(*active_ms),
+            _ => None,
+        })
+        .expect("the first Run settles its active time");
+    let replay = SessionView::replay(initial.session_id, &events)
+        .expect("strict replay of the between-Run compaction")
         .expect("Session");
-    assert_eq!(replay.goals[0].reserved_active_ms, None);
-    assert_eq!(replay.goals[0].active_ms, total_ms);
+    assert_eq!(replay.goals[0].active_ms, run_active_ms + compaction_ms);
+
+    // A longer compaction is charged to the Goal, and the terminal receipt must include it.
+    let mut slower = events.clone();
+    if let Event::ContextCompacted { active_ms, .. } = &mut slower[compaction_call + 1].event {
+        *active_ms = Some(compaction_ms + 1_000);
+    }
+    assert!(SessionView::replay(initial.session_id, &slower).is_err());
+    let Event::GoalFinished { active_ms, .. } =
+        &mut slower.last_mut().expect("terminal Goal receipt").event
+    else {
+        panic!("terminal Goal receipt");
+    };
+    *active_ms += 1_000;
+    let replay = SessionView::replay(initial.session_id, &slower)
+        .expect("the receipt includes the compaction's time")
+        .expect("Session");
+    assert_eq!(
+        replay.goals[0].active_ms,
+        run_active_ms + compaction_ms + 1_000
+    );
     store.close().await.expect("Store shutdown");
 }
 
@@ -677,7 +692,7 @@ async fn known_active_time_exhaustion_closes_without_provider_dispatch() {
     assert_eq!(view.goals[0].status, arany::GoalStatus::Failed);
     assert_eq!(view.goals[0].active_ms, 0);
     assert_eq!(view.goals[0].uncertain_active_ms, 0);
-    assert!(view.goals[0].reserved_active_ms.is_none());
+    assert!(view.goals[0].active_deadline.is_none());
     store.close().await.expect("Store shutdown");
 }
 
@@ -1179,6 +1194,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
                 compaction_content_digest: None,
                 tool_policy: None,
             },
+            active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
         },
         Event::AgentSpawned {
             run_id,
@@ -1192,6 +1208,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
             goal_id,
             run_id,
             agent_run_id,
+            active_ceiling_ms: 0,
         },
     ];
     for event in crashed {
@@ -1373,6 +1390,12 @@ async fn exact_token_cap_after_tool_review_settles_the_goal_as_failed() {
         .expect("Session");
     assert_eq!(view.goals[0].status, arany::GoalStatus::Failed);
     assert!(view.goals[0].report.is_some());
+    let events = store
+        .load_session(outcome.session_id)
+        .await
+        .expect("Events");
+    // The exhausted-budget stop closes inside the bound of the action that found the budget spent.
+    assert_action_bounds(&events, false, false);
     store.close().await.expect("Store shutdown");
 }
 
@@ -3078,6 +3101,79 @@ async fn pause_between_autonomous_runs_starts_no_next_run() {
 }
 
 #[tokio::test]
+async fn approval_wait_is_not_charged_to_the_runs_active_time() {
+    use std::os::unix::fs::PermissionsExt;
+    const APPROVAL_WAIT: Duration = Duration::from_secs(20);
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![crate::tool_outcome(
+        arany::ToolCall::Write {
+            path: "notes/facts.txt".into(),
+            expected_digest: None,
+            content: "changed".into(),
+        },
+        Some(Box::new(arany::GoalPlanContract {
+            mission: "Change the facts".into(),
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            paths: vec!["notes".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "notes/facts.txt".into(),
+                content: "changed".into(),
+            },
+            budget: arany::GoalBudget::default(),
+        })),
+    )]);
+    let mut engine =
+        Engine::open(StateRoot::admit(&state_path).expect("state"), provider).expect("engine");
+    let config = state_path.join("tools.json");
+    std::fs::write(
+        &config,
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("tool configuration");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+        .expect("tool configuration mode");
+    engine
+        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
+        .expect("Guard enabled");
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    engine.set_tool_approvals(approvals);
+    let mut input = request(&workspace, "Change the facts");
+    input.include_paths.clear();
+
+    // The user answers after a long wait; only the clock inside the wait advances.
+    let decide = async {
+        let approval = inbox.next().await.expect("approval requested");
+        tokio::time::pause();
+        tokio::time::advance(APPROVAL_WAIT).await;
+        tokio::time::resume();
+        approval.decide(false);
+    };
+    let (run, ()) = tokio::join!(engine.run(input), decide);
+    let outcome = run.expect("denied Run");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    engine.close().await.expect("engine shutdown");
+
+    let (events, _) = replayed(&state_path, outcome.session_id).await;
+    let run_active_ms = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::RunFinished { active_ms, .. } => Some(*active_ms),
+            _ => None,
+        })
+        .expect("the Run settles its active time");
+    assert!(
+        u128::from(run_active_ms) < APPROVAL_WAIT.as_millis() / 10,
+        "{run_active_ms} ms charged across a {APPROVAL_WAIT:?} approval wait"
+    );
+}
+
+#[tokio::test]
 async fn pause_during_approval_wait_dispatches_no_tool() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().expect("temporary root");
@@ -3810,6 +3906,7 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
     let goal = view.goal(outcome.goal_id).expect("Goal");
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert!(goal.report.is_some());
+    assert_action_bounds(&events, false, false);
 }
 
 /// The child's last call is its observed Tool request; no Tool starts and the Goal is interrupted.
@@ -4304,90 +4401,94 @@ fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steerin
         }
         open.values().filter(|count| **count > 0).count() as u32
     };
+    let primary_call = |index: usize| {
+        matches!(
+            &events[index].event,
+            Event::GoalProviderCallReserved { agent_run_id, .. } if primaries.contains(agent_run_id)
+        )
+    };
     // (index, action, explicit end)
     let mut points: Vec<(usize, Action, Option<usize>)> = Vec::new();
     let mut markers: Vec<usize> = Vec::new();
     for (index, envelope) in events.iter().enumerate() {
-        let next = events.get(index + 1).map(|next| &next.event);
-        let call = Action::ProviderCall { previews, steering };
+        let previous = index.checked_sub(1).map(|previous| &events[previous].event);
         match &envelope.event {
             Event::GoalStarted { .. }
             | Event::GoalResumed { .. }
+            | Event::GoalRunLinked { .. }
             | Event::SessionStarted { .. } => markers.push(index),
-            Event::GoalActiveTimeReserved { .. } => {
-                let action = match next {
-                    Some(Event::GoalProviderCallReserved { agent_run_id, .. }) => {
-                        let phase = events[index..].iter().find_map(|later| match &later.event {
-                            Event::ProviderCallRecorded {
-                                agent_run_id: recorded,
-                                record,
-                                ..
-                            } if recorded == agent_run_id => Some(record.phase),
-                            _ => None,
-                        });
-                        if phase == Some(AgentPhase::ToolReview) {
-                            (Action::Review, None)
-                        } else {
-                            (call, None)
-                        }
-                    }
-                    Some(Event::GoalCompactionCallReserved { .. }) => (Action::Compaction, None),
-                    Some(Event::AgentSpawned { .. }) => {
-                        let spawned: Vec<_> = events[index + 1..]
-                            .iter()
-                            .map_while(|later| match &later.event {
-                                Event::AgentSpawned { grant, .. } => Some(*grant),
-                                _ => None,
-                            })
-                            .collect();
-                        let settled = events[index..]
-                            .iter()
-                            .position(|later| {
-                                matches!(later.event, Event::GoalActiveTimeSettled { .. })
-                            })
-                            .map(|offset| index + offset + 1);
-                        (
-                            Action::Delegation {
-                                children: spawned.len(),
-                                research: spawned.contains(&Some(arany::ChildGrant::ReadOnly)),
-                            },
-                            settled,
-                        )
-                    }
-                    Some(Event::GoalActiveTimeSettled { .. }) => {
-                        if matches!(
-                            events.get(index + 2).map(|later| &later.event),
-                            Some(Event::AgentFinished { agent_run_id, .. })
-                                if primaries.contains(agent_run_id)
-                        ) {
-                            (Action::Stop, None)
-                        } else {
-                            (Action::Pause, None)
-                        }
-                    }
-                    Some(Event::ToolFinished { .. }) => (Action::Tool, None),
-                    // The between-Run compaction reserves its call first; it is classified there.
-                    _ if matches!(
-                        index.checked_sub(1).map(|previous| &events[previous].event),
-                        Some(Event::GoalCompactionCallReserved { .. })
-                    ) =>
-                    {
-                        continue;
-                    }
-                    other => panic!("unclassified active-time reservation at {index}: {other:?}"),
-                };
-                points.push((index, action.0, action.1));
-            }
-            Event::GoalCompactionCallReserved { .. }
-                if matches!(next, Some(Event::GoalActiveTimeReserved { .. })) =>
+            Event::GoalProviderCallReserved { agent_run_id, .. }
+                if primaries.contains(agent_run_id) =>
             {
-                points.push((index, Action::BoundaryCompaction { goal: true }, None));
+                let phase = events[index..].iter().find_map(|later| match &later.event {
+                    Event::ProviderCallRecorded {
+                        agent_run_id: recorded,
+                        record,
+                        ..
+                    } if recorded == agent_run_id => Some(record.phase),
+                    _ => None,
+                });
+                let action = if phase == Some(AgentPhase::ToolReview) {
+                    Action::Review
+                } else {
+                    Action::ProviderCall { previews, steering }
+                };
+                points.push((index, action, None));
+            }
+            Event::GoalProviderCallReserved { .. } => points.push((
+                index,
+                Action::Child {
+                    in_flight: in_flight(index),
+                },
+                None,
+            )),
+            Event::AgentSpawned { grant: Some(_), .. }
+                if !matches!(previous, Some(Event::AgentSpawned { .. })) =>
+            {
+                let spawned: Vec<_> = events[index..]
+                    .iter()
+                    .map_while(|later| match &later.event {
+                        Event::AgentSpawned { grant, .. } => Some(*grant),
+                        _ => None,
+                    })
+                    .collect();
+                // The delegation covers its children through the synthesis call or the Run's end.
+                let end = (index + 1..events.len())
+                    .find(|later| {
+                        primary_call(*later)
+                            || matches!(
+                                events[*later].event,
+                                Event::GoalRunLinked { .. } | Event::GoalResumed { .. }
+                            )
+                    })
+                    .unwrap_or(events.len());
+                points.push((
+                    index,
+                    Action::Delegation {
+                        children: spawned.len(),
+                        research: spawned.contains(&Some(arany::ChildGrant::ReadOnly)),
+                    },
+                    Some(end),
+                ));
+            }
+            Event::GoalCompactionCallReserved { .. } => {
+                let between_runs = events[index..]
+                    .iter()
+                    .find_map(|later| match &later.event {
+                        Event::ContextCompacted { .. } => Some(true),
+                        Event::GoalContextCompacted { .. } => Some(false),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+                let action = if between_runs {
+                    Action::BoundaryCompaction { goal: true }
+                } else {
+                    Action::Compaction
+                };
+                points.push((index, action, None));
             }
             Event::ContextCompacted { .. }
-                if !matches!(
-                    index.checked_sub(1).map(|previous| &events[previous].event),
-                    Some(Event::GoalActiveTimeReserved { .. })
-                ) =>
+                if !matches!(previous, Some(Event::GoalCompactionCallReserved { .. })) =>
             {
                 points.push((index, Action::BoundaryCompaction { goal: false }, None));
             }
@@ -4401,17 +4502,6 @@ fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steerin
                     }
                 };
                 points.push((index, action, None));
-            }
-            Event::GoalProviderCallReserved { agent_run_id, .. }
-                if !primaries.contains(agent_run_id) =>
-            {
-                points.push((
-                    index,
-                    Action::Child {
-                        in_flight: in_flight(index),
-                    },
-                    None,
-                ));
             }
             _ => {}
         }
@@ -4441,7 +4531,7 @@ fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steerin
 }
 
 #[tokio::test]
-async fn crash_left_reserved_active_time_reaches_the_resumed_runs_uncertain_facts() {
+async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues() {
     use std::os::unix::fs::MetadataExt;
 
     let temp = tempfile::tempdir().expect("temporary root");
@@ -4505,6 +4595,7 @@ async fn crash_left_reserved_active_time_reaches_the_resumed_runs_uncertain_fact
                 compaction_content_digest: None,
                 tool_policy: None,
             },
+            active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
         },
         Event::AgentSpawned {
             run_id,
@@ -4514,10 +4605,11 @@ async fn crash_left_reserved_active_time_reaches_the_resumed_runs_uncertain_fact
             objective: None,
             grant: None,
         },
-        Event::GoalActiveTimeReserved {
+        Event::GoalProviderCallReserved {
             goal_id,
             run_id,
-            reserved_ms: 7_000,
+            agent_run_id,
+            active_ceiling_ms: 7_000,
         },
     ];
     for event in crashed {
@@ -4548,7 +4640,7 @@ async fn crash_left_reserved_active_time_reaches_the_resumed_runs_uncertain_fact
     let facts = call_facts(&calls[0]).expect("goal context facts");
     assert_eq!(
         facts.uncertain_active_ms, 7_000,
-        "the settled reservation is charged as uncertain time on the resumed Run's first call"
+        "only the open call's ceiling is charged as uncertain time on the resumed Run's first call"
     );
     assert!(facts.active_ms >= 7_000);
 }
@@ -4767,13 +4859,7 @@ async fn steered_run_near_the_event_cap_is_refused_up_front_never_stranded() {
         .events
         .iter()
         .enumerate()
-        .filter(|(index, envelope)| {
-            matches!(envelope.event, Event::GoalActiveTimeReserved { .. })
-                && matches!(
-                    dry.events.get(index + 1).map(|next| &next.event),
-                    Some(Event::GoalProviderCallReserved { .. })
-                )
-        })
+        .filter(|(_, envelope)| matches!(envelope.event, Event::GoalProviderCallReserved { .. }))
         .nth(2)
         .map(|(index, _)| index)
         .expect("the steered second call of the steered Run");

@@ -131,7 +131,7 @@ pub(crate) fn validate_compactions(events: &[EventEnvelope]) -> Result<(), Repla
     let mut hasher = PrefixHasher::new();
     let mut boundary = None;
     for envelope in events {
-        if let Event::ContextCompacted { record } = &envelope.event {
+        if let Event::ContextCompacted { record, .. } = &envelope.event {
             if boundary
                 != Some((
                     record.covered_run_id,

@@ -319,10 +319,16 @@ impl RunLoop<'_> {
             return Ok(None);
         }
         let agent_run_id = intent.agent_run_id;
+        // A researcher's Tool runs inside its delegation's reservation.
+        let action_ms = match grant {
+            Grant::Primary { .. } => tool_action_ms(runtime, &intent),
+            Grant::Researcher { .. } => 0,
+        };
         self.append(Event::ToolStarted {
             run_id: self.run_id,
             agent_run_id,
             intent: intent.clone(),
+            active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
         })
         .await?;
         let answer = match self.before_dispatch(grant, runtime, intent).await? {
@@ -350,7 +356,7 @@ impl RunLoop<'_> {
         .await?;
         if let Some(active_time) = answer.active_time {
             if let Some(segment) = active_time.segment {
-                self.settle_active_segment(segment).await?;
+                self.settle_active_segment(segment)?;
             }
             if active_time.exhausted || self.ledger().active_time_exhausted() {
                 return Err(EngineError::GoalBudgetExhausted);
@@ -489,7 +495,7 @@ impl RunLoop<'_> {
                 }
             }
             if !approved && !active_time_exhausted && !self.pause_at_boundary() {
-                match self.reserve_active_pause().await {
+                match self.reserve_active_pause() {
                     Ok(pause) => {
                         let mut cancellation = self.controls.cancellation.clone();
                         let expires = intent.expires_at_ms.saturating_sub(crate::tools::now_ms());
@@ -499,7 +505,7 @@ impl RunLoop<'_> {
                             result = tokio::time::timeout(Duration::from_millis(expires), approvals.ask(&intent)) => result.unwrap_or(false),
                         };
                         let resume_at = approved.then(Instant::now);
-                        self.settle_active_pause(pause, resume_at).await?;
+                        self.settle_active_pause(pause, resume_at)?;
                     }
                     Err(EngineError::GoalBudgetExhausted) => active_time_exhausted = true,
                     Err(error) => return Err(error),
@@ -514,7 +520,7 @@ impl RunLoop<'_> {
             && !active_time_exhausted
             && self.ledger().can_start_provider_call()
         {
-            match self.reserve_active_pause().await {
+            match self.reserve_active_pause() {
                 Ok(pause) => Some(pause),
                 Err(EngineError::GoalBudgetExhausted) => {
                     approved = false;
@@ -534,7 +540,7 @@ impl RunLoop<'_> {
             // A pause requested during review or the approval wait stops the Run before dispatch.
             approved = false;
             if let Some(pause) = queue_pause.take() {
-                self.settle_active_pause(pause, None).await?;
+                self.settle_active_pause(pause, None)?;
             }
             not_dispatched(
                 intent,
@@ -584,14 +590,7 @@ impl RunLoop<'_> {
                 };
                 self.dispatch_guard(runtime, intent, queue_pause).await?
             } else {
-                let action_bound = runtime
-                    .reservation_overhead(&intent.call)
-                    .saturating_add(Duration::from_millis(u64::from(intent.limits.runtime_ms)))
-                    .saturating_add(TOOL_CLEANUP_OVERHEAD);
-                match self
-                    .reserve_active_segment(action_bound, Action::Tool)
-                    .await
-                {
+                match self.reserve_active_segment(tool_action_bound(runtime, &intent)) {
                     Ok(segment) => (
                         execute_cancellable(runtime, intent, &self.controls.cancellation).await,
                         Some(segment),
@@ -628,11 +627,7 @@ impl RunLoop<'_> {
         let worker_cancellation = RunCancellation::new();
         let mut run_cancellation = self.controls.cancellation.clone();
         let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
-        let action_bound = runtime
-            .reservation_overhead(&intent.call)
-            .saturating_add(cache_transfer.saturating_mul(2))
-            .saturating_add(Duration::from_millis(u64::from(intent.limits.runtime_ms)))
-            .saturating_add(TOOL_CLEANUP_OVERHEAD);
+        let action_bound = tool_action_bound(&runtime, &intent);
         let runtime_ms = intent.limits.runtime_ms;
         let execution = runtime.execute(intent, worker_cancellation.clone());
         tokio::pin!(execution);
@@ -647,12 +642,9 @@ impl RunLoop<'_> {
                 request = active_receiver.recv(), if active_segment.is_none() => {
                     if let Some((admitted_at, reply)) = request {
                         if let Some(pause) = queue_pause.take() {
-                            self.settle_active_pause(pause, Some(admitted_at)).await?;
+                            self.settle_active_pause(pause, Some(admitted_at))?;
                         }
-                        match self
-                            .reserve_active_segment(action_bound, Action::Tool)
-                            .await
-                        {
+                        match self.reserve_active_segment(action_bound) {
                             Ok(segment) => {
                                 let window = active_window(&segment, cache_transfer, runtime_ms);
                                 active_segment = Some(segment);
@@ -672,7 +664,7 @@ impl RunLoop<'_> {
             }
         };
         if let Some(pause) = queue_pause.take() {
-            self.settle_active_pause(pause, None).await?;
+            self.settle_active_pause(pause, None)?;
         }
         if active_time_exhausted && observation.disposition != ToolDisposition::Limit {
             observation = active_time_limit_observation(observation.intent);
@@ -711,16 +703,21 @@ impl RunLoop<'_> {
             },
         };
         let trace = primary.begin_provider(AgentPhase::ToolReview, &review.model);
-        let active_segment = self
-            .reserve_active_segment(TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD, Action::Review)
-            .await?;
+        let active_segment =
+            self.reserve_active_segment(TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD)?;
         if let Err(error) = self
-            .reserve_provider_call(self.primary_id, Action::Review)
+            .reserve_provider_call(
+                self.primary_id,
+                Action::Review,
+                self.controls
+                    .tools
+                    .map_or(0, |runtime| tool_action_ms(runtime, intent)),
+            )
             .await
         {
             trace.finish_refused();
             if matches!(error, EngineError::GoalBudgetExhausted) {
-                self.settle_active_segment(active_segment).await?;
+                self.settle_active_segment(active_segment)?;
             }
             return Err(error);
         }
@@ -747,7 +744,7 @@ impl RunLoop<'_> {
             record: call_record(AgentPhase::ToolReview, &result, valid),
         })
         .await?;
-        self.settle_active_segment(active_segment).await?;
+        self.settle_active_segment(active_segment)?;
         if self.ledger().active_time_exhausted() {
             return Ok(false);
         }
@@ -755,6 +752,22 @@ impl RunLoop<'_> {
             matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Finish(finish), .. }) if valid && finish.result == "approve"),
         )
     }
+}
+
+/// The active interval a Tool reserves once dispatched: setup, cache transfers, payload and cleanup.
+fn tool_action_bound(runtime: &ToolRuntime, intent: &EffectIntent) -> Duration {
+    runtime
+        .reservation_overhead(&intent.call)
+        .saturating_add(
+            Duration::from_millis(u64::from(intent.limits.cache_transfer_ms)).saturating_mul(2),
+        )
+        .saturating_add(Duration::from_millis(u64::from(intent.limits.runtime_ms)))
+        .saturating_add(TOOL_CLEANUP_OVERHEAD)
+}
+
+/// A Tool's reservation with its Store tail, as an action-start ceiling counts it.
+fn tool_action_ms(runtime: &ToolRuntime, intent: &EffectIntent) -> u64 {
+    duration_ms(tool_action_bound(runtime, intent).saturating_add(STORE_ACTION_OVERHEAD))
 }
 
 /// The deadlines the Guard must meet inside `segment`; a passed deadline refuses the action.
