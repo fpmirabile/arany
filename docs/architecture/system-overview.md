@@ -394,7 +394,7 @@ The first local effectful base implements immutable typed effects, deterministic
 
 ## 12. Evidence-dense proof
 
-Test: [`tests/engine_run.rs::scripted_runs_snapshot_workspace_and_replay_across_process_exit`](../../tests/engine_run.rs); [Session scenarios](../specs/session.md#acceptance-scenarios-and-evidence-owners) own the journey requirements, and [testing rules](../../agents/testing.md#user-visible-proof) own observations and evidence lanes.
+Test: [`crates/arany-cli/tests/guard_runs.rs::scripted_runs_snapshot_workspace_and_replay_across_process_exit`](../../crates/arany-cli/tests/guard_runs.rs); [Session scenarios](../specs/session.md#acceptance-scenarios-and-evidence-owners) own the journey requirements, and [testing rules](../../agents/testing.md#user-visible-proof) own observations and evidence lanes.
 
 ## 13. Distribution decision
 

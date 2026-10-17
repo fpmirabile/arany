@@ -37,31 +37,31 @@
 
 | Area | Owner for behavior | Owner for implementation shape |
 |---|---|---|
-| Journal, Events, reducer, replay | [Session spec](../../docs/specs/session.md), [Execution spec](../../docs/specs/execution.md) | `src/session/`, `src/store/` |
-| Goal lifecycle, budgets, recovery | [Goal spec](../../docs/specs/goals.md) | `src/engine/run_loop.rs`, `src/session/reducer/goal.rs` |
-| Tools, grants, Guard, MCP, Skills | [Tools spec](../../docs/specs/tools.md) | `src/tools/` |
-| Provider seam and adapters | [Provider spec](../../docs/specs/provider.md) | `src/provider/` |
-| Engine lifetime and Runs | [Execution spec](../../docs/specs/execution.md) | `src/engine.rs`, `src/engine/` |
-| Telemetry and diagnostics | [Telemetry spec](../../docs/specs/telemetry.md), [Diagnostics spec](../../docs/specs/diagnostics.md) | `src/telemetry.rs`, `src/diagnostics.rs` |
-| Terminal and CLI | [Terminal spec](../../docs/specs/terminal.md) | `src/terminal.rs`, `src/cli/` |
-| Credentials and saved accounts | [Credential spec](../../docs/specs/credentials.md) | `src/cli/credentials/`, `src/cli/chatgpt/` |
-| Private directories | [Credential spec (private directories)](../../docs/specs/credentials.md) | `src/private_fs.rs` |
+| Journal, Events, reducer, replay | [Session spec](../../docs/specs/session.md), [Execution spec](../../docs/specs/execution.md) | `crates/arany/src/session/`, `crates/arany/src/store/` |
+| Goal lifecycle, budgets, recovery | [Goal spec](../../docs/specs/goals.md) | `crates/arany/src/engine/run_loop.rs`, `crates/arany/src/session/reducer/goal.rs` |
+| Tools, grants, Guard, MCP, Skills | [Tools spec](../../docs/specs/tools.md) | `crates/arany/src/tools/` |
+| Provider seam and adapters | [Provider spec](../../docs/specs/provider.md) | `crates/arany/src/provider/` |
+| Engine lifetime and Runs | [Execution spec](../../docs/specs/execution.md) | `crates/arany/src/engine.rs`, `crates/arany/src/engine/` |
+| Telemetry and diagnostics | [Telemetry spec](../../docs/specs/telemetry.md), [Diagnostics spec](../../docs/specs/diagnostics.md) | `crates/arany/src/telemetry.rs`, `crates/arany/src/diagnostics.rs` |
+| Terminal and CLI | [Terminal spec](../../docs/specs/terminal.md) | `crates/arany-cli/src/terminal.rs`, `crates/arany-cli/src/cli/` |
+| Credentials and saved accounts | [Credential spec](../../docs/specs/credentials.md) | `crates/arany-cli/src/accounts/credentials/`, `crates/arany-cli/src/accounts/chatgpt/` |
+| Private directories | [Credential spec (private directories)](../../docs/specs/credentials.md) | `crates/arany/src/private_fs.rs` |
 | System shape | [System overview](../../docs/architecture/system-overview.md) | n/a |
 
 **Verified facts the PRs depend on.** Every line reference was read on `8857765`.
 
-- **Goal state is duplicated.** `GoalRunBudget` (`src/engine/run_loop.rs:159-181`, 17 fields, six mutexes, about 460 lines of methods) is a live copy of `GoalView` (`src/session/reducer.rs:41-76`), which the reducer already maintains through `ProgressPublisher::committed` (`src/engine/progress.rs:213-239`). The copy is kept honest by seven ledger Events and Event-tail literals (`src/engine/run_loop.rs:966, 1850, 1983, 2065`; `src/engine/run_loop/children.rs:733`; `src/engine/compaction.rs:128`; `src/engine.rs:2169-2175`).
-- **The Tool step is implemented twice.** `execute_tool` and `execute_intent` (`src/engine/run_loop.rs:1434-1665`, `:2024-2314`) and `execute_child_tool` (`src/engine/run_loop/children.rs:675-787`) repeat sizing, admission, `ToolStarted`/`ToolFinished`, cancellation and continuation with different rules. The child path builds a fake `GuardReceipt` only to size a reservation (`children.rs:701-716`).
-- **Every read launches a Guard unit.** `guard::execute` (`src/tools/guard.rs:482-495`) routes every call, including `List`, `Read` and `Search`, into the Guard, although `src/tools/fs.rs` already implements them with `cap-std` (`fs.rs:812` native path). A read pays the preparation budget (5 s on Linux, `src/tools/guard/linux.rs:19`; launchd and disk image on macOS).
-- **The Engine's interface is a mutation sequence.** `Engine` is built by `open_with_telemetry`, then mutated by `enable_tools`, `set_tool_approvals`, `set_steering` and `enable_trusted_workspace` (`src/engine.rs:1977-2005`), each writing an `Option` field (`:1801-1810`). `enable_tools` silently resets `workspace_permissions`. `run_turn` is 467 lines (`:2110-2577`). Both CLI paths open and close an Engine per submission (`src/cli/attached/run.rs:328-368`, `src/cli/exec.rs:247-290`).
-- **Provider identity is reassembled.** The `Provider` trait has 13 methods, seven of them identity getters (`src/provider.rs:698-760`), reassembled into `ProviderSelection` (`src/engine.rs:390-400`) and checked by `ProviderIdentity::valid()` (`src/provider.rs:259-290`). `RunControls` carries ChatGPT fields only to stamp compaction records (`src/engine/run_loop.rs:143-144`).
-- **Tool knowledge has nine owners.** One operation's facts are spread across `src/tools/types.rs` (enum at `:138-208`, predicates at `:224-345`, schemas at `:1030-1145`, `CALL_ORDER` at `:1148`), `src/tools/config.rs:225-269`, `src/tools/approval.rs:30-34`, `src/session/events.rs:1055`, `src/session/reducer.rs:690-697`, `src/provider/tool_specs.rs`, `src/tools.rs:368-420` and the Guard dispatch at `src/tools/guard.rs:1017-1070`. Typed Git reads (A5) touched 28 files for this reason.
-- **The crate graph has a cycle and a wrong shape.** `tools` depends on `engine` only for `RunCancellation` (`src/tools/guard.rs:5`, `linux.rs:5`, `macos.rs:5`, `macos/unit.rs:9`). `terminal` has no library consumer, and `presentation` has one. `keyring` is used only under `cli/credentials`; `ratatui` and `crossterm` only under `terminal`. `lib.rs:58-67` re-exports terminal items for the binary.
-- **The journal is the hub.** `session/events.rs` embeds `tools` and `provider` types (`src/session/events.rs:2361-2494`), with fan-in 8 for `session` and 6 for `tools`.
-- **Store evidence lives in Store.** Six `Request` variants serve Provider and native evidence caches (`src/store.rs:201-224`), and `StateRoot` has 25 pass-through methods (`src/store/state.rs:249-375`).
-- **Observers are inline.** `append_observed` fans one committed Event to diagnostics, telemetry and progress (`src/engine/progress.rs:242-288`). `RunLoop.trace` and `AgentTrace` are threaded through control flow (63 `trace` tokens in `run_loop.rs`). `TraceEventKind` re-enumerates 20 of 26 Event kinds (`src/telemetry.rs:122`). `RunProgress` is a coalescing `watch` (`progress.rs:14-23`), so a client cannot see every Event.
-- **Payload versions are global.** `EVENT_PAYLOAD_VERSION` is `6` for all 26 kinds (`src/session/events.rs:101`).
-- **Test fixtures re-implement production knowledge.** `tests/common/semantic.rs` (127 lines) inverts the renderer by matching prompt prefixes. `tests/session_run/tools/replay.rs:17-21` and `:376-385` hard-code Event indices that re-derive the tail arithmetic.
+- **Goal state is duplicated.** `GoalRunBudget` (`crates/arany/src/engine/run_loop.rs:159-181`, 17 fields, six mutexes, about 460 lines of methods) is a live copy of `GoalView` (`crates/arany/src/session/reducer.rs:41-76`), which the reducer already maintains through `ProgressPublisher::committed` (`crates/arany/src/engine/progress.rs:213-239`). The copy is kept honest by seven ledger Events and Event-tail literals (`crates/arany/src/engine/run_loop.rs:966, 1850, 1983, 2065`; `crates/arany/src/engine/run_loop/children.rs:733`; `crates/arany/src/engine/compaction.rs:128`; `crates/arany/src/engine.rs:2169-2175`).
+- **The Tool step is implemented twice.** `execute_tool` and `execute_intent` (`crates/arany/src/engine/run_loop.rs:1434-1665`, `:2024-2314`) and `execute_child_tool` (`crates/arany/src/engine/run_loop/children.rs:675-787`) repeat sizing, admission, `ToolStarted`/`ToolFinished`, cancellation and continuation with different rules. The child path builds a fake `GuardReceipt` only to size a reservation (`children.rs:701-716`).
+- **Every read launches a Guard unit.** `guard::execute` (`crates/arany/src/tools/guard.rs:482-495`) routes every call, including `List`, `Read` and `Search`, into the Guard, although `crates/arany/src/tools/fs.rs` already implements them with `cap-std` (`fs.rs:812` native path). A read pays the preparation budget (5 s on Linux, `crates/arany/src/tools/guard/linux.rs:19`; launchd and disk image on macOS).
+- **The Engine's interface is a mutation sequence.** `Engine` is built by `open_with_telemetry`, then mutated by `enable_tools`, `set_tool_approvals`, `set_steering` and `enable_trusted_workspace` (`crates/arany/src/engine.rs:1977-2005`), each writing an `Option` field (`:1801-1810`). `enable_tools` silently resets `workspace_permissions`. `run_turn` is 467 lines (`:2110-2577`). Both CLI paths open and close an Engine per submission (`crates/arany-cli/src/cli/attached/run.rs:328-368`, `crates/arany-cli/src/cli/exec.rs:247-290`).
+- **Provider identity is reassembled.** The `Provider` trait has 13 methods, seven of them identity getters (`crates/arany/src/provider.rs:698-760`), reassembled into `ProviderSelection` (`crates/arany/src/engine.rs:390-400`) and checked by `ProviderIdentity::valid()` (`crates/arany/src/provider.rs:259-290`). `RunControls` carries ChatGPT fields only to stamp compaction records (`crates/arany/src/engine/run_loop.rs:143-144`).
+- **Tool knowledge has nine owners.** One operation's facts are spread across `crates/arany/src/tools/types.rs` (enum at `:138-208`, predicates at `:224-345`, schemas at `:1030-1145`, `CALL_ORDER` at `:1148`), `crates/arany/src/tools/config.rs:225-269`, `crates/arany/src/tools/approval.rs:30-34`, `crates/arany/src/session/events.rs:1055`, `crates/arany/src/session/reducer.rs:690-697`, `crates/arany/src/provider/tool_specs.rs`, `crates/arany/src/tools.rs:368-420` and the Guard dispatch at `crates/arany/src/tools/guard.rs:1017-1070`. Typed Git reads (A5) touched 28 files for this reason.
+- **The crate graph has a cycle and a wrong shape.** `tools` depends on `engine` only for `RunCancellation` (`crates/arany/src/tools/guard.rs:5`, `linux.rs:5`, `macos.rs:5`, `macos/unit.rs:9`). `terminal` has no library consumer, and `presentation` has one. `keyring` is used only under `cli/credentials`; `ratatui` and `crossterm` only under `terminal`. `lib.rs:58-67` re-exports terminal items for the binary.
+- **The journal is the hub.** `session/events.rs` embeds `tools` and `provider` types (`crates/arany/src/session/events.rs:2361-2494`), with fan-in 8 for `session` and 6 for `tools`.
+- **Store evidence lives in Store.** Six `Request` variants serve Provider and native evidence caches (`crates/arany/src/store.rs:201-224`), and `StateRoot` has 25 pass-through methods (`crates/arany/src/store/state.rs:249-375`).
+- **Observers are inline.** `append_observed` fans one committed Event to diagnostics, telemetry and progress (`crates/arany/src/engine/progress.rs:242-288`). `RunLoop.trace` and `AgentTrace` are threaded through control flow (63 `trace` tokens in `run_loop.rs`). `TraceEventKind` re-enumerates 20 of 26 Event kinds (`crates/arany/src/telemetry.rs:122`). `RunProgress` is a coalescing `watch` (`progress.rs:14-23`), so a client cannot see every Event.
+- **Payload versions are global.** `EVENT_PAYLOAD_VERSION` is `6` for all 26 kinds (`crates/arany/src/session/events.rs:101`).
+- **Test fixtures re-implement production knowledge.** `crates/arany/src/provider/render/semantic.rs` (127 lines) inverts the renderer by matching prompt prefixes. `crates/arany-cli/tests/session_run/tools/replay.rs:17-21` and `:376-385` hard-code Event indices that re-derive the tail arithmetic.
 - **Spec drift.** `agents/provider.md:18` says `Provider` is the only Engine behavior seam; `docs/architecture/system-overview.md` §2 says one long-lived process and labels children "one-call read-only". See [evidence.md](./evidence.md#findings-f1-f13) for the full F1-F13 list.
 
 **Roadmap facts.** [NEXT_STEPS.md](../../NEXT_STEPS.md) lists the roadmap items that this plan unblocks and the macOS architecture follow-ups that stay frozen until a Mac is available. The plan maps each roadmap item to its PR in [Roadmap fit](#roadmap-fit).
@@ -135,7 +135,7 @@ The target shape is three crates at the end. Diagrams are in [diagrams.md §5](.
 Chosen shape (PR6):
 
 ```rust
-// src/tools/catalog.rs: the one place that knows what an operation is
+// crates/arany/src/tools/catalog.rs: the one place that knows what an operation is
 pub struct OperationFacts {
     pub name: &'static str,      // wire `operation` and journal label
     pub family: Family,          // File | Process | Skill | Mcp | Git
@@ -149,7 +149,7 @@ pub struct OperationFacts {
 }
 impl ToolCall { pub const fn facts(&self) -> &'static OperationFacts { /* exhaustive match */ } }
 
-// src/tools/dispatch.rs: one router for the Guard helper and the in-process path
+// crates/arany/src/tools/dispatch.rs: one router for the Guard helper and the in-process path
 pub(crate) async fn run(call: &ToolCall, site: &SiteContext<'_>) -> Result<Output, ToolError> {
     match call.facts().family {
         Family::File => fs::run(call, site), /* Process, Skill, Mcp, Git */
@@ -190,10 +190,10 @@ Each crate owns a `tests/` directory. A test set moves only where a crate bounda
 
 Placement:
 
-- `arany`: `tests/engine_run.rs` and `tests/engine_run/` (`goals.rs`, `replay.rs`, `workspace_security.rs`, `performance/`), except for the Guard-launching cases below. In-module `tests.rs` files: `src/tools/tests.rs`, `src/store/journal/tests.rs`, `src/telemetry/tests.rs`, `src/provider/render/tests.rs`, `src/provider/{anthropic,openai}/wire/tests.rs`, `src/provider/openai/subscription/tests.rs`.
-- `arany-cli`: `tests/session_run.rs` and `tests/session_run/` (layout unchanged), `tests/platform_tls.rs`, `tests/release_build_guard.rs`, the five `goals.rs` cases that open the Engine with `guard_executable: Some(env!("CARGO_BIN_EXE_arany"))` and submit with `ToolGrant::Configured` (lines 230, 1337, 1643, 3112, 3202) and the launch at `engine_run.rs:1022`, which move to `tests/guard_runs.rs`. This is the only split inside a corpus. In-module: `src/terminal/view/tests.rs` and `src/cli/chatgpt/**/tests.rs` (which become `accounts`).
-- Shared support: `tests/common/process.rs` and `tests/common/git.rs` become `arany` modules behind the `test-support` feature, introduced in PR4. `tests/common/semantic.rs` moves to `src/provider/render/semantic.rs` in PR3, behind `cfg(any(test, feature = "test-support"))`. `arany-cli` takes `arany = { path = "../arany", features = ["test-support"] }` under `[dev-dependencies]`.
-- `arany-journal` (PR14) gets its own `tests/` for the reducer and cold-replay tests that move out of `src/session`. SQLite admission tests stay in `arany`.
+- `arany`: `crates/arany/tests/engine_run.rs` and `crates/arany/tests/engine_run/` (`goals.rs`, `replay.rs`, `workspace_security.rs`, `performance/`), except for the Guard-launching cases below. In-module `tests.rs` files: `crates/arany/src/tools/tests.rs`, `crates/arany/src/store/journal/tests.rs`, `crates/arany/src/telemetry/tests.rs`, `crates/arany/src/provider/render/tests.rs`, `crates/arany/src/provider/{anthropic,openai}/wire/tests.rs`, `crates/arany/src/provider/openai/subscription/tests.rs`.
+- `arany-cli`: `crates/arany-cli/tests/session_run.rs` and `crates/arany-cli/tests/session_run/` (layout unchanged), `crates/arany-cli/tests/platform_tls.rs`, `crates/arany-cli/tests/release_build_guard.rs`, the five `goals.rs` cases that open the Engine with `guard_executable: Some(env!("CARGO_BIN_EXE_arany"))` and submit with `ToolGrant::Configured` (lines 230, 1337, 1643, 3112, 3202) and the launch at `engine_run.rs:1022`, which move to `crates/arany-cli/tests/guard_runs.rs`. This is the only split inside a corpus. In-module: `crates/arany-cli/src/terminal/view/tests.rs` and `crates/arany-cli/src/accounts/chatgpt/**/tests.rs` (which become `accounts`).
+- Shared support: `crates/arany/src/test_support/process.rs` and `crates/arany/src/test_support/git.rs` become `arany` modules behind the `test-support` feature, introduced in PR4. Semantic support lives in `crates/arany/src/provider/render/semantic.rs` after PR3, behind `cfg(any(test, feature = "test-support"))`. `arany-cli` takes `arany = { path = "../arany", features = ["test-support"] }` under `[dev-dependencies]`.
+- `arany-journal` (PR14) gets its own `tests/` for the reducer and cold-replay tests that move out of `crates/arany/src/session`. SQLite admission tests stay in `arany`.
 
 ### Linux and macOS impact
 
@@ -211,7 +211,7 @@ These answers are owner decisions. They are final for this plan.
 1. **Per-kind payload versions (PR5): approved.** Each Event kind has one current payload version in one table. A change bumps that kind only. No global bump, no compatibility readers, no migrations.
 2. **Crates (PR13, PR14): approved.** The library `arany` keeps its name. The binary package `arany-cli` produces `arany`. `arany-journal` arrives with `serve --stdio`. Each crate owns a `tests/` corpus, and shared support sits behind `test-support`.
 3. **Documentation: no `//!` docs** (see the rule above).
-4. **Typed Git reads stay in the Guard.** NEXT_STEPS item 2 lists typed Git reads among in-process operations. The guarantee says every process runs in the Guard, and a Git read spawns `git` on a neutralized private view (`src/tools/git.rs:124, 405`). PR7 therefore moves only List, Read and Search. A warm per-Run Guard unit may cut the Git round trip later without weakening the boundary.
+4. **Typed Git reads stay in the Guard.** NEXT_STEPS item 2 lists typed Git reads among in-process operations. The guarantee says every process runs in the Guard, and a Git read spawns `git` on a neutralized private view (`crates/arany/src/tools/git.rs:124, 405`). PR7 therefore moves only List, Read and Search. A warm per-Run Guard unit may cut the Git round trip later without weakening the boundary.
 5. **Per-command unguarded fallback: outside this plan.** Tracked in NEXT_STEPS. The Tools spec owns it once implemented. Nothing here implements or depends on it.
 
 ### Not refactored yet
@@ -307,43 +307,43 @@ Sizes: S is at most 2 days, M is at most 2 weeks, L is more than 2 weeks. Every 
 | 7-8 | PR11 | PR12 | PR13 documentation migration |
 | 9 | PR13 move (one coder) | Hooks (roadmap 6) on `execute_step` | PR14 when item 8 starts |
 
-**Shared hot spots.** `src/engine/run_loop.rs` (PR7 deadlines, PR8 budget calls, PR10 deletion), `src/session/events.rs` (PR5, PR7, PR9), `src/lib.rs` (PR3, PR12, PR13). Everything else is disjoint by lane.
+**Shared hot spots.** `crates/arany/src/engine/run_loop.rs` (PR7 deadlines, PR8 budget calls, PR10 deletion), `crates/arany/src/session/events.rs` (PR5, PR7, PR9), `crates/arany/src/lib.rs` (PR3, PR12, PR13). Everything else is disjoint by lane.
 
 ### The 14 PRs
 
 Each entry gives the PR, lane, size, risk, dependencies and verification. Behavior-preserving unless stated.
 
 **PR1. Cut the `tools` to `engine` cycle and make reservation overhead a runtime method.** Lane Tools. Size S. Risk none. Depends on nothing.
-- Move `RunCancellation` to `src/tools/cancel.rs` as `tools::Cancellation`, re-exported under the old public name. Replace `PREPARATION_OVERHEAD` with `ToolRuntime::reservation_overhead(&self, call) -> Duration`.
-- Verification: corpus `tests/engine_run.rs`, `goals.rs` (paused-time deadline arithmetic), `tests/session_run/tools`.
+- Move `RunCancellation` to `crates/arany/src/tools/cancel.rs` as `tools::Cancellation`, re-exported under the old public name. Replace `PREPARATION_OVERHEAD` with `ToolRuntime::reservation_overhead(&self, call) -> Duration`.
+- Verification: corpus `crates/arany/tests/engine_run.rs`, `goals.rs` (paused-time deadline arithmetic), `crates/arany-cli/tests/session_run/tools`.
 
 **PR2. Reducer by aggregate.** Lane Engine. Size S. Risk very low. Depends on nothing.
 - Split `SessionView::apply_committed` (`reducer.rs:668-1547`, 879 lines) into per-aggregate `apply` functions (session, goal, run, agent, tool), keeping the single entry point and cross-aggregate guards; `child.rs` merges into `agent.rs`. Pure code motion.
-- Verification: `src/session/reducer` unit tests, `tests/engine_run/replay.rs`, `tests/session_run/tools/replay.rs`, cold-replay assertions in every journey.
+- Verification: `crates/arany/src/session/reducer` unit tests, `crates/arany/tests/engine_run.rs`, `crates/arany-cli/tests/session_run/tools/replay.rs`, cold-replay assertions in every journey.
 
 **PR3. Provider identity as one value; semantic inverse beside the renderer.** Lane Edges. Size S to M. Risk low. Depends on nothing.
-- Replace seven identity getters with `identity() -> &ProviderIdentity`. Delete `ProviderSelection` and the `RunControls` provenance fields. Move `tests/common/semantic.rs` into `src/provider/render/semantic.rs` with a round-trip test, `semantic(render(input)) == input`.
-- Verification: wire corpora per adapter, `tests/engine_run.rs`, `tests/session_run/{custom,live,loopback}.rs`, billing-route display tests, and the new round-trip test.
+- Replace seven identity getters with `identity() -> &ProviderIdentity`. Delete `ProviderSelection` and the `RunControls` provenance fields. Keep semantic support in `crates/arany/src/provider/render/semantic.rs` with a round-trip test, `semantic(render(input)) == input`.
+- Verification: wire corpora per adapter, `crates/arany/tests/engine_run.rs`, `crates/arany-cli/tests/session_run/{custom,live,loopback}.rs`, billing-route display tests, and the new round-trip test.
 
 **PR4. `StateRoot` records, Store evidence and one fault seam.** Lane Edges. Size S to M. Risk none behavioral. Depends on nothing.
 - Replace 25 record methods with `RecordKind` and `Record`. Replace six Store evidence requests with `Request::Evidence(EvidenceOp)`, and move the record types to `provider::evidence`. Replace four fault hooks with one `FaultPlan` behind the `test-support` feature.
-- Verification: `store/state` tests, `tests/session_run/setup.rs`, `engine.rs` goal-lease tests, `tests/session_run/disk_fault.rs`.
+- Verification: `store/state` tests, `crates/arany-cli/tests/session_run/setup.rs`, `engine.rs` goal-lease tests, `crates/arany-cli/tests/session_run/disk_fault.rs`.
 
 **PR5. Per-kind payload versions.** Lane Edges. Size S. Risk low. Depends on nothing; PR7 and PR9 depend on it.
 - Replace `EVENT_PAYLOAD_VERSION` with a `payload_version(kind)` table. `decode` compares against the kind's current version. Stale versions are rejected, data untouched.
-- Verification: `store/journal` crash tests, `tests/engine_run/replay.rs`. New test: a bumped kind rejects the previous version and an unbumped kind still decodes.
+- Verification: `store/journal` crash tests, `crates/arany/tests/engine_run.rs`. New test: a bumped kind rejects the previous version and an unbumped kind still decodes.
 
 **PR6. Tool operation facts table and per-family dispatch.** Lane Tools. Size M. Risk medium. Depends on PR1.
 - Add `tools/catalog.rs` (`OperationFacts`, the `ALL` table, schemas, prose) and `tools/dispatch.rs`. Family modules gain `valid`, `schema` and `run`. `helper_main` shrinks to protocol, `dispatch::run` and receipt (about 180 lines). Six predicates, two string arrays and `child_research_operation` become reads of `facts()`. Every site is still the Guard in this PR.
-- Verification: snapshot the rendered catalog and `tool_specs` output before the PR and assert byte equality. Corpus `tool_specs_cover_every_catalog_operation`, `the_catalog_filters_tools_and_pins_names_without_changing_the_order`, wire corpora, reducer prelude tests, `src/tools/tests.rs`, `tests/session_run/tools*.rs`. New: an `ALL` to enum permutation test.
+- Verification: snapshot the rendered catalog and `tool_specs` output before the PR and assert byte equality. Corpus `tool_specs_cover_every_catalog_operation`, `the_catalog_filters_tools_and_pins_names_without_changing_the_order`, wire corpora, reducer prelude tests, `crates/arany/src/tools/tests.rs`, `crates/arany-cli/tests/session_run/tools*.rs`. New: an `ALL` to enum permutation test.
 
 **PR7. In-process reads with attestation.** Lane Tools. Size M. Risk medium; security pass required. Depends on PR1, PR5, PR6. Behavior change (stated).
 - `List`, `Read` and `Search` run in the Engine process under the admitted `cap-std` `Dir`. `ToolObservation.guard` becomes `attestation: Option<Attestation>`, with `Attestation::{InProcess {..}, Guard(GuardReceipt)}`. Dispatch happens in `ToolRuntime::execute` by `facts().site`. Read bounds rise to 64 KiB. Typed Git reads stay in the Guard. The design is in [PR7 design](#pr7-design-in-process-reads) below.
-- Verification: `src/tools/tests.rs` and `tests/session_run/tools*.rs` for both sites; native Guard lane for mutations on both platforms; `tests/engine_run/replay.rs`; reducer tests. New: replay with `InProcess` attestations survives process exit; an `InProcess` attestation on `Write` is rejected by the reducer; Read p95 at or below 50 ms (roadmap item 2).
+- Verification: `crates/arany/src/tools/tests.rs` and `crates/arany-cli/tests/session_run/tools*.rs` for both sites; native Guard lane for mutations on both platforms; `crates/arany/tests/engine_run.rs`; reducer tests. New: replay with `InProcess` attestations survives process exit; an `InProcess` attestation on `Write` is rejected by the reducer; Read p95 at or below 50 ms (roadmap item 2).
 
 **PR8. `GoalLedger` over the reducer's view; `Action::max_events`.** Lane Engine. Size M. Risk medium. Depends on PR2, PR3. Byte-identical journals.
 - Add `engine/ledger.rs` with `admits`, `reserve` and `settle` over `Action` (`ProviderCall`, `Tool`, `Review`, `Compaction`, `Pause`, `Delegation`), with `max_events` as the one table. Delete `GoalRunBudget` (about 460 lines). Split `run_turn` into `admit_turn`, `prepare_turn` and `settle_turn`, and move `goal_report` to `engine/report.rs`. `ProgressPublisher` shares the ledger's view.
-- Verification: `tests/engine_run/goals.rs` (61 tests), `engine_run.rs`, `replay.rs`, `tests/session_run/tools/replay.rs`, `auto_compaction.rs`. New: `max_events` is at least the observed Events for every action kind, in one table test. `goal_budget_tests` move to `ledger/tests.rs`.
+- Verification: `crates/arany/tests/engine_run/goals.rs` (61 tests), `engine_run.rs`, `replay.rs`, `crates/arany-cli/tests/session_run/tools/replay.rs`, `auto_compaction.rs`. New: `max_events` is at least the observed Events for every action kind, in one table test. `goal_budget_tests` move to `ledger/tests.rs`.
 
 **PR9. Ledger diet.** Lane Engine. Size M. Risk medium. Depends on PR5, PR8. Journal change (stated).
 - Run-level active deadline computed once in `reserve`; `RunStarted` gains `active_deadline_ms`; per-action reservations become in-memory; `RunFinished` carries `active_ms`; `GoalActiveTimeReserved` and `GoalActiveTimeSettled` are deleted. Bumps `RunStarted`, `RunFinished` and `GoalFinished`. Updates the Goal spec's lifecycle, budgets and recovery section.
@@ -351,18 +351,18 @@ Each entry gives the PR, lane, size, risk, dependencies and verification. Behavi
 
 **PR10. One `execute_step` for primary, researcher and (later) worker.** Lane Engine. Size M. Risk medium. Depends on PR7, PR8.
 - `engine/step.rs`: `execute_step(AgentStep, request, turn)` replaces `execute_tool`, `execute_intent` and `execute_child_tool`. The step sizes by `ToolContext::projected_len`, asks the ledger, journals `ToolStarted`, calls `before_dispatch(grant)` (the single hook point for approval, AI review and timeout denial), runs `runtime.execute` under cancellation, journals `ToolFinished`, integrates changesets for the primary, and pushes `ToolStep`. `Grant` is `Primary`, `Researcher` (and `Worker` in C2). `run_children` splits into `spawn_children`, `drive_children` and `synthesize`. `compact_tool_context_if_needed` moves to `engine/tool_compaction.rs` and splits into `select_compaction_window`, `summarize` and `record_compaction`. The fake receipt is deleted.
-- Verification: `engine_run.rs` (38 tests), `goals.rs`, `replay.rs` (child research), `tests/session_run/tools*.rs`, `agent_inspector.rs`. New: one table test per `Grant` variant, with the Event sequence of one step equal to the pre-PR snapshot.
+- Verification: `engine_run.rs` (38 tests), `goals.rs`, `replay.rs` (child research), `crates/arany-cli/tests/session_run/tools*.rs`, `agent_inspector.rs`. New: one table test per `Grant` variant, with the Event sequence of one step equal to the pre-PR snapshot.
 
 **PR11. Journal tap: progress, telemetry and diagnostics as subscribers.** Lane Engine. Size M. Risk low to medium. Depends on PR8, PR10. Span timing change (stated).
 - `Journal { store, tap: broadcast::Sender<Arc<EventEnvelope>> }` with `append`, `subscribe` and `admit`. `ProgressPublisher`, `telemetry::RunTrace` and `diagnostics::event_failure` each become a subscriber. `TraceEventKind` becomes `From<&Event>`. Trace parameters leave the loop. The two in-loop timings not derivable from Events stay as attributes on the next Event.
-- Verification: `src/telemetry/tests.rs` (1,007 lines), `tests/session_run/telemetry.rs` (643 lines), and every journey that watches `RunProgress`. New: a lagging subscriber receives `Resync` and recovers; `exec --output jsonl` equals the stream.
+- Verification: `crates/arany/src/telemetry/tests.rs` (1,007 lines), `crates/arany-cli/tests/session_run/telemetry.rs` (643 lines), and every journey that watches `RunProgress`. New: a lagging subscriber receives `Resync` and recovers; `exec --output jsonl` equals the stream.
 
 **PR12. `Engine` as a long-lived service with `RunHandle`.** Lane Engine. Size M. Risk low to medium. Depends on PR11.
 - `Engine::open(state, EngineConfig)` once per process; `submit(providers, request, controls) -> RunHandle`; `RunResult` replaces the `StoppedAfterRun` error. Delete the four setters and the `run_*` variants. The CLI opens one Engine in `attached::run` and `exec::run`. `compact_with_provider` uses the same Engine. `is_some_and(|(config, _)| config.write)` becomes a `match` on `ToolGrant`.
-- Verification: `engine_run.rs`, `goals.rs`, `tests/session_run/{active_terminal,exec_interrupt,session_picker,startup_trust}.rs`. New: `submit` while busy is refused; the Provider changes between two submissions on one Engine.
+- Verification: `engine_run.rs`, `goals.rs`, `crates/arany-cli/tests/session_run/{active_terminal,exec_interrupt,session_picker,startup_trust}.rs`. New: `submit` while busy is refused; the Provider changes between two submissions on one Engine.
 
 **PR13. Workspace split: `arany` library and `arany-cli` binary; documentation ownership migration.** Lane Shape. Size M. Risk low. Depends on PR12. Scaffolding (workspace, lints) may land earlier.
-- `crates/arany` (library) and `crates/arany-cli` (`[[bin]] name = "arany"`, with `cli/`, `terminal/`, `presentation/`, `accounts/`). Test corpora move as in [Test corpora per crate](#test-corpora-per-crate-approved). `tests/common` moves behind `test-support`. Guard helper entry points stay reachable from the binary's `main.rs`. Workspace-level `[workspace.lints]` carries the Clippy settings from the readability bounds. `ci.yml` test paths update in the same PR. Documentation: correct [system overview](../../docs/architecture/system-overview.md) §2 and the AGENTS.md routing table (F12). Nothing in the Engine changes.
+- `crates/arany` (library) and `crates/arany-cli` (`[[bin]] name = "arany"`, with `cli/`, `terminal/`, `presentation/`, `accounts/`). Test corpora move as in [Test corpora per crate](#test-corpora-per-crate-approved). `crates/arany/src/test_support` moves behind `test-support`. Guard helper entry points stay reachable from the binary's `main.rs`. Workspace-level `[workspace.lints]` carries the Clippy settings from the readability bounds. `ci.yml` test paths update in the same PR. Documentation: correct [system overview](../../docs/architecture/system-overview.md) §2 and the AGENTS.md routing table (F12). Nothing in the Engine changes.
 - Verification: `cargo test -p arany` and `cargo test -p arany-cli`. New: `cargo tree -p arany -e normal` has no `ratatui`, `crossterm` or `keyring`, asserted in CI. Manual native lanes run once.
 
 **PR14. `arany-journal` vocabulary crate (conditional).** Lane Shape. Size S to M. Risk low (code motion). Depends on PR13. Starts only when roadmap item 8 starts.
@@ -389,7 +389,7 @@ impl ToolRuntime {
 }
 ```
 
-The runtime opens the workspace `Dir` once at `admit`, and `reservation_overhead` returns zero for in-process calls. `src/provider/test_support.rs:131-148` changes to build `Attestation::InProcess`.
+The runtime opens the workspace `Dir` once at `admit`, and `reservation_overhead` returns zero for in-process calls. `crates/arany/src/provider/test_support.rs:131-148` changes to build `Attestation::InProcess`.
 
 ### Roadmap fit
 

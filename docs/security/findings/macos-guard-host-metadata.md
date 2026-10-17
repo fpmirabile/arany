@@ -1,8 +1,8 @@
 # macOS Guard host metadata and ancestor listings
 
 Status: corrected in source; native regression owners are the
-[file profile](../../../src/tools/guard/macos.rs) and
-[process unit](../../../src/tools/guard/macos/unit.rs).
+[file profile](../../../crates/arany/src/tools/guard/macos.rs) and
+[process unit](../../../crates/arany/src/tools/guard/macos/unit.rs).
 Severity: medium privacy exposure; release-blocking for the stated offline
 selected-root isolation contract.
 
@@ -21,7 +21,7 @@ The command profile retains a literal `/` directory read for the native loader;
 top-level names remain visible, without access beneath them. Removing this
 exception aborts ordinary native launch; it is not a general ancestor grant.
 
-The [native adapter](../../../src/tools/guard/macos.rs) grants metadata only to
+The [native adapter](../../../crates/arany/src/tools/guard/macos.rs) grants metadata only to
 the fixed runtime traversal roots and exact required ancestors. Ancestors grant
 no directory data. Selected Workspace, private snapshot and admitted runtime
 rules retain their existing scopes and bounds. Resource constants and profile

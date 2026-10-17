@@ -121,7 +121,7 @@ unsupported enforcement fails closed. Child authority remains
 
 3. **Flexible limits.** Before A4, the ceilings were compile-time constants
    (`MAX_TOOL_CALLS = 16` and a 64 KiB Tool context in
-   [src/tools/types.rs](../../src/tools/types.rs), plus the 300-second Run).
+   [crates/arany/src/tools/types.rs](../../crates/arany/src/tools/types.rs), plus the 300-second Run).
    Follow the established harness pattern instead of inventing one:
    - These caps stop being product constants. A Run's loop continues until
      Finish, bounded by context compaction, the Goal budget and
@@ -590,9 +590,9 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    (landed); Round 14 rules R14-1 and R14-7 land in the execution and Tools
    specs with this stage. Beta 1 check 7 is run by the user later. This stage may
    be implemented before it, and its new child Tool encodings stay marked
-   unvalidated live until check 7 passes. Evidence: [Engine Run corpus](../../tests/engine_run.rs)
+   unvalidated live until check 7 passes. Evidence: [Engine Run corpus](../../crates/arany/tests/engine_run.rs)
    for live admission and for a worker `McpCall` rejected before dispatch
-   (R14-1, R14-7); [reducer replay corpus](../../src/session/reducer.rs) for
+   (R14-1, R14-7); [reducer replay corpus](../../crates/arany/src/session/reducer.rs) for
    spawn pins (R14-1). Stays out: writes, commands, MCP invocation and build
    cache publication.
 7. **C2 Edit-only workers (stage 2 of C).** Leases, handover eligibility,
@@ -600,13 +600,13 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    integration, as specified in C2. Gate: C1 landed; Round 14 rules R14-2 to
    R14-5 land in the execution, Goals and Tools specs with this stage; the new
    child write Tool encodings follow the same check 7 rule as C1. Evidence:
-   [Tool journeys](../../tests/session_run/tools.rs) for out-of-lease rejection
+   [Tool journeys](../../crates/arany-cli/tests/session_run/tools.rs) for out-of-lease rejection
    with the Workspace unchanged, post-GO Uncertain and digest conflict
-   (R14-3, R14-5); [Goal corpus](../../tests/engine_run/goals.rs) for the
+   (R14-3, R14-5); [Goal corpus](../../crates/arany/tests/engine_run/goals.rs) for the
    Goal-scope subset, writer lock and resume reporting discarded work (R14-3,
-   R14-4); [reducer replay corpus](../../src/session/reducer.rs) for overlapping
+   R14-4); [reducer replay corpus](../../crates/arany/src/session/reducer.rs) for overlapping
    live leases, lease lifetime and integration without an eligible handover
-   (R14-2, R14-3); [Engine Run corpus](../../tests/engine_run.rs) for a
+   (R14-2, R14-3); [Engine Run corpus](../../crates/arany/tests/engine_run.rs) for a
    worker-local loss failing only that worker and for cancellation discarding
    unintegrated worker work (R14-4, R14-5). Stays out: command execution in
    workers, build cache publication, MCP invocation, and the criterion inside a
@@ -615,8 +615,8 @@ triggered and evidence under [testing rules](../../agents/testing.md).
    view, worker commands in it, the own-criterion handover condition and the
    read-only build cache for workers (R14-4, R11-1, R11-5, R14-6). Gate: C2
    landed; A4's command timeout and Build profile in place; R14-6 lands in the
-   Tools build-cache section with this stage. Evidence: [Tool journeys](../../tests/session_run/tools.rs)
-   for the worker command's cache outcome (R14-6); [Engine Run corpus](../../tests/engine_run.rs)
+   Tools build-cache section with this stage. Evidence: [Tool journeys](../../crates/arany-cli/tests/session_run/tools.rs)
+   for the worker command's cache outcome (R14-6); [Engine Run corpus](../../crates/arany/tests/engine_run.rs)
    for cancellation discarding views (R14-4). Stays out: MCP invocation (R14-7)
    and worker cache publication.
 9. **Goal completion.** E2–E4 context reinjection, Workspace

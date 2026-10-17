@@ -54,7 +54,7 @@ Use the [shared documentation checks](../docs/development.md#verification). When
 
 ## Corpus placement
 
-Keep scenarios that launch `arany` or drive a terminal in `crates/arany-cli/tests/`: Session journeys stay in `tests/session_run.rs`, and Guard-launching Engine cases belong to `tests/guard_runs.rs`. In-process Engine, Session, Store, Provider and Tool scenarios stay in `crates/arany/tests/` or their owning module. Focused module tests use compact transition, boundary, hostile-input or parser tables only where the central journey cannot prove the claim.
+Keep scenarios that launch `arany` or drive a terminal in `crates/arany-cli/tests/`: Session journeys stay in `crates/arany-cli/tests/session_run.rs`, and Guard-launching Engine cases belong to `crates/arany-cli/tests/guard_runs.rs`. In-process Engine, Session, Store, Provider and Tool scenarios stay in `crates/arany/tests/` or their owning module. Focused module tests use compact transition, boundary, hostile-input or parser tables only where the central journey cannot prove the claim.
 
 Reuse shared process/Git fixtures and semantic Provider support through the library's `test-support` feature; do not copy fixture or Provider-rendering knowledge between corpora.
 

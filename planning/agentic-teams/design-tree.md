@@ -87,7 +87,7 @@ Applied as workstream D in the plan.
 
 At the time of this decision, `MAX_TOOL_CALLS = 16`, a 64 KiB Tool context
 and the 300-second Run were compile-time constants
-([src/tools/types.rs](../../src/tools/types.rs)).
+([crates/arany/src/tools/types.rs](../../crates/arany/src/tools/types.rs)).
 Mainstream coding harnesses do not cap tool calls per turn: their loop runs
 until the model finishes, context is managed by compaction, commands have a
 default timeout with a configurable maximum (Claude Code: 2-minute default,
@@ -253,8 +253,8 @@ Evidence owners:
 
 | Node | Owner |
 |---|---|
-| R14-1, R14-2 | [Engine Run corpus](../../tests/engine_run.rs) for live admission and rejection; [reducer replay corpus](../../src/session/reducer.rs) for spawn pins and integration without an eligible handover |
-| R14-3 | [Tool journeys](../../tests/session_run/tools.rs) for out-of-lease rejection with the Workspace unchanged; [Goal corpus](../../tests/engine_run/goals.rs) for the Goal-scope subset and writer lock; reducer replay corpus for overlapping live leases and a lease held until its handover is integrated or discarded |
+| R14-1, R14-2 | [Engine Run corpus](../../crates/arany/tests/engine_run.rs) for live admission and rejection; [reducer replay corpus](../../crates/arany/src/session/reducer.rs) for spawn pins and integration without an eligible handover |
+| R14-3 | [Tool journeys](../../crates/arany-cli/tests/session_run/tools.rs) for out-of-lease rejection with the Workspace unchanged; [Goal corpus](../../crates/arany/tests/engine_run/goals.rs) for the Goal-scope subset and writer lock; reducer replay corpus for overlapping live leases and a lease held until its handover is integrated or discarded |
 | R14-4 | Goal corpus for resume reporting discarded work without restart; Engine Run corpus for cancellation discarding views |
 | R14-5 | Tool journeys for post-GO Uncertain and digest conflict; Engine Run corpus for a worker-local loss failing only that worker |
 | R14-6 | Tool journeys for the worker command's cache outcome |

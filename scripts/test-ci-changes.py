@@ -24,7 +24,7 @@ class CodeChanges(unittest.TestCase):
         ]
         code = [
             b"src/main.rs", b"src/provider/prompts/primary.txt", b"tests/test.rs", b"src/x.md", b"tests/fixtures/x.md", b"scripts/notes.md",
-            b"crates/new/Cargo.toml", b"Cargo.toml", b"Cargo.lock", b"build.rs",
+            b"crates/new/Cargo.toml", b"crates/arany/README.md", b"crates/arany-cli/tests/fixtures/x.md", b"Cargo.toml", b"Cargo.lock", b"build.rs",
             b"rust-toolchain.toml", b".cargo/config.toml", b"scripts/check.sh",
             b"fixtures/input.json", b"tests/fixtures/tool-calls.json", b"deny.toml",
             b".github/workflows/ci.yml", b".github/workflows/guide.md",

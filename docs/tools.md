@@ -78,7 +78,7 @@ association or authorize deletion.
    inventory. Completion covers this host/account, not other installations or
    secure media erasure.
 
-[`historical_seed_maintenance_removes_only_selected_inactive_objects`](../src/tools/guard/admission.rs)
+[`historical_seed_maintenance_removes_only_selected_inactive_objects`](../crates/arany/src/tools/guard/admission.rs)
 uses the same deletion primitive with independent UUIDs, selected identity,
 live-lease refusal, replacement and unrelated canaries. `Linux Tests (debug)` and
 `Linux Tests (release)` in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)

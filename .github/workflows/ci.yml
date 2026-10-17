@@ -58,7 +58,7 @@ jobs:
           import subprocess
 
           def non_code(path):
-              if path.startswith((b".github/workflows/", b"src/", b"tests/", b"scripts/")):
+              if path.startswith((b".github/workflows/", b"crates/", b"src/", b"tests/", b"scripts/")):
                   return False
               return (
                   path.endswith(b".md")
@@ -95,6 +95,13 @@ jobs:
         run: cargo fmt --all --check
       - if: needs.changes.outputs.code-changed != 'false'
         run: cargo fetch --locked
+      - name: Check library dependency boundary
+        if: needs.changes.outputs.code-changed != 'false'
+        run: |
+          cargo tree -p arany -e normal --target all --locked --offline > "$RUNNER_TEMP/arany-library-tree.txt"
+          if grep -E 'ratatui|crossterm|keyring' "$RUNNER_TEMP/arany-library-tree.txt"; then
+            exit 1
+          fi
       - if: needs.changes.outputs.code-changed != 'false'
         run: cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 
@@ -137,7 +144,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get install --yes tmux
-          cargo test --locked --offline --release --test session_run active_terminal::tmux::history_latency::active_keyboard_stays_visible_with_near_cap_history -- --exact --ignored --nocapture | tee "$RUNNER_TEMP/arany-history-measurement.log"
+          cargo test --locked --offline --release -p arany-cli --test session_run active_terminal::tmux::history_latency::active_keyboard_stays_visible_with_near_cap_history -- --exact --ignored --nocapture | tee "$RUNNER_TEMP/arany-history-measurement.log"
           python3 - <<'PY'
           import os
           import pathlib
@@ -233,7 +240,7 @@ jobs:
 
           run_exact_parent() {
             local parent="$1"
-            if ! cargo test --release --locked --offline --test session_run "$parent" -- --ignored --exact 2>&1 | python3 -c '
+            if ! cargo test --release --locked --offline -p arany-cli --test session_run "$parent" -- --ignored --exact 2>&1 | python3 -c '
           import sys
 
           limit = int(sys.argv[2])

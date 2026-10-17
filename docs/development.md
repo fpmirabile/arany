@@ -34,8 +34,8 @@ cargo test --locked --offline <filter>
 ```
 
 Choose `<filter>` from the owning corpus or journey of the changed code, for
-example `--test engine_run goals::`, `--test session_run tools::` or
-`--lib store::` for a module's own `tests.rs`; add `--release` when the change
+example `-p arany --test engine_run goals::`, `-p arany-cli --test session_run tools::` or
+`-p arany --lib store::` for a module's own `tests.rs`; add `--release` when the change
 touches an optimized-profile gate. The complete workspace suite in both
 profiles runs in [CI](../.github/workflows/ci.yml) on pull requests with code
 changes, whatever their base branch; watch that run and fix a red result before handoff.
