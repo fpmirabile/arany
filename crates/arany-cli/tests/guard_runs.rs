@@ -1667,7 +1667,7 @@ async fn primary_tool_step_events_match_the_snapshot() {
 }
 
 #[tokio::test]
-async fn researcher_tool_results_keep_the_child_ceiling_and_primary_keeps_its_own() {
+async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit() {
     let read = || arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
         offset: 0,
@@ -1708,8 +1708,9 @@ async fn researcher_tool_results_keep_the_child_ceiling_and_primary_keeps_its_ow
         READ_ONLY,
     )
     .await;
-    assert_eq!(result_bytes(&child), 16 * 1024);
-    assert!(result_bytes(&primary) > 16 * 1024);
+    assert_eq!(result_bytes(&child), 59099);
+    assert!(result_bytes(&child) > 16 * 1024);
+    assert!(result_bytes(&primary) > result_bytes(&child));
 }
 
 #[tokio::test]
@@ -1888,7 +1889,7 @@ ProviderCallRecorded RootPlan
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
-ToolStarted result_bytes=16384 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=59099 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
@@ -1912,7 +1913,7 @@ ProviderCallRecorded RootPlan
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
-ToolStarted result_bytes=16384 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=59101 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
@@ -2608,6 +2609,17 @@ mod routing {
             ProviderRole::Compaction
         );
         assert_eq!(second.compact_requests.lock().unwrap().len(), 1);
+        let shown = std::process::Command::new(env!("CARGO_BIN_EXE_arany"))
+            .args(["show", "--state-dir"])
+            .arg(&state)
+            .args(["--output", "text", &fork.to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            shown.status.success(),
+            "show on a fork after a compaction switch: {}",
+            String::from_utf8_lossy(&shown.stderr)
+        );
     }
 
     #[tokio::test]

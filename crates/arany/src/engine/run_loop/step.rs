@@ -23,8 +23,6 @@ use crate::tools::{
 use std::time::Duration;
 use tokio::time::Instant;
 
-const MAX_RESEARCHER_TOOL_RESULT_BYTES: usize = 16 * 1024;
-
 /// The agent a Tool step runs for, with the state its rules read.
 pub(super) enum Grant<'s> {
     Primary {
@@ -228,14 +226,10 @@ impl RunLoop<'_> {
         let Some(capacity) = runtime.result_capacity(overhead, integration_capacity) else {
             return Ok(None);
         };
-        let ceiling = match grant {
-            Grant::Primary { .. } => MAX_TOOL_RESULT_BYTES,
-            Grant::Researcher { .. } => MAX_RESEARCHER_TOOL_RESULT_BYTES,
-        };
         intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
             128
         } else {
-            capacity.min(ceiling) as u32
+            capacity.min(MAX_TOOL_RESULT_BYTES) as u32
         };
         Ok(Some(intent))
     }
