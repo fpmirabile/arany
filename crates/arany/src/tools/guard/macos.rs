@@ -995,9 +995,8 @@ async fn execute_worker(
             .map_err(|_| ToolError::Limit)?
         };
         let deadline = tokio::time::Instant::now()
-            + PREPARATION_DEADLINE
-            + Duration::from_millis(u64::from(intent.limits.runtime_ms))
-            + Duration::from_secs(5);
+            + RESERVATION_OVERHEAD
+            + Duration::from_millis(u64::from(intent.limits.runtime_ms));
         let execution = tokio::time::timeout_at(deadline, execution);
         tokio::pin!(execution);
         let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);

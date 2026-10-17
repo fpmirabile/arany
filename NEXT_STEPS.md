@@ -14,7 +14,7 @@ Arany is a harness for multi-agent coding teams that can be trusted to work auto
 ### Pursue, in order
 
 1. **Run probe P1** (owner, live; see [owner-run live probes](#message-native-provider-request-owner-run-live-probes)). Until P1 passes, the Anthropic native route stays "offline-tested, unvalidated live". Follow-up if P1 shows weak schema compliance: move `plan_contract` to its own `arany_plan` Tool so Tool schemas can be strict again.
-2. **In-process read-only Tools: named-host performance.** Measure Read p95 <= 50 ms on named hosts; the existing [Read timing gate](./crates/arany/src/tools/tests.rs) is not native host evidence.
+2. **In-process read-only Tools: named-host performance.** Measure Read p95 <= 50 ms on named hosts; no hosted test gates this latency.
 3. **Engine hygiene for embedding.** The attached terminal still renders from `RunProgress`; move it to `RunHandle.events` when it becomes a `serve --stdio` client (item 8). Preserve the [Engine lifetime and ownership](./docs/architecture/system-overview.md#2-runtime-architecture). Copy Codex's core shape (submission queue in, ordered events out).
 4. **Spec diet** (process, owner-approved). Done: release and Tool review ledgers are collapsed and `agents/` holds working practice only. Keep new behavior facts in their single owning spec.
 5. **Ledger diet.** Done: the [Goal contract](./docs/specs/goals.md#lifecycle-budgets-and-recovery) owns action headroom and crash ceilings.

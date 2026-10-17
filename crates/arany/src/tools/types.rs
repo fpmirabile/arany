@@ -10,7 +10,7 @@ use uuid::Uuid;
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_READ_PAGE_BYTES: u32 = 64 * 1024;
-/// A finished observation: the intent with its call plus an output that JSON escaping at most doubles.
+// ToolObservation::valid checks every producer against this serialized bound.
 pub(crate) const MAX_TOOL_OBSERVATION_BYTES: usize =
     2 * MAX_TOOL_RESULT_BYTES + MAX_TOOL_ARGUMENT_BYTES;
 pub const MAX_TOOL_CONTEXT_BYTES: usize = crate::session::MAX_CONTEXT_CONTENT_BYTES;
@@ -234,7 +234,6 @@ impl ToolCall {
         self.facts().family == Family::Git
     }
 
-    /// Read-only calls a researcher child may make; Git reads stay with the primary (R7-8).
     pub(crate) fn is_child_research(&self) -> bool {
         self.facts().researcher
     }
@@ -268,12 +267,10 @@ impl ToolCall {
 pub(crate) const MAX_GIT_LOG_COMMITS: u32 = 50;
 const MAX_REVISION_BYTES: usize = 128;
 
-/// Path components no Tool reads; Git reads also exclude them through pathspecs.
 pub(crate) const FORBIDDEN_NAMES: [&str; 7] = [
     ".git", ".aws", ".ssh", ".gnupg", ".env", ".npmrc", ".pypirc",
 ];
 
-/// `HEAD`, a ref name or an object name with at most four `~N`/`^N` steps; no ranges, `:`, `@{` or options.
 pub(crate) fn valid_revision(value: &str) -> bool {
     if value.is_empty() || value.len() > MAX_REVISION_BYTES {
         return false;
@@ -317,7 +314,6 @@ pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
-/// ASCII-case-insensitive so `.ENV` and `.Env` match `.env` on case-insensitive volumes such as APFS.
 pub(crate) fn forbidden(value: &str) -> bool {
     FORBIDDEN_NAMES
         .iter()
@@ -608,8 +604,6 @@ pub enum Attestation {
 }
 
 impl Attestation {
-    /// An attestation is valid only from the site the operation's facts name, so a read
-    /// attestation never authorizes a mutation.
     pub(crate) fn valid_for(&self, intent: &EffectIntent) -> bool {
         match self {
             Self::InProcess {
@@ -628,7 +622,6 @@ impl Attestation {
         }
     }
 
-    /// The attestation the operation's own site issues for `intent`.
     #[cfg(test)]
     pub(crate) fn for_site(intent: &EffectIntent) -> Self {
         match intent.call.facts().site {
@@ -797,14 +790,12 @@ impl ToolContext {
         self.steps.iter().map(|step| step.observations.len()).sum()
     }
 
-    /// Bytes this context adds to a request: catalog, summary and every step's turn, results, facts and notes.
     pub(crate) fn rendered_len(&self) -> usize {
         self.catalog.len()
             + self.history_summary.as_ref().map_or(0, String::len)
             + self.steps.iter().map(ToolStep::rendered_len).sum::<usize>()
     }
 
-    /// `rendered_len` after the first `steps` steps are replaced by `summary`.
     pub(crate) fn projected_len(&self, summary: Option<&str>, steps: usize) -> usize {
         self.catalog.len()
             + summary.map_or(0, str::len)
@@ -814,8 +805,6 @@ impl ToolContext {
                 .sum::<usize>()
     }
 
-    /// `rendered_len` with `step` appended and an attested, empty success of each of `calls`: the
-    /// bytes a step reserves before its results are known.
     pub(crate) fn reserved_len(&self, step: &ToolStep, calls: &[&ToolCall]) -> usize {
         self.rendered_len()
             + step.rendered_len()
@@ -837,7 +826,6 @@ impl ToolContext {
                 .sum::<usize>()
     }
 
-    /// Model projection of the observations of the first `steps` steps.
     pub(crate) fn model_observations(&self, steps: usize) -> Vec<Value> {
         self.steps[..steps]
             .iter()
@@ -846,7 +834,6 @@ impl ToolContext {
     }
 }
 
-/// The model-facing call; an internal changeset's source intent digest stays out of model input.
 pub(crate) fn model_call(call: &ToolCall) -> Value {
     let mut value = json!(call);
     if let ToolCall::ApplyChangeset { .. } = call

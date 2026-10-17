@@ -289,7 +289,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                 Event::GoalFinished {
                     goal_id,
                     status: GoalStatus::Completed,
-                    active_ms: GOAL_RUNS as u64,
+                    active_ms: 0,
                     report: GoalReport {
                         summary: "fixture completed".into(),
                         changes: Vec::new(),

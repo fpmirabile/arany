@@ -15,9 +15,9 @@ enum Fault {
         oneshot::Sender<()>,
         std::sync::mpsc::Receiver<()>,
     ),
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "read only by test fixtures"))]
     CandidateSync(String),
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(test), expect(dead_code, reason = "read only by test fixtures"))]
     CommitMarker(String),
 }
 

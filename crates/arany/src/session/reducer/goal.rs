@@ -11,7 +11,10 @@ use crate::session::{MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES};
 
 impl SessionView {
     // The event's fields plus the replay prior; a struct would only forward them.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Goal start carries independent admitted inputs"
+    )]
     pub(super) fn start_goal(
         &mut self,
         goal_id: &GoalId,

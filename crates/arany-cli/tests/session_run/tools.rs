@@ -917,21 +917,6 @@ async fn in_process_reads_are_attested_and_replay_after_exit_or_a_crash() {
         .unwrap();
     assert_eq!(replay.runs[0], outcome.run);
 
-    let mut durations = Vec::new();
-    let mut started_at = None;
-    for envelope in &events {
-        match &envelope.event {
-            arany::Event::ToolStarted { .. } => started_at = Some(envelope.created_at_ms),
-            arany::Event::ToolFinished { .. } => {
-                durations.push(envelope.created_at_ms - started_at.take().unwrap());
-            }
-            _ => {}
-        }
-    }
-    durations.sort_unstable();
-    // Journal timestamps include ToolStarted's commit; the gate times execute() in src/tools/tests.rs.
-    eprintln!("in-process read journal span ms: {durations:?}");
-
     let last_started = events
         .iter()
         .rposition(|envelope| matches!(envelope.event, arany::Event::ToolStarted { .. }))

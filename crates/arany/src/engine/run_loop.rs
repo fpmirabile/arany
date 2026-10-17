@@ -25,7 +25,6 @@ use step::Grant;
 
 const MAX_FINISH_SUMMARY_BYTES: usize = 2 * 1024;
 const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
-/// Wall-clock bound of one Tool-review call, excluding its Store overhead.
 const TOOL_REVIEW_DEADLINE: Duration = Duration::from_secs(20);
 
 pub(super) enum CallResult {
@@ -158,9 +157,9 @@ impl<'a> RunLoop<'a> {
         self.ledger
     }
 
-    fn settle_result(&self, result: &CallResult) {
+    fn settle_result(&self, result: &CallResult) -> Result<(), EngineError> {
         let (input, output) = call_usage(result);
-        self.ledger().settle(input, output);
+        self.ledger().settle(input, output)
     }
 
     async fn append(&self, event: Event) -> Result<(), EngineError> {
@@ -170,10 +169,6 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
-    /// Closes the primary after its loop stopped early. Exactly one exit applies: an uncertain
-    /// Tool, an open reservation or an unacknowledged action returns an error and leaves the Run
-    /// for recovery; a cancellation, including a pause, cancels the primary; otherwise the Goal
-    /// budget ran out and the primary fails.
     async fn settle_stopped_primary(&self) -> Result<(), EngineError> {
         let view = self
             .journal
@@ -272,7 +267,6 @@ impl<'a> RunLoop<'a> {
         self.settle_active_segment_at(pause.segment, pause.paused_at, resume_at)
     }
 
-    /// `pending_ms` bounds an action still to run once this call settles, such as a reviewed Tool.
     async fn reserve_provider_call(
         &self,
         agent_run_id: AgentRunId,
@@ -306,8 +300,6 @@ impl<'a> RunLoop<'a> {
         }
     }
 
-    /// Journals the waiting steering note inside the open primary reservation and adds it to this call,
-    /// after the step whose results it accompanies.
     async fn record_steering_note(&self, request: &mut ProviderRequest) -> Result<(), EngineError> {
         let Some(steering) = &self.controls.steering else {
             return Ok(());
@@ -338,7 +330,6 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
-    /// Whether the caller asked to pause; unlike `pause_at_boundary` it never cancels in-flight calls.
     pub(super) fn pause_requested(&self) -> bool {
         self.controls
             .steering
@@ -346,7 +337,6 @@ impl<'a> RunLoop<'a> {
             .is_some_and(RunSteering::pause_requested)
     }
 
-    /// Converts a requested pause into this Run's cancellation; callers stop at their boundary.
     pub(super) fn pause_at_boundary(&self) -> bool {
         let requested = self.pause_requested();
         if requested {
@@ -355,8 +345,6 @@ impl<'a> RunLoop<'a> {
         requested
     }
 
-    /// Records an admitted Plan contract and narrows this Run to it; `false` means the Run must fail.
-    /// The request's own goal block stays as the Run began, so every later request extends the last.
     pub(super) async fn admit_plan_contract(
         &self,
         contract: crate::session::GoalPlanContract,
@@ -489,7 +477,6 @@ impl<'a> RunLoop<'a> {
         }
     }
 
-    /// Each primary call carries every steering note this Run has recorded so far, in order.
     async fn invoke_primary(
         &self,
         root: &mut ProviderRequest,
@@ -537,7 +524,7 @@ impl<'a> RunLoop<'a> {
                 .routing
                 .invoke(request, deadline, self.controls.cancellation.clone(), None)
                 .await?;
-            self.settle_result(&result);
+            self.settle_result(&result)?;
             return Ok((result, active_segment));
         };
         let call_index = context.call_index;
@@ -585,7 +572,7 @@ impl<'a> RunLoop<'a> {
             }
             result => result,
         };
-        self.settle_result(&result);
+        self.settle_result(&result)?;
         if !matches!(
             result,
             CallResult::Failed(
@@ -679,7 +666,6 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
-    /// The Engine accepts exactly one Tool request per step.
     fn valid_tools(&self, requests: &[crate::tools::ToolRequest]) -> bool {
         matches!(requests, [request] if self.valid_tool(&request.call, &request.plan_contract))
     }
@@ -737,8 +723,6 @@ impl<'a> RunLoop<'a> {
             && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. })
     }
 
-    /// Admits the request's Plan contract and returns the step's one request; `None` means the
-    /// Run must fail.
     pub(super) async fn begin_tool_step(
         &self,
         requests: Vec<crate::tools::ToolRequest>,

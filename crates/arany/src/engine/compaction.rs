@@ -122,6 +122,16 @@ impl Engine {
         let (request, source_bytes) =
             compaction_request(prepared, session_id, covered_run_id, identity, goal)?;
         let active_started = Instant::now();
+        let actor = last_run.primary().map(|agent| agent.id);
+        let routing = if providers.compaction.len() > 1 {
+            let (actor, route_goal_id) = compaction_route_ids(actor, &open_view, covered_run_id)?;
+            Some((
+                self.compaction_ledger(session_id, route_goal_id).await?,
+                actor,
+            ))
+        } else {
+            None
+        };
         let provider_deadline = self
             .reserve_compaction_call(
                 session_id,
@@ -129,44 +139,21 @@ impl Engine {
                 goal_id,
                 active_reservation_ms,
                 active_started,
-                identity.limits.deadline,
+                routing.as_ref().map(|(ledger, _)| ledger),
+            )
+            .await?
+            .min(identity.limits.deadline);
+        let provider_trace = trace.begin_provider(&requested_identity.model);
+        let (status, response_id, usage, wire_provenance, provider) = self
+            .compaction_call(
+                providers,
+                routing.as_ref(),
+                provider,
+                request,
+                provider_deadline,
             )
             .await?;
-        let actor = last_run.primary().map(|agent| agent.id);
-        let routing = if providers.compaction.len() > 1 {
-            let (actor, goal_id) = compaction_route_ids(actor, &open_view, covered_run_id)?;
-            Some((
-                super::routing::CallRouter {
-                    providers: providers.clone(),
-                    journal: &self.journal,
-                    ledger: &self.compaction_ledger(session_id, goal_id).await?,
-                    publisher: None,
-                },
-                actor,
-            ))
-        } else {
-            None
-        };
-        let provider_trace = trace.begin_provider(&requested_identity.model);
-        let (response, provider) = match &routing {
-            Some((routing, actor)) => routing
-                .compact(
-                    request,
-                    *actor,
-                    tokio::time::Instant::now() + provider_deadline,
-                    crate::RunCancellation::new(),
-                )
-                .await?
-                .ok_or(EngineError::CoordinatorFailed)?,
-            None => (
-                tokio::time::timeout(provider_deadline, provider.compact(request))
-                    .await
-                    .unwrap_or(Err(crate::provider::ProviderError::CallTimedOut)),
-                std::sync::Arc::clone(&provider),
-            ),
-        };
         let identity = provider.identity();
-        let (status, response_id, usage, wire_provenance) = compaction_outcome(response);
         let provider_outcome = ProviderTraceOutcome::from(&status);
         provider_trace.finish_with_usage(provider_outcome, usage.input_tokens, usage.output_tokens);
         let record = compaction_record(
@@ -219,31 +206,87 @@ impl Engine {
         goal_id: Option<crate::session::GoalId>,
         active_reservation_ms: Option<u64>,
         active_started: Instant,
-        provider_limit: Duration,
+        ledger: Option<&super::ledger::GoalLedger>,
     ) -> Result<Duration, EngineError> {
         if let (Some(goal_id), Some(active_ceiling_ms)) = (goal_id, active_reservation_ms) {
-            self.journal
-                .append(
-                    session_id,
-                    Event::GoalCompactionCallReserved {
-                        goal_id,
-                        run_id: covered_run_id,
-                        active_ceiling_ms,
-                    },
-                )
-                .await?;
+            let event = Event::GoalCompactionCallReserved {
+                goal_id,
+                run_id: covered_run_id,
+                active_ceiling_ms,
+            };
+            match ledger {
+                Some(ledger) => {
+                    ledger.append(&self.journal, session_id, event).await?;
+                }
+                None => {
+                    self.journal.append(session_id, event).await?;
+                }
+            }
         }
-        let deadline = active_reservation_ms
-            .map_or(COMPACTION_CALL_DEADLINE, |reserved| {
+        Ok(
+            active_reservation_ms.map_or(COMPACTION_CALL_DEADLINE, |reserved| {
                 Duration::from_millis(
                     reserved
                         .saturating_sub(duration_ms(active_started.elapsed()))
                         .saturating_sub(duration_ms(STORE_ACTION_OVERHEAD)),
                 )
                 .min(COMPACTION_CALL_DEADLINE)
-            })
-            .min(provider_limit);
-        Ok(deadline)
+            }),
+        )
+    }
+
+    async fn compaction_call(
+        &self,
+        providers: &AdmittedProviders,
+        routing: Option<&(super::ledger::GoalLedger, crate::session::AgentRunId)>,
+        provider: std::sync::Arc<dyn crate::provider::Provider>,
+        request: CompactionRequest,
+        provider_deadline: Duration,
+    ) -> Result<
+        (
+            CompactionStatus,
+            Option<String>,
+            Usage,
+            Option<crate::provider::ProviderWireProvenance>,
+            std::sync::Arc<dyn crate::provider::Provider>,
+        ),
+        EngineError,
+    > {
+        Ok(match routing {
+            Some((ledger, actor)) => {
+                let router = super::routing::CallRouter {
+                    providers: providers.clone(),
+                    journal: &self.journal,
+                    ledger,
+                    publisher: None,
+                };
+                // A fresh token is never cancelled, so the router always yields an outcome.
+                let (response, provider) = router
+                    .compact(
+                        request,
+                        *actor,
+                        tokio::time::Instant::now() + provider_deadline,
+                        crate::RunCancellation::new(),
+                    )
+                    .await?
+                    .ok_or(EngineError::CoordinatorFailed)?;
+                let (status, response_id, usage, wire_provenance) = compaction_outcome(response);
+                (status, response_id, usage, wire_provenance, provider)
+            }
+            None => {
+                let response = tokio::time::timeout(provider_deadline, provider.compact(request))
+                    .await
+                    .unwrap_or(Err(crate::provider::ProviderError::CallTimedOut));
+                let (status, response_id, usage, wire_provenance) = compaction_outcome(response);
+                (
+                    status,
+                    response_id,
+                    usage,
+                    wire_provenance,
+                    std::sync::Arc::clone(&provider),
+                )
+            }
+        })
     }
 }
 

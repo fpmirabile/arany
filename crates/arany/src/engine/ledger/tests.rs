@@ -205,10 +205,10 @@ fn an_unrecorded_result_counts_toward_the_token_cap() {
         max_tokens: Some(10),
         ..GoalBudget::default()
     });
-    ledger.settle(Some(6), Some(4));
+    ledger.settle(Some(6), Some(4)).unwrap();
     assert!(ledger.tokens_within_limit());
     assert!(!ledger.can_start_provider_call());
-    ledger.settle(Some(1), None);
+    ledger.settle(Some(1), None).unwrap();
     assert!(!ledger.tokens_within_limit(), "unknown usage blocks");
 }
 

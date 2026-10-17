@@ -897,8 +897,6 @@ pub(super) fn copy_seed() -> Result<(), ToolError> {
     Ok(())
 }
 
-/// Runs one in-process read under the admitted Workspace handle; output fits `result_bytes`
-/// before it is serialized.
 pub(super) fn inspect(
     root: &Dir,
     call: &ToolCall,
@@ -1005,7 +1003,6 @@ pub(super) fn inspect(
     }
 }
 
-/// Bytes `character` occupies inside a serialized JSON string.
 fn escaped_len(character: char) -> usize {
     match character {
         '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,

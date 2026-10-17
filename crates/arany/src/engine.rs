@@ -53,7 +53,6 @@ pub fn validate_workspace_inputs(
 }
 
 const CHILD_OUTPUT_TOKEN_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
-/// Store admission and commit time reserved after each action's own deadline.
 // GoalStarted or GoalResumed, GoalRunLinked, MessageAccepted, RunStarted and AgentSpawned.
 const RUN_START_EVENTS: usize = 5;
 
@@ -290,7 +289,6 @@ impl<'a> IntoFuture for RunHandle<'a> {
     }
 }
 
-/// One submission's Provider and resolved controls, fixed for every Run of its Goal loop.
 struct AdmittedSubmission {
     providers: crate::provider::AdmittedProviders,
     grant: ToolGrant,
@@ -304,7 +302,6 @@ struct AdmittedSubmission {
 }
 
 impl AdmittedSubmission {
-    /// A pause requested while no Run is open stops the Run before it is admitted.
     fn cancel_if_paused(&self, cancellation: &RunCancellation) {
         if self
             .steering
@@ -323,7 +320,6 @@ impl AdmittedSubmission {
     }
 }
 
-/// Frees the Engine's single operation slot when the operation ends or is dropped.
 struct OperationSlot<'a>(&'a AtomicBool);
 
 impl Drop for OperationSlot<'_> {
@@ -381,7 +377,6 @@ struct StartedRun<'a> {
     workspace_identity: (u64, u64),
 }
 
-/// One admitted Run and the Goal state it left behind.
 struct RunTurn {
     outcome: RunOutcome,
     autonomous: bool,
@@ -389,13 +384,11 @@ struct RunTurn {
 }
 
 impl RunTurn {
-    /// Settlement failed the Goal over this Finished Run, which leaves no admissible next Run.
     fn exhausted(&self) -> bool {
         self.goal_status == GoalStatus::Failed
             && self.outcome.run.status == crate::session::RunStatus::Finished
     }
 
-    /// An autonomous Goal continues after an unsatisfied Run that it did not finish.
     fn continues(&self) -> bool {
         self.autonomous
             && self.goal_status == GoalStatus::Running
@@ -418,7 +411,6 @@ struct SteeringState {
     recorded: u64,
 }
 
-/// Separates notes offered before the Engine takes them; the Engine delivers them as one note.
 const NOTE_SEPARATOR: &str = "\n\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -492,8 +484,6 @@ impl RunSteering {
         }
     }
 
-    /// Takes the waiting note only if it still fits this Run's quota. Taking reserves the quota,
-    /// so an accepted offer always stays deliverable within this Run.
     pub(crate) fn take_note(&self) -> Option<String> {
         let mut state = self.lock()?;
         let fits = state.waiting.as_ref().is_some_and(|text| {
@@ -868,7 +858,6 @@ mod goal_workspace_lease_tests {
     }
 }
 
-/// `continuation` admits the next Run of a live autonomous Goal, whose history projects as interrupted.
 fn resolve_goal_admission(
     request: &RunRequest,
     history: Option<&crate::session::SessionView>,
@@ -949,7 +938,6 @@ pub struct Engine {
     busy: AtomicBool,
 }
 
-/// Writer locks held by one call. A paused Goal holds none: the call drops them when it returns.
 type WorkspaceLeases = HashMap<(u64, u64), GoalWorkspaceLock>;
 
 struct GoalWorkspaceLock {
@@ -1071,8 +1059,6 @@ impl Engine {
         }
     }
 
-    /// Closes a paused Goal that explicit resume finds out of budget, so it is no longer resumable. It
-    /// runs under the Session lock and acquires no Workspace lease; no Goal span exists yet to close.
     async fn close_exhausted_goal(
         &self,
         session_id: SessionId,
@@ -1224,7 +1210,6 @@ impl Engine {
         })
     }
 
-    /// Runs one admitted Run, then keeps an autonomous Goal iterating on its pinned objective.
     async fn run_inner(
         &self,
         submission: &AdmittedSubmission,
@@ -1607,7 +1592,6 @@ impl Engine {
         Ok(())
     }
 
-    /// Resolves the Goal and takes the Session, lineage and Workspace admissions a Run needs.
     async fn admit_turn(
         &self,
         submission: &AdmittedSubmission,
@@ -1700,7 +1684,6 @@ impl Engine {
         })
     }
 
-    /// Admits the Tools, loads the pinned Workspace inputs and compiles the Run's context and config.
     fn prepare_turn(
         &self,
         submission: &AdmittedSubmission,
@@ -1855,7 +1838,6 @@ impl Engine {
         })
     }
 
-    /// Closes the Goal when the Run's outcome settles it and reports the committed Run.
     async fn settle_turn(
         &self,
         started: StartedRun<'_>,
@@ -1962,7 +1944,6 @@ impl Engine {
     }
 }
 
-/// Admits a submission's per-role Provider chains before any of them is called.
 fn admit_providers(providers: &crate::provider::AdmittedProviders) -> Result<(), EngineError> {
     if !providers.identities().valid() {
         return Err(EngineError::InvalidRequest);

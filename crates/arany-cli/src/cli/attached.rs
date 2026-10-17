@@ -125,7 +125,6 @@ impl std::fmt::Display for Feedback {
     }
 }
 
-/// `Notice` keeps the Session; `Fatal` ends it through terminal restoration. Unclassified errors are `Fatal`.
 #[derive(Debug)]
 enum LoopError {
     Fatal(String),
@@ -144,7 +143,6 @@ impl From<&str> for LoopError {
     }
 }
 
-/// The attached loop's only decision point for command failures.
 fn feedback_or_end<T: Into<Feedback>>(result: Result<T, LoopError>) -> Result<Feedback, String> {
     match result {
         Ok(feedback) => Ok(feedback.into()),
@@ -1159,7 +1157,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
     closed
 }
 
-/// A failed exit drops the Engine instead, which still stops its Store thread.
+// A failed exit drops the Engine instead, which still stops its Store thread.
 async fn close_engine(engine: Engine) -> Result<(), String> {
     engine
         .close()
@@ -1313,8 +1311,10 @@ fn retained_draft_notice(composer: &Composer) -> Option<Feedback> {
     })
 }
 
-/// Runs one idle submission, materializing an unsaved conversation first.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "submission carries independent Run inputs"
+)]
 async fn submit_idle_run(
     engine: &Engine,
     terminal: &mut AttachedTerminal,
@@ -1381,7 +1381,6 @@ const INTERRUPTED_GOAL_NOTICE: &str = "Goal paused; use /goal resume to continue
 const OUT_OF_BUDGET_GOAL_NOTICE: &str =
     "Goal paused and out of budget; /goal resume will close it.";
 
-/// Wording for a paused Goal, chosen by whether an explicit resume still admits a Run.
 fn paused_goal_notice(resume_admitted: bool) -> &'static str {
     if resume_admitted {
         INTERRUPTED_GOAL_NOTICE
@@ -1451,7 +1450,10 @@ async fn finish_interrupted_submission(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "submission carries independent Run inputs"
+)]
 async fn finish_submission(
     engine: &Engine,
     terminal: &mut AttachedTerminal,
@@ -1716,7 +1718,6 @@ fn refresh_runtime_skills<N: From<String> + std::fmt::Display>(
     }
 }
 
-/// Runs folder consent, then history recovery, before any account or Provider step.
 async fn admit_startup(
     terminal: &mut AttachedTerminal,
     admission: &mut Admission,
@@ -1765,8 +1766,6 @@ async fn admit_startup(
     Ok(ControlFlow::Continue(()))
 }
 
-/// Runs saved-access authorization; `Break` means the user cancelled, `Continue(false)` a
-/// recoverable failure.
 async fn authorize_or_notice<N: From<String> + std::fmt::Display>(
     terminal: &mut AttachedTerminal,
     defaults: &SessionDefaults,
@@ -1796,7 +1795,6 @@ fn require_access(authorized: bool, notice: Option<impl std::fmt::Display>) -> R
     ))
 }
 
-/// Replaces the exec-only `arany --setup` hint with the in-chat `/setup` one.
 fn restore_failure_notice(error: impl std::fmt::Display) -> String {
     let error = error.to_string();
     let error = error
@@ -1805,7 +1803,6 @@ fn restore_failure_notice(error: impl std::fmt::Display) -> String {
     format!("Saved access could not be restored: {error}; use /setup to choose or reset access")
 }
 
-/// Selects the missing-selection hints, which only a new conversation can act on.
 #[derive(Clone, Copy)]
 enum PromptEntry {
     New,
@@ -2050,7 +2047,6 @@ async fn load_confirmed_outcome(
     Ok(view)
 }
 
-/// A mismatch means the committed Run is not in the loaded history; it is an integrity failure, not a reload failure.
 fn confirm_outcome(view: &SessionView, outcome: &RunOutcome) -> Result<(), String> {
     if !view.runs.iter().any(|run| {
         run.id == outcome.run.id
@@ -2177,9 +2173,6 @@ async fn load_view(state_dir: &Path, session_id: SessionId) -> Result<SessionVie
     Ok(view)
 }
 
-/// Events are already committed when this runs, so a failed reload keeps the displayed history
-/// and returns the notice with the reload failure appended. `hidden` tells the user how to read a
-/// committed answer this presentation did not show.
 fn reload_view_or_keep(
     view: &mut SessionView,
     reloaded: Result<SessionView, String>,
@@ -2208,8 +2201,6 @@ fn reload_failure(error: &str, hidden: Option<&str>) -> String {
     )
 }
 
-/// Linear output has no history view, so `/resume` cannot show the answer there. Its notice points to
-/// the recovery line that `print_run_answer` writes untruncated; other presentations use `/resume`.
 fn hidden_answer_guidance(linear: bool) -> &'static str {
     if linear {
         "the committed answer was not shown; see the command above"
@@ -2218,8 +2209,6 @@ fn hidden_answer_guidance(linear: bool) -> &'static str {
     }
 }
 
-/// Builds the `show` command that replays a Run. Only an explicit `--state-dir` must be repeated;
-/// `show` also reads `ARANY_STATE_DIR` and the default store.
 fn show_command(run: arany::RunId, explicit_state_dir: Option<&Path>) -> String {
     match explicit_state_dir {
         Some(dir) => format!(
@@ -2242,8 +2231,6 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
-/// Prints a confirmed Run answer for this presentation. Linear output runs on the restored terminal;
-/// a missing `confirmed` view (failed reload) writes the untruncated `show` recovery line instead.
 fn print_run_answer(
     terminal: &mut AttachedTerminal,
     confirmed: Option<&SessionView>,
