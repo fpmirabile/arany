@@ -1,6 +1,7 @@
 use super::{
-    BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, TASK_BYTES_CAP, Task,
-    bootstrap_failure, drain_stderr, parse_ready, read_capped, read_line_capped, read_observation,
+    BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, TASK_BYTES_CAP, TEARDOWN_WAIT,
+    Task, bootstrap_failure, drain_stderr, parse_ready, read_capped, read_line_capped,
+    read_observation,
 };
 use crate::session::WorkspaceIdentity;
 use crate::tools::Cancellation;
@@ -1022,11 +1023,13 @@ async fn execute_worker(
     if result.is_err() {
         let _ = child.start_kill();
     }
+    let deadline = tokio::time::Instant::now() + TEARDOWN_WAIT;
+    scope.teardown = Some(deadline);
     let capture = fixture::Span::begin(fixture::Stage::WorkerReap);
     let reaped = match status {
         Some(status) => Ok(status),
         None => {
-            tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::time::timeout_at(deadline, async {
                 child.wait().await.map_err(|_| ToolError::Operation)
             })
             .await
@@ -1034,9 +1037,9 @@ async fn execute_worker(
     };
     if reaped.is_err() {
         let _ = child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+        let _ = tokio::time::timeout_at(deadline, child.wait()).await;
     }
-    let drained = drain_stderr(&mut stderr_task).await;
+    let drained = drain_stderr(&mut stderr_task, deadline).await;
     capture.finish(matches!(reaped, Ok(Ok(_))) && drained.is_some());
     if result.is_err()
         && let Some(failure) = drained.as_deref().and_then(bootstrap_failure)

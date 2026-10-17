@@ -693,7 +693,8 @@ async fn settle_launch(
     }
     let _ = child.start_kill();
     let reaped = tokio::time::timeout_at(deadline, child.wait()).await;
-    let drained = match tokio::time::timeout_at(deadline, drain_stderr(stderr_task)).await {
+    let drained = match tokio::time::timeout_at(deadline, drain_stderr(stderr_task, deadline)).await
+    {
         Ok(drained) => drained,
         Err(_) => {
             stderr_task.abort();

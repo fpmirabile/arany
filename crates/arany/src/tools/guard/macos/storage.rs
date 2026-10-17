@@ -1,4 +1,4 @@
-use super::super::CAPTURE_BYTES;
+use super::super::{CAPTURE_BYTES, TEARDOWN_WAIT, retry_transient};
 use super::system_program;
 use crate::private_fs::open_directory;
 use crate::tools::toolchains::RuntimeGrant;
@@ -16,6 +16,8 @@ pub(super) const STORAGE_BYTES_CAP: u64 = crate::tools::types::SCRATCH_BYTES;
 const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
 const _: () = assert!(STORAGE_BYTES_CAP.is_multiple_of(BYTES_PER_MEBIBYTE));
 const STORAGE_NAMES: [&str; 3] = ["workspace", "scratch", "cache"];
+const CLEANUP_ATTEMPTS: usize = 3;
+const CLEANUP_PAUSE: Duration = Duration::from_millis(250);
 pub(super) const STORAGE_PENDING: &str = "storage.pending";
 
 pub(super) use super::super::admission::{read_record, write_record};
@@ -384,6 +386,20 @@ pub(super) fn storage_mounted(root: &Path) -> Result<bool, ToolError> {
 }
 
 pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
+    cleanup_storage_until(root, tokio::time::Instant::now() + TEARDOWN_WAIT).await
+}
+
+pub(super) async fn cleanup_storage_until(
+    root: &Path,
+    deadline: tokio::time::Instant,
+) -> Result<(), ToolError> {
+    retry_transient(CLEANUP_ATTEMPTS, CLEANUP_PAUSE, deadline, || {
+        cleanup_storage_once(root)
+    })
+    .await
+}
+
+async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
     let mut has_images = false;

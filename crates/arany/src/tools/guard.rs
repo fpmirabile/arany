@@ -15,6 +15,8 @@ use tokio::process::{Child, Command};
 const CAPTURE_BYTES: usize = 48 * 1024;
 const TASK_BYTES_CAP: usize = 96 * 1024;
 pub(super) const RUNTIME_ROOT: &str = "/usr";
+// Loaded CI hosts stall teardown for seconds; one shared bound only widens the wait for termination evidence.
+pub(super) const TEARDOWN_WAIT: Duration = Duration::from_secs(10);
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -308,6 +310,10 @@ enum BootstrapStage {
     Handshake,
     Payload,
     Receipt,
+    ProcessStop,
+    LauncherReap,
+    StderrDrain,
+    StorageCleanup,
 }
 
 impl BootstrapStage {
@@ -320,6 +326,10 @@ impl BootstrapStage {
             Self::Handshake => "handshake",
             Self::Payload => "payload",
             Self::Receipt => "receipt",
+            Self::ProcessStop => "process stop",
+            Self::LauncherReap => "launcher reap",
+            Self::StderrDrain => "stderr drain",
+            Self::StorageCleanup => "storage cleanup",
         }
     }
 }
@@ -346,6 +356,10 @@ impl BootstrapFailure {
             BootstrapStage::Handshake => "handshake",
             BootstrapStage::Payload => "execution",
             BootstrapStage::Receipt => "receipt",
+            BootstrapStage::ProcessStop => "process cleanup",
+            BootstrapStage::LauncherReap => "launcher reap",
+            BootstrapStage::StderrDrain => "output EOF",
+            BootstrapStage::StorageCleanup => "storage cleanup",
         }
     }
 }
@@ -503,14 +517,36 @@ pub(super) async fn execute(
 
 pub(super) async fn drain_stderr(
     task: &mut tokio::task::JoinHandle<Result<Vec<u8>, ToolError>>,
+    deadline: tokio::time::Instant,
 ) -> Option<Vec<u8>> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut *task).await {
+    match tokio::time::timeout_at(deadline, &mut *task).await {
         Ok(Ok(Ok(stderr))) => Some(stderr),
         Ok(_) => None,
         Err(_) => {
             task.abort();
             let _ = task.await;
             None
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<T, ToolError>>>(
+    attempts: usize,
+    pause: Duration,
+    deadline: tokio::time::Instant,
+    mut operation: impl FnMut() -> Fut,
+) -> Result<T, ToolError> {
+    let mut attempt = 1;
+    loop {
+        match operation().await {
+            Err(ToolError::ProtectionUnavailable | ToolError::Operation)
+                if attempt < attempts && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(pause * attempt as u32).await;
+                attempt += 1;
+            }
+            result => return result,
         }
     }
 }
@@ -582,8 +618,7 @@ async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
     intent: &EffectIntent,
 ) -> Result<ToolObservation, ToolError> {
     let bytes = read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES).await?;
-    let observation: ToolObservation =
-        serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
+    let observation = parse_observation(&bytes)?;
     if observation.cache_update != CacheUpdate::NotApplicable
         || !observation.attested_for(intent)
         || !read_capped(&mut *reader, 1).await?.is_empty()
@@ -593,13 +628,19 @@ async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
     Ok(observation)
 }
 
+fn parse_observation(bytes: &[u8]) -> Result<ToolObservation, ToolError> {
+    serde_json::from_slice(bytes).map_err(|_| {
+        serde_json::from_slice::<BootstrapFailure>(bytes)
+            .map_or(ToolError::Operation, ToolError::GuardBootstrap)
+    })
+}
+
 pub(super) async fn read_observation_line<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     intent: &EffectIntent,
 ) -> Result<ToolObservation, ToolError> {
     let bytes = read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES).await?;
-    let observation: ToolObservation =
-        serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
+    let observation = parse_observation(&bytes)?;
     if observation.cache_update != CacheUpdate::NotAttempted || !observation.attested_for(intent) {
         return Err(ToolError::Operation);
     }
@@ -1218,6 +1259,66 @@ pub(super) fn payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_failure_lines_keep_their_closed_stage() {
+        let failure = br#"{"stage":"launcher_reap"}"#;
+        assert!(matches!(
+            parse_observation(failure),
+            Err(ToolError::GuardBootstrap(found)) if found.failure_stage() == "launcher reap"
+        ));
+        assert!(matches!(
+            parse_observation(br#"{"stage":"made_up"}"#),
+            Err(ToolError::Operation)
+        ));
+    }
+
+    #[tokio::test]
+    async fn transient_retry_is_bounded_and_keeps_terminal_errors() {
+        let calls = std::cell::Cell::new(0);
+        let far = tokio::time::Instant::now() + Duration::from_secs(60);
+        let recovered = retry_transient(3, Duration::ZERO, far, || {
+            calls.set(calls.get() + 1);
+            let attempt = calls.get();
+            async move {
+                if attempt < 3 {
+                    Err(ToolError::ProtectionUnavailable)
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await;
+        assert!(matches!(recovered, Ok(3)));
+
+        calls.set(0);
+        let exhausted: Result<(), _> = retry_transient(3, Duration::ZERO, far, || {
+            calls.set(calls.get() + 1);
+            async { Err(ToolError::Operation) }
+        })
+        .await;
+        assert!(matches!(exhausted, Err(ToolError::Operation)));
+        assert_eq!(calls.get(), 3);
+
+        calls.set(0);
+        let expired: Result<(), _> =
+            retry_transient(3, Duration::ZERO, tokio::time::Instant::now(), || {
+                calls.set(calls.get() + 1);
+                async { Err(ToolError::Operation) }
+            })
+            .await;
+        assert!(matches!(expired, Err(ToolError::Operation)));
+        assert_eq!(calls.get(), 1);
+
+        calls.set(0);
+        let terminal: Result<(), _> = retry_transient(3, Duration::ZERO, far, || {
+            calls.set(calls.get() + 1);
+            async { Err(ToolError::Path) }
+        })
+        .await;
+        assert!(matches!(terminal, Err(ToolError::Path)));
+        assert_eq!(calls.get(), 1);
+    }
 
     #[cfg(unix)]
     #[tokio::test]
