@@ -7,7 +7,7 @@ use crate::provider::{
     AdmittedProviders, MAX_PROVIDER_SWITCHES, Provider, ProviderError, ProviderFallback,
     ProviderIdentity, ProviderRequest, ProviderResponse, ProviderRole, ResponsePreview,
 };
-use crate::session::{AgentRunId, Event};
+use crate::session::{AgentRunId, Event, RunId, SessionId};
 use crate::store::StoreError;
 use std::sync::{
     Arc,
@@ -15,10 +15,17 @@ use std::sync::{
 };
 use tokio::time::Instant;
 
-pub(super) type CompactionOutcome = (
-    Result<crate::provider::CompactionResponse, ProviderError>,
-    Arc<dyn Provider>,
-);
+pub(super) struct CompactionOutcome {
+    pub(super) response: Result<crate::provider::CompactionResponse, ProviderError>,
+    pub(super) provider: Arc<dyn Provider>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct CallScope {
+    pub(super) session_id: SessionId,
+    pub(super) run_id: RunId,
+    pub(super) agent_run_id: AgentRunId,
+}
 
 pub(super) struct CallRouter<'a> {
     pub(super) providers: AdmittedProviders,
@@ -107,7 +114,11 @@ impl CallRouter<'_> {
                 || Instant::now() >= deadline
                 || !self
                     .switch(
-                        (request.session_id, request.run_id, request.agent_run_id),
+                        CallScope {
+                            session_id: request.session_id,
+                            run_id: request.run_id,
+                            agent_run_id: request.agent_run_id,
+                        },
                         role,
                         provider.identity(),
                         Some(&request),
@@ -154,14 +165,18 @@ impl CallRouter<'_> {
                 || Instant::now() >= deadline
                 || !self
                     .switch(
-                        (request.session_id, request.covered_run_id, actor),
+                        CallScope {
+                            session_id: request.session_id,
+                            run_id: request.covered_run_id,
+                            agent_run_id: actor,
+                        },
                         ProviderRole::Compaction,
                         provider.identity(),
                         None,
                     )
                     .await?
             {
-                return Ok(Some((response, provider)));
+                return Ok(Some(CompactionOutcome { response, provider }));
             }
         }
     }
@@ -191,7 +206,7 @@ impl CallRouter<'_> {
 
     pub(super) async fn switch(
         &self,
-        scope: (crate::session::SessionId, crate::session::RunId, AgentRunId),
+        scope: CallScope,
         role: ProviderRole,
         from: &ProviderIdentity,
         request: Option<&ProviderRequest>,
@@ -199,7 +214,11 @@ impl CallRouter<'_> {
         if request.is_some_and(|request| !self.can_switch(role, from, request)) {
             return Ok(false);
         }
-        let (session_id, run_id, agent_run_id) = scope;
+        let CallScope {
+            session_id,
+            run_id,
+            agent_run_id,
+        } = scope;
         let Some(to) = self.next(role, from) else {
             return Ok(false);
         };

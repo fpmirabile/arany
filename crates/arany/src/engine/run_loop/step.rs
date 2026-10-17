@@ -780,7 +780,7 @@ impl RunLoop<'_> {
                     break execution.await;
                 }
                 request = active_receiver.recv(), if active_segment.is_none() => {
-                    if let Some((admitted_at, reply)) = request {
+                    if let Some(ActiveActionRequest { admitted_at, reply }) = request {
                         if let Some(pause) = queue_pause.take() {
                             self.settle_active_pause(pause, Some(admitted_at))?;
                         }

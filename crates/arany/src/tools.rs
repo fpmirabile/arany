@@ -118,7 +118,11 @@ pub enum ToolError {
     GuardBootstrap(guard::BootstrapFailure),
 }
 
-pub(crate) type PermissionSnapshot = (std::sync::Arc<permissions::PermissionConfig>, [u8; 32]);
+#[derive(Clone)]
+pub(crate) struct PermissionSnapshot {
+    pub(crate) config: std::sync::Arc<permissions::PermissionConfig>,
+    pub(crate) digest: [u8; 32],
+}
 
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
@@ -139,10 +143,10 @@ pub(crate) struct ToolRuntime {
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
 }
 
-pub(crate) type ActiveActionRequest = (
-    tokio::time::Instant,
-    tokio::sync::oneshot::Sender<Result<ActiveToolWindow, ToolError>>,
-);
+pub(crate) struct ActiveActionRequest {
+    pub(crate) admitted_at: tokio::time::Instant,
+    pub(crate) reply: tokio::sync::oneshot::Sender<Result<ActiveToolWindow, ToolError>>,
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct ActiveToolWindow {
@@ -180,7 +184,7 @@ impl ToolRuntime {
         };
         let (reply, receipt) = tokio::sync::oneshot::channel();
         sender
-            .send((admitted_at, reply))
+            .send(ActiveActionRequest { admitted_at, reply })
             .await
             .map_err(|_| ToolError::Operation)?;
         receipt
@@ -300,7 +304,10 @@ impl ToolRuntime {
             .map_err(|_| ToolError::Configuration)?
             .map(|bytes| {
                 permissions::PermissionConfig::parse(&bytes)
-                    .map(|config| (std::sync::Arc::new(config), types::digest(&bytes)))
+                    .map(|config| PermissionSnapshot {
+                        config: std::sync::Arc::new(config),
+                        digest: types::digest(&bytes),
+                    })
                     .map_err(|_| ToolError::Configuration)
             })
             .transpose()
@@ -394,12 +401,14 @@ impl ToolRuntime {
     pub(crate) fn receipt(&self) -> ToolPolicyReceipt {
         let mut receipt = self.config.receipt();
         receipt.max_context_bytes = self.context_limit_bytes as u32;
-        receipt.permissions_digest = self.permissions.as_ref().map(|(_, digest)| *digest);
+        receipt.permissions_digest = self.permissions.as_ref().map(|snapshot| snapshot.digest);
         receipt
     }
 
     pub(crate) fn permissions(&self) -> Option<&permissions::PermissionConfig> {
-        self.permissions.as_ref().map(|(config, _)| config.as_ref())
+        self.permissions
+            .as_ref()
+            .map(|snapshot| snapshot.config.as_ref())
     }
 
     fn skill_rows(&self) -> Vec<serde_json::Value> {

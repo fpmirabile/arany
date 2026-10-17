@@ -2,6 +2,7 @@ use super::RunLoop;
 use crate::engine::EngineError;
 use crate::engine::compaction::{COMPACTION_CALL_DEADLINE, classify_response};
 use crate::engine::ledger::Action;
+use crate::engine::routing::CompactionOutcome;
 use crate::provider::{
     CompactionItem, CompactionRequest, GoalContextFacts, HistoryTurn, ProviderFailureClass,
     ProviderRequest, ProviderWireProvenance, Usage,
@@ -299,11 +300,18 @@ impl RunLoop<'_> {
         };
         let (mut status, response_id, usage, wire_provenance) = match response {
             None => failed(CompactionFailure::Cancelled),
-            Some((Ok(response), _)) => classify_response(response),
-            Some((Err(crate::provider::ProviderError::CallTimedOut), _)) => {
-                failed(CompactionFailure::TimedOut)
-            }
-            Some((Err(error), _)) => failed(match error.failure_class() {
+            Some(CompactionOutcome {
+                response: Ok(response),
+                ..
+            }) => classify_response(response),
+            Some(CompactionOutcome {
+                response: Err(crate::provider::ProviderError::CallTimedOut),
+                ..
+            }) => failed(CompactionFailure::TimedOut),
+            Some(CompactionOutcome {
+                response: Err(error),
+                ..
+            }) => failed(match error.failure_class() {
                 ProviderFailureClass::Unavailable => CompactionFailure::ProviderUnavailable,
                 ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
                 ProviderFailureClass::InvalidOutcome => CompactionFailure::InvalidOutcome,

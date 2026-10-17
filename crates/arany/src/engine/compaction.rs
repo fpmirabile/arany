@@ -261,7 +261,7 @@ impl Engine {
                     publisher: None,
                 };
                 // A fresh token is never cancelled, so the router always yields an outcome.
-                let (response, provider) = router
+                let super::routing::CompactionOutcome { response, provider } = router
                     .compact(
                         request,
                         *actor,
