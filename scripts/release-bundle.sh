@@ -80,7 +80,7 @@ for target in x86_64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin;
     --prefix none --format '{p}' > "$stage/tree-$target"
 done
 awk '
-  NF == 0 || $1 == "arany" { next }
+  NF == 0 || $1 == "arany" || $1 == "arany-cli" { next }
   $1 ~ /^[A-Za-z0-9_-]+$/ && $2 ~ /^v[0-9A-Za-z.+-]+$/ {
     print $1, substr($2, 2)
     next

@@ -4,7 +4,7 @@ Status: **repaired in the offline Linux beta 1 path**. Severity before repair: *
 
 ## Evidence and failure path
 
-Previously, the attached [setup owner](../../../src/cli/attached/setup.rs) inspected the native API account first and returned it when present; only then did it inspect the selected ChatGPT account ID. [Bare new Session entry](../../../src/cli/attached.rs) used those defaults without a fresh access-method choice. A user who last completed ChatGPT setup but still had a saved API account therefore started a later bare `arany` Session on the API-key route.
+Previously, the attached [setup owner](../../../crates/arany-cli/src/cli/attached/setup.rs) inspected the native API account first and returned it when present; only then did it inspect the selected ChatGPT account ID. [Bare new Session entry](../../../crates/arany-cli/src/cli/attached.rs) used those defaults without a fresh access-method choice. A user who last completed ChatGPT setup but still had a saved API account therefore started a later bare `arany` Session on the API-key route.
 
 The old `saved_defaults` called `credentials::inspect`, which loaded the full API account before deciding the route. No key disclosure or API request was observed, but this crossed the intended selected-credential boundary.
 

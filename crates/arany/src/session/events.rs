@@ -1,0 +1,1039 @@
+mod goal;
+mod records;
+#[cfg(test)]
+mod tests;
+mod validate;
+
+use super::{
+    MAX_ASSISTANT_MESSAGE_BYTES, MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES,
+    MAX_CONTEXT_CONTENT_BYTES, MAX_HISTORY_RUNS, MAX_STEERING_NOTE_BYTES, MAX_USER_MESSAGE_BYTES,
+    compaction,
+};
+
+pub use goal::{
+    GoalBudget, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus,
+    GoalSuccessCriterion, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_CONTRACT_BYTES,
+    MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES,
+    MAX_GOAL_RUNS,
+};
+pub(crate) use goal::{GoalSuccessState, GoalUsage};
+pub use records::{
+    AgentDisposition, AgentRole, ChildGrant, CollaborationPolicy, CompactionFailure,
+    CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
+    DisplayChunk, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
+    MAX_DISPLAY_TEXT_BYTES, ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition,
+    SessionDefaults,
+};
+use validate::bounded;
+
+use serde::{Deserialize, Serialize};
+use std::{fmt, str::FromStr};
+use uuid::{Uuid, Version};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct WorkspaceIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+fn parse_v7(value: &str) -> Result<Uuid, &'static str> {
+    let id = Uuid::parse_str(value).map_err(|_| "invalid ID")?;
+    if id.get_version() != Some(Version::SortRand) {
+        return Err("ID must be UUIDv7");
+    }
+    Ok(id)
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(Uuid);
+
+impl SessionId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl FromStr for SessionId {
+    type Err = &'static str;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_v7(value).map(Self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RunId(Uuid);
+
+impl RunId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+impl Default for RunId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl fmt::Display for RunId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl FromStr for RunId {
+    type Err = &'static str;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_v7(value).map(Self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GoalId(Uuid);
+
+impl GoalId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    fn valid(self) -> bool {
+        self.0.get_version() == Some(Version::SortRand)
+    }
+}
+impl Default for GoalId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl fmt::Display for GoalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl FromStr for GoalId {
+    type Err = &'static str;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_v7(value).map(Self)
+    }
+}
+
+pub(crate) fn payload_version(kind: &str) -> Option<i64> {
+    match kind {
+        "SessionStarted"
+        | "SessionDefaultChanged"
+        | "SessionForked"
+        | "SessionRenamed"
+        | "GoalStarted"
+        | "GoalRunLinked"
+        | "GoalResumed"
+        | "GoalPlanContractRecorded"
+        | "MessageAccepted"
+        | "AgentSpawned"
+        | "ProviderCallRecorded"
+        | "GoalContextCompacted"
+        | "GoalSteeringNoteRecorded"
+        | "AssistantDisplayRecorded"
+        | "GoalFinished"
+        | "AgentFinished"
+        | "MessageCommitted" => Some(6),
+        "ProviderFallbackUsed" => Some(1),
+        "ToolPermissionDecided" => Some(1),
+        "ToolFinished" => Some(8),
+        "RunStarted" => Some(9),
+        "RunFinished" => Some(7),
+        "GoalProviderCallReserved" => Some(7),
+        "GoalCompactionCallReserved" => Some(7),
+        "ToolStarted" => Some(7),
+        "ContextCompacted" => Some(7),
+        _ => None,
+    }
+}
+pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
+pub(crate) const MAX_STEP_TOOL_CALLS: u8 = 4;
+const _: () = assert!(MAX_STEP_TOOL_CALLS as u32 <= u8::MAX as u32);
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentRunId(Uuid);
+
+impl AgentRunId {
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+impl Default for AgentRunId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl fmt::Display for AgentRunId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl FromStr for AgentRunId {
+    type Err = &'static str;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_v7(value).map(Self)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Event {
+    SessionStarted {
+        title: String,
+        workspace_identity: WorkspaceIdentity,
+    },
+    SessionDefaultChanged {
+        defaults: SessionDefaults,
+    },
+    SessionForked {
+        title: String,
+        source_session_id: SessionId,
+        source_run_id: RunId,
+        source_sequence: u64,
+        prefix_digest: [u8; 32],
+    },
+    ContextCompacted {
+        record: CompactionRecord,
+        /// The Goal compaction call's settled active time; `None` outside a Goal.
+        active_ms: Option<u64>,
+    },
+    SessionRenamed {
+        title: String,
+    },
+    GoalStarted {
+        goal_id: GoalId,
+        objective: String,
+        workspace_identity: WorkspaceIdentity,
+        budget: GoalBudget,
+        phase: GoalPhase,
+        /// Engine iterates Runs on the pinned objective until a Goal stop condition.
+        autonomous: bool,
+        resource_settings: crate::tools::ToolResourceSettings,
+    },
+    GoalRunLinked {
+        goal_id: GoalId,
+        run_id: RunId,
+        phase: GoalPhase,
+    },
+    GoalResumed {
+        goal_id: GoalId,
+    },
+    GoalPlanContractRecorded {
+        goal_id: GoalId,
+        run_id: RunId,
+        contract: GoalPlanContract,
+    },
+    GoalFinished {
+        goal_id: GoalId,
+        status: GoalStatus,
+        active_ms: u64,
+        report: GoalReport,
+    },
+    MessageAccepted {
+        run_id: RunId,
+        text: String,
+        images: Vec<crate::provider::ImageAttachment>,
+    },
+    RunStarted {
+        run_id: RunId,
+        config: RunConfig,
+        /// Active time the Run may spend: the Goal's remaining time at start; `None` when unlimited.
+        active_deadline_ms: Option<u64>,
+    },
+    AgentSpawned {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        role: AgentRole,
+        ordinal: u8,
+        objective: Option<String>,
+        grant: Option<ChildGrant>,
+    },
+    ProviderFallbackUsed {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        fallback: crate::provider::ProviderFallback,
+    },
+    ProviderCallRecorded {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        record: ProviderCallRecord,
+    },
+    GoalProviderCallReserved {
+        goal_id: GoalId,
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        /// Upper bound of the Run's active time until the next action starts; a crash charges it.
+        active_ceiling_ms: u64,
+    },
+    GoalCompactionCallReserved {
+        goal_id: GoalId,
+        run_id: RunId,
+        active_ceiling_ms: u64,
+    },
+    GoalContextCompacted {
+        goal_id: GoalId,
+        run_id: RunId,
+        covered_tool_count: u32,
+        record: CompactionRecord,
+    },
+    GoalSteeringNoteRecorded {
+        goal_id: GoalId,
+        run_id: RunId,
+        text: String,
+    },
+    AssistantDisplayRecorded {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        chunk: DisplayChunk,
+    },
+    ToolStarted {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        intent: crate::tools::EffectIntent,
+        active_ceiling_ms: u64,
+    },
+    ToolFinished {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        observation: crate::tools::ToolObservation,
+    },
+    ToolPermissionDecided {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        verdict: crate::tools::permissions::PermissionVerdict,
+    },
+    AgentFinished {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        disposition: AgentDisposition,
+        summary: Option<String>,
+        result: Option<String>,
+    },
+    MessageCommitted {
+        run_id: RunId,
+        text: String,
+    },
+    RunFinished {
+        run_id: RunId,
+        disposition: RunDisposition,
+        active_ms: u64,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventEnvelope {
+    pub sequence: u64,
+    pub session_id: SessionId,
+    pub run_id: Option<RunId>,
+    pub agent_run_id: Option<AgentRunId>,
+    pub event: Event,
+    pub created_at_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForkLineage {
+    pub source_session_id: SessionId,
+    pub source_run_id: RunId,
+    pub source_sequence: u64,
+    pub prefix_digest: [u8; 32],
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReplayError {
+    #[error("invalid Event payload")]
+    InvalidPayload,
+    #[error("unknown Event kind or version")]
+    UnknownEvent,
+    #[error("invalid Session transition")]
+    InvalidTransition,
+    #[error("invalid compaction snapshot")]
+    InvalidSnapshot,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TitlePayload {
+    title: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartedPayload {
+    title: String,
+    workspace_device: u64,
+    workspace_inode: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForkPayload {
+    title: String,
+    source_session_id: SessionId,
+    source_run_id: RunId,
+    source_sequence: u64,
+    prefix_digest: [u8; 32],
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextPayload {
+    text: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessagePayload {
+    text: String,
+    #[serde(deserialize_with = "crate::provider::deserialize_images")]
+    images: Vec<crate::provider::ImageAttachment>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalStartedPayload {
+    goal_id: GoalId,
+    objective: String,
+    workspace_device: u64,
+    workspace_inode: u64,
+    budget: GoalBudget,
+    phase: GoalPhase,
+    autonomous: bool,
+    resource_settings: crate::tools::ToolResourceSettings,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalRunPayload {
+    goal_id: GoalId,
+    phase: GoalPhase,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalIdPayload {
+    goal_id: GoalId,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalContractPayload {
+    goal_id: GoalId,
+    contract: GoalPlanContract,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalFinishedPayload {
+    goal_id: GoalId,
+    status: GoalStatus,
+    active_ms: u64,
+    report: GoalReport,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalProviderCallPayload {
+    goal_id: GoalId,
+    active_ceiling_ms: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolStartedPayload {
+    intent: crate::tools::EffectIntent,
+    active_ceiling_ms: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextCompactedPayload {
+    record: CompactionRecord,
+    #[serde(deserialize_with = "Option::deserialize")]
+    active_ms: Option<u64>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalContextCompactionPayload {
+    goal_id: GoalId,
+    covered_tool_count: u32,
+    record: CompactionRecord,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoalSteeringNotePayload {
+    goal_id: GoalId,
+    text: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnPayload {
+    role: AgentRole,
+    ordinal: u8,
+    #[serde(deserialize_with = "Option::deserialize")]
+    objective: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    grant: Option<ChildGrant>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentFinishedPayload {
+    disposition: AgentDisposition,
+    #[serde(deserialize_with = "Option::deserialize")]
+    summary: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    result: Option<String>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunFinishedPayload {
+    disposition: RunDisposition,
+    active_ms: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunStartedPayload {
+    config: RunConfig,
+    #[serde(deserialize_with = "Option::deserialize")]
+    active_deadline_ms: Option<u64>,
+}
+
+impl Event {
+    pub(crate) fn finished_payload_size(summary: &str, result: &str) -> Result<usize, ReplayError> {
+        serialize(&AgentFinishedPayload {
+            disposition: AgentDisposition::Finished,
+            summary: Some(summary.into()),
+            result: Some(result.into()),
+        })
+        .map(|payload| payload.len())
+    }
+
+    pub fn version(&self) -> i64 {
+        payload_version(self.kind()).expect("every Event kind has a payload version")
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::SessionStarted { .. } => "SessionStarted",
+            Self::SessionDefaultChanged { .. } => "SessionDefaultChanged",
+            Self::SessionForked { .. } => "SessionForked",
+            Self::ContextCompacted { .. } => "ContextCompacted",
+            Self::SessionRenamed { .. } => "SessionRenamed",
+            Self::GoalStarted { .. } => "GoalStarted",
+            Self::GoalRunLinked { .. } => "GoalRunLinked",
+            Self::GoalResumed { .. } => "GoalResumed",
+            Self::GoalPlanContractRecorded { .. } => "GoalPlanContractRecorded",
+            Self::GoalFinished { .. } => "GoalFinished",
+            Self::MessageAccepted { .. } => "MessageAccepted",
+            Self::RunStarted { .. } => "RunStarted",
+            Self::AgentSpawned { .. } => "AgentSpawned",
+            Self::ProviderFallbackUsed { .. } => "ProviderFallbackUsed",
+            Self::ProviderCallRecorded { .. } => "ProviderCallRecorded",
+            Self::GoalProviderCallReserved { .. } => "GoalProviderCallReserved",
+            Self::GoalCompactionCallReserved { .. } => "GoalCompactionCallReserved",
+            Self::GoalContextCompacted { .. } => "GoalContextCompacted",
+            Self::GoalSteeringNoteRecorded { .. } => "GoalSteeringNoteRecorded",
+            Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
+            Self::ToolStarted { .. } => "ToolStarted",
+            Self::ToolFinished { .. } => "ToolFinished",
+            Self::ToolPermissionDecided { .. } => "ToolPermissionDecided",
+            Self::AgentFinished { .. } => "AgentFinished",
+            Self::MessageCommitted { .. } => "MessageCommitted",
+            Self::RunFinished { .. } => "RunFinished",
+        }
+    }
+
+    pub(crate) fn scope(&self) -> (Option<RunId>, Option<AgentRunId>) {
+        match self {
+            Self::SessionStarted { .. }
+            | Self::SessionDefaultChanged { .. }
+            | Self::SessionForked { .. }
+            | Self::ContextCompacted { .. }
+            | Self::SessionRenamed { .. }
+            | Self::GoalStarted { .. }
+            | Self::GoalResumed { .. }
+            | Self::GoalFinished { .. } => (None, None),
+            Self::GoalRunLinked { run_id, .. }
+            | Self::GoalPlanContractRecorded { run_id, .. }
+            | Self::GoalCompactionCallReserved { run_id, .. }
+            | Self::GoalContextCompacted { run_id, .. }
+            | Self::GoalSteeringNoteRecorded { run_id, .. }
+            | Self::MessageAccepted { run_id, .. }
+            | Self::RunStarted { run_id, .. }
+            | Self::MessageCommitted { run_id, .. }
+            | Self::RunFinished { run_id, .. } => (Some(*run_id), None),
+            Self::AgentSpawned {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::ProviderFallbackUsed {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::GoalProviderCallReserved {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::AssistantDisplayRecorded {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::ToolStarted {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::ToolPermissionDecided {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::ToolFinished {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::AgentFinished {
+                run_id,
+                agent_run_id,
+                ..
+            } => (Some(*run_id), Some(*agent_run_id)),
+        }
+    }
+
+    pub fn payload(&self) -> Result<String, ReplayError> {
+        self.validate()?;
+        match self {
+            Self::SessionStarted {
+                title,
+                workspace_identity:
+                    WorkspaceIdentity {
+                        device: workspace_device,
+                        inode: workspace_inode,
+                    },
+            } => serialize(&StartedPayload {
+                title: title.clone(),
+                workspace_device: *workspace_device,
+                workspace_inode: *workspace_inode,
+            }),
+            Self::SessionRenamed { title } => serialize(&TitlePayload {
+                title: title.clone(),
+            }),
+            Self::SessionDefaultChanged { defaults } => serialize(defaults),
+            Self::SessionForked {
+                title,
+                source_session_id,
+                source_run_id,
+                source_sequence,
+                prefix_digest,
+            } => serialize(&ForkPayload {
+                title: title.clone(),
+                source_session_id: *source_session_id,
+                source_run_id: *source_run_id,
+                source_sequence: *source_sequence,
+                prefix_digest: *prefix_digest,
+            }),
+            Self::ContextCompacted { record, active_ms } => serialize(&ContextCompactedPayload {
+                record: record.clone(),
+                active_ms: *active_ms,
+            }),
+            Self::GoalStarted {
+                goal_id,
+                objective,
+                workspace_identity:
+                    WorkspaceIdentity {
+                        device: workspace_device,
+                        inode: workspace_inode,
+                    },
+                budget,
+                phase,
+                autonomous,
+                resource_settings,
+            } => serialize(&GoalStartedPayload {
+                goal_id: *goal_id,
+                objective: objective.clone(),
+                workspace_device: *workspace_device,
+                workspace_inode: *workspace_inode,
+                budget: *budget,
+                phase: *phase,
+                autonomous: *autonomous,
+                resource_settings: *resource_settings,
+            }),
+            Self::GoalRunLinked { goal_id, phase, .. } => serialize(&GoalRunPayload {
+                goal_id: *goal_id,
+                phase: *phase,
+            }),
+            Self::GoalResumed { goal_id } => serialize(&GoalIdPayload { goal_id: *goal_id }),
+            Self::GoalPlanContractRecorded {
+                goal_id, contract, ..
+            } => serialize(&GoalContractPayload {
+                goal_id: *goal_id,
+                contract: contract.clone(),
+            }),
+            Self::GoalFinished {
+                goal_id,
+                status,
+                active_ms,
+                report,
+            } => serialize(&GoalFinishedPayload {
+                goal_id: *goal_id,
+                status: *status,
+                active_ms: *active_ms,
+                report: report.clone(),
+            }),
+            Self::MessageAccepted { text, images, .. } => serialize(&MessagePayload {
+                text: text.clone(),
+                images: images.clone(),
+            }),
+            Self::MessageCommitted { text, .. } => serialize(&TextPayload { text: text.clone() }),
+            Self::RunStarted {
+                config,
+                active_deadline_ms,
+                ..
+            } => serialize(&RunStartedPayload {
+                config: config.clone(),
+                active_deadline_ms: *active_deadline_ms,
+            }),
+            Self::AgentSpawned {
+                role,
+                ordinal,
+                objective,
+                grant,
+                ..
+            } => serialize(&SpawnPayload {
+                role: *role,
+                ordinal: *ordinal,
+                objective: objective.clone(),
+                grant: *grant,
+            }),
+            Self::ProviderFallbackUsed { fallback, .. } => serialize(fallback),
+            Self::ProviderCallRecorded { record, .. } => serialize(record),
+            Self::GoalProviderCallReserved {
+                goal_id,
+                active_ceiling_ms,
+                ..
+            }
+            | Self::GoalCompactionCallReserved {
+                goal_id,
+                active_ceiling_ms,
+                ..
+            } => serialize(&GoalProviderCallPayload {
+                goal_id: *goal_id,
+                active_ceiling_ms: *active_ceiling_ms,
+            }),
+            Self::GoalContextCompacted {
+                goal_id,
+                covered_tool_count,
+                record,
+                ..
+            } => serialize(&GoalContextCompactionPayload {
+                goal_id: *goal_id,
+                covered_tool_count: *covered_tool_count,
+                record: record.clone(),
+            }),
+            Self::GoalSteeringNoteRecorded { goal_id, text, .. } => {
+                serialize(&GoalSteeringNotePayload {
+                    goal_id: *goal_id,
+                    text: text.clone(),
+                })
+            }
+            Self::AssistantDisplayRecorded { chunk, .. } => serialize(chunk),
+            Self::ToolStarted {
+                intent,
+                active_ceiling_ms,
+                ..
+            } => serialize(&ToolStartedPayload {
+                intent: intent.clone(),
+                active_ceiling_ms: *active_ceiling_ms,
+            }),
+            Self::ToolFinished { observation, .. } => serialize(observation),
+            Self::ToolPermissionDecided { verdict, .. } => serialize(verdict),
+            Self::AgentFinished {
+                disposition,
+                summary,
+                result,
+                ..
+            } => serialize(&AgentFinishedPayload {
+                disposition: *disposition,
+                summary: summary.clone(),
+                result: result.clone(),
+            }),
+            Self::RunFinished {
+                disposition,
+                active_ms,
+                ..
+            } => serialize(&RunFinishedPayload {
+                disposition: *disposition,
+                active_ms: *active_ms,
+            }),
+        }
+    }
+
+    pub(crate) fn decode(
+        kind: &str,
+        version: i64,
+        payload: &str,
+        run_id: Option<RunId>,
+        agent_run_id: Option<AgentRunId>,
+    ) -> Result<Self, ReplayError> {
+        if payload_version(kind) != Some(version) {
+            return Err(ReplayError::UnknownEvent);
+        }
+        let event = match kind {
+            "SessionStarted" if run_id.is_none() && agent_run_id.is_none() => {
+                let data: StartedPayload = parse(payload)?;
+                Self::SessionStarted {
+                    title: data.title,
+                    workspace_identity: WorkspaceIdentity {
+                        device: data.workspace_device,
+                        inode: data.workspace_inode,
+                    },
+                }
+            }
+            "SessionDefaultChanged" if run_id.is_none() && agent_run_id.is_none() => {
+                Self::SessionDefaultChanged {
+                    defaults: parse(payload)?,
+                }
+            }
+            "SessionForked" if run_id.is_none() && agent_run_id.is_none() => {
+                let data: ForkPayload = parse(payload)?;
+                Self::SessionForked {
+                    title: data.title,
+                    source_session_id: data.source_session_id,
+                    source_run_id: data.source_run_id,
+                    source_sequence: data.source_sequence,
+                    prefix_digest: data.prefix_digest,
+                }
+            }
+            "ContextCompacted" if run_id.is_none() && agent_run_id.is_none() => {
+                let data: ContextCompactedPayload = parse(payload)?;
+                Self::ContextCompacted {
+                    record: data.record,
+                    active_ms: data.active_ms,
+                }
+            }
+            "SessionRenamed" if run_id.is_none() && agent_run_id.is_none() => {
+                Self::SessionRenamed {
+                    title: parse::<TitlePayload>(payload)?.title,
+                }
+            }
+            "GoalStarted" if run_id.is_none() && agent_run_id.is_none() => {
+                let data: GoalStartedPayload = parse(payload)?;
+                Self::GoalStarted {
+                    goal_id: data.goal_id,
+                    objective: data.objective,
+                    workspace_identity: WorkspaceIdentity {
+                        device: data.workspace_device,
+                        inode: data.workspace_inode,
+                    },
+                    budget: data.budget,
+                    phase: data.phase,
+                    autonomous: data.autonomous,
+                    resource_settings: data.resource_settings,
+                }
+            }
+            "GoalRunLinked" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalRunPayload = parse(payload)?;
+                Self::GoalRunLinked {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    phase: data.phase,
+                }
+            }
+            "GoalResumed" if run_id.is_none() && agent_run_id.is_none() => Self::GoalResumed {
+                goal_id: parse::<GoalIdPayload>(payload)?.goal_id,
+            },
+            "GoalPlanContractRecorded" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalContractPayload = parse(payload)?;
+                Self::GoalPlanContractRecorded {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    contract: data.contract,
+                }
+            }
+            "GoalFinished" if run_id.is_none() && agent_run_id.is_none() => {
+                let data: GoalFinishedPayload = parse(payload)?;
+                Self::GoalFinished {
+                    goal_id: data.goal_id,
+                    status: data.status,
+                    active_ms: data.active_ms,
+                    report: data.report,
+                }
+            }
+            "MessageAccepted" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: MessagePayload = parse(payload)?;
+                Self::MessageAccepted {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    text: data.text,
+                    images: data.images,
+                }
+            }
+            "RunStarted" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: RunStartedPayload = parse(payload)?;
+                Self::RunStarted {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    config: data.config,
+                    active_deadline_ms: data.active_deadline_ms,
+                }
+            }
+            "AgentSpawned" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: SpawnPayload = parse(payload)?;
+                Self::AgentSpawned {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    role: data.role,
+                    ordinal: data.ordinal,
+                    objective: data.objective,
+                    grant: data.grant,
+                }
+            }
+            "AgentFinished" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: AgentFinishedPayload = parse(payload)?;
+                Self::AgentFinished {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    disposition: data.disposition,
+                    summary: data.summary,
+                    result: data.result,
+                }
+            }
+            "ProviderFallbackUsed" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::ProviderFallbackUsed {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    fallback: parse(payload)?,
+                }
+            }
+            "ProviderCallRecorded" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::ProviderCallRecorded {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    record: parse(payload)?,
+                }
+            }
+            "GoalProviderCallReserved" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: GoalProviderCallPayload = parse(payload)?;
+                Self::GoalProviderCallReserved {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    active_ceiling_ms: data.active_ceiling_ms,
+                }
+            }
+            "GoalCompactionCallReserved" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalProviderCallPayload = parse(payload)?;
+                Self::GoalCompactionCallReserved {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    active_ceiling_ms: data.active_ceiling_ms,
+                }
+            }
+            "GoalContextCompacted" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalContextCompactionPayload = parse(payload)?;
+                Self::GoalContextCompacted {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    covered_tool_count: data.covered_tool_count,
+                    record: data.record,
+                }
+            }
+            "GoalSteeringNoteRecorded" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: GoalSteeringNotePayload = parse(payload)?;
+                Self::GoalSteeringNoteRecorded {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    text: data.text,
+                }
+            }
+            "ToolStarted" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: ToolStartedPayload = parse(payload)?;
+                Self::ToolStarted {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    intent: data.intent,
+                    active_ceiling_ms: data.active_ceiling_ms,
+                }
+            }
+            "AssistantDisplayRecorded" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::AssistantDisplayRecorded {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    chunk: parse(payload)?,
+                }
+            }
+            "ToolFinished" if run_id.is_some() && agent_run_id.is_some() => Self::ToolFinished {
+                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                observation: parse(payload)?,
+            },
+            "ToolPermissionDecided" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::ToolPermissionDecided {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    verdict: parse(payload)?,
+                }
+            }
+            "MessageCommitted" if run_id.is_some() && agent_run_id.is_none() => {
+                Self::MessageCommitted {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    text: parse::<TextPayload>(payload)?.text,
+                }
+            }
+            "RunFinished" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: RunFinishedPayload = parse(payload)?;
+                Self::RunFinished {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    disposition: data.disposition,
+                    active_ms: data.active_ms,
+                }
+            }
+            "SessionStarted"
+            | "SessionDefaultChanged"
+            | "SessionForked"
+            | "ContextCompacted"
+            | "SessionRenamed"
+            | "GoalStarted"
+            | "GoalRunLinked"
+            | "GoalResumed"
+            | "GoalPlanContractRecorded"
+            | "GoalFinished"
+            | "MessageAccepted"
+            | "RunStarted"
+            | "AgentSpawned"
+            | "ProviderCallRecorded"
+            | "GoalCompactionCallReserved"
+            | "GoalContextCompacted"
+            | "GoalSteeringNoteRecorded"
+            | "AssistantDisplayRecorded"
+            | "ToolStarted"
+            | "ToolFinished"
+            | "ToolPermissionDecided"
+            | "AgentFinished"
+            | "MessageCommitted"
+            | "RunFinished" => {
+                return Err(ReplayError::InvalidPayload);
+            }
+            _ => return Err(ReplayError::UnknownEvent),
+        };
+        event.validate()?;
+        Ok(event)
+    }
+}
+
+fn serialize<T: Serialize>(value: &T) -> Result<String, ReplayError> {
+    serde_json::to_string(value).map_err(|_| ReplayError::InvalidPayload)
+}
+
+fn parse<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T, ReplayError> {
+    serde_json::from_str(value).map_err(|_| ReplayError::InvalidPayload)
+}

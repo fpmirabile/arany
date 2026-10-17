@@ -13,16 +13,22 @@ cd "$project_root"
 mkdir -p "$project_root/target"
 export CARGO_TARGET_DIR="$project_root/target"
 
-cargo package --locked --offline --allow-dirty --no-verify
-
 stage="$(mktemp -d "$project_root/target/source-stage.XXXXXXXX")"
 verify="$(mktemp -d "$project_root/target/source-verify.XXXXXXXX")"
 artifact="$(mktemp -d "$project_root/target/source-artifact.XXXXXXXX")"
 trap 'rm -rf -- "$stage" "$verify"' EXIT
 
-tar -xzf "$project_root/target/package/$package.crate" -C "$stage"
-cp "$project_root/Cargo.toml" "$stage/$package/Cargo.toml"
-cp "$project_root/Cargo.lock" "$stage/$package/Cargo.lock"
+git ls-files -z -- Cargo.toml Cargo.lock rust-toolchain.toml clippy.toml LICENSE NOTICE scripts \
+  crates/arany/Cargo.toml crates/arany/src crates/arany/tests \
+  crates/arany-cli/Cargo.toml crates/arany-cli/src crates/arany-cli/tests \
+  > "$stage/tracked-files"
+mkdir "$stage/$package"
+while IFS= read -r -d '' file; do
+  if [[ "$file" == */* ]]; then
+    mkdir -p "$stage/$package/${file%/*}"
+  fi
+  cp "$project_root/$file" "$stage/$package/$file"
+done < "$stage/tracked-files"
 
 archive="$artifact/$package-source.tar.gz"
 tar -czf "$archive" -C "$stage" "$package"

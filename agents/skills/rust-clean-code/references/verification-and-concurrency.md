@@ -14,7 +14,7 @@ A test owns one claim: the observable behavior or failure it protects. State the
 
 ### Test support in the crate
 
-- Unit tests live in `#[cfg(test)] mod tests` beside the code (private access through `use super::*`); integration tests in `tests/` see only the public surface, each file its own crate, shared helpers under `tests/common/`.
+- Unit tests live in `#[cfg(test)] mod tests` beside the code (private access through `use super::*`); integration tests in `tests/` see only the public surface, each file its own crate, shared helpers under `crates/arany/src/test_support/`.
 - Hooks a test needs on a production type (fault injection, gates, scripted peers) go behind a Cargo feature, conventionally `test-support`, enabled for the crate's own tests through `[dev-dependencies] crate = { path = ".", features = ["test-support"] }`. `#[cfg(test)]` on a production type is invisible to integration tests and other crates, and it makes the type's shape differ between `cargo build` and `cargo test`. Keep the feature additive and the hooks few: one fault plan, not one method per fault.
 - A fake that mirrors a renderer (an inverse parser) lives next to the renderer with a round-trip test, so a format change fails there rather than in a distant journey.
 

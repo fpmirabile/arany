@@ -1,0 +1,912 @@
+use super::catalog::{Family, Site};
+use crate::session::{AgentRunId, RunId};
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::path::{Component, Path};
+use uuid::Uuid;
+
+pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
+pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_READ_PAGE_BYTES: u32 = 64 * 1024;
+// ToolObservation::valid checks every producer against this serialized bound.
+pub(crate) const MAX_TOOL_OBSERVATION_BYTES: usize =
+    2 * MAX_TOOL_RESULT_BYTES + MAX_TOOL_ARGUMENT_BYTES;
+pub const MAX_TOOL_CONTEXT_BYTES: usize = crate::session::MAX_CONTEXT_CONTENT_BYTES;
+pub const MAX_SKILLS: usize = 64;
+pub(crate) const MAX_TOOL_CATALOG_BYTES: usize = 16 * 1024;
+pub(crate) const MIN_TOOL_CONTEXT_BYTES: usize = MAX_TOOL_CATALOG_BYTES + 512;
+pub(crate) const MAX_FILE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_SNAPSHOT_FILES: usize = 2048;
+pub(crate) const MAX_RUNTIME_BYTES: usize = 96 * 1024 * 1024;
+pub(crate) const SCRATCH_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MEMORY_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const MAX_PROCESSES_OR_THREADS: u32 = 64;
+pub const MAX_BUILD_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub const MAX_BUILD_PROJECT_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_BUILD_CACHE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub const MAX_BUILD_PROCESSES_OR_THREADS: u32 = 256;
+pub const MAX_COMMAND_TIMEOUT_MS: u32 = 600_000;
+const BYTES_PER_MEBIBYTE: u64 = 1024 * 1024;
+pub(crate) const MAX_CHANGESET_FILES: usize = 64;
+pub(crate) const MAX_CHANGESET_BYTES: usize = 8 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileVersion {
+    pub sha256: String,
+    pub content: String,
+    pub executable: bool,
+}
+
+impl FileVersion {
+    pub(crate) fn from_bytes(bytes: &[u8], executable: bool) -> Self {
+        Self {
+            sha256: hex_digest(bytes),
+            content: base64::engine::general_purpose::STANDARD.encode(bytes),
+            executable,
+        }
+    }
+
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        if !valid_digest(&self.sha256) || self.content.len() > MAX_CHANGESET_BYTES.div_ceil(3) * 4 {
+            return None;
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.content)
+            .ok()?;
+        (bytes.len() <= MAX_CHANGESET_BYTES
+            && hex_digest(&bytes) == self.sha256
+            && base64::engine::general_purpose::STANDARD.encode(&bytes) == self.content)
+            .then_some(bytes)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileChange {
+    pub path: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub before: Option<FileVersion>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub after: Option<FileVersion>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandChangeset {
+    pub files: Vec<FileChange>,
+}
+
+impl CommandChangeset {
+    pub(crate) fn valid(&self) -> bool {
+        if self.files.len() > MAX_CHANGESET_FILES {
+            return false;
+        }
+        let mut bytes = 0usize;
+        for (index, change) in self.files.iter().enumerate() {
+            if !valid_relative(&change.path, false)
+                || change.path.split('/').count() > 16
+                || change.before == change.after
+                || self.files[..index].iter().any(|other| {
+                    other.path >= change.path || Path::new(&change.path).starts_with(&other.path)
+                })
+            {
+                return false;
+            }
+            for version in change.before.iter().chain(change.after.iter()) {
+                let Some(content) = version.bytes() else {
+                    return false;
+                };
+                bytes = bytes.saturating_add(content.len());
+                if bytes > MAX_CHANGESET_BYTES {
+                    return false;
+                }
+            }
+        }
+        serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES - 256)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandResult {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub changeset: CommandChangeset,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheUpdate {
+    NotApplicable,
+    NotAttempted,
+    Published,
+    Rejected,
+    Failed,
+    Uncertain,
+}
+
+impl CommandResult {
+    pub(crate) fn valid(&self) -> bool {
+        self.changeset.valid()
+            && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolCall {
+    List {
+        path: String,
+    },
+    Read {
+        path: String,
+        offset: u32,
+        limit: u32,
+    },
+    Search {
+        path: String,
+        query: String,
+    },
+    Mkdir {
+        path: String,
+    },
+    Write {
+        path: String,
+        #[serde(deserialize_with = "required_nullable")]
+        expected_digest: Option<String>,
+        content: String,
+    },
+    Edit {
+        path: String,
+        expected_digest: String,
+        old: String,
+        new: String,
+    },
+    Command {
+        program: String,
+        args: Vec<String>,
+        cwd: String,
+    },
+    ApplyChangeset {
+        source_intent_digest: [u8; 32],
+        changeset: CommandChangeset,
+    },
+    Skill {
+        name: String,
+        #[serde(deserialize_with = "required_nullable")]
+        resource: Option<String>,
+    },
+    McpList {
+        server: String,
+    },
+    McpCall {
+        server: String,
+        tool: String,
+        schema_digest: String,
+        arguments: String,
+    },
+    GitStatus {
+        path: String,
+    },
+    GitDiff {
+        path: String,
+        #[serde(deserialize_with = "required_nullable")]
+        base: Option<String>,
+        #[serde(deserialize_with = "required_nullable")]
+        head: Option<String>,
+        staged: bool,
+    },
+    GitLog {
+        path: String,
+        #[serde(deserialize_with = "required_nullable")]
+        revision: Option<String>,
+        max_count: u32,
+    },
+}
+
+fn required_nullable<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
+
+pub(crate) fn parse_mcp_arguments(arguments: &str) -> Result<Value, super::ToolError> {
+    let value = super::skills::parse_json(arguments.as_bytes(), 8 * 1024)?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(super::ToolError::Operation)
+    }
+}
+
+impl ToolCall {
+    pub(crate) fn is_process(&self) -> bool {
+        self.facts().spawns_process
+    }
+
+    pub(crate) fn is_git_read(&self) -> bool {
+        self.facts().family == Family::Git
+    }
+
+    pub(crate) fn is_child_research(&self) -> bool {
+        self.facts().researcher
+    }
+
+    pub(crate) fn valid(&self) -> bool {
+        if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
+            return false;
+        }
+        match self.facts().family {
+            Family::File => super::fs::valid(self),
+            Family::Process => super::process::valid(self),
+            Family::Skill => super::skills::valid(self),
+            Family::Mcp => super::mcp::valid(self),
+            Family::Git => super::git::valid(self),
+        }
+    }
+
+    pub(crate) fn mutates(&self) -> bool {
+        self.facts().mutates
+    }
+
+    pub(crate) fn is_goal_plan_prelude(&self) -> bool {
+        self.facts().prelude
+    }
+
+    pub fn label(&self) -> &'static str {
+        self.facts().name
+    }
+}
+
+pub(crate) const MAX_GIT_LOG_COMMITS: u32 = 50;
+const MAX_REVISION_BYTES: usize = 128;
+
+pub(crate) const FORBIDDEN_NAMES: [&str; 7] = [
+    ".git", ".aws", ".ssh", ".gnupg", ".env", ".npmrc", ".pypirc",
+];
+
+pub(crate) fn valid_revision(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_REVISION_BYTES {
+        return false;
+    }
+    let (name, mut suffix) = value.split_at(value.find(['~', '^']).unwrap_or(value.len()));
+    let name_valid = !name.is_empty()
+        && !name.contains("..")
+        && name.split('/').all(|part| {
+            !part.is_empty()
+                && !part.starts_with(['.', '-'])
+                && !part.ends_with('.')
+                && !part.ends_with(".lock")
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        });
+    let mut steps = 0;
+    while let Some(rest) = suffix.strip_prefix(['~', '^']) {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 4 {
+            return false;
+        }
+        suffix = &rest[digits..];
+        steps += 1;
+    }
+    name_valid && suffix.is_empty() && steps <= 4
+}
+
+pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
+    if value.is_empty() || value == "." {
+        return root;
+    }
+    value.len() <= 512
+        && !value.chars().any(char::is_control)
+        && !value.contains('\\')
+        && value
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != ".." && !forbidden(part))
+        && Path::new(value)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+}
+
+pub(crate) fn forbidden(value: &str) -> bool {
+    FORBIDDEN_NAMES
+        .iter()
+        .any(|name| value.eq_ignore_ascii_case(name))
+        || value
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(".env."))
+}
+
+pub fn valid_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
+pub(crate) fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+pub(crate) fn digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+pub(crate) fn hex_digest(bytes: &[u8]) -> String {
+    digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolPolicyReceipt {
+    pub contract_version: u32,
+    pub config_digest: [u8; 32],
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub permissions_digest: Option<[u8; 32]>,
+    pub max_context_bytes: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResourceClass {
+    #[default]
+    Default,
+    Build,
+}
+
+impl ToolPolicyReceipt {
+    pub(crate) fn valid(&self) -> bool {
+        self.contract_version == 1
+            && self.config_digest != [0; 32]
+            && self.permissions_digest != Some([0; 32])
+            && (MIN_TOOL_CONTEXT_BYTES as u32..=MAX_TOOL_CONTEXT_BYTES as u32)
+                .contains(&self.max_context_bytes)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectIntent {
+    pub id: Uuid,
+    pub run_id: RunId,
+    pub agent_run_id: AgentRunId,
+    pub policy_digest: [u8; 32],
+    pub enforcement_digest: [u8; 32],
+    pub workspace_device: u64,
+    pub workspace_inode: u64,
+    pub call: ToolCall,
+    pub limits: ToolLimits,
+    pub expires_at_ms: u64,
+    pub use_count: u8,
+}
+
+impl EffectIntent {
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        digest(&serde_json::to_vec(self).expect("typed intent is serializable"))
+    }
+
+    pub(crate) fn valid(&self) -> bool {
+        self.id.get_version() == Some(uuid::Version::SortRand)
+            && self.policy_digest != [0; 32]
+            && self.enforcement_digest != [0; 32]
+            && self.workspace_inode > 0
+            && self.expires_at_ms > 0
+            && self.use_count == 1
+            && self.call.valid()
+            && self.limits.valid()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolLimits {
+    pub result_bytes: u32,
+    pub runtime_ms: u32,
+    pub cache_transfer_ms: u32,
+    pub memory_bytes: u64,
+    pub max_processes: u32,
+    pub scratch_bytes: u64,
+    pub project_bytes: u64,
+    pub cache_requested_bytes: u64,
+    pub cache_bytes: u64,
+    pub cache_candidate_bytes: u64,
+    pub network: NetworkGrant,
+    pub resource_class: ToolResourceClass,
+    pub resource_profile: ToolResourceProfile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResourceProfile {
+    LinuxKernel,
+    MacosSupervised,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolResourceSettings {
+    pub default_command_timeout_ms: u32,
+    pub max_command_timeout_ms: u32,
+    pub build_memory_bytes: u64,
+    pub build_processes: u32,
+    pub build_project_bytes: u64,
+    pub build_cache_bytes: u64,
+}
+
+impl Default for ToolResourceSettings {
+    fn default() -> Self {
+        Self {
+            default_command_timeout_ms: 120_000,
+            max_command_timeout_ms: MAX_COMMAND_TIMEOUT_MS,
+            build_memory_bytes: MAX_BUILD_MEMORY_BYTES,
+            build_processes: MAX_BUILD_PROCESSES_OR_THREADS,
+            build_project_bytes: MAX_BUILD_PROJECT_BYTES,
+            build_cache_bytes: MAX_BUILD_CACHE_BYTES,
+        }
+    }
+}
+
+impl ToolResourceSettings {
+    pub fn valid(self) -> bool {
+        (1_000..=self.max_command_timeout_ms).contains(&self.default_command_timeout_ms)
+            && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.max_command_timeout_ms)
+            && (1..=MAX_BUILD_MEMORY_BYTES).contains(&self.build_memory_bytes)
+            && (1..=MAX_BUILD_PROCESSES_OR_THREADS).contains(&self.build_processes)
+            && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES).contains(&self.build_project_bytes)
+            && self.build_project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
+            && self.build_cache_bytes <= MAX_BUILD_CACHE_BYTES
+            && (self.build_cache_bytes == 0
+                || self.build_cache_bytes.is_multiple_of(BYTES_PER_MEBIBYTE))
+    }
+}
+
+pub(crate) fn command_timeout_limit_message(requested_ms: u32, maximum_ms: u32) -> String {
+    format!(
+        "Timeout {requested_ms} ms exceeds pinned max {maximum_ms} ms. Lower request or change /settings; Goal remains pinned."
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkGrant {
+    None,
+}
+
+impl Default for ToolLimits {
+    fn default() -> Self {
+        Self {
+            result_bytes: MAX_TOOL_RESULT_BYTES as u32,
+            runtime_ms: 60_000,
+            cache_transfer_ms: 0,
+            memory_bytes: MEMORY_BYTES,
+            max_processes: MAX_PROCESSES_OR_THREADS,
+            scratch_bytes: SCRATCH_BYTES,
+            project_bytes: SCRATCH_BYTES,
+            cache_requested_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
+            cache_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
+            cache_candidate_bytes: crate::store::BUILD_CACHE_ARCHIVE_BYTES,
+            network: NetworkGrant::None,
+            resource_class: ToolResourceClass::Default,
+            resource_profile: if cfg!(target_os = "macos") {
+                ToolResourceProfile::MacosSupervised
+            } else {
+                ToolResourceProfile::LinuxKernel
+            },
+        }
+    }
+}
+
+impl ToolLimits {
+    fn valid(&self) -> bool {
+        (128..=MAX_TOOL_RESULT_BYTES as u32).contains(&self.result_bytes)
+            && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.runtime_ms)
+            && self.scratch_bytes == SCRATCH_BYTES
+            && self.network == NetworkGrant::None
+            && match self.resource_class {
+                ToolResourceClass::Default => {
+                    self.memory_bytes == MEMORY_BYTES
+                        && self.max_processes == MAX_PROCESSES_OR_THREADS
+                        && self.project_bytes == SCRATCH_BYTES
+                        && self.cache_requested_bytes <= crate::store::BUILD_CACHE_ARCHIVE_BYTES
+                        && self.cache_bytes <= crate::store::BUILD_CACHE_ARCHIVE_BYTES
+                        && self.cache_bytes <= self.cache_requested_bytes
+                        && self.cache_candidate_bytes <= self.cache_bytes
+                        && self
+                            .cache_candidate_bytes
+                            .is_multiple_of(BYTES_PER_MEBIBYTE)
+                        && (self.cache_transfer_ms == 0
+                            || self.cache_transfer_ms == self.runtime_ms)
+                        && (self.cache_bytes != 0 || self.cache_transfer_ms == 0)
+                }
+                ToolResourceClass::Build => {
+                    (1..=MAX_BUILD_MEMORY_BYTES).contains(&self.memory_bytes)
+                        && (1..=MAX_BUILD_PROCESSES_OR_THREADS).contains(&self.max_processes)
+                        && (BYTES_PER_MEBIBYTE..=MAX_BUILD_PROJECT_BYTES)
+                            .contains(&self.project_bytes)
+                        && self.project_bytes.is_multiple_of(BYTES_PER_MEBIBYTE)
+                        && self.cache_requested_bytes <= MAX_BUILD_CACHE_BYTES
+                        && (self.cache_requested_bytes == 0
+                            || self
+                                .cache_requested_bytes
+                                .is_multiple_of(BYTES_PER_MEBIBYTE))
+                        && self.cache_bytes <= MAX_BUILD_CACHE_BYTES
+                        && self.cache_bytes <= self.cache_requested_bytes
+                        && self.cache_candidate_bytes <= self.cache_bytes
+                        && (self.cache_bytes == 0
+                            || self.cache_bytes.is_multiple_of(BYTES_PER_MEBIBYTE))
+                        && self
+                            .cache_candidate_bytes
+                            .is_multiple_of(BYTES_PER_MEBIBYTE)
+                        && self.cache_transfer_ms
+                            == if self.cache_bytes == 0 {
+                                0
+                            } else {
+                                self.runtime_ms
+                            }
+                }
+            }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDisposition {
+    Succeeded,
+    Denied,
+    Failed,
+    Conflict,
+    Limit,
+    Cancelled,
+    Uncertain,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuardReceipt {
+    pub contract_version: u32,
+    pub intent_digest: [u8; 32],
+    pub enforcement_digest: [u8; 32],
+    pub limits: ToolLimits,
+}
+
+impl GuardReceipt {
+    pub(crate) fn valid_for(&self, intent: &EffectIntent) -> bool {
+        self.contract_version == 1
+            && self.intent_digest == intent.digest()
+            && self.enforcement_digest == intent.enforcement_digest
+            && self.limits == intent.limits
+    }
+}
+
+/// Who executed an operation: the Engine in process, or the Guard with its receipt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Attestation {
+    InProcess {
+        policy_digest: [u8; 32],
+        workspace_device: u64,
+        workspace_inode: u64,
+    },
+    Guard(GuardReceipt),
+}
+
+impl Attestation {
+    pub(crate) fn valid_for(&self, intent: &EffectIntent) -> bool {
+        match self {
+            Self::InProcess {
+                policy_digest,
+                workspace_device,
+                workspace_inode,
+            } => {
+                intent.call.facts().site == Site::InProcess
+                    && *policy_digest == intent.policy_digest
+                    && *workspace_device == intent.workspace_device
+                    && *workspace_inode == intent.workspace_inode
+            }
+            Self::Guard(receipt) => {
+                intent.call.facts().site == Site::Guard && receipt.valid_for(intent)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_site(intent: &EffectIntent) -> Self {
+        match intent.call.facts().site {
+            Site::InProcess => Self::InProcess {
+                policy_digest: intent.policy_digest,
+                workspace_device: intent.workspace_device,
+                workspace_inode: intent.workspace_inode,
+            },
+            Site::Guard => Self::Guard(GuardReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                enforcement_digest: intent.enforcement_digest,
+                limits: intent.limits.clone(),
+            }),
+        }
+    }
+
+    pub fn guard(&self) -> Option<&GuardReceipt> {
+        match self {
+            Self::Guard(receipt) => Some(receipt),
+            Self::InProcess { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnforcementCause {
+    FilesystemDenied,
+}
+
+impl EnforcementCause {
+    pub fn diagnostic(self) -> &'static str {
+        match self {
+            Self::FilesystemDenied => "Guard enforcement: protected path or set-ID entry refused",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolObservation {
+    pub intent: EffectIntent,
+    pub disposition: ToolDisposition,
+    pub enforcement_cause: Option<EnforcementCause>,
+    pub output: String,
+    pub attestation: Option<Attestation>,
+    pub cache_update: CacheUpdate,
+}
+
+impl ToolObservation {
+    pub(crate) fn attested_for(&self, intent: &EffectIntent) -> bool {
+        self.intent == *intent && self.valid() && self.attestation.is_some()
+    }
+    pub(crate) fn stops_run(&self) -> bool {
+        matches!(
+            self.disposition,
+            ToolDisposition::Uncertain | ToolDisposition::Cancelled
+        ) || (self.disposition == ToolDisposition::Failed && self.attestation.is_none())
+            || self.cache_update == CacheUpdate::Uncertain
+    }
+
+    pub(crate) fn valid(&self) -> bool {
+        self.intent.valid()
+            && self.output.len() <= self.intent.limits.result_bytes as usize
+            && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_OBSERVATION_BYTES)
+            && self
+                .attestation
+                .as_ref()
+                .is_none_or(|attestation| attestation.valid_for(&self.intent))
+            && (self.disposition != ToolDisposition::Succeeded || self.attestation.is_some())
+            && (self.enforcement_cause.is_none()
+                || self.disposition == ToolDisposition::Denied && self.attestation.is_some())
+            && match self.cache_update {
+                CacheUpdate::NotApplicable => true,
+                CacheUpdate::NotAttempted | CacheUpdate::Uncertain => self.intent.call.is_process(),
+                CacheUpdate::Published | CacheUpdate::Rejected | CacheUpdate::Failed => {
+                    self.intent.call.is_process()
+                        && self.attestation.is_some()
+                        && self.disposition == ToolDisposition::Succeeded
+                }
+            }
+    }
+}
+
+/// One Tool call the Provider asked for; the id correlates its result in the next request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolRequest {
+    pub id: crate::provider::ToolUseId,
+    pub call: ToolCall,
+    pub plan_contract: Option<Box<crate::session::GoalPlanContract>>,
+}
+
+/// One Provider turn and the observations of the requests it declared, in request order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolStep {
+    pub turn: crate::provider::ProviderTurn,
+    /// Empty for a Delegate step.
+    pub requests: Vec<ToolRequest>,
+    /// A prefix of `requests` plus any Engine integration observation; shorter only when the Run stopped.
+    pub observations: Vec<ToolObservation>,
+    /// Goal facts written when the next call is prepared; `None` for Researchers.
+    pub facts: Option<crate::provider::GoalContextFacts>,
+    /// Notes first delivered with this step's results.
+    pub steering_notes: Vec<String>,
+    /// Researcher Tool calls left once this step is answered; `None` for the primary.
+    pub calls_remaining: Option<usize>,
+}
+
+/// Live Run state only: replayed turns are never serialized or journaled.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolContext {
+    pub catalog: String,
+    pub history_summary: Option<String>,
+    pub steps: Vec<ToolStep>,
+}
+
+impl ToolStep {
+    fn rendered_len(&self) -> usize {
+        self.turn.len()
+            + self
+                .observations
+                .iter()
+                .map(|observation| {
+                    model_observation(observation).to_string().len() + RESULT_ENVELOPE_BYTES
+                })
+                .sum::<usize>()
+            + self
+                .facts
+                .and_then(|facts| serde_json::to_string(&facts).ok())
+                .map_or(0, |facts| facts.len() + RESULT_ENVELOPE_BYTES)
+            + self.steering_notes.iter().map(String::len).sum::<usize>()
+    }
+}
+
+const RESULT_ENVELOPE_BYTES: usize = 128;
+
+impl ToolContext {
+    /// Researcher Tool calls the next request may still make: the newest step's count, else the
+    /// catalog's own; `None` for the primary.
+    pub fn calls_remaining(&self) -> Option<usize> {
+        match self.steps.last() {
+            Some(step) => step.calls_remaining,
+            None => serde_json::from_str::<Value>(&self.catalog)
+                .ok()?
+                .get("tool_calls_remaining")?
+                .as_u64()
+                .and_then(|count| usize::try_from(count).ok()),
+        }
+    }
+
+    /// A researcher with no Tool calls left may only Finish.
+    pub fn finish_only(&self) -> bool {
+        self.calls_remaining() == Some(0)
+    }
+
+    /// Every observation of the live steps, in order.
+    pub fn observations(&self) -> Vec<&ToolObservation> {
+        self.steps
+            .iter()
+            .flat_map(|step| &step.observations)
+            .collect()
+    }
+
+    pub fn observation_count(&self) -> usize {
+        self.steps.iter().map(|step| step.observations.len()).sum()
+    }
+
+    pub(crate) fn rendered_len(&self) -> usize {
+        self.catalog.len()
+            + self.history_summary.as_ref().map_or(0, String::len)
+            + self.steps.iter().map(ToolStep::rendered_len).sum::<usize>()
+    }
+
+    pub(crate) fn projected_len(&self, summary: Option<&str>, steps: usize) -> usize {
+        self.catalog.len()
+            + summary.map_or(0, str::len)
+            + self.steps[steps..]
+                .iter()
+                .map(ToolStep::rendered_len)
+                .sum::<usize>()
+    }
+
+    pub(crate) fn reserved_len(&self, step: &ToolStep, calls: &[&ToolCall]) -> usize {
+        self.rendered_len()
+            + step.rendered_len()
+            + calls
+                .iter()
+                .map(|call| {
+                    let effect = if call.mutates() { "applied" } else { "none" };
+                    model_projection(
+                        call,
+                        ToolDisposition::Succeeded,
+                        &json!(""),
+                        effect,
+                        CacheUpdate::NotApplicable,
+                    )
+                    .to_string()
+                    .len()
+                        + RESULT_ENVELOPE_BYTES
+                })
+                .sum::<usize>()
+    }
+
+    pub(crate) fn model_observations(&self, steps: usize) -> Vec<Value> {
+        self.steps[..steps]
+            .iter()
+            .flat_map(|step| step.observations.iter().map(model_observation))
+            .collect()
+    }
+}
+
+pub(crate) fn model_call(call: &ToolCall) -> Value {
+    let mut value = json!(call);
+    if let ToolCall::ApplyChangeset { .. } = call
+        && let Some(object) = value.as_object_mut()
+    {
+        object.remove("source_intent_digest");
+    }
+    value
+}
+
+pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
+    let output = super::skills::parse_json(observation.output.as_bytes(), MAX_TOOL_RESULT_BYTES)
+        .unwrap_or_else(|_| json!(observation.output));
+    let effect = if !observation.intent.call.mutates() {
+        "none"
+    } else {
+        match observation.disposition {
+            ToolDisposition::Succeeded
+                if observation
+                    .attestation
+                    .as_ref()
+                    .is_some_and(|attestation| attestation.valid_for(&observation.intent)) =>
+            {
+                "applied"
+            }
+            ToolDisposition::Uncertain | ToolDisposition::Cancelled => "uncertain",
+            _ => "not_confirmed",
+        }
+    };
+    let mut value = model_projection(
+        &observation.intent.call,
+        observation.disposition,
+        &output,
+        effect,
+        observation.cache_update,
+    );
+    if let Some(cause) = observation.enforcement_cause {
+        value["enforcement_cause"] = json!(cause.diagnostic());
+    }
+    value
+}
+
+fn model_projection(
+    call: &ToolCall,
+    disposition: ToolDisposition,
+    output: &Value,
+    effect: &str,
+    cache_update: CacheUpdate,
+) -> Value {
+    let call = model_call(call);
+    json!({"call":call,"disposition":disposition,"output":output,"workspace_effect":effect,"cache_update":cache_update})
+}
+
+#[cfg(test)]
+mod model_call_tests {
+    use super::*;
+
+    #[test]
+    fn model_call_strips_only_the_changeset_source_digest() {
+        let changeset = ToolCall::ApplyChangeset {
+            source_intent_digest: [7; 32],
+            changeset: CommandChangeset::default(),
+        };
+        let value = model_call(&changeset);
+        assert!(value.get("source_intent_digest").is_none());
+        assert!(value.get("changeset").is_some());
+
+        let read = model_call(&ToolCall::Read {
+            path: "src/main.rs".into(),
+            offset: 0,
+            limit: 32,
+        });
+        assert_eq!(read["operation"], "read");
+        assert_eq!(read["path"], "src/main.rs");
+    }
+}

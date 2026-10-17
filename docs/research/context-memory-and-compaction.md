@@ -144,7 +144,7 @@ failed append. Once the serialized payload sum exceeds 128 MiB, it cannot be
 installed, so subsequent appends cold-resolve and reduce the persisted prefix.
 The view becomes the next cache only after the transaction commits. The Store
 replies to append only after commit, so the optimization preserves durable
-acknowledgement. [Store append path](../../src/store/journal.rs)
+acknowledgement. [Store append path](../../crates/arany/src/store/journal.rs)
 and [Execution spec](../specs/execution.md#admission-persistence-and-recovery) own these constraints. SQLite defines
 `data_version` as connection-local: it changes on commits from other
 connections and does not change for that connection's own commits, so Arany also
@@ -160,15 +160,15 @@ and 10,000 combined Events are admitted. The schema already has
 `events_by_session(session_id, sequence)`, but replay does not use it. Replacing
 the global scan with a per-Session lookup alone would stop checking the global
 journal properties on that path. Keep canonical replay and its integrity checks
-as the source of truth. [Replay](../../src/store/replay.rs), [digest
-implementation](../../src/session/lineage.rs), and [Session spec](../specs/session.md)
+as the source of truth. [Replay](../../crates/arany/src/store/replay.rs), [digest
+implementation](../../crates/arany/src/session/lineage.rs), and [Session spec](../specs/session.md)
 own this behavior.
 
 Terminal history is an ephemeral row-count/source-anchor index over the
 already-loaded `SessionView`; it does not retain another transcript or read
 State. A same-Session/same-width append replaces only the last Run's index.
 Session switches, width changes and detail-mode changes rebuild it; find scans
-its bounded rows synchronously. [History implementation](../../src/terminal/history.rs)
+its bounded rows synchronously. [History implementation](../../crates/arany-cli/src/terminal/history.rs)
 and [Terminal spec](../specs/terminal.md) own this boundary.
 
 **Smallest path, proposed:** Measure serialized Event payload, DB size, append
@@ -193,11 +193,11 @@ byte preflight is not a reservation against independent writers. The
 [execution contract](../specs/execution.md#admission-persistence-and-recovery)
 owns those public limits.
 
-History owner: [`tests/session_run/active_terminal/tmux/history_latency.rs::active_keyboard_stays_visible_with_near_cap_history`](../../tests/session_run/active_terminal/tmux/history_latency.rs), in `Linux Tests (release)` with `history_benchmark=true`.
+History owner: [`crates/arany-cli/tests/session_run/active_terminal/tmux/history_latency.rs::active_keyboard_stays_visible_with_near_cap_history`](../../crates/arany-cli/tests/session_run/active_terminal/tmux/history_latency.rs), in `Linux Tests (release)` with `history_benchmark=true`.
 
 Its workload is 800 Runs across 50 Goal lifecycles, 8,901 Events and 32,764,000 objective/answer bytes, about half the former 65.5 MB intent and not the same workload. It checks strict replay, serialized payload and SQLite bytes, samples 100 fresh read-only Store loads, and measures resume-to-ready, input/delegation and product RSS/HWM. Fresh Store instances do not clear the OS page cache; Store replay and terminal history/input latency remain separate observations. This workload does not establish the exact 10,000-Event boundary, the 128 MiB HotSession limit, the 256 MiB shared-Store quota or near-quota fallback.
 
-Separate owners: [`tests/session_run/performance.rs::show_replay_latency_on_named_host`](../../tests/session_run/performance.rs) uses 100 Events; [`tests/engine_run.rs::database_capacity_is_admitted_before_provider_usage`](../../tests/engine_run.rs) pads a non-Event table to prove StorageFull admission and canonical reopen, rather than history latency. [Next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns named-host measurements and remaining gates.
+Separate owners: [`crates/arany-cli/tests/session_run/performance.rs::show_replay_latency_on_named_host`](../../crates/arany-cli/tests/session_run/performance.rs) uses 100 Events; [`crates/arany/tests/engine_run.rs::database_capacity_is_admitted_before_provider_usage`](../../crates/arany/tests/engine_run.rs) pads a non-Event table to prove StorageFull admission and canonical reopen, rather than history latency. [Next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns named-host measurements and remaining gates.
 
 ### Proposed policy, not accepted behavior
 
@@ -224,7 +224,7 @@ but it does not change the fixed OS-user account root. Remembered trust for the
 same folder and its generated default Tool grant, saved accounts and saved
 account/model preferences remain available across StateRoots; changing roots is
 not an implicit trust revocation or account-isolation boundary. The user can
-revisit folder trust through `/permissions`. The [Workspace trust loader](../../src/tools/workspace.rs)
+revisit folder trust through `/permissions`. The [Workspace trust loader](../../crates/arany/src/tools/workspace.rs)
 and [Tools contract](../specs/tools.md#folder-trust-and-approvals) own folder
 trust; the [account scope contract](../specs/credentials.md#account-scope-and-identity)
 owns saved account and preference scope. The UI thresholds and recovery wording

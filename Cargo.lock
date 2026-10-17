@@ -128,19 +128,16 @@ dependencies = [
 name = "arany"
 version = "0.1.0"
 dependencies = [
+ "arany",
  "async-trait",
  "aws-lc-rs",
  "base64 0.23.1",
  "cap-fs-ext",
  "cap-std",
- "clap",
  "core-foundation",
- "crossterm",
  "directories",
  "getrandom 0.4.3",
  "jsonschema",
- "keyring",
- "mio",
  "nix",
  "opentelemetry",
  "opentelemetry-http",
@@ -148,7 +145,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
- "ratatui",
+ "regex",
  "reqwest",
  "rusqlite",
  "rustix",
@@ -161,10 +158,45 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "unicode-segmentation",
- "unicode-width",
  "url",
  "uuid",
  "yaml_serde",
+]
+
+[[package]]
+name = "arany-cli"
+version = "0.1.0"
+dependencies = [
+ "arany",
+ "async-trait",
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "cap-fs-ext",
+ "cap-std",
+ "clap",
+ "crossterm",
+ "getrandom 0.4.3",
+ "keyring",
+ "mio",
+ "nix",
+ "opentelemetry-proto",
+ "opentelemetry_sdk",
+ "prost",
+ "ratatui",
+ "reqwest",
+ "rusqlite",
+ "rustix",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "unicode-segmentation",
+ "unicode-width",
+ "url",
+ "uuid",
 ]
 
 [[package]]

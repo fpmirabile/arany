@@ -47,11 +47,16 @@ Use the [shared documentation checks](../docs/development.md#verification). When
 - Default `cargo test` is offline, deterministic, isolated, retry-free, free of wall sleeps and hardware-sensitive timing, and quiet on success.
 - Heavy native gates use `cfg_attr(not(arany_ci), ignore)`, so CI's `--cfg arany_ci` runs them in its ordinary test step. Explicitly ignored release gates need a named opt-in lane that proves a nonzero exact test count. Gates in one test binary hold `crate::test_process::NATIVE_GATE`. A locally ignored gate is not evidence. Check commands live in the [development guide](../docs/development.md#verification).
 - Before activating an ignored native parent, reconcile its fixture with the current Provider wire, Tool admission, Goal lifecycle, and persisted success criteria; a stale fixture is not native evidence.
-- Keep beta integration scenarios in one `tests/session_run.rs` target. Focused owning-module tests use compact transition, boundary, hostile-input, or parser tables only where the central journey cannot prove the claim.
 - Cross-platform claims need native behavior tests for filesystem, ACL, signal, process, SQLite reopen, and terminal semantics. A compile-only target or silent skip is not evidence.
 - Process-death, disk-fault, fuzz, repeated-flake, and named-host performance work may run as scheduled or release gates. Stochastic model quality belongs to evaluations and latency to benchmarks; neither overrides a failed deterministic invariant.
 - Add property, fuzz, model-checking, snapshot, or concurrency frameworks only when their named boundary has outgrown readable tables.
 - Security test coverage: hostile repository/Git configuration, every path-component type, state-path links and permissions, omitted-input egress canaries per adapter, credential isolation, broker-route drift, terminal-control payloads, oversized input/output, malformed replay, cancellation cleanup, and unavailable-provider/telemetry failure.
+
+## Corpus placement
+
+Keep scenarios that launch `arany` or drive a terminal in `crates/arany-cli/tests/`: Session journeys stay in `crates/arany-cli/tests/session_run.rs`, and Guard-launching Engine cases belong to `crates/arany-cli/tests/guard_runs.rs`. In-process Engine, Session, Store, Provider and Tool scenarios stay in `crates/arany/tests/` or their owning module. Focused module tests use compact transition, boundary, hostile-input or parser tables only where the central journey cannot prove the claim.
+
+Reuse shared process/Git fixtures and semantic Provider support through the library's `test-support` feature; do not copy fixture or Provider-rendering knowledge between corpora.
 
 ## Deferred evidence
 
@@ -61,7 +66,7 @@ Use the [shared documentation checks](../docs/development.md#verification). When
 ## Diagnosing failures
 
 - Read the development log ([diagnostics spec](../docs/specs/diagnostics.md)) before adding instrumentation.
-- New instrumentation records only closed categories and counters at typed boundaries, never display strings.
+- Review new instrumentation at typed boundaries against the [diagnostic privacy contract](../docs/specs/diagnostics.md).
 - A synthetic distinction between causes does not establish the cause of a live failure.
 
 ## Failure and maintenance discipline

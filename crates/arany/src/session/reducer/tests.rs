@@ -1,0 +1,3276 @@
+use super::*;
+use crate::session::WorkspaceIdentity;
+
+mod goal_recovery_tests {
+    use super::*;
+    use crate::tools::{EffectIntent, ToolCall, ToolDisposition, ToolObservation};
+
+    fn pending_plan_view(disposition: Option<ToolDisposition>) -> SessionView {
+        let session_id = SessionId::new();
+        let goal_id = GoalId::new();
+        let run_id = RunId::new();
+        let intent = EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id,
+            agent_run_id: AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: 32,
+            },
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        let tool = ToolView {
+            permission_verdict: None,
+            intent: intent.clone(),
+            observation: disposition.map(|disposition| ToolObservation {
+                enforcement_cause: None,
+                intent,
+                disposition,
+                output: if disposition == ToolDisposition::Succeeded {
+                    "{}".into()
+                } else {
+                    String::new()
+                },
+                attestation: None,
+                cache_update: crate::tools::CacheUpdate::NotApplicable,
+            }),
+            review_call_index: None,
+            finished_sequence: disposition.map(|_| 2),
+        };
+        SessionView {
+            id: session_id,
+            title: "Interrupted Goal".into(),
+            title_is_explicit: false,
+            inherited_title: None,
+            workspace_identity: Some(WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            }),
+            defaults: SessionDefaults::default(),
+            created_sequence: 0,
+            last_sequence: 1,
+            lineage: None,
+            runs: vec![RunView {
+                id: run_id,
+                objective: "Inspect before planning".into(),
+                images: Vec::new(),
+                config: None,
+                agents: Vec::new(),
+                assistant_message: None,
+                status: RunStatus::Interrupted,
+                accepted_sequence: 1,
+                finished_sequence: None,
+                tools: vec![tool],
+                tool_compaction_summary: None,
+                tool_compaction_covered_count: 0,
+                display: Vec::new(),
+                steering_notes: Vec::new(),
+                provider_fallbacks: Vec::new(),
+            }],
+            compactions: Vec::new(),
+            goals: vec![GoalView {
+                id: goal_id,
+                objective: "Inspect before planning".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+                budget: GoalBudget::default(),
+                resource_settings: crate::tools::ToolResourceSettings::default(),
+                phase: GoalPhase::Research,
+                autonomous: false,
+                status: GoalStatus::Interrupted,
+                run_ids: vec![run_id],
+                active_run: None,
+                plan_contract: None,
+                success_state: crate::session::GoalSuccessState::NoContract,
+                success_criterion_satisfied: false,
+                awaiting_plan_contract: true,
+                active_ms: 0,
+                uncertain_active_ms: 0,
+                active_deadline: None,
+                provider_calls: 1,
+                unobserved_provider_calls: Vec::new(),
+                compaction_call_reserved: None,
+                uncertain_compaction_calls: 0,
+                known_tokens: 0,
+                known_cached_tokens: 0,
+                token_usage_unknown: false,
+                report: None,
+                started_sequence: 1,
+                finished_sequence: None,
+                active_ceiling_ms: 0,
+            }],
+        }
+    }
+
+    #[test]
+    fn pending_plan_recovery_accepts_closed_inspection_and_refuses_open_or_uncertain_tools() {
+        let closed = pending_plan_view(Some(ToolDisposition::Succeeded));
+        assert!(closed.goals[0].can_resume(&closed));
+
+        let mut started_only = closed.clone();
+        started_only.runs.clear();
+        started_only.goals[0].run_ids.clear();
+        started_only.goals[0].awaiting_plan_contract = false;
+        assert!(started_only.goals[0].can_resume(&started_only));
+
+        let open = pending_plan_view(None);
+        assert!(!open.goals[0].can_resume(&open));
+
+        let uncertain = pending_plan_view(Some(ToolDisposition::Uncertain));
+        assert!(!uncertain.goals[0].can_resume(&uncertain));
+    }
+}
+
+mod goal_replay_tests {
+    use super::*;
+    use crate::provider::{AgentPhase, OutputTokenBound};
+    use crate::session::events::{ChildGrant, CollaborationPolicy, GoalSuccessCriterion};
+    use crate::tools::{
+        CacheUpdate, EffectIntent, ToolCall, ToolDisposition, ToolLimits, ToolObservation,
+        ToolPolicyReceipt,
+    };
+
+    const GOAL_OBJECTIVE: &str = "Goal";
+
+    fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
+        RunConfig {
+            providers: None,
+            provider: "openai".into(),
+            model: "gpt-5.4".into(),
+            effort: None,
+            custom_profile_provenance: None,
+            saved_api_account_id: None,
+            chatgpt_provenance: None,
+            output_token_bound: OutputTokenBound::ProviderEnforced,
+            policy,
+            output_token_cap: 4096,
+            provider_concurrency: 1,
+            workspace_device: 1,
+            workspace_inode: 2,
+            instruction_digest: None,
+            include_digests: Vec::new(),
+            history_run_ids: Vec::new(),
+            excluded_history_runs: 0,
+            context_usage: None,
+            compaction_event_sequence: None,
+            compaction_content_digest: None,
+            tool_policy: tools.then_some(ToolPolicyReceipt {
+                permissions_digest: None,
+                contract_version: 1,
+                config_digest: [1; 32],
+                max_context_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES as u32,
+            }),
+        }
+    }
+
+    fn record(
+        phase: AgentPhase,
+        disposition: ProviderCallDisposition,
+        tokens: Option<u32>,
+    ) -> ProviderCallRecord {
+        ProviderCallRecord {
+            phase,
+            disposition,
+            response_id: None,
+            input_tokens: tokens,
+            output_tokens: tokens,
+            wire_provenance: None,
+            failure_reason: None,
+            requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        }
+    }
+
+    fn journal(session_id: SessionId, events: Vec<Event>) -> Vec<EventEnvelope> {
+        events
+            .into_iter()
+            .zip(1..)
+            .map(|(event, sequence)| {
+                let (run_id, agent_run_id) = event.scope();
+                EventEnvelope {
+                    sequence,
+                    session_id,
+                    run_id,
+                    agent_run_id,
+                    event,
+                    created_at_ms: 0,
+                }
+            })
+            .collect()
+    }
+
+    fn goal_started(goal_id: GoalId, budget: GoalBudget) -> Event {
+        Event::GoalStarted {
+            goal_id,
+            objective: GOAL_OBJECTIVE.into(),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
+            budget,
+            resource_settings: crate::tools::ToolResourceSettings::default(),
+            phase: GoalPhase::Implementation,
+            autonomous: false,
+        }
+    }
+
+    /// Links one Run, accepts its message and spawns its primary AgentRun.
+    fn start_run(
+        goal_id: GoalId,
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        config: RunConfig,
+    ) -> Vec<Event> {
+        vec![
+            Event::GoalRunLinked {
+                goal_id,
+                run_id,
+                phase: GoalPhase::Implementation,
+            },
+            Event::MessageAccepted {
+                run_id,
+                text: GOAL_OBJECTIVE.into(),
+                images: Vec::new(),
+            },
+            Event::RunStarted {
+                run_id,
+                config,
+                active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
+            },
+            Event::AgentSpawned {
+                run_id,
+                agent_run_id,
+                role: AgentRole::Primary,
+                ordinal: 0,
+                objective: None,
+                grant: None,
+            },
+        ]
+    }
+
+    /// Completes the Run that `start_run` opened, and with it the Goal.
+    fn complete_run_and_goal(
+        goal_id: GoalId,
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+    ) -> Vec<Event> {
+        vec![
+            Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+                active_ceiling_ms: 0,
+            },
+            Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Finished,
+                    None,
+                ),
+            },
+            Event::AgentFinished {
+                run_id,
+                agent_run_id,
+                disposition: AgentDisposition::Finished,
+                summary: Some("done".into()),
+                result: Some("done".into()),
+            },
+            Event::MessageCommitted {
+                run_id,
+                text: "done".into(),
+            },
+            Event::RunFinished {
+                run_id,
+                disposition: RunDisposition::Finished,
+                active_ms: 0,
+            },
+            Event::GoalFinished {
+                goal_id,
+                status: GoalStatus::Completed,
+                active_ms: 0,
+                report: GoalReport {
+                    summary: "done".into(),
+                    changes: Vec::new(),
+                    evidence: Vec::new(),
+                    unresolved: Vec::new(),
+                    cached_input_tokens: 0,
+                },
+            },
+        ]
+    }
+
+    /// Cancels the Run that `start_run` opened; its Goal stays open and paused.
+    fn cancel_run(run_id: RunId, agent_run_id: AgentRunId) -> Vec<Event> {
+        vec![
+            Event::AgentFinished {
+                run_id,
+                agent_run_id,
+                disposition: AgentDisposition::Cancelled,
+                summary: None,
+                result: None,
+            },
+            Event::RunFinished {
+                run_id,
+                disposition: RunDisposition::Cancelled,
+                active_ms: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn role_chains_are_canonical_and_tool_history_stays_in_one_adapter_and_account() {
+        use crate::provider::{Provenance, Providers};
+        let mut config = config(CollaborationPolicy::Single, true);
+        let primary = config.identity().unwrap();
+        config.providers = Some(Providers::all(vec![primary.clone()]));
+        assert!(config.validate().is_err());
+        for child in [false, true] {
+            for account_kind in 0..3 {
+                let mut alternate = primary.clone();
+                alternate.model = "alternate".into();
+                if account_kind == 0 {
+                    alternate.profile = "anthropic".into();
+                } else if account_kind == 1 {
+                    alternate.provenance = Provenance::Native {
+                        saved_api_account_id: Some(uuid::Uuid::now_v7()),
+                    };
+                } else {
+                    alternate.profile = "chatgpt".into();
+                    alternate.effort = Some(crate::provider::Effort::High);
+                    alternate.limits.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;
+                    alternate.provenance =
+                        Provenance::ChatGpt(crate::provider::ChatGptProvenance {
+                            account_id: uuid::Uuid::now_v7(),
+                            evidence_fingerprint: [1; 32],
+                            admission: crate::provider::ChatGptAdmission::AccountConsent,
+                        });
+                }
+                let mut routes = Providers::all(vec![primary.clone()]);
+                if child {
+                    routes.child.push(alternate);
+                } else {
+                    routes.primary.push(alternate);
+                }
+                config.providers = Some(routes);
+                assert!(config.validate().is_err());
+                let mut no_tools = config.clone();
+                no_tools.tool_policy = None;
+                assert!(no_tools.validate().is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn provider_fallback_replay_requires_pinned_chain_reservation_role_and_budget() {
+        use crate::provider::{ProviderFallback, ProviderRole, Providers};
+        let (session, goal, run, actor) = (
+            SessionId::new(),
+            GoalId::new(),
+            RunId::new(),
+            AgentRunId::new(),
+        );
+        let mut config = config(CollaborationPolicy::Single, false);
+        let primary = config.identity().unwrap();
+        let mut alternate = primary.clone();
+        alternate.model = "alternate-model".into();
+        config.providers = Some(Providers::all(vec![primary.clone(), alternate.clone()]));
+        let mut facts = vec![goal_started(goal, GoalBudget::default())];
+        facts.extend(start_run(goal, run, actor, config));
+        let mut completion = complete_run_and_goal(goal, run, actor);
+        if let Event::GoalProviderCallReserved {
+            active_ceiling_ms, ..
+        } = &mut completion[0]
+        {
+            *active_ceiling_ms = 7_000;
+        }
+        completion.insert(
+            1,
+            Event::ProviderFallbackUsed {
+                run_id: run,
+                agent_run_id: actor,
+                fallback: ProviderFallback {
+                    role: ProviderRole::Primary,
+                    call_index: 0,
+                    from: primary,
+                    to: alternate,
+                    failure: ProviderCallDisposition::Unavailable,
+                },
+            },
+        );
+        facts.extend(completion);
+        let valid = session_with(session, facts);
+        let switch = valid
+            .iter()
+            .position(|event| matches!(event.event, Event::ProviderFallbackUsed { .. }))
+            .unwrap();
+        let open = SessionView::replay_open(session, &valid[..=switch])
+            .unwrap()
+            .unwrap();
+        assert_eq!(open.goals[0].provider_calls, 2);
+        assert_eq!(open.goals[0].unobserved_provider_calls, [actor]);
+        assert!(open.goals[0].active_ceiling_ms > 0);
+        assert!(open.runs[0].primary().unwrap().provider_calls.is_empty());
+        let closed = SessionView::replay(session, &valid[..=switch])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            closed.goals[0].resume_usage(&closed).active_ms,
+            open.goals[0].active_ceiling_ms
+        );
+        assert_eq!(closed.goals[0].provider_calls, 2);
+        let view = SessionView::replay(session, &valid).unwrap().unwrap();
+        assert_eq!(view.goals[0].provider_calls, 2);
+        assert!(view.goals[0].token_usage_unknown);
+        assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
+        assert_eq!(
+            view.runs[0].provider_fallbacks[0].1.role,
+            ProviderRole::Primary
+        );
+        for case in 0..9 {
+            let mut invalid = valid.clone();
+            match case {
+                0..=4 => {
+                    let fallback = invalid
+                        .iter_mut()
+                        .find_map(|event| match &mut event.event {
+                            Event::ProviderFallbackUsed { fallback, .. } => Some(fallback),
+                            _ => None,
+                        })
+                        .unwrap();
+                    match case {
+                        0 => fallback.from.model = "unknown".into(),
+                        1 => fallback.to.model = "unknown".into(),
+                        2 => fallback.role = ProviderRole::Child,
+                        3 => fallback.call_index = 1,
+                        _ => fallback.failure = ProviderCallDisposition::Rejected,
+                    }
+                }
+                5..=6 => {
+                    let budget = invalid
+                        .iter_mut()
+                        .find_map(|event| match &mut event.event {
+                            Event::GoalStarted { budget, .. } => Some(budget),
+                            _ => None,
+                        })
+                        .unwrap();
+                    if case == 5 {
+                        budget.max_provider_calls = Some(1);
+                    } else {
+                        budget.max_tokens = Some(100);
+                    }
+                }
+                _ => {
+                    let config = invalid
+                        .iter_mut()
+                        .find_map(|event| match &mut event.event {
+                            Event::RunStarted { config, .. } => Some(config),
+                            _ => None,
+                        })
+                        .unwrap();
+                    let providers = config.providers.as_mut().unwrap();
+                    if case == 7 {
+                        providers.primary[0].model = "different".into();
+                    } else {
+                        providers.child[0].profile = "custom:unadmitted".into();
+                    }
+                }
+            }
+            assert!(
+                SessionView::replay(session, &invalid).is_err(),
+                "case {case}"
+            );
+        }
+        for before in [true, false] {
+            let mut invalid: Vec<_> = valid.iter().map(|event| event.event.clone()).collect();
+            let switch = invalid
+                .iter()
+                .position(|event| matches!(event, Event::ProviderFallbackUsed { .. }))
+                .unwrap();
+            if before {
+                invalid.insert(
+                    switch,
+                    Event::AssistantDisplayRecorded {
+                        run_id: run,
+                        agent_run_id: actor,
+                        chunk: crate::session::DisplayChunk {
+                            call_index: 0,
+                            phase: AgentPhase::RootPlan,
+                            category: crate::session::DisplayCategory::Answer,
+                            item: 0,
+                            offset: 0,
+                            text: "partial".into(),
+                        },
+                    },
+                );
+            } else {
+                invalid.swap(switch, switch + 1);
+            }
+            assert!(SessionView::replay(session, &journal(session, invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn research_child_review_fallback_requires_its_own_pending_tool() {
+        use crate::provider::{ProviderFallback, ProviderRole, Providers};
+        let (mut view, goal, run, child) = research_session();
+        view.goals[0]
+            .plan_contract
+            .as_mut()
+            .unwrap()
+            .budget
+            .max_tokens = None;
+        let primary_agent = view.runs[0].primary().unwrap().id;
+        let config = view.runs[0].config.as_mut().unwrap();
+        let primary = config.identity().unwrap();
+        let mut alternate = primary.clone();
+        alternate.model = "alternate-model".into();
+        config.providers = Some(Providers::all(vec![primary.clone(), alternate.clone()]));
+        let fallback = Event::ProviderFallbackUsed {
+            run_id: run,
+            agent_run_id: child,
+            fallback: ProviderFallback {
+                role: ProviderRole::Review,
+                call_index: 1,
+                from: primary,
+                to: alternate,
+                failure: ProviderCallDisposition::Unavailable,
+            },
+        };
+        let read = child_intent(
+            run,
+            child,
+            ToolCall::Read {
+                path: "src/lib.rs".into(),
+                offset: 0,
+                limit: 1024,
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("child Tool request");
+        let mut elsewhere = view.clone();
+        elsewhere.runs[0].tools.push(ToolView {
+            intent: child_intent(
+                run,
+                primary_agent,
+                ToolCall::Read {
+                    path: "src/main.rs".into(),
+                    offset: 0,
+                    limit: 1024,
+                },
+            ),
+            observation: None,
+            review_call_index: None,
+            permission_verdict: None,
+            finished_sequence: None,
+        });
+        apply(&mut elsewhere, reserve_child_call(goal, run, child)).expect("review reservation");
+        assert!(rejected(&elsewhere, fallback.clone()));
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: read.clone(),
+                active_ceiling_ms: 0,
+            },
+        )
+        .expect("child Tool starts");
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("review reservation");
+        apply(&mut view, fallback).expect("child review fallback");
+        assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
+        apply(
+            &mut view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: child,
+                observation: observation_for(read, b"ok"),
+            },
+        )
+        .expect("child Tool finishes after the review switch");
+    }
+
+    #[test]
+    fn a_forks_boundary_compaction_is_refused_while_its_own_run_is_open() {
+        use crate::session::events::{CompactionFailure, CompactionStatus};
+        let (fork, source, source_run, run, agent) = (
+            SessionId::new(),
+            SessionId::new(),
+            RunId::new(),
+            RunId::new(),
+            AgentRunId::new(),
+        );
+        let mut events = vec![Event::SessionForked {
+            title: "Fork".into(),
+            source_session_id: source,
+            source_run_id: source_run,
+            source_sequence: 1,
+            prefix_digest: [0; 32],
+        }];
+        let goal = GoalId::new();
+        events.push(goal_started(goal, GoalBudget::default()));
+        events.extend(start_run(
+            goal,
+            run,
+            agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        let open = journal(fork, events.clone());
+        assert!(SessionView::replay_open(fork, &open).unwrap().is_some());
+        events.push(Event::ContextCompacted {
+            record: crate::session::events::CompactionRecord {
+                covered_run_id: source_run,
+                covered_sequence: 1,
+                source_digest: [0; 32],
+                provider: "openai".into(),
+                model: "gpt-5.4".into(),
+                prompt_version: 1,
+                schema_version: 1,
+                compiler_version: 3,
+                source_bytes: 1,
+                source_tokens_estimate: 1,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                response_id: None,
+                wire_provenance: None,
+                chatgpt_provenance: None,
+                output_token_bound: OutputTokenBound::ProviderEnforced,
+                status: CompactionStatus::Failed {
+                    reason: CompactionFailure::ProviderUnavailable,
+                },
+            },
+            active_ms: None,
+        });
+        assert!(SessionView::replay_open(fork, &journal(fork, events)).is_err());
+    }
+
+    fn session_with(session_id: SessionId, events: Vec<Event>) -> Vec<EventEnvelope> {
+        let mut all = vec![Event::SessionStarted {
+            title: "Goal".into(),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
+        }];
+        all.extend(events);
+        journal(session_id, all)
+    }
+
+    #[test]
+    fn steering_note_is_accepted_only_inside_an_open_primary_reservation() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let started = || {
+            let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(CollaborationPolicy::Single, false),
+            ));
+            events
+        };
+        let open = || {
+            let mut events = started();
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+                active_ceiling_ms: 0,
+            });
+            events
+        };
+        let note = |goal_id: GoalId, text: &str| Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: text.into(),
+        };
+        let accepts = |events: Vec<Event>| {
+            SessionView::replay_open(session, &session_with(session, events)).is_ok()
+        };
+
+        let mut accepted = open();
+        accepted.push(note(goal_id, "use the smaller fixture"));
+        let view = SessionView::replay_open(session, &session_with(session, accepted.clone()))
+            .expect("a note inside the open reservation replays")
+            .expect("Session exists");
+        assert_eq!(view.runs[0].steering_notes, vec!["use the smaller fixture"]);
+
+        // Every rejected case first proves its prefix is accepted, so the rejection is not vacuous.
+        let prefix = started();
+        assert!(accepts(prefix.clone()));
+        let mut before = prefix;
+        before.push(note(goal_id, "before the reservation"));
+        assert!(!accepts(before));
+
+        let recorded_prefix = {
+            let mut events = open();
+            events.push(Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Finished,
+                    None,
+                ),
+            });
+            events
+        };
+        assert!(accepts(recorded_prefix.clone()));
+        let mut recorded = recorded_prefix;
+        recorded.push(note(goal_id, "after the call settled"));
+        assert!(!accepts(recorded));
+
+        let child = AgentRunId::new();
+        let child_prefix = {
+            let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(
+                    CollaborationPolicy::Auto {
+                        max_active_children: 1,
+                    },
+                    false,
+                ),
+            ));
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+                active_ceiling_ms: 0,
+            });
+            events.push(Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Delegated,
+                    None,
+                ),
+            });
+            events.push(Event::AgentSpawned {
+                run_id,
+                agent_run_id: child,
+                role: AgentRole::Child,
+                ordinal: 1,
+                objective: Some("inspect the parser".into()),
+                grant: Some(ChildGrant::NoTools),
+            });
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id: child,
+                active_ceiling_ms: 0,
+            });
+            events
+        };
+        assert!(accepts(child_prefix.clone()));
+        let mut child_open = child_prefix;
+        child_open.push(note(goal_id, "for the child"));
+        assert!(!accepts(child_open));
+
+        let mut full = open();
+        full.extend((1..=4).map(|n| note(goal_id, &n.to_string())));
+        assert!(accepts(full.clone()));
+        full.push(note(
+            goal_id,
+            &"f".repeat(crate::session::MAX_STEERING_NOTE_BYTES),
+        ));
+        assert!(!accepts(full), "a Run's notes stay within the byte cap");
+
+        // Each note charges its text plus its label, so exactly the per-Run byte cap is accepted.
+        let label = crate::session::MAX_STEERING_LABEL_BYTES;
+        let mut exact = open();
+        exact.push(note(goal_id, &"a".repeat(4 * 1024 - label)));
+        exact.push(note(goal_id, &"b".repeat(4 * 1024 - label)));
+        assert!(accepts(exact.clone()));
+        let mut oversized = open();
+        oversized.push(note(goal_id, &"a".repeat(4 * 1024 - label)));
+        oversized.push(note(goal_id, &"b".repeat(4 * 1024 - label + 1)));
+        assert!(!accepts(oversized));
+
+        let mut finished_prefix = open();
+        finished_prefix.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                None,
+            ),
+        });
+        finished_prefix.push(Event::AgentFinished {
+            run_id,
+            agent_run_id,
+            disposition: AgentDisposition::Finished,
+            summary: Some("done".into()),
+            result: Some("done".into()),
+        });
+        assert!(accepts(finished_prefix.clone()));
+        let mut between = finished_prefix;
+        between.push(note(goal_id, "between AgentFinished and RunFinished"));
+        assert!(!accepts(between));
+
+        let mut ended_prefix = open();
+        ended_prefix.extend(cancel_run(run_id, agent_run_id));
+        assert!(accepts(ended_prefix.clone()));
+        let mut finished = ended_prefix;
+        finished.push(note(goal_id, "after the Run ended"));
+        assert!(!accepts(finished));
+
+        let other_prefix = open();
+        assert!(accepts(other_prefix.clone()));
+        let mut other = other_prefix;
+        other.push(note(GoalId::new(), "another Goal"));
+        assert!(!accepts(other));
+
+        // A Tool review reserves under the primary id; its pending Tool observation must reject notes.
+        let mut review = SessionView::replay_open(session, &session_with(session, open()))
+            .expect("open reservation replays")
+            .expect("Session exists");
+        let intent = crate::tools::EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id,
+            agent_run_id,
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: crate::tools::ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: 32,
+            },
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        review.runs[0].tools.push(ToolView {
+            permission_verdict: None,
+            intent,
+            observation: None,
+            review_call_index: None,
+            finished_sequence: None,
+        });
+        assert!(
+            review
+                .record_goal_steering_note(&goal_id, &run_id, "during a Tool review")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn steering_notes_charge_labels_and_stay_within_the_run_byte_bound() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+            active_ceiling_ms: 0,
+        });
+        let note = |text: &str| Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: text.into(),
+        };
+        // One byte of text plus its label is the densest packing the bound allows.
+        let most = crate::session::MAX_STEERING_NOTE_BYTES
+            / (1 + crate::session::MAX_STEERING_LABEL_BYTES);
+        events.extend((0..most).map(|_| note("n")));
+        let view = SessionView::replay_open(session, &session_with(session, events.clone()))
+            .expect("the maximum tiny notes replay")
+            .expect("Session exists");
+        let run = &view.runs[0];
+        assert_eq!(run.steering_notes.len(), most);
+        let text = run.history_user_text();
+        assert!(text.len() - run.objective.len() <= crate::session::MAX_STEERING_CONTEXT_BYTES);
+        events.push(note("n"));
+        assert!(
+            SessionView::replay_open(session, &session_with(session, events)).is_err(),
+            "the next tiny note exceeds the Run's bound with its label"
+        );
+    }
+
+    #[test]
+    fn steering_notes_have_no_count_cap_but_keep_the_run_byte_bound() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let open = || {
+            let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(CollaborationPolicy::Single, false),
+            ));
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+                active_ceiling_ms: 0,
+            });
+            events
+        };
+        let note = |len: usize| Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: "n".repeat(len),
+        };
+        let mut events = open();
+        events.extend((0..9).map(|_| note(800)));
+        let view = SessionView::replay_open(session, &session_with(session, events.clone()))
+            .expect("nine notes within 8 KiB replay")
+            .expect("Session exists");
+        assert_eq!(view.runs[0].steering_notes.len(), 9);
+        // Nine notes of 800 bytes charge 9 x (800 + 8) = 7272; a 912-byte tenth charges 920 and
+        // reaches exactly 8192, while 913 bytes would charge 921 and reach 8193.
+        events.push(note(912));
+        assert!(
+            SessionView::replay_open(session, &session_with(session, events.clone())).is_ok(),
+            "the Run's notes together reach exactly 8 KiB with labels"
+        );
+        events.push(note(913));
+        assert!(
+            SessionView::replay_open(session, &session_with(session, events)).is_err(),
+            "one more byte exceeds the Run's bound"
+        );
+    }
+
+    #[test]
+    fn history_user_text_labels_notes_within_the_steering_reserve() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+            active_ceiling_ms: 0,
+        });
+        for _ in 0..4 {
+            events.push(Event::GoalSteeringNoteRecorded {
+                goal_id,
+                run_id,
+                text: "n".repeat(2000),
+            });
+        }
+        let view = SessionView::replay_open(session, &session_with(session, events))
+            .expect("notes replay")
+            .expect("Session exists");
+        let run = &view.runs[0];
+        let text = run.history_user_text();
+        assert!(text.starts_with(&run.objective));
+        assert!(text.contains("\n[4] nnnn"));
+        // The reserve covers every note byte plus its labels and header, so compaction and history agree on size.
+        assert!(text.len() - run.objective.len() <= crate::session::MAX_STEERING_CONTEXT_BYTES);
+        let mut bare = run.clone();
+        bare.steering_notes.clear();
+        assert_eq!(bare.history_user_text(), run.objective);
+    }
+
+    #[test]
+    fn crash_after_steering_note_replays_interrupted_and_resume_starts_without_notes() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let session = SessionId::new();
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+            active_ceiling_ms: 0,
+        });
+        events.push(Event::GoalSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            text: "steer".into(),
+        });
+        // The process dies before the reserved call's outcome commits.
+        let crashed = SessionView::replay(session, &session_with(session, events.clone()))
+            .expect("crashed journal replays")
+            .expect("Session exists");
+        assert_eq!(crashed.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(crashed.goals[0].status, GoalStatus::Interrupted);
+        assert_eq!(crashed.runs[0].steering_notes, vec!["steer"]);
+
+        let resumed_run = RunId::new();
+        let resumed_agent = AgentRunId::new();
+        events.push(Event::GoalResumed { goal_id });
+        events.extend(start_run(
+            goal_id,
+            resumed_run,
+            resumed_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        let resumed = SessionView::replay_open(session, &session_with(session, events))
+            .expect("resume replays")
+            .expect("Session exists");
+        assert_eq!(resumed.runs.len(), 2);
+        assert_eq!(resumed.runs[0].steering_notes, vec!["steer"]);
+        assert!(resumed.runs[1].steering_notes.is_empty());
+    }
+
+    #[test]
+    fn a_new_goal_is_accepted_after_a_paused_goal_and_owns_its_run() {
+        let (first, second) = (GoalId::new(), GoalId::new());
+        let (first_run, first_agent) = (RunId::new(), AgentRunId::new());
+        let (second_run, second_agent) = (RunId::new(), AgentRunId::new());
+        let mut events = vec![goal_started(first, GoalBudget::default())];
+        events.extend(start_run(
+            first,
+            first_run,
+            first_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(cancel_run(first_run, first_agent));
+        events.push(goal_started(second, GoalBudget::default()));
+        events.extend(start_run(
+            second,
+            second_run,
+            second_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(complete_run_and_goal(second, second_run, second_agent));
+        let session = SessionId::new();
+        let journal = session_with(session, events);
+
+        let open = SessionView::replay_open(session, &journal)
+            .expect("a new Goal pauses its paused predecessor")
+            .expect("Session exists");
+        assert_eq!(open.goals[0].status, GoalStatus::Interrupted);
+        assert_eq!(open.goals[1].status, GoalStatus::Completed);
+        assert_eq!(open.goals[1].run_ids, vec![second_run]);
+        assert_eq!(open.goals[0].run_ids, vec![first_run]);
+        let closed = SessionView::replay(session, &journal)
+            .expect("closed replay agrees")
+            .expect("Session exists");
+        assert_eq!(closed.interrupted_goal_id(), Some(first));
+    }
+
+    #[test]
+    fn a_crashed_predecessor_is_sealed_by_a_new_goal() {
+        let (first, second) = (GoalId::new(), GoalId::new());
+        let (first_run, first_agent) = (RunId::new(), AgentRunId::new());
+        let (second_run, second_agent) = (RunId::new(), AgentRunId::new());
+        let mut events = vec![goal_started(first, GoalBudget::default())];
+        events.extend(start_run(
+            first,
+            first_run,
+            first_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        // No terminal Run or Goal event: the process died mid-Run.
+        events.push(goal_started(second, GoalBudget::default()));
+        events.extend(start_run(
+            second,
+            second_run,
+            second_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        let session = SessionId::new();
+        let journal = session_with(session, events);
+
+        let open = SessionView::replay_open(session, &journal)
+            .expect("a crashed predecessor does not block a new Goal")
+            .expect("Session exists");
+        assert_eq!(open.goals[0].status, GoalStatus::Interrupted);
+        assert_eq!(open.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(open.goals[1].status, GoalStatus::Running);
+    }
+
+    #[test]
+    fn resume_continues_the_most_recent_paused_goal_after_a_newer_goal_finished() {
+        let (first, second) = (GoalId::new(), GoalId::new());
+        let (first_run, first_agent) = (RunId::new(), AgentRunId::new());
+        let (second_run, second_agent) = (RunId::new(), AgentRunId::new());
+        let (resumed_run, resumed_agent) = (RunId::new(), AgentRunId::new());
+        let mut events = vec![goal_started(first, GoalBudget::default())];
+        events.extend(start_run(
+            first,
+            first_run,
+            first_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(cancel_run(first_run, first_agent));
+        events.push(goal_started(second, GoalBudget::default()));
+        events.extend(start_run(
+            second,
+            second_run,
+            second_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(complete_run_and_goal(second, second_run, second_agent));
+        events.push(Event::GoalResumed { goal_id: first });
+        events.extend(start_run(
+            first,
+            resumed_run,
+            resumed_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(complete_run_and_goal(first, resumed_run, resumed_agent));
+        let session = SessionId::new();
+        let journal = session_with(session, events);
+
+        let view = SessionView::replay(session, &journal)
+            .expect("resumed Goal replays")
+            .expect("Session exists");
+        assert_eq!(view.goals[0].status, GoalStatus::Completed);
+        assert_eq!(view.goals[0].run_ids, vec![first_run, resumed_run]);
+        assert_eq!(view.goals[1].status, GoalStatus::Completed);
+        assert_eq!(view.interrupted_goal_id(), None);
+    }
+
+    #[test]
+    fn an_older_paused_goal_is_not_resumable_once_a_newer_goal_is_paused() {
+        let (first, second) = (GoalId::new(), GoalId::new());
+        let (first_run, first_agent) = (RunId::new(), AgentRunId::new());
+        let (second_run, second_agent) = (RunId::new(), AgentRunId::new());
+        let mut paused = vec![goal_started(first, GoalBudget::default())];
+        paused.extend(start_run(
+            first,
+            first_run,
+            first_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        paused.extend(cancel_run(first_run, first_agent));
+        paused.push(goal_started(second, GoalBudget::default()));
+        paused.extend(start_run(
+            second,
+            second_run,
+            second_agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        paused.extend(cancel_run(second_run, second_agent));
+        let session = SessionId::new();
+        let closed_session = session_with(session, paused.clone());
+        let view = SessionView::replay(session, &closed_session)
+            .expect("both paused Goals replay")
+            .expect("Session exists");
+        assert_eq!(view.interrupted_goal_id(), Some(second));
+
+        let mut older = paused.clone();
+        older.push(Event::GoalResumed { goal_id: first });
+        assert!(
+            SessionView::replay_open(session, &session_with(session, older)).is_err(),
+            "the older paused Goal is history, not resumable"
+        );
+        let mut newer = paused;
+        newer.push(Event::GoalResumed { goal_id: second });
+        assert!(SessionView::replay_open(session, &session_with(session, newer)).is_ok());
+    }
+
+    #[test]
+    fn interrupted_goal_without_admissible_run_closes_as_failed() {
+        let goal = GoalId::new();
+        let (run, agent) = (RunId::new(), AgentRunId::new());
+        let budget = GoalBudget {
+            max_runs: 1,
+            ..GoalBudget::default()
+        };
+        let close = Event::GoalFinished {
+            goal_id: goal,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report: GoalReport {
+                summary: "Out of budget.".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+                cached_input_tokens: 0,
+            },
+        };
+        let mut events = vec![goal_started(goal, budget)];
+        events.extend(start_run(
+            goal,
+            run,
+            agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(cancel_run(run, agent));
+        let session = SessionId::new();
+        let mut closing = events.clone();
+        closing.push(close.clone());
+        let view = SessionView::replay_open(session, &session_with(session, closing))
+            .expect("an exhausted paused Goal closes as Failed")
+            .expect("Session exists");
+        assert_eq!(view.goal(goal).unwrap().status, GoalStatus::Failed);
+        assert_eq!(view.interrupted_goal_id(), None);
+
+        let session = SessionId::new();
+        let mut admissible = vec![goal_started(goal, GoalBudget::default())];
+        admissible.extend(start_run(
+            goal,
+            run,
+            agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        admissible.extend(cancel_run(run, agent));
+        admissible.push(close);
+        assert!(
+            SessionView::replay_open(session, &session_with(session, admissible)).is_err(),
+            "a paused Goal that still admits a Run cannot close as Failed"
+        );
+    }
+
+    #[test]
+    fn exhausted_goal_closes_over_a_crash_left_provider_call() {
+        let (goal, run, agent) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let report = GoalReport {
+            summary: "Goal budget is exhausted.".into(),
+            changes: Vec::new(),
+            evidence: Vec::new(),
+            unresolved: Vec::new(),
+            cached_input_tokens: 0,
+        };
+        let close = Event::GoalFinished {
+            goal_id: goal,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report,
+        };
+        let budget = GoalBudget {
+            max_provider_calls: Some(1),
+            ..GoalBudget::default()
+        };
+        // The process died inside the only admitted provider call: no RunFinished was journaled.
+        let mut crashed = vec![goal_started(goal, budget)];
+        crashed.extend(start_run(
+            goal,
+            run,
+            agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        crashed.push(Event::GoalProviderCallReserved {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: agent,
+            active_ceiling_ms: 0,
+        });
+        let session = SessionId::new();
+        let mut closing = crashed.clone();
+        closing.push(close.clone());
+        let view = SessionView::replay_open(session, &session_with(session, closing))
+            .expect("an exhausted crash-left Goal closes as Failed")
+            .expect("Session exists");
+        let goal_view = view.goal(goal).expect("Goal");
+        assert_eq!(goal_view.status, GoalStatus::Failed);
+        assert_eq!(goal_view.active_run, None);
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(view.interrupted_goal_id(), None);
+
+        let session = SessionId::new();
+        let mut admissible = vec![goal_started(goal, GoalBudget::default())];
+        admissible.extend(start_run(
+            goal,
+            run,
+            agent,
+            config(CollaborationPolicy::Single, false),
+        ));
+        admissible.push(Event::GoalProviderCallReserved {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: agent,
+            active_ceiling_ms: 0,
+        });
+        admissible.push(close);
+        assert!(
+            SessionView::replay_open(session, &session_with(session, admissible)).is_err(),
+            "a crash-left Goal that still admits a Run cannot close as Failed"
+        );
+    }
+
+    #[test]
+    fn resumed_crash_left_compaction_call_settles_as_uncertain() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(cancel_run(run_id, agent_run_id));
+        // The process died after the compaction call was reserved, before its outcome was journaled.
+        events.push(Event::GoalCompactionCallReserved {
+            goal_id,
+            run_id,
+            active_ceiling_ms: 0,
+        });
+        events.push(Event::GoalResumed { goal_id });
+
+        let view = SessionView::replay_open(session_id, &session_with(session_id, events))
+            .expect("resumed Goal replays")
+            .expect("Session exists");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(goal.status, GoalStatus::Running);
+        assert_eq!(goal.compaction_call_reserved, None);
+        assert_eq!(goal.uncertain_compaction_calls, 1);
+        assert!(goal.token_usage_unknown);
+    }
+
+    #[test]
+    fn exhausted_goal_closes_over_a_crash_left_compaction_call() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let budget = GoalBudget {
+            max_provider_calls: Some(1),
+            ..GoalBudget::default()
+        };
+        let mut events = vec![goal_started(goal_id, budget)];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.extend(cancel_run(run_id, agent_run_id));
+        // The only admitted call is the compaction call, whose outcome never committed.
+        events.push(Event::GoalCompactionCallReserved {
+            goal_id,
+            run_id,
+            active_ceiling_ms: 0,
+        });
+        events.push(Event::GoalFinished {
+            goal_id,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report: GoalReport {
+                summary: "Goal budget is exhausted.".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+                cached_input_tokens: 0,
+            },
+        });
+
+        let session = SessionId::new();
+        let view = SessionView::replay_open(session, &session_with(session, events))
+            .expect("an exhausted Goal closes over its crash-left compaction call")
+            .expect("Session exists");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert_eq!(goal.compaction_call_reserved, None);
+        assert_eq!(goal.uncertain_compaction_calls, 1);
+    }
+
+    #[test]
+    fn exhausted_autonomous_goal_closes_over_a_crash_left_compaction_call() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let budget = GoalBudget {
+            max_provider_calls: Some(2),
+            ..GoalBudget::default()
+        };
+        let mut events = vec![Event::GoalStarted {
+            goal_id,
+            objective: GOAL_OBJECTIVE.into(),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
+            budget,
+            resource_settings: crate::tools::ToolResourceSettings::default(),
+            phase: GoalPhase::Implementation,
+            autonomous: true,
+        }];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+            active_ceiling_ms: 0,
+        });
+        events.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                None,
+            ),
+        });
+        events.extend([
+            Event::AgentFinished {
+                run_id,
+                agent_run_id,
+                disposition: AgentDisposition::Finished,
+                summary: Some("done".into()),
+                result: Some("done".into()),
+            },
+            Event::MessageCommitted {
+                run_id,
+                text: "done".into(),
+            },
+            Event::RunFinished {
+                run_id,
+                disposition: RunDisposition::Finished,
+                active_ms: 0,
+            },
+        ]);
+        // The Run finished, but its between-Run compaction call never committed: the Goal is paused.
+        events.push(Event::GoalCompactionCallReserved {
+            goal_id,
+            run_id,
+            active_ceiling_ms: 0,
+        });
+        events.push(Event::GoalFinished {
+            goal_id,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report: GoalReport {
+                summary: "Goal budget is exhausted.".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+                cached_input_tokens: 0,
+            },
+        });
+
+        let session = SessionId::new();
+        let view = SessionView::replay_open(session, &session_with(session, events))
+            .expect("an exhausted autonomous Goal closes over its crash-left compaction call")
+            .expect("Session exists");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert_eq!(goal.uncertain_compaction_calls, 1);
+    }
+
+    #[test]
+    fn resumed_orphaned_provider_reservation_settles_as_uncertain() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let mut events = vec![
+            Event::SessionStarted {
+                title: "Goal".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+            goal_started(goal_id, GoalBudget::default()),
+        ];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+            active_ceiling_ms: 0,
+        });
+        events.push(Event::GoalResumed { goal_id });
+
+        let view = SessionView::replay_open(session_id, &journal(session_id, events))
+            .expect("resumed Goal replays")
+            .expect("Session exists");
+        let goal = view.goals.last().expect("Goal");
+        assert!(goal.unobserved_provider_calls.is_empty());
+        assert!(goal.token_usage_unknown);
+    }
+
+    #[test]
+    fn finish_with_unknown_usage_is_not_a_tool_or_delegate_outcome() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let budget = GoalBudget {
+            max_tokens: Some(1000),
+            ..GoalBudget::default()
+        };
+        let mut events = vec![
+            Event::SessionStarted {
+                title: "Goal".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+            goal_started(goal_id, budget),
+        ];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+            active_ceiling_ms: 0,
+        });
+        events.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                None,
+            ),
+        });
+        events.push(Event::AgentFinished {
+            run_id,
+            agent_run_id,
+            disposition: AgentDisposition::Finished,
+            summary: Some("done".into()),
+            result: Some("done".into()),
+        });
+
+        let view = SessionView::replay_open(session_id, &journal(session_id, events))
+            .expect("unknown usage does not block a Finish")
+            .expect("Session exists");
+        assert_eq!(view.runs[0].agents[0].status, AgentStatus::Finished);
+    }
+
+    #[test]
+    fn finished_run_fails_only_an_unsatisfied_planned_goal_at_its_active_limit() {
+        let limit = 1000;
+        // (plan contract, its criterion satisfied, settled active time, Failed accepted)
+        for (planned, satisfied, settled, accepted) in [
+            (true, false, limit, true),
+            (true, false, limit - 1, false),
+            (false, false, limit, false),
+            (true, true, limit, false),
+        ] {
+            let session_id = SessionId::new();
+            let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+            let budget = GoalBudget {
+                max_active_ms: Some(limit),
+                ..GoalBudget::default()
+            };
+            let mut events = vec![
+                Event::SessionStarted {
+                    title: "Goal".into(),
+                    workspace_identity: WorkspaceIdentity {
+                        device: 1,
+                        inode: 2,
+                    },
+                },
+                Event::GoalStarted {
+                    goal_id,
+                    objective: GOAL_OBJECTIVE.into(),
+                    workspace_identity: WorkspaceIdentity {
+                        device: 1,
+                        inode: 2,
+                    },
+                    budget,
+                    resource_settings: crate::tools::ToolResourceSettings::default(),
+                    phase: GoalPhase::Implementation,
+                    autonomous: true,
+                },
+            ];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(CollaborationPolicy::Single, false),
+            ));
+            if let Some(Event::RunStarted {
+                active_deadline_ms, ..
+            }) = events.get_mut(4)
+            {
+                *active_deadline_ms = Some(limit);
+            }
+            events.push(Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+                active_ceiling_ms: 0,
+            });
+            events.push(Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Finished,
+                    None,
+                ),
+            });
+            events.push(Event::AgentFinished {
+                run_id,
+                agent_run_id,
+                disposition: AgentDisposition::Finished,
+                summary: Some("done".into()),
+                result: Some("done".into()),
+            });
+            events.push(Event::MessageCommitted {
+                run_id,
+                text: "done".into(),
+            });
+            events.push(Event::RunFinished {
+                run_id,
+                disposition: RunDisposition::Finished,
+                active_ms: settled,
+            });
+            let mut view = SessionView::replay_open(session_id, &journal(session_id, events))
+                .expect("Finished Run before the Goal receipt")
+                .expect("Session");
+            if planned {
+                let goal = view.goals.last_mut().expect("Goal");
+                goal.plan_contract = Some(GoalPlanContract {
+                    mission: GOAL_OBJECTIVE.into(),
+                    resource_class: crate::tools::ToolResourceClass::Default,
+                    command_timeout_ms: None,
+                    paths: Vec::new(),
+                    commands: Vec::new(),
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                        path: "src/lib.rs".into(),
+                        sha256: crate::tools::types::hex_digest(b"done"),
+                    },
+                    budget: GoalBudget {
+                        max_active_ms: Some(limit),
+                        ..GoalBudget::default()
+                    },
+                });
+                goal.success_criterion_satisfied = satisfied;
+            }
+            let report = GoalReport {
+                summary: "budget".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+                cached_input_tokens: 0,
+            };
+            let receipt = view.finish_goal(&goal_id, &GoalStatus::Failed, &settled, &report, 0);
+            assert_eq!(
+                receipt.is_ok(),
+                accepted,
+                "a Failed receipt over a Finished Run needs an unsatisfied plan and spent active time (planned {planned}, satisfied {satisfied}, {settled} of {limit})"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_wait_does_not_block_a_terminal_failure_before_tool_start() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let mut events = vec![
+            Event::SessionStarted {
+                title: "Goal".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+            goal_started(goal_id, GoalBudget::default()),
+        ];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, true),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+            active_ceiling_ms: 0,
+        });
+        events.push(Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::ToolRequested,
+                Some(0),
+            ),
+        });
+        // Engine fails the primary when the Tool deadline or context capacity refuses before ToolStarted.
+        events.push(Event::AgentFinished {
+            run_id,
+            agent_run_id,
+            disposition: AgentDisposition::Failed,
+            summary: None,
+            result: None,
+        });
+        events.push(Event::RunFinished {
+            run_id,
+            disposition: RunDisposition::Failed,
+            active_ms: 0,
+        });
+        events.push(Event::GoalFinished {
+            goal_id,
+            status: GoalStatus::Failed,
+            active_ms: 0,
+            report: GoalReport {
+                summary: "failed".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+                cached_input_tokens: 0,
+            },
+        });
+
+        let view = SessionView::replay_open(session_id, &journal(session_id, events))
+            .expect("a terminal failure closes the plan wait")
+            .expect("Session exists");
+        let goal = view.goals.last().expect("Goal");
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert!(!goal.awaiting_plan_contract);
+        assert_eq!(view.runs[0].status, RunStatus::Failed);
+    }
+
+    #[test]
+    fn crash_between_tool_start_and_finish_replays_interrupted_with_the_tool_ceiling_charged() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let mut events = vec![
+            Event::SessionStarted {
+                title: "Goal".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+            goal_started(goal_id, GoalBudget::default()),
+        ];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, true),
+        ));
+        let intent = read_intent(run_id, agent_run_id, "src/lib.rs");
+        events.extend([
+            Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+                active_ceiling_ms: 605_000,
+            },
+            Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::ToolRequested,
+                    Some(0),
+                ),
+            },
+            Event::ToolStarted {
+                run_id,
+                agent_run_id,
+                intent,
+                active_ceiling_ms: 46_000,
+            },
+        ]);
+        let view = SessionView::replay(session_id, &journal(session_id, events.clone()))
+            .expect("crash-left prefix")
+            .expect("Session");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        assert!(view.runs[0].tools[0].observation.is_none());
+        assert_eq!(goal.status, GoalStatus::Interrupted);
+        assert_eq!(
+            goal.resume_usage(&view).active_ms,
+            46_000,
+            "only the open Tool's ceiling is charged, not the settled call's reservation"
+        );
+        assert!(
+            !goal.can_resume(&view),
+            "an unobserved effect stops continuation"
+        );
+
+        let mut resumed = events;
+        resumed.push(Event::GoalResumed { goal_id });
+        assert!(SessionView::replay_open(session_id, &journal(session_id, resumed)).is_err());
+    }
+
+    #[test]
+    fn crash_mid_run_charges_only_the_open_action_and_resume_continues() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let mut events = vec![
+            Event::SessionStarted {
+                title: "Goal".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+            goal_started(goal_id, GoalBudget::default()),
+        ];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            agent_run_id,
+            config(CollaborationPolicy::Single, false),
+        ));
+        events.push(Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+            active_ceiling_ms: 7_000,
+        });
+        let mut resumed = events.clone();
+        resumed.push(Event::GoalResumed { goal_id });
+        resumed.extend(start_run(
+            goal_id,
+            RunId::new(),
+            AgentRunId::new(),
+            config(CollaborationPolicy::Single, false),
+        ));
+        if let Some(Event::RunStarted {
+            active_deadline_ms, ..
+        }) = resumed.iter_mut().rev().nth(1)
+        {
+            *active_deadline_ms = Some(crate::session::MAX_GOAL_ACTIVE_MS - 7_000);
+        }
+        let view = SessionView::replay_open(session_id, &journal(session_id, resumed))
+            .expect("resume continues with time left")
+            .expect("Session");
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!((goal.active_ms, goal.uncertain_active_ms), (7_000, 7_000));
+        assert_eq!(goal.active_ceiling_ms, 0, "charged once");
+
+        let view = SessionView::replay(session_id, &journal(session_id, events))
+            .expect("crash-left Run")
+            .expect("Session");
+        let mut capped = view.goals[0].clone();
+        capped.active_deadline = Some((run_id, Some(3_000)));
+        assert_eq!(
+            capped.unsettled_active_charge_ms(),
+            3_000,
+            "the Run deadline caps it"
+        );
+        capped.active_deadline = Some((run_id, Some(30_000)));
+        capped.plan_contract = Some(GoalPlanContract {
+            mission: GOAL_OBJECTIVE.into(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            paths: Vec::new(),
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/lib.rs".into(),
+                content: "ok".into(),
+            },
+            budget: GoalBudget {
+                max_active_ms: Some(5_000),
+                ..GoalBudget::default()
+            },
+        });
+        assert_eq!(
+            capped.unsettled_active_charge_ms(),
+            5_000,
+            "plan narrowing caps it"
+        );
+    }
+
+    fn delegated_session(known_tokens: u64) -> SessionView {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let contract = GoalPlanContract {
+            mission: "Plan".into(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            paths: vec!["src/lib.rs".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/lib.rs".into(),
+                content: "ok".into(),
+            },
+            budget: GoalBudget {
+                max_tokens: Some(1000),
+                ..GoalBudget::default()
+            },
+        };
+        SessionView {
+            id: session_id,
+            title: "Goal".into(),
+            title_is_explicit: false,
+            inherited_title: None,
+            workspace_identity: Some(WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            }),
+            defaults: SessionDefaults::default(),
+            created_sequence: 0,
+            last_sequence: 1,
+            lineage: None,
+            runs: vec![RunView {
+                id: run_id,
+                objective: GOAL_OBJECTIVE.into(),
+                images: Vec::new(),
+                config: Some(config(
+                    CollaborationPolicy::Auto {
+                        max_active_children: 1,
+                    },
+                    false,
+                )),
+                agents: vec![AgentView {
+                    id: agent_run_id,
+                    role: AgentRole::Primary,
+                    ordinal: 0,
+                    objective: None,
+                    summary: None,
+                    result: None,
+                    provider_calls: vec![record(
+                        AgentPhase::RootPlan,
+                        ProviderCallDisposition::Delegated,
+                        Some(0),
+                    )],
+                    grant: None,
+                    tools: Vec::new(),
+                    status: AgentStatus::Active,
+                }],
+                assistant_message: None,
+                status: RunStatus::Active,
+                accepted_sequence: 1,
+                finished_sequence: None,
+                tools: Vec::new(),
+                tool_compaction_summary: None,
+                tool_compaction_covered_count: 0,
+                display: Vec::new(),
+                steering_notes: Vec::new(),
+                provider_fallbacks: Vec::new(),
+            }],
+            compactions: Vec::new(),
+            goals: vec![GoalView {
+                id: goal_id,
+                objective: GOAL_OBJECTIVE.into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+                budget: GoalBudget::default(),
+                phase: GoalPhase::Implementation,
+                autonomous: false,
+                status: GoalStatus::Running,
+                run_ids: vec![run_id],
+                active_run: Some(run_id),
+                plan_contract: Some(contract),
+                success_criterion_satisfied: false,
+                awaiting_plan_contract: false,
+                active_ms: 0,
+                uncertain_active_ms: 0,
+                active_deadline: None,
+                compaction_call_reserved: None,
+                uncertain_compaction_calls: 0,
+                success_state: crate::session::GoalSuccessState::NoContract,
+                resource_settings: crate::tools::ToolResourceSettings::default(),
+                provider_calls: 1,
+                unobserved_provider_calls: Vec::new(),
+                known_tokens,
+                token_usage_unknown: false,
+                report: None,
+                started_sequence: 1,
+                finished_sequence: None,
+                known_cached_tokens: 0,
+                active_ceiling_ms: 0,
+            }],
+        }
+    }
+
+    fn apply_child_spawn(view: &mut SessionView, grant: ChildGrant) -> Result<(), ReplayError> {
+        let run_id = view.runs[0].id;
+        let event = Event::AgentSpawned {
+            run_id,
+            agent_run_id: AgentRunId::new(),
+            role: AgentRole::Child,
+            ordinal: 1,
+            objective: Some("Check the child result".into()),
+            grant: Some(grant),
+        };
+        let (run_id, agent_run_id) = event.scope();
+        view.apply_committed(&EventEnvelope {
+            sequence: 2,
+            session_id: view.id,
+            run_id,
+            agent_run_id,
+            event,
+            created_at_ms: 0,
+        })
+    }
+
+    #[test]
+    fn child_spawn_grant_follows_the_run_tool_policy() {
+        let session_with_tools = |tools| {
+            let mut view = delegated_session(0);
+            view.runs[0].config = Some(config(
+                CollaborationPolicy::Auto {
+                    max_active_children: 1,
+                },
+                tools,
+            ));
+            view
+        };
+        let mut no_tools = session_with_tools(false);
+        assert!(apply_child_spawn(&mut no_tools, ChildGrant::NoTools).is_ok());
+        assert_eq!(no_tools.runs[0].agents[1].grant, Some(ChildGrant::NoTools));
+        assert!(apply_child_spawn(&mut session_with_tools(false), ChildGrant::ReadOnly).is_err());
+
+        let mut with_tools = session_with_tools(true);
+        assert!(apply_child_spawn(&mut with_tools, ChildGrant::ReadOnly).is_ok());
+        assert_eq!(
+            with_tools.runs[0].agents[1].grant,
+            Some(ChildGrant::ReadOnly)
+        );
+        assert!(apply_child_spawn(&mut session_with_tools(true), ChildGrant::NoTools).is_err());
+    }
+
+    /// Applies one Event at the next sequence, as the Store would.
+    fn apply(view: &mut SessionView, event: Event) -> Result<(), ReplayError> {
+        let (run_id, agent_run_id) = event.scope();
+        let sequence = view.last_sequence + 1;
+        view.apply_committed(&EventEnvelope {
+            sequence,
+            session_id: view.id,
+            run_id,
+            agent_run_id,
+            event,
+            created_at_ms: 0,
+        })
+    }
+
+    fn child_intent(run_id: RunId, agent_run_id: AgentRunId, call: ToolCall) -> EffectIntent {
+        EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id,
+            agent_run_id,
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call,
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        }
+    }
+
+    /// A delegated Tool Run with one spawned `ReadOnly` child; returns (goal, run, child) ids.
+    fn research_session() -> (SessionView, GoalId, RunId, AgentRunId) {
+        let mut view = delegated_session(0);
+        view.runs[0].config = Some(config(
+            CollaborationPolicy::Auto {
+                max_active_children: 1,
+            },
+            true,
+        ));
+        apply_child_spawn(&mut view, ChildGrant::ReadOnly).expect("research child spawn");
+        let (goal, run, child) = (view.goals[0].id, view.runs[0].id, view.runs[0].agents[1].id);
+        (view, goal, run, child)
+    }
+
+    fn reserve_child_call(goal_id: GoalId, run_id: RunId, agent_run_id: AgentRunId) -> Event {
+        Event::GoalProviderCallReserved {
+            goal_id,
+            run_id,
+            agent_run_id,
+            active_ceiling_ms: 0,
+        }
+    }
+
+    fn child_record(
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        disposition: ProviderCallDisposition,
+    ) -> Event {
+        Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            record: record(AgentPhase::ChildWork, disposition, Some(0)),
+        }
+    }
+
+    /// Whether `event` is rejected when applied after the accepted prefix in `view`.
+    fn rejected(view: &SessionView, event: Event) -> bool {
+        apply(&mut view.clone(), event).is_err()
+    }
+
+    #[test]
+    fn child_research_tools_replay_in_order_and_reject_widening() {
+        let (mut view, goal, run, child) = research_session();
+        let read = child_intent(
+            run,
+            child,
+            ToolCall::Read {
+                path: "src/lib.rs".into(),
+                offset: 0,
+                limit: 1024,
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        assert!(rejected(
+            &view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: read.clone(),
+                active_ceiling_ms: 0,
+            }
+        ));
+        let mut no_tools = delegated_session(0);
+        apply_child_spawn(&mut no_tools, ChildGrant::NoTools).expect("no-tools child spawn");
+        let (no_tools_goal, no_tools_run, no_tools_child) = (
+            no_tools.goals[0].id,
+            no_tools.runs[0].id,
+            no_tools.runs[0].agents[1].id,
+        );
+        apply(
+            &mut no_tools,
+            reserve_child_call(no_tools_goal, no_tools_run, no_tools_child),
+        )
+        .expect("no-tools child call");
+        assert!(rejected(
+            &no_tools,
+            child_record(
+                no_tools_run,
+                no_tools_child,
+                ProviderCallDisposition::ToolRequested
+            ),
+        ));
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("child Tool request");
+        let started = Event::ToolStarted {
+            run_id: run,
+            agent_run_id: child,
+            intent: read.clone(),
+            active_ceiling_ms: 0,
+        };
+        let finished = Event::ToolFinished {
+            run_id: run,
+            agent_run_id: child,
+            observation: observation_for(read.clone(), b"ok"),
+        };
+        let after_request = view.clone();
+        let write = child_intent(
+            run,
+            child,
+            ToolCall::Write {
+                path: "src/lib.rs".into(),
+                expected_digest: None,
+                content: "x".into(),
+            },
+        );
+        assert!(rejected(
+            &after_request,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: write,
+                active_ceiling_ms: 0,
+            }
+        ));
+        let mcp = child_intent(
+            run,
+            child,
+            ToolCall::McpCall {
+                server: "local".into(),
+                tool: "probe".into(),
+                schema_digest: "a".repeat(64),
+                arguments: "{}".into(),
+            },
+        );
+        assert!(rejected(
+            &after_request,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: mcp,
+                active_ceiling_ms: 0,
+            }
+        ));
+        for call in [
+            ToolCall::GitStatus { path: ".".into() },
+            ToolCall::GitLog {
+                path: ".".into(),
+                revision: None,
+                max_count: 1,
+            },
+        ] {
+            let intent = child_intent(run, child, call);
+            assert!(rejected(
+                &after_request,
+                Event::ToolStarted {
+                    run_id: run,
+                    agent_run_id: child,
+                    intent,
+                    active_ceiling_ms: 0,
+                }
+            ));
+        }
+        apply(&mut view, started.clone()).expect("child Tool starts");
+        let mut open = view.clone();
+        apply(&mut open, reserve_child_call(goal, run, child)).expect("second reservation");
+        assert!(rejected(
+            &open,
+            child_record(run, child, ProviderCallDisposition::Finished)
+        ));
+        assert!(rejected(
+            &view,
+            Event::AgentFinished {
+                run_id: run,
+                agent_run_id: child,
+                disposition: AgentDisposition::Cancelled,
+                summary: None,
+                result: None,
+            }
+        ));
+        let mismatched = ToolObservation {
+            enforcement_cause: None,
+            intent: child_intent(
+                run,
+                child,
+                ToolCall::Read {
+                    path: "src/lib.rs".into(),
+                    offset: 0,
+                    limit: 2,
+                },
+            ),
+            ..observation_for(read.clone(), b"ok")
+        };
+        assert!(rejected(
+            &view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: child,
+                observation: mismatched,
+            }
+        ));
+        apply(&mut view, finished).expect("child Tool finishes");
+
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::Finished),
+        )
+        .expect("child finishes");
+        apply(
+            &mut view,
+            Event::AgentFinished {
+                run_id: run,
+                agent_run_id: child,
+                disposition: AgentDisposition::Finished,
+                summary: Some("report".into()),
+                result: Some("report".into()),
+            },
+        )
+        .expect("child report");
+        assert!(view.runs[0].tools.is_empty());
+        assert_eq!(view.runs[0].agents[1].tools.len(), 1);
+        assert!(!view.goals[0].awaiting_plan_contract);
+        assert!(!view.goals[0].success_criterion_satisfied);
+    }
+
+    #[test]
+    fn child_tool_outside_the_plan_replays_only_as_denied() {
+        let (mut view, goal, run, child) = research_session();
+        let outside = child_intent(
+            run,
+            child,
+            ToolCall::Read {
+                path: "src/main.rs".into(),
+                offset: 0,
+                limit: 1024,
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("child Tool request");
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: outside.clone(),
+                active_ceiling_ms: 0,
+            },
+        )
+        .expect("child Tool starts");
+        assert!(rejected(
+            &view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: child,
+                observation: observation_for(outside.clone(), b"x"),
+            }
+        ));
+        apply(
+            &mut view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: child,
+                observation: ToolObservation {
+                    enforcement_cause: None,
+                    intent: outside,
+                    disposition: ToolDisposition::Denied,
+                    output:
+                        "The effect is outside the active Goal plan; no operation was dispatched"
+                            .into(),
+                    attestation: None,
+                    cache_update: CacheUpdate::NotApplicable,
+                },
+            },
+        )
+        .expect("out-of-plan child read is denied");
+    }
+
+    #[test]
+    fn child_research_tool_bound_admits_sixteen_requests_and_no_seventeenth() {
+        let (mut view, goal, run, child) = research_session();
+        for _ in 0..crate::session::MAX_CHILD_TOOL_CALLS {
+            let read = child_intent(
+                run,
+                child,
+                ToolCall::Read {
+                    path: "src/lib.rs".into(),
+                    offset: 0,
+                    limit: 1024,
+                },
+            );
+            apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+            apply(
+                &mut view,
+                child_record(run, child, ProviderCallDisposition::ToolRequested),
+            )
+            .expect("child Tool request");
+            apply(
+                &mut view,
+                Event::ToolStarted {
+                    run_id: run,
+                    agent_run_id: child,
+                    intent: read.clone(),
+                    active_ceiling_ms: 0,
+                },
+            )
+            .expect("child Tool starts");
+            apply(
+                &mut view,
+                Event::ToolFinished {
+                    run_id: run,
+                    agent_run_id: child,
+                    observation: observation_for(read, b"ok"),
+                },
+            )
+            .expect("child Tool finishes");
+        }
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        assert!(rejected(
+            &view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested)
+        ));
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::Finished),
+        )
+        .expect("child may still finish at the bound");
+    }
+
+    #[test]
+    fn crash_left_child_tool_interrupts_the_run_and_blocks_goal_resume() {
+        let (mut view, goal, run, child) = research_session();
+        let read = child_intent(
+            run,
+            child,
+            ToolCall::Read {
+                path: "src/lib.rs".into(),
+                offset: 0,
+                limit: 1024,
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("child Tool request");
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: read.clone(),
+                active_ceiling_ms: 0,
+            },
+        )
+        .expect("child Tool starts");
+        let mut crashed = view.clone();
+        apply(
+            &mut crashed,
+            goal_started(GoalId::new(), GoalBudget::default()),
+        )
+        .expect("a new Goal seals the crashed Goal");
+        assert_eq!(crashed.goals[0].status, GoalStatus::Interrupted);
+        assert_eq!(crashed.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(crashed.runs[0].agents[1].status, AgentStatus::Interrupted);
+        assert!(!crashed.goals[0].can_resume(&crashed));
+
+        apply(
+            &mut view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: child,
+                observation: observation_for(read, b"ok"),
+            },
+        )
+        .expect("child Tool finishes");
+        let mut settled = view.clone();
+        apply(
+            &mut settled,
+            goal_started(GoalId::new(), GoalBudget::default()),
+        )
+        .expect("a new Goal seals the settled Goal");
+        assert!(settled.goals[0].can_resume(&settled));
+    }
+
+    #[test]
+    fn child_admission_uses_the_effective_plan_token_ceiling() {
+        let mut below_cap = delegated_session(999);
+        assert!(apply_child_spawn(&mut below_cap, ChildGrant::NoTools).is_ok());
+
+        let mut at_cap = delegated_session(1000);
+        assert!(apply_child_spawn(&mut at_cap, ChildGrant::NoTools).is_err());
+    }
+
+    fn read_observation(path: &str, content: &[u8]) -> ToolObservation {
+        file_observation(
+            ToolCall::Read {
+                path: path.into(),
+                offset: 0,
+                limit: 1024,
+            },
+            content,
+        )
+    }
+
+    fn file_observation(call: ToolCall, content: &[u8]) -> ToolObservation {
+        let intent = EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: RunId::new(),
+            agent_run_id: AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call,
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        observation_for(intent, content)
+    }
+
+    fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObservation {
+        ToolObservation {
+            enforcement_cause: None,
+            attestation: Some(crate::tools::Attestation::for_site(&intent)),
+            intent,
+            disposition: ToolDisposition::Succeeded,
+            output: serde_json::json!({
+                "sha256": crate::tools::types::hex_digest(content)
+            })
+            .to_string(),
+            cache_update: CacheUpdate::NotApplicable,
+        }
+    }
+
+    #[test]
+    fn plan_contract_counts_a_pre_plan_read_matching_its_digest() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let read = read_observation("src/main.rs", b"before");
+        let read_intent = read.intent.clone();
+        let contract = GoalPlanContract {
+            mission: "Verify the file".into(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            paths: vec!["src/main.rs".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                path: "src/main.rs".into(),
+                sha256: crate::tools::types::hex_digest(b"before"),
+            },
+            budget: GoalBudget::default(),
+        };
+        let mut view = SessionView {
+            id: session_id,
+            title: "Goal".into(),
+            title_is_explicit: false,
+            inherited_title: None,
+            workspace_identity: Some(WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            }),
+            defaults: SessionDefaults::default(),
+            created_sequence: 0,
+            last_sequence: 1,
+            lineage: None,
+            runs: vec![RunView {
+                id: run_id,
+                objective: GOAL_OBJECTIVE.into(),
+                images: Vec::new(),
+                config: Some(config(CollaborationPolicy::Single, true)),
+                agents: vec![AgentView {
+                    id: agent_run_id,
+                    role: AgentRole::Primary,
+                    ordinal: 0,
+                    objective: None,
+                    summary: None,
+                    result: None,
+                    provider_calls: vec![
+                        record(
+                            AgentPhase::RootPlan,
+                            ProviderCallDisposition::ToolRequested,
+                            Some(0),
+                        ),
+                        record(
+                            AgentPhase::RootPlan,
+                            ProviderCallDisposition::ToolRequested,
+                            Some(0),
+                        ),
+                    ],
+                    grant: None,
+                    tools: Vec::new(),
+                    status: AgentStatus::Active,
+                }],
+                assistant_message: None,
+                status: RunStatus::Active,
+                accepted_sequence: 1,
+                finished_sequence: None,
+                tools: vec![ToolView {
+                    permission_verdict: None,
+                    intent: read_intent,
+                    observation: Some(read),
+                    review_call_index: None,
+                    finished_sequence: Some(2),
+                }],
+                tool_compaction_summary: None,
+                tool_compaction_covered_count: 0,
+                display: Vec::new(),
+                steering_notes: Vec::new(),
+                provider_fallbacks: Vec::new(),
+            }],
+            compactions: Vec::new(),
+            goals: vec![GoalView {
+                id: goal_id,
+                objective: GOAL_OBJECTIVE.into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+                budget: GoalBudget::default(),
+                resource_settings: crate::tools::ToolResourceSettings::default(),
+                phase: GoalPhase::Research,
+                autonomous: false,
+                status: GoalStatus::Running,
+                run_ids: vec![run_id],
+                active_run: Some(run_id),
+                plan_contract: None,
+                success_criterion_satisfied: false,
+                awaiting_plan_contract: true,
+                active_ms: 0,
+                uncertain_active_ms: 0,
+                active_deadline: None,
+                compaction_call_reserved: None,
+                uncertain_compaction_calls: 0,
+                success_state: crate::session::GoalSuccessState::NoContract,
+                provider_calls: 2,
+                unobserved_provider_calls: Vec::new(),
+                known_tokens: 0,
+                known_cached_tokens: 0,
+                token_usage_unknown: false,
+                report: None,
+                started_sequence: 1,
+                finished_sequence: None,
+                active_ceiling_ms: 0,
+            }],
+        };
+        view.apply_committed(&EventEnvelope {
+            sequence: 2,
+            session_id,
+            run_id: Some(run_id),
+            agent_run_id: None,
+            event: Event::GoalPlanContractRecorded {
+                goal_id,
+                run_id,
+                contract,
+            },
+            created_at_ms: 0,
+        })
+        .expect("contract records");
+        assert!(view.goals[0].success_criterion_satisfied);
+    }
+
+    #[test]
+    fn plan_contract_counts_a_write_from_an_earlier_run() {
+        let session_id = SessionId::new();
+        let (goal_id, earlier_run_id, run_id, agent_run_id) =
+            (GoalId::new(), RunId::new(), RunId::new(), AgentRunId::new());
+        let write = file_observation(
+            ToolCall::Write {
+                path: "src/main.rs".into(),
+                expected_digest: None,
+                content: "after".into(),
+            },
+            b"after",
+        );
+        let contract = GoalPlanContract {
+            mission: "Write the file".into(),
+            paths: vec!["src/main.rs".into()],
+            commands: Vec::new(),
+            resource_class: crate::tools::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/main.rs".into(),
+                content: "after".into(),
+            },
+            budget: GoalBudget::default(),
+        };
+        let mut view = SessionView {
+            id: session_id,
+            title: "Goal".into(),
+            title_is_explicit: false,
+            inherited_title: None,
+            workspace_identity: Some(WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            }),
+            defaults: SessionDefaults::default(),
+            created_sequence: 0,
+            last_sequence: 2,
+            lineage: None,
+            runs: vec![
+                RunView {
+                    id: earlier_run_id,
+                    objective: GOAL_OBJECTIVE.into(),
+                    images: Vec::new(),
+                    config: Some(config(CollaborationPolicy::Single, true)),
+                    agents: Vec::new(),
+                    assistant_message: None,
+                    status: RunStatus::Finished,
+                    accepted_sequence: 1,
+                    finished_sequence: Some(1),
+                    tools: vec![ToolView {
+                        permission_verdict: None,
+                        intent: write.intent.clone(),
+                        observation: Some(write),
+                        review_call_index: None,
+                        finished_sequence: Some(1),
+                    }],
+                    tool_compaction_summary: None,
+                    tool_compaction_covered_count: 0,
+                    display: Vec::new(),
+                    steering_notes: Vec::new(),
+                    provider_fallbacks: Vec::new(),
+                },
+                RunView {
+                    id: run_id,
+                    objective: GOAL_OBJECTIVE.into(),
+                    images: Vec::new(),
+                    config: Some(config(CollaborationPolicy::Single, true)),
+                    agents: vec![AgentView {
+                        id: agent_run_id,
+                        role: AgentRole::Primary,
+                        ordinal: 0,
+                        objective: None,
+                        summary: None,
+                        result: None,
+                        provider_calls: vec![record(
+                            AgentPhase::RootPlan,
+                            ProviderCallDisposition::ToolRequested,
+                            Some(0),
+                        )],
+                        grant: None,
+                        tools: Vec::new(),
+                        status: AgentStatus::Active,
+                    }],
+                    assistant_message: None,
+                    status: RunStatus::Active,
+                    accepted_sequence: 2,
+                    finished_sequence: None,
+                    tools: Vec::new(),
+                    tool_compaction_summary: None,
+                    tool_compaction_covered_count: 0,
+                    display: Vec::new(),
+                    steering_notes: Vec::new(),
+                    provider_fallbacks: Vec::new(),
+                },
+            ],
+            compactions: Vec::new(),
+            goals: vec![GoalView {
+                id: goal_id,
+                objective: GOAL_OBJECTIVE.into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+                budget: GoalBudget::default(),
+                resource_settings: crate::tools::ToolResourceSettings::default(),
+                phase: GoalPhase::Research,
+                autonomous: false,
+                status: GoalStatus::Running,
+                run_ids: vec![earlier_run_id, run_id],
+                active_run: Some(run_id),
+                plan_contract: None,
+                success_state: crate::session::GoalSuccessState::NoContract,
+                success_criterion_satisfied: false,
+                awaiting_plan_contract: true,
+                active_ms: 0,
+                uncertain_active_ms: 0,
+                active_deadline: None,
+                provider_calls: 2,
+                unobserved_provider_calls: Vec::new(),
+                compaction_call_reserved: None,
+                uncertain_compaction_calls: 0,
+                known_tokens: 0,
+                known_cached_tokens: 0,
+                token_usage_unknown: false,
+                report: None,
+                started_sequence: 1,
+                finished_sequence: None,
+                active_ceiling_ms: 0,
+            }],
+        };
+        view.apply_committed(&EventEnvelope {
+            sequence: 3,
+            session_id,
+            run_id: Some(run_id),
+            agent_run_id: None,
+            event: Event::GoalPlanContractRecorded {
+                goal_id,
+                run_id,
+                contract,
+            },
+            created_at_ms: 0,
+        })
+        .expect("contract records");
+        assert!(view.goals[0].success_criterion_satisfied);
+        assert_eq!(
+            view.goals[0].success_state,
+            crate::session::GoalSuccessState::WorkspaceFile {
+                sha256: Some(crate::tools::types::hex_digest(b"after")),
+            }
+        );
+    }
+
+    /// A tool-enabled primary AgentRun with no provider calls, under a Goal with or without its plan.
+    fn primary_tool_session(planned: bool) -> (SessionView, GoalId, RunId, AgentRunId) {
+        let mut view = delegated_session(0);
+        view.runs[0].config = Some(config(CollaborationPolicy::Single, true));
+        view.runs[0].agents[0].provider_calls.clear();
+        if !planned {
+            view.goals[0].plan_contract = None;
+        }
+        let (goal, run, agent) = (view.goals[0].id, view.runs[0].id, view.runs[0].agents[0].id);
+        (view, goal, run, agent)
+    }
+
+    fn read_intent(run: RunId, agent: AgentRunId, path: &str) -> EffectIntent {
+        child_intent(
+            run,
+            agent,
+            ToolCall::Read {
+                path: path.into(),
+                offset: 0,
+                limit: 1024,
+            },
+        )
+    }
+
+    #[test]
+    fn permission_verdict_replay_requires_pending_intent_and_blocks_denied_effects() {
+        use crate::tools::permissions::{
+            Decision, PermissionMode, PermissionSource, PermissionVerdict,
+        };
+        for researcher in [false, true] {
+            let (mut view, goal, run, agent) = if researcher {
+                research_session()
+            } else {
+                primary_tool_session(true)
+            };
+            view.runs[0]
+                .config
+                .as_mut()
+                .unwrap()
+                .tool_policy
+                .as_mut()
+                .unwrap()
+                .permissions_digest = Some([3; 32]);
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(
+                &mut view,
+                if researcher {
+                    child_record(run, agent, ProviderCallDisposition::ToolRequested)
+                } else {
+                    requesting_step(run, agent, 1)
+                },
+            )
+            .unwrap();
+            let intent = read_intent(run, agent, "src/lib.rs");
+            let verdict = Event::ToolPermissionDecided {
+                run_id: run,
+                agent_run_id: agent,
+                verdict: PermissionVerdict {
+                    intent_digest: intent.digest(),
+                    decision: Decision::Deny,
+                    mode: PermissionMode::Default,
+                    basis: PermissionSource::Rule,
+                    source: PermissionSource::Rule,
+                    approved: false,
+                },
+            };
+            assert_eq!(
+                Event::decode(
+                    "ToolPermissionDecided",
+                    1,
+                    &verdict.payload().unwrap(),
+                    Some(run),
+                    Some(agent)
+                )
+                .unwrap(),
+                verdict
+            );
+            assert!(rejected(&view, verdict.clone()));
+            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            let succeeded = tool_finished(run, agent, &intent, b"ok");
+            assert!(rejected(&view, succeeded.clone()));
+            let mut wrong_intent = verdict.clone();
+            if let Event::ToolPermissionDecided { verdict, .. } = &mut wrong_intent {
+                verdict.intent_digest = [4; 32];
+            }
+            assert!(rejected(&view, wrong_intent));
+            for mode in [PermissionMode::Auto, PermissionMode::Default] {
+                let mut unreviewed = verdict.clone();
+                if let Event::ToolPermissionDecided { verdict, .. } = &mut unreviewed {
+                    verdict.decision = Decision::Ask;
+                    verdict.mode = mode;
+                    verdict.basis = PermissionSource::Mode;
+                    verdict.source = PermissionSource::AiReview;
+                    verdict.approved = true;
+                }
+                assert!(unreviewed.payload().is_ok());
+                assert!(rejected(&view, unreviewed.clone()));
+                if let Event::ToolPermissionDecided { verdict, .. } = &mut unreviewed {
+                    verdict.basis = PermissionSource::Rule;
+                }
+                assert!(unreviewed.payload().is_err());
+            }
+            apply(&mut view, verdict.clone()).unwrap();
+            assert!(rejected(&view, verdict));
+            assert!(rejected(&view, succeeded));
+            let mut denied = observation_for(intent, b"unused");
+            denied.disposition = ToolDisposition::Denied;
+            denied.attestation = None;
+            denied.output = "Permission deny rule blocked this Tool".into();
+            apply(
+                &mut view,
+                Event::ToolFinished {
+                    run_id: run,
+                    agent_run_id: agent,
+                    observation: denied,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    fn tool_started(run: RunId, agent: AgentRunId, intent: &EffectIntent) -> Event {
+        Event::ToolStarted {
+            run_id: run,
+            agent_run_id: agent,
+            intent: intent.clone(),
+            active_ceiling_ms: 0,
+        }
+    }
+
+    fn tool_finished(
+        run: RunId,
+        agent: AgentRunId,
+        intent: &EffectIntent,
+        content: &[u8],
+    ) -> Event {
+        Event::ToolFinished {
+            run_id: run,
+            agent_run_id: agent,
+            observation: observation_for(intent.clone(), content),
+        }
+    }
+
+    fn requesting_step(run: RunId, agent: AgentRunId, requested_tools: u8) -> Event {
+        Event::ProviderCallRecorded {
+            run_id: run,
+            agent_run_id: agent,
+            record: ProviderCallRecord {
+                requested_tools,
+                ..record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::ToolRequested,
+                    Some(0),
+                )
+            },
+        }
+    }
+
+    #[test]
+    fn enforcement_causes_round_trip_and_reject_unsupported_claims() {
+        use crate::tools::EnforcementCause;
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        let intent = read_intent(run, agent, "src/lib.rs");
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        let mut observation = observation_for(intent, b"");
+        observation.disposition = ToolDisposition::Denied;
+        observation.output =
+            "File path is unavailable or outside the admitted regular-file boundary".into();
+        observation.enforcement_cause = Some(EnforcementCause::FilesystemDenied);
+        let finished = |observation| Event::ToolFinished {
+            run_id: run,
+            agent_run_id: agent,
+            observation,
+        };
+        for disposition in [
+            ToolDisposition::Succeeded,
+            ToolDisposition::Failed,
+            ToolDisposition::Uncertain,
+            ToolDisposition::Limit,
+        ] {
+            let mut invalid = observation.clone();
+            invalid.disposition = disposition;
+            assert!(
+                rejected(&view, finished(invalid)),
+                "unsupported cause on {disposition:?}"
+            );
+        }
+        let mut unattested = observation.clone();
+        unattested.attestation = None;
+        assert!(rejected(&view, finished(unattested)));
+        let event = finished(observation.clone());
+        let payload = event.payload().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload).unwrap()["enforcement_cause"],
+            "filesystem_denied"
+        );
+        let decoded = Event::decode(
+            "ToolFinished",
+            crate::session::events::payload_version("ToolFinished").unwrap(),
+            &payload,
+            Some(run),
+            Some(agent),
+        )
+        .unwrap();
+        assert_eq!(decoded, event);
+        apply(&mut view, decoded).unwrap();
+        assert_eq!(
+            view.runs[0].tools.last().unwrap().observation.as_ref(),
+            Some(&observation)
+        );
+    }
+
+    #[test]
+    fn tool_started_requires_pending_request() {
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        let (first, second, third) = (
+            read_intent(run, agent, "src/lib.rs"),
+            read_intent(run, agent, "src/main.rs"),
+            read_intent(run, agent, "README.md"),
+        );
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
+        assert!(
+            rejected(&view, tool_started(run, agent, &first)),
+            "no request is declared before the step"
+        );
+        apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
+        apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
+        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
+        assert!(
+            rejected(&view, tool_started(run, agent, &third)),
+            "every declared request is already started"
+        );
+    }
+
+    #[test]
+    fn an_in_process_attestation_cannot_finish_a_write() {
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        let write = child_intent(
+            run,
+            agent,
+            ToolCall::Write {
+                path: "src/lib.rs".into(),
+                expected_digest: None,
+                content: "after".into(),
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
+        apply(&mut view, requesting_step(run, agent, 1)).expect("one-request step");
+        apply(&mut view, tool_started(run, agent, &write)).expect("write starts");
+        let mut read_attested = observation_for(write.clone(), b"after");
+        read_attested.attestation = Some(crate::tools::Attestation::InProcess {
+            policy_digest: write.policy_digest,
+            workspace_device: write.workspace_device,
+            workspace_inode: write.workspace_inode,
+        });
+        assert!(rejected(
+            &view,
+            Event::ToolFinished {
+                run_id: run,
+                agent_run_id: agent,
+                observation: read_attested,
+            }
+        ));
+        apply(&mut view, tool_finished(run, agent, &write, b"after")).expect("Guard receipt");
+    }
+
+    #[test]
+    fn continuation_requires_all_requested_observed() {
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        let (first, second) = (
+            read_intent(run, agent, "src/lib.rs"),
+            read_intent(run, agent, "src/lib.rs"),
+        );
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
+        apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
+        apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
+        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("continuation call");
+        let continuation = Event::ProviderCallRecorded {
+            run_id: run,
+            agent_run_id: agent,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                Some(0),
+            ),
+        };
+        assert!(
+            rejected(&view, continuation.clone()),
+            "the second declared request is unobserved"
+        );
+        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
+        apply(&mut view, continuation).expect("all declared requests observed");
+    }
+
+    /// A planned Goal whose completed two-request step has a compaction call reserved.
+    fn compacting_session() -> (SessionView, GoalId, RunId) {
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        let (first, second) = (
+            read_intent(run, agent, "src/lib.rs"),
+            read_intent(run, agent, "src/lib.rs"),
+        );
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
+        apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
+        apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
+        apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
+        apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
+        apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
+        apply(
+            &mut view,
+            Event::GoalCompactionCallReserved {
+                goal_id: goal,
+                run_id: run,
+                active_ceiling_ms: 0,
+            },
+        )
+        .expect("compaction call reserved");
+        (view, goal, run)
+    }
+
+    /// A Failed compaction record covering the first `count` Tools, ending at the last of them.
+    fn covering_compaction(view: &SessionView, goal: GoalId, run: RunId, count: u32) -> Event {
+        let covered = &view.runs[0].tools[count as usize - 1];
+        Event::GoalContextCompacted {
+            goal_id: goal,
+            run_id: run,
+            covered_tool_count: count,
+            record: crate::session::events::CompactionRecord {
+                covered_run_id: run,
+                covered_sequence: covered.finished_sequence.expect("observed Tool"),
+                source_digest: [0; 32],
+                provider: "openai".into(),
+                model: "gpt-5.4".into(),
+                prompt_version: 1,
+                schema_version: 1,
+                compiler_version: 3,
+                source_bytes: 1,
+                source_tokens_estimate: 1,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                response_id: None,
+                wire_provenance: None,
+                chatgpt_provenance: None,
+                output_token_bound: OutputTokenBound::ProviderEnforced,
+                status: crate::session::events::CompactionStatus::Failed {
+                    reason: crate::session::events::CompactionFailure::ProviderUnavailable,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn compaction_prefix_never_splits_a_step() {
+        let (view, goal, run) = compacting_session();
+        assert!(
+            rejected(&view, covering_compaction(&view, goal, run, 1)),
+            "a covered prefix inside the two-request step"
+        );
+        let whole = covering_compaction(&view, goal, run, 2);
+        let mut replayed = view.clone();
+        apply(&mut replayed, whole).expect("the whole step is covered");
+        assert_eq!(replayed.goals[0].compaction_call_reserved, None);
+    }
+
+    #[test]
+    fn goal_report_cached_tokens_must_match_the_goal_total() {
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let cached_call = ProviderCallRecord {
+            cache_read_input_tokens: Some(5),
+            ..record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                Some(5),
+            )
+        };
+        let finish = |cached_input_tokens| {
+            let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+            events.extend(start_run(
+                goal_id,
+                run_id,
+                agent_run_id,
+                config(CollaborationPolicy::Single, false),
+            ));
+            events.extend([
+                Event::GoalProviderCallReserved {
+                    goal_id,
+                    run_id,
+                    agent_run_id,
+                    active_ceiling_ms: 0,
+                },
+                Event::ProviderCallRecorded {
+                    run_id,
+                    agent_run_id,
+                    record: cached_call.clone(),
+                },
+                Event::AgentFinished {
+                    run_id,
+                    agent_run_id,
+                    disposition: AgentDisposition::Finished,
+                    summary: Some("done".into()),
+                    result: Some("done".into()),
+                },
+                Event::MessageCommitted {
+                    run_id,
+                    text: "done".into(),
+                },
+                Event::RunFinished {
+                    run_id,
+                    disposition: RunDisposition::Finished,
+                    active_ms: 0,
+                },
+                Event::GoalFinished {
+                    goal_id,
+                    status: GoalStatus::Completed,
+                    active_ms: 0,
+                    report: GoalReport {
+                        summary: "done".into(),
+                        changes: Vec::new(),
+                        evidence: Vec::new(),
+                        unresolved: Vec::new(),
+                        cached_input_tokens,
+                    },
+                },
+            ]);
+            SessionView::replay(session_id, &session_with(session_id, events))
+        };
+        let view = finish(5).expect("matching cache total").expect("Session");
+        assert_eq!(
+            view.goals[0].report.as_ref().map(|r| r.cached_input_tokens),
+            Some(5)
+        );
+        assert!(
+            finish(0).is_err(),
+            "a report may not understate cache reads"
+        );
+        assert!(finish(6).is_err(), "a report may not overstate cache reads");
+    }
+
+    #[test]
+    fn child_tool_request_count_is_one() {
+        let (mut view, goal, run, child) = research_session();
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        let widened = Event::ProviderCallRecorded {
+            run_id: run,
+            agent_run_id: child,
+            record: ProviderCallRecord {
+                requested_tools: 2,
+                ..record(
+                    AgentPhase::ChildWork,
+                    ProviderCallDisposition::ToolRequested,
+                    Some(0),
+                )
+            },
+        };
+        assert!(rejected(&view, widened), "a child step declares one Tool");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("single child request");
+    }
+}
