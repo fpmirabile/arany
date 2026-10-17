@@ -995,7 +995,7 @@ fn compaction_switches(view: &SessionView) -> Vec<&arany::ProviderFallback> {
     })
 }
 
-/// `None` marks a view from another Run, so no earlier switch was shown for it.
+// `None` marks a view from another Run, so no earlier switch was shown for it.
 fn unshown<T>(switches: Vec<T>, shown: Option<usize>) -> Vec<T> {
     switches.into_iter().skip(shown.unwrap_or(0)).collect()
 }
@@ -1063,14 +1063,14 @@ fn upsert_goal(goals: &mut Vec<arany::GoalView>, goal: arany::GoalView) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn switches_shown_before_a_stale_view_do_not_skip_or_panic() {
         assert_eq!(unshown(vec![1, 2, 3], Some(1)), vec![2, 3]);
         assert_eq!(unshown(vec![1], Some(2)), Vec::<i32>::new());
         assert_eq!(unshown(vec![1, 2], None), vec![1, 2]);
     }
-
-    use super::*;
 
     #[test]
     fn goal_update_appends_new_goal_and_replaces_known_goal() {
