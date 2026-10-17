@@ -42,7 +42,6 @@ const SYSTEM_PROGRAMS_CAP: usize = 2048;
 const PROFILE_BYTES_CAP: usize = 96 * 1024;
 pub(super) const SUPERVISION_INTERVAL: Duration = Duration::from_millis(10);
 pub(super) const PREPARATION_DEADLINE: Duration = Duration::from_secs(30);
-/// Native preparation and handshake time the Engine adds to a Guard call's action deadline.
 pub(in crate::tools) const RESERVATION_OVERHEAD: Duration =
     PREPARATION_DEADLINE.saturating_add(Duration::from_secs(5));
 const PROCESS_LIMITS: &[(rustix::process::Resource, u64)] = &[

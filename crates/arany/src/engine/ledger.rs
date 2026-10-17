@@ -27,8 +27,7 @@ impl Action {
     /// Base Event bound before configured Provider switches.
     pub fn max_events(self) -> usize {
         match self {
-            // A finishing call: its reservation, record, an optional steering note and display chunks,
-            // then the terminal Events through the Goal receipt.
+            // Reserve terminal Events through the Goal receipt even when no further step runs.
             Self::ProviderCall { previews, steering } => {
                 6 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
             }
@@ -93,8 +92,7 @@ impl Action {
 
     pub(super) fn tool_observations(self) -> usize {
         match self {
-            // A Tool step, and the review inside it, ends with its observation and any integration
-            // observation.
+            // A command can need a separate integration observation, so reserve two observations per Tool step.
             Self::Tool | Self::Review => 2,
             Self::Child {
                 in_flight,

@@ -238,7 +238,6 @@ impl SessionView {
         Ok(())
     }
 
-    /// Accepts a steering note only while the Run's primary call holds an open provider reservation.
     pub(super) fn record_goal_steering_note(
         &mut self,
         goal_id: &GoalId,
@@ -371,8 +370,6 @@ impl SessionView {
             .ok_or(ReplayError::InvalidTransition)?;
         let goal = current_goal_mut(self, *goal_id)?;
         let active_limit = goal.effective_budget().max_active_ms;
-        // Settlement fails an unsatisfied planned Goal whose Finished Run admits no next Run; a planless or
-        // satisfied Goal completes instead.
         let exhausted_after_finish = goal.autonomous
             && run_status == RunStatus::Finished
             && goal.plan_contract.is_some()
@@ -405,8 +402,6 @@ impl SessionView {
         Ok(())
     }
 
-    /// Closes a paused Goal that admits no next Run, as explicit resume finds it. Settles the same
-    /// unfinished facts resume would, so the close is refused whenever a Run is still admissible.
     fn close_exhausted_goal(
         &mut self,
         goal_id: &GoalId,
@@ -431,9 +426,7 @@ impl SessionView {
         } else {
             run_status
         };
-        // A paused Goal is one whose last Run was cancelled or interrupted, or whose non-autonomous Run
-        // finished without finishing the Goal. A Finished autonomous Run is paused only when a crash left
-        // its between-Run compaction call open.
+        // A crash with open between-Run compaction can pause an autonomous Goal even after a Finished Run.
         let paused = matches!(run_status, RunStatus::Cancelled | RunStatus::Interrupted)
             || (run_status == RunStatus::Finished
                 && (!goal.autonomous || goal.compaction_call_reserved.is_some()));
@@ -458,9 +451,6 @@ impl SessionView {
     }
 }
 
-/// Settles the facts an unfinished Goal leaves open when it pauses: an unaccepted trailing link is not a
-/// Run, unsettled active time is charged as uncertain time, and crashed or orphaned provider calls
-/// leave usage unknown.
 fn settle_unfinished_facts(
     goal: &mut GoalView,
     has_unaccepted_run: bool,
@@ -504,12 +494,10 @@ fn settle_unfinished_facts(
     Ok(())
 }
 
-/// The latest started action's ceiling covers the Run's settled time and that action.
 pub(super) fn record_active_ceiling(goal: &mut GoalView, ceiling_ms: u64) {
     goal.active_ceiling_ms = ceiling_ms;
 }
 
-/// Projects an unfinished Goal as paused: its live Run is interrupted and no later event may retry its calls or effects.
 fn seal_unfinished_goal(goal: &mut GoalView, runs: &mut [RunView]) {
     if let Some(run) = goal
         .active_run
@@ -660,7 +648,7 @@ pub(super) fn apply(
     Ok(())
 }
 
-/// A covered prefix may not end inside a step: its model Tool count must be a cumulative step total.
+// A compaction prefix must end on a whole step to preserve Tool-request correlation.
 fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
     let Some(primary) = run.primary() else {
         return false;

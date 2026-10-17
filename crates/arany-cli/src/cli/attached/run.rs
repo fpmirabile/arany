@@ -18,9 +18,7 @@ pub(super) struct ToolAccess<'a> {
 
 #[derive(Debug, PartialEq)]
 pub(super) enum RunAttemptError {
-    /// Cancelled before the next Run was admitted; an interrupted Goal stays resumable.
     InterruptedBeforeRun,
-    /// A committed Run whose autonomous Goal stopped before its next Run, for `reason`.
     Stopped {
         outcome: Box<arany::RunOutcome>,
         reason: String,

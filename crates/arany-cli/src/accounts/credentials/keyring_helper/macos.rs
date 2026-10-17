@@ -13,7 +13,6 @@ const ERR_SEC_AUTH_FAILED: i32 = -25293;
 const ERR_SEC_NO_SUCH_KEYCHAIN: i32 = -25294;
 const ERR_SEC_INVALID_KEYCHAIN: i32 = -25295;
 pub(in crate::accounts::credentials) const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
-/// The store exists but cannot be used right now.
 const ERR_SEC_STORAGE_ACCESS: [i32; 8] = [
     ERR_SEC_WR_PERM,
     ERR_SEC_INVALID_OWNER_EDIT,
@@ -71,8 +70,7 @@ impl Entry {
                 return Err(Error::NoDefaultStore);
             }
             let interaction = SecKeychain::disable_user_interaction().map_err(decode_error)?;
-            // Security opens keychains only by path; the admitted owner-only root keeps the
-            // checked file from being replaced by another user before this reopen.
+            // The owner-only root prevents other users replacing the checked keychain before Security reopens by path.
             (
                 SecKeychain::open(root.path().join(TEST_KEYCHAIN)).map_err(decode_error)?,
                 Some(interaction),

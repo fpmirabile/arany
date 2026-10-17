@@ -18,7 +18,6 @@ pub(crate) struct Config {
     pub mcp: Vec<Server>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_grants: Vec<RuntimeGrant>,
-    /// Pinned system Git for typed Git reads (Linux `/usr`, macOS Command Line Tools).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<Program>,
 }
@@ -177,7 +176,7 @@ impl Config {
             .chain(self.skills.iter().map(|skill| skill.directory.as_str()))
     }
 
-    /// Typed Git reads need a pinned Git and the whole-Workspace grant, because Git output spans the repository.
+    // Git output spans the repository, so typed Git reads require the whole-Workspace grant.
     pub(crate) fn git_available(&self) -> bool {
         self.git.is_some() && self.workspace_paths == ["."]
     }
@@ -216,7 +215,6 @@ impl Config {
         }
     }
 
-    /// Whether a Workspace-relative path lies under an admitted root; `"."` admits the whole Workspace.
     pub(crate) fn in_workspace_scope(&self, path: &str) -> bool {
         self.workspace_paths == ["."]
             || self

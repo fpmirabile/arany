@@ -98,7 +98,6 @@ impl FromStr for GoalId {
 
 pub const MAX_GOAL_PROVIDER_CALLS: u32 = 64;
 pub const MAX_GOAL_ACTIVE_MS: u64 = 30 * 60 * 1000;
-/// Current payload version per Event kind. A format change bumps only that kind's arm.
 pub(crate) fn payload_version(kind: &str) -> Option<i64> {
     match kind {
         "SessionStarted"
@@ -131,7 +130,6 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
     }
 }
 pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
-/// Model Tool requests one Provider step may declare. Engine and adapters emit one until fan-out lands.
 pub(crate) const MAX_STEP_TOOL_CALLS: u8 = 4;
 const _: () = assert!(MAX_STEP_TOOL_CALLS as u32 <= u8::MAX as u32);
 pub const MAX_GOAL_RUNS: u8 = 16;
@@ -165,7 +163,6 @@ impl Default for GoalBudget {
     }
 }
 
-/// Goal usage that decides whether another Run is admissible; `runs` counts linked Runs.
 #[derive(Clone, Copy)]
 pub(crate) struct GoalUsage {
     pub(crate) runs: usize,
@@ -192,7 +189,6 @@ impl GoalBudget {
         Ok(())
     }
 
-    /// Limits in force once a Plan contract narrows the pinned budget; an absent plan token ceiling keeps the pinned one.
     pub(crate) fn effective(&self, plan: Option<&GoalPlanContract>) -> Self {
         plan.map_or_else(
             || *self,
@@ -203,7 +199,6 @@ impl GoalBudget {
         )
     }
 
-    /// The one admission rule for another Run: every finite dimension must have headroom.
     pub(crate) fn admits_next_run(&self, usage: GoalUsage) -> bool {
         usize::from(self.max_runs) > usage.runs
             && self

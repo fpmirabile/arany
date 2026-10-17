@@ -365,7 +365,6 @@ impl WorkspacePermissions {
         self.save(root, trusted, mode, runtime_grants)
     }
 
-    /// Fresh candidates are verified now; a saved grant keeps its pin and rejects dispatch on drift.
     fn selected_grants(&self, tokens: &[String]) -> Result<Vec<RuntimeGrant>, ToolError> {
         if tokens.len() > MAX_RUNTIME_GRANTS {
             return Err(ToolError::Limit);

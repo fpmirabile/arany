@@ -312,7 +312,6 @@ pub(crate) fn event_failure(event: &crate::session::Event) {
     record_local(record);
 }
 
-/// The diagnostics subscriber fell behind the Journal tap and skipped `missed` Events.
 pub(crate) fn tap_resync(missed: u64) {
     if !cfg!(debug_assertions) {
         return;
@@ -371,7 +370,6 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
     record_local(record);
 }
 
-/// `site` is the compiled label `Guard` or `Read`.
 pub(crate) fn tool_failure(site: &'static str, error: &crate::tools::ToolError) {
     if !cfg!(debug_assertions) {
         return;

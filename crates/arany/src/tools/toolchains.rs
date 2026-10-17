@@ -15,7 +15,6 @@ const PIP_HOST_HTTP_CACHE: &str = ".cache/pip/http-v2";
 #[cfg(not(target_os = "macos"))]
 const PIP_HOST_WHEEL_CACHE: &str = ".cache/pip/wheels";
 
-/// Sandbox root for host-cache grants; the payload's package-manager cache base must match it.
 #[cfg(target_os = "linux")]
 pub(crate) fn sandbox_cache_root(cache_enabled: bool) -> &'static str {
     if cache_enabled { "/cache" } else { "/scratch" }
@@ -72,7 +71,6 @@ impl RuntimeKind {
         }
     }
 
-    /// Host subtree and its path under the sandbox; Cargo's sandbox path follows the payload's `CARGO_HOME`.
     fn cache_layout(self) -> Option<(&'static str, &'static str)> {
         match self {
             Self::CargoCache => Some((".cargo/registry/cache", "cargo/registry/cache")),
@@ -118,7 +116,6 @@ pub(crate) struct RuntimeGrant {
 }
 
 impl RuntimeGrant {
-    /// Binds the kind to the exact directory identity, so a recreated root is a new profile.
     pub(crate) fn token(&self) -> Result<String, ToolError> {
         let path = self.path.to_str().ok_or(ToolError::Path)?;
         let mut identity = path.as_bytes().to_vec();
@@ -154,7 +151,6 @@ impl RuntimeGrant {
         Ok(())
     }
 
-    /// Rejects a grant overlapping protected Arany roots or the Guard's system runtime.
     pub(crate) fn reject_overlap(&self, protected: &[&Path]) -> Result<(), ToolError> {
         for path in protected {
             fs::reject_overlap(&self.path, path)?;
@@ -181,7 +177,7 @@ impl RuntimeGrant {
         Ok(())
     }
 
-    /// Linux mounts a toolchain at its exact host path so absolute shebangs resolve.
+    // Mount Linux toolchains at their host paths so absolute shebangs resolve.
     #[cfg(target_os = "linux")]
     pub(crate) fn mounted_path(&self, cache_enabled: bool) -> Result<PathBuf, ToolError> {
         if self.kind.is_toolchain() {
@@ -375,7 +371,6 @@ fn has_toolchain(path: &Path, kind: RuntimeKind) -> bool {
     has_executables(kind, path)
 }
 
-/// Caches have no executables to check, so they always pass.
 fn has_executables(kind: RuntimeKind, path: &Path) -> bool {
     match kind {
         RuntimeKind::Rust => {

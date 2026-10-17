@@ -351,7 +351,6 @@ impl Composer {
         }
     }
 
-    /// Escape closes an open completion or file menu first; otherwise it changes nothing.
     pub fn has_open_menu(&self) -> bool {
         self.file_menu().is_some() || self.completion_menu().is_some()
     }

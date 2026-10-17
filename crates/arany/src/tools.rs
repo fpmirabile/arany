@@ -118,7 +118,6 @@ pub enum ToolError {
     GuardBootstrap(guard::BootstrapFailure),
 }
 
-/// The `permissions.json` bytes' parsed form and digest, pinned once per submission.
 pub(crate) type PermissionSnapshot = (std::sync::Arc<permissions::PermissionConfig>, [u8; 32]);
 
 #[derive(Clone)]
@@ -228,8 +227,6 @@ impl ToolRuntime {
         self.context_limit_bytes
     }
 
-    /// Result bytes one Tool may return after its serialized `overhead` and `reserved` extra bytes;
-    /// `None` when fewer than 128 bytes remain.
     pub(crate) fn result_capacity(&self, overhead: usize, reserved: usize) -> Option<usize> {
         let capacity = self
             .context_limit_bytes
@@ -435,7 +432,6 @@ impl ToolRuntime {
         })
     }
 
-    /// Catalog for a read-only researcher child; `tool_calls_remaining == 0` offers only Finish.
     pub(crate) fn research_context(
         &self,
         tool_calls_remaining: usize,
@@ -487,7 +483,6 @@ impl ToolRuntime {
         }
     }
 
-    /// Native preparation and handshake time the Engine adds to a Tool's action deadline.
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
         match call.facts().site {
             Site::InProcess => Duration::ZERO,
@@ -523,7 +518,6 @@ impl ToolRuntime {
         }
     }
 
-    /// The admitted Workspace handle, after the checks the Guard helper applies before Ready.
     fn pinned_root(
         &self,
         intent: &EffectIntent,
@@ -546,8 +540,6 @@ impl ToolRuntime {
         Ok(root)
     }
 
-    /// Runs a read-only operation on the Workspace handle pinned at admission, with the Guard's
-    /// intent, expiry and device/inode checks; nothing it reads can change the Workspace.
     async fn run_in_process(
         &self,
         intent: EffectIntent,
@@ -609,14 +601,12 @@ impl ToolRuntime {
     }
 }
 
-/// The Workspace handle opened once at admission and the process-wide read slots.
 #[derive(Clone)]
 struct InProcessReads {
     root: std::sync::Arc<cap_std::fs::Dir>,
     slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
-/// Concurrent in-process reads across the process; a full set refuses the call before dispatch.
 const MAX_IN_PROCESS_READS: usize = 16;
 static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| {

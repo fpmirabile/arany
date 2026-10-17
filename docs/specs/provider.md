@@ -69,6 +69,8 @@ An explicit unknown effort is admitted without a compatibility claim and runs on
 
 Anthropic thinking blocks are opaque: they replay unchanged within a Run, are never interpreted, and are dropped from kept turns when compaction rewrites history.
 
+An opaque in-memory assistant turn is bounded to eight bytes per requested output token plus 64 KiB of framing and ciphertext overhead, capped at the 1 MiB response ceiling; exceeding this bound fails the call with `InvalidOutcome`.
+
 ## Prompt caching
 
 - Anthropic follows the peer explicit-breakpoint layout for active Tool loops: `cache_control: {"type":"ephemeral"}` on the last Tool definition, the last system text block, and the final content block of the conversation tail. Single-call requests without Tools and compaction requests mark only the system block; their changing data tails are not reused, so a tail breakpoint would pay the 1.25× cache-write charge without a subsequent read. A spent researcher's final call retains Tool and system markers but omits the tail marker. Markers are added to the outgoing request, never stored in replayed turns or accumulated over previous messages. This uses at most three of Anthropic's [four documented breakpoints](https://platform.claude.com/docs/en/build-with-claude/prompt-caching); the default five-minute TTL applies. No top-level automatic cache marker or extended TTL is requested.

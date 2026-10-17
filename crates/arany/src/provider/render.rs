@@ -58,7 +58,6 @@ fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
     system
 }
 
-/// A labelled JSON data block; the label tells the model what the data is and how far to trust it.
 pub(crate) fn data_block(scope: &str, data: Value) -> Block {
     Block::Text(json!({"scope": scope, "data": data}).to_string())
 }
@@ -230,8 +229,6 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
     Ok(blocks)
 }
 
-/// Historical Tool facts of a previous Run: `{call, disposition, output, workspace_effect}` per Tool,
-/// never intent internals such as ids, digests or limits.
 pub(crate) fn history_tool_block(run: &RunView) -> String {
     if run.tools.is_empty() && run.tool_compaction_summary.is_none() {
         return String::new();

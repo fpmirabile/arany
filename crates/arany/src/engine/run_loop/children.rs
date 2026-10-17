@@ -20,17 +20,14 @@ use tokio::time::Instant;
 const MAX_CHILD_OBJECTIVE_BYTES: usize = 2 * 1024;
 const MAX_CHILD_RESULT_BYTES: usize = 16 * 1024;
 const CANCELLATION_DRAIN: Duration = Duration::from_secs(2);
-/// Wall-clock bound of one delegation, with or without read-only Tools.
 const MAX_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
-/// Free context kept for the next child Tool intent.
 const CHILD_INTENT_RESERVE_BYTES: usize = 4 * 1024;
-/// A full 4 KiB Read page plus metadata; with less room a child is offered only Finish.
+// Keep enough room for a full Read page and its metadata before offering child Tools.
 const MIN_CHILD_RESULT_BYTES: usize = 4096 + 512;
 
 pub(super) struct ChildWork {
     pub(super) agent_run_id: AgentRunId,
     objective: String,
-    /// Read-only research context; `None` for a `NoTools` child.
     pub(super) tools: Option<ToolContext>,
     pub(super) tool_calls_remaining: usize,
 }
@@ -41,7 +38,6 @@ struct Spawned {
     active_segment: ActiveSegment,
 }
 
-/// Where the children stand once no call is in flight.
 struct Drained {
     results: Vec<Option<ChildResult>>,
     abort_reason: Option<AbortReason>,
@@ -77,8 +73,7 @@ impl ChildQueue {
         }
     }
 
-    /// Drains aborted calls and returns the failure that caused the abort; a drain error is
-    /// recorded as a diagnostic instead of replacing that failure.
+    // Preserve the original abort cause if draining also fails.
     async fn abort_with(&mut self, error: EngineError) -> EngineError {
         let _ = self
             .abort_and_drain()
@@ -171,7 +166,6 @@ impl RunLoop<'_> {
         self.synthesize(root_request, results, delegate_turn).await
     }
 
-    /// Reserves the delegation and journals each child; `None` means the primary must stop.
     async fn spawn_children(
         &self,
         objectives: Vec<String>,
@@ -267,8 +261,6 @@ impl RunLoop<'_> {
         }))
     }
 
-    /// Runs the children's calls and Tool steps in bounded slots until each one finished or the
-    /// delegation aborted.
     async fn drive_children(
         &self,
         children: &mut [ChildWork],
@@ -427,8 +419,6 @@ impl RunLoop<'_> {
         })
     }
 
-    /// Journals one child's finished call, then finishes the child or runs its Tool step; `None`
-    /// means the child continues with another call.
     async fn settle_child_call(
         &self,
         child: &mut ChildWork,
@@ -521,7 +511,6 @@ impl RunLoop<'_> {
         Ok(Some(disposition))
     }
 
-    /// Asks the primary to synthesize the children's results; it may continue with Tool steps.
     async fn synthesize(
         &self,
         root_request: &mut ProviderRequest,
@@ -622,7 +611,7 @@ impl RunLoop<'_> {
         }
     }
 
-    /// Why children still queued after a fill will not start: a pause first, then an exhausted call budget.
+    // Honor pause before reporting an exhausted queued-child call budget.
     fn unstarted_abort(&self, queue: &ChildQueue) -> Option<AbortReason> {
         if queue.pending.is_empty() {
             None
@@ -659,8 +648,7 @@ impl RunLoop<'_> {
                 if !room {
                     child.tool_calls_remaining = 0;
                 }
-                // The catalog is the request head and stays as first sent; later calls carry the
-                // remaining budget in their newest step.
+                // Keep the request head frozen; later calls carry their remaining budget in the newest step.
                 match tools.steps.last_mut() {
                     Some(step) => step.calls_remaining = Some(child.tool_calls_remaining),
                     None => {
@@ -791,7 +779,6 @@ fn classify_join(
     }
 }
 
-/// Researcher delegations use the fixed bound; a tool-free delegation runs one call per wave.
 fn delegation_active_bound(research: bool, call_deadline: Duration, waves: usize) -> Duration {
     if research {
         MAX_DELEGATION_DEADLINE

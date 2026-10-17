@@ -439,7 +439,6 @@ async fn run_on_engine(
     })
 }
 
-/// Grace for the Run's Cancelled receipt after a forced stop; matches the attached terminal.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -451,9 +450,7 @@ enum StopSignal {
 
 #[derive(Debug, PartialEq, Eq)]
 enum StopStep {
-    /// The first Ctrl+C requests cancellation and keeps waiting for the receipt.
     Cancel,
-    /// A second Ctrl+C or a termination signal stops waiting after the grace period.
     Force(&'static str),
 }
 
@@ -466,7 +463,6 @@ fn stop_step(cancelling: bool, signal: StopSignal) -> StopStep {
     }
 }
 
-/// Names the command that resumes a Goal left paused by interruption.
 fn resume_hint(session_id: SessionId, goal_id: GoalId) -> String {
     format!(
         "Goal paused; resume with arany exec --session-id {session_id} --resume-goal {goal_id}\n"
@@ -517,13 +513,10 @@ impl StopSignals {
 
 struct SignalledRun {
     result: Result<RunResult, EngineError>,
-    /// A stop signal requested cancellation before the Run's receipt.
     interrupted: bool,
-    /// Set when a forced stop produced the receipt within the grace period.
     forced: Option<&'static str>,
 }
 
-/// Drives one Run with stop signals installed only while it is in flight.
 async fn run_signalled(
     engine: &Engine,
     providers: AdmittedProviders,

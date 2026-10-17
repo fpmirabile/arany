@@ -15,7 +15,6 @@ use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-/// Native preparation and handshake time the Engine adds to a Guard call's action deadline.
 pub(in crate::tools) const RESERVATION_OVERHEAD: Duration = Duration::from_secs(5);
 const MANAGER_DEADLINE: Duration = Duration::from_secs(4);
 const MOUNTINFO_BYTES_CAP: usize = 1024 * 1024;
@@ -120,7 +119,6 @@ pub(super) async fn stop_command_descendants(
     }
 }
 
-/// Drops capabilities, installs the syscall profile and verifies every thread before Ready.
 pub(super) fn harden() -> Result<(), ToolError> {
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .map_err(|_| ToolError::ProtectionUnavailable)?;
@@ -943,7 +941,6 @@ pub(super) async fn execute_inner(
     .await
 }
 
-/// Destinations that `profile_arguments` mounts or creates; a toolchain may not overlap them.
 const PROFILE_MOUNT_TARGETS: [&str; 13] = [
     RUNTIME_ROOT,
     "/lib",
@@ -971,7 +968,6 @@ fn reject_profile_overlap(target: &Path) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// Ancestors of a mount target below `root`, shallowest first, each created as a bwrap directory.
 fn mount_directories(target: &Path, root: &Path) -> Vec<PathBuf> {
     let mut directories = target
         .ancestors()
@@ -982,10 +978,8 @@ fn mount_directories(target: &Path, root: &Path) -> Vec<PathBuf> {
     directories
 }
 
-/// Directories to create, then read-only `(source, target)` binds.
 type RuntimeMounts = (Vec<PathBuf>, Vec<(PathBuf, PathBuf)>);
 
-/// Verifies every grant before any seed exists; a rejected grant leaves no state behind.
 fn runtime_mounts(
     grants: &[super::super::toolchains::RuntimeGrant],
     cache_enabled: bool,
@@ -1009,7 +1003,6 @@ fn runtime_mounts(
     Ok((directories, mounts))
 }
 
-/// The fixed bwrap profile; every destination it mounts must lie under `PROFILE_MOUNT_TARGETS`.
 fn profile_arguments(
     command: &mut Command,
     runtime_path: &str,

@@ -103,7 +103,6 @@ impl Drop for AlternateScreen {
     }
 }
 
-/// Committed facts already inserted above the Classic viewport for one Session.
 #[derive(Default)]
 struct NativeTranscript {
     session: Option<arany::SessionId>,
@@ -397,7 +396,6 @@ pub struct AttachedTerminal {
     terminate: tokio::signal::unix::Signal,
 }
 
-/// Profile rows and cursor state for the folder consent screen; `options` and `selected` align by index.
 pub struct ProfileSelection<'a> {
     pub options: &'a [arany::RuntimeProfileOption],
     pub selected: &'a [bool],
@@ -767,7 +765,6 @@ impl AttachedTerminal {
         self.mode
     }
 
-    /// Keeps Classic for this process; later `set_mode` calls leave the presentation unchanged.
     pub fn pin_classic(&mut self) {
         self.classic_pinned = true;
     }
@@ -1045,7 +1042,6 @@ impl AttachedTerminal {
         self.restore_draft_input(draft_bytes)
     }
 
-    /// Whether an accepted canonical segment has finished delivering its input events.
     #[must_use]
     pub fn input_boundary_ready(&self) -> bool {
         self.input.as_ref().is_some_and(TerminalReader::paste_ready)
@@ -1160,7 +1156,6 @@ impl AttachedTerminal {
         self.release().map_err(TerminalError::Io)
     }
 
-    /// Reacquires a restored terminal while retaining queued Unix signals.
     pub fn reacquire_after_output(&mut self) -> Result<(), TerminalError> {
         if self.input.is_some() {
             return Err(TerminalError::Io(io::Error::new(
@@ -1480,7 +1475,6 @@ impl AttachedTerminal {
         Ok(())
     }
 
-    /// Draw a visible, non-secret setup field without taking the Session composer.
     pub fn draw_setup_text_input(
         &mut self,
         title: &str,
@@ -2103,8 +2097,7 @@ impl AttachedTerminal {
     }
 }
 
-/// Inserts rows above a viewport on a screen too short for Ratatui's scrolling-region path.
-/// Each row is cleared and drawn as a diff from blank cells, so wide-cell padding is not sent.
+// Too short for Ratatui's scrolling region: draw rows as diffs from blank cells so wide-cell padding is not sent.
 fn insert_rows_scrolling_screen<'a, B: Backend>(
     terminal: &mut Terminal<B>,
     screen: u16,

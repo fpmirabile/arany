@@ -541,8 +541,6 @@ struct EventLine {
     created_at_ms: i64,
 }
 
-/// Read-only status of the Session's current or last Goal, shown by `/goal`. A paused Goal that is
-/// not that Goal is named on its own line, since `/goal resume` continues it.
 pub fn goal_status(view: &SessionView) -> String {
     let Some(goal) = view.goals.last() else {
         return "No Goal in this Session; send a message or use /goal <objective>".into();
@@ -943,7 +941,6 @@ fn append_jsonl(rendered: &mut String, envelope: &EventEnvelope) {
     rendered.push('\n');
 }
 
-/// Escapes terminal control and bidirectional formatting characters in untrusted text.
 pub fn escape_terminal(value: &str) -> String {
     let mut safe = String::with_capacity(value.len());
     for character in value.chars() {

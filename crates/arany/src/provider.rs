@@ -94,9 +94,7 @@ async fn read_identity_body(
 }
 
 pub(crate) const MAX_REPORTED_INPUT_TOKENS: u32 = 1_000_000;
-/// The largest primary output cap a Provider may declare; replay rejects a larger pinned cap.
 pub(crate) const MAX_OUTPUT_TOKEN_CAP: u32 = 16_384;
-/// The output cap of Providers that keep the historical bound (ChatGPT plan, custom profiles, children).
 pub(crate) const DEFAULT_OUTPUT_TOKEN_CAP: u32 = 4096;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -150,12 +148,9 @@ pub(crate) fn compaction_input(request: &CompactionRequest) -> Value {
     input
 }
 
-/// The request body ceiling each wire adapter enforces before sending (`encode_request`).
 pub(crate) const MAX_PROVIDER_REQUEST_BYTES: usize = 512 * 1024;
-/// Both adapters send the compaction input as one JSON string, so each quote and backslash of
-/// the serialized input is escaped again: at most two request bytes per input byte.
+// JSON-string embedding escapes quotes and backslashes again, doubling their request bytes.
 pub(crate) const COMPACTION_INPUT_EXPANSION: usize = 2;
-/// Bytes of a compaction request outside its input string: instructions, schema and fixed fields.
 pub(crate) const COMPACTION_REQUEST_ENVELOPE_BYTES: usize = 8 * 1024;
 
 pub(crate) fn compaction_input_bytes(
@@ -459,7 +454,6 @@ impl ProviderRequest {
     }
 }
 
-/// Finish and Delegate only; Tools are offered natively and never selected through this schema.
 pub(crate) fn restrict_outcome_schema(
     schema: serde_json::Value,
     request: &ProviderRequest,
@@ -537,7 +531,6 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// Cache counts exist only with a reported input total and must fit inside it.
     pub(crate) fn cache_consistent(self) -> bool {
         match self.input_tokens {
             None => {

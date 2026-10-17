@@ -28,14 +28,12 @@ impl From<StructuredOutcome> for ProviderOutcome {
     }
 }
 
-/// Finish or Delegate from the schema-constrained `{"outcome": {...}}` text; anything else is rejected.
 pub(crate) fn structured_outcome(text: &str) -> Result<ProviderOutcome, ProviderError> {
     serde_json::from_str::<OutcomeEnvelope>(text)
         .map(|envelope| envelope.outcome.into())
         .map_err(|_| ProviderError::InvalidOutcome)
 }
 
-/// Finish or Delegate from the arguments of the `finish` or `delegate` function.
 pub(crate) fn function_outcome(
     operation: &str,
     mut fields: Map<String, Value>,
@@ -46,7 +44,6 @@ pub(crate) fn function_outcome(
     structured_outcome(&json!({"outcome": fields}).to_string())
 }
 
-/// One typed Tool request from a native call: `operation` is injected, a sibling `plan_contract` lifted.
 pub(crate) fn tool_request(
     id: ToolUseId,
     operation: &str,
@@ -80,11 +77,9 @@ pub(crate) fn tool_request(
     })
 }
 
-/// Tool requests one step may carry until multi-call steps land.
 const STEP_TOOL_CALLS: usize = 1;
 const _: () = assert!(STEP_TOOL_CALLS <= crate::session::MAX_STEP_TOOL_CALLS as usize);
 
-/// `Tools` outcome of one step; the ids must be unique.
 pub(crate) fn tools_outcome(requests: Vec<ToolRequest>) -> Result<ProviderOutcome, ProviderError> {
     if requests.is_empty()
         || requests.len() > STEP_TOOL_CALLS
