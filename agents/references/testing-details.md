@@ -4,7 +4,7 @@ Load the section named by [testing rules](../testing.md) when its task applies. 
 
 ## Local verification and CI
 
-Use the standard checks in [the development guide](../../docs/development.md#verification). The [CI workflow](../../.github/workflows/ci.yml) runs on pull requests and pushes to `main`; Markdown-only pull requests skip the test steps while required checks still complete.
+Use the standard checks in [the development guide](../../docs/development.md#verification), which owns CI profile selection, changed-path detection and skipped-job behavior.
 
 Manual dispatch offers three inputs. `linux_arm64` runs the `Linux ARM64 Tests` job. `linux_native_advanced` runs the `Native Linux Guard and tmux` job, where each ignored `--exact` invocation must report one completed test. `history_benchmark` runs the `Measure native long-history behavior` step, and its numbers describe that runner only. The [focused workflow](../../.github/workflows/ci-focused.yml) runs one manually chosen `ci.yml` lane; [failure and maintenance discipline](../testing.md#failure-and-maintenance-discipline) governs its use. Linux terminal fixtures need Bubblewrap, util-linux `script`, and user and network namespaces. To reproduce the default suite:
 

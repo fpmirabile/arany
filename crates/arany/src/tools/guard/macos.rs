@@ -960,6 +960,7 @@ async fn execute_worker(
             .map_err(|_| {
                 ToolError::GuardBootstrap(BootstrapFailure {
                     stage: BootstrapStage::Handshake,
+                    check: None,
                 })
             })??;
             if ready.pid != pid {
