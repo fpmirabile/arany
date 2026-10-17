@@ -357,8 +357,7 @@ pub(crate) const RUNTIME_PROFILE_LINES: [&str; 3] = [
     "Caches may hold private package data or credential URLs; a command can print them into bounded output that is journaled and sent to the Provider. Package-manager configuration and credential files stay excluded.",
 ];
 
-/// Shows a path under `home` as `~`-relative; the caller escapes the result.
-/// `/` is not abbreviated: every absolute path is under it.
+// `/` is not abbreviated: every absolute path is under it.
 pub fn abbreviate_home(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
     let Some(home) = home.filter(|home| home.is_absolute() && home.parent().is_some()) else {
         return path.to_string_lossy().into_owned();

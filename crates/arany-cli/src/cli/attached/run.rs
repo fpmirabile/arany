@@ -1260,7 +1260,8 @@ mod tests {
                         input.write_all(b"\x04").unwrap();
                         cancelled = true;
                     } else if text.contains("Folder trust recovery") {
-                        input.write_all(b"\x1b").unwrap();
+                        // Linear mode reads whole lines, so a lone Escape never arrives.
+                        input.write_all(b"\x04").unwrap();
                         cancelled = true;
                     }
                 },

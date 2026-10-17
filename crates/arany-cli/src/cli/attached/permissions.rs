@@ -105,8 +105,7 @@ fn recovery_choices(resettable: bool, exit: &'static str) -> Vec<(u8, &'static s
     choices
 }
 
-/// Opens the trust record or offers Retry, Reset folder trust or `exit`, as history recovery does.
-/// The reset pins the bytes shown in the dialog; confirmation deletes only those bytes.
+// The reset pins the bytes shown in the dialog; confirmation deletes only those bytes.
 pub(super) async fn open_or_recover(
     terminal: &mut AttachedTerminal,
     workspace: &Path,
