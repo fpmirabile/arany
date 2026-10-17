@@ -1,4 +1,4 @@
-use super::super::{CAPTURE_BYTES, TEARDOWN_WAIT, retry_transient};
+use super::super::{CAPTURE_BYTES, CleanupCheck, TEARDOWN_WAIT, retry_transient};
 use super::system_program;
 use crate::private_fs::open_directory;
 use crate::tools::toolchains::RuntimeGrant;
@@ -7,6 +7,7 @@ use cap_std::fs::MetadataExt as _;
 use core_foundation::{base::CFType, dictionary::CFDictionary, string::CFString};
 use nix::libc;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -385,21 +386,39 @@ pub(super) fn storage_mounted(root: &Path) -> Result<bool, ToolError> {
     Ok(false)
 }
 
-pub(super) async fn cleanup_storage(root: &Path) -> Result<(), ToolError> {
+#[derive(Debug)]
+pub(super) struct CleanupFailed {
+    pub(super) error: ToolError,
+    pub(super) check: CleanupCheck,
+}
+
+impl From<CleanupFailed> for ToolError {
+    fn from(failed: CleanupFailed) -> Self {
+        failed.error
+    }
+}
+
+pub(super) async fn cleanup_storage(root: &Path) -> Result<(), CleanupFailed> {
     cleanup_storage_until(root, tokio::time::Instant::now() + TEARDOWN_WAIT).await
 }
 
 pub(super) async fn cleanup_storage_until(
     root: &Path,
     deadline: tokio::time::Instant,
-) -> Result<(), ToolError> {
+) -> Result<(), CleanupFailed> {
+    let check = Cell::new(CleanupCheck::Inspection);
     retry_transient(CLEANUP_ATTEMPTS, CLEANUP_PAUSE, deadline, || {
-        cleanup_storage_once(root)
+        cleanup_storage_once(root, &check)
     })
     .await
+    .map_err(|error| CleanupFailed {
+        error,
+        check: check.get(),
+    })
 }
 
-async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
+async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result<(), ToolError> {
+    check.set(CleanupCheck::Inspection);
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
     let mut has_images = false;
@@ -415,6 +434,7 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
         }
     }
     if !has_images {
+        check.set(CleanupCheck::MountStillPresent);
         return if !storage_mounted(root)?
             && !super::ffi::mounts()?
                 .iter()
@@ -432,8 +452,10 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
         Err(_) => return Err(ToolError::Path),
     };
     let mut admitted_image = false;
+    check.set(CleanupCheck::ListingUnavailable);
     let attached = disk_command(root, &["info", "-plist"]).await?;
     let owned_attachments = attachments(&attached, root)?;
+    check.set(CleanupCheck::Inspection);
     if let Some(pending) = &pending {
         if pending.version != 1 || !STORAGE_NAMES.contains(&pending.image.as_str()) {
             return Err(ToolError::ProtectionUnavailable);
@@ -472,6 +494,7 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
             .find(|attachment| attachment.name == name);
         if let Some(attachment) = owned {
             verify_image(&directory, name)?;
+            check.set(CleanupCheck::MountStillPresent);
             let mounts = super::ffi::mounts()?;
             for (device, target) in &mounts {
                 if device == &attachment.device && target != &root.join(name) {
@@ -487,11 +510,13 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
             } else if mounts.iter().any(|(_, target)| target == &root.join(name)) {
                 return Err(ToolError::ProtectionUnavailable);
             }
+            check.set(CleanupCheck::Inspection);
             devices.push(attachment.device.clone());
         } else if metadata.dev() != parent.0 {
             return Err(ToolError::ProtectionUnavailable);
         }
     }
+    check.set(CleanupCheck::MountStillPresent);
     if super::ffi::mounts()?.iter().any(|(_, target)| {
         target.starts_with(root) && !STORAGE_NAMES.iter().any(|name| target == &root.join(name))
     }) {
@@ -507,6 +532,7 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
     }
     for device in devices {
         // Recheck OS ownership immediately before acting on a potentially reused disk number.
+        check.set(CleanupCheck::ListingUnavailable);
         let current = disk_command(root, &["info", "-plist"]).await?;
         if !attachments(&current, root)?
             .iter()
@@ -514,6 +540,7 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
         {
             return Err(ToolError::ChangedInput);
         }
+        check.set(CleanupCheck::DetachFailed);
         disk_command(
             root,
             &[
@@ -528,7 +555,9 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
     if pending.is_some() && !admitted_image {
         return Err(ToolError::ProtectionUnavailable);
     }
+    check.set(CleanupCheck::ListingUnavailable);
     let remaining = disk_command(root, &["info", "-plist"]).await?;
+    check.set(CleanupCheck::ImageStillListed);
     if !attachments(&remaining, root)?.is_empty() {
         return Err(ToolError::ProtectionUnavailable);
     }
@@ -537,6 +566,7 @@ async fn cleanup_storage_once(root: &Path) -> Result<(), ToolError> {
             .remove_file(STORAGE_PENDING)
             .map_err(|_| ToolError::Operation)?;
     }
+    check.set(CleanupCheck::MountStillPresent);
     if storage_mounted(root)? {
         Err(ToolError::ProtectionUnavailable)
     } else {
@@ -596,14 +626,13 @@ fn attachments(bytes: &[u8], root: &Path) -> Result<Vec<Attachment>, ToolError> 
     let mut result = Vec::new();
     for image in images.iter() {
         let image = super::ffi::dictionary(&image)?;
-        // Host-wide listing: another call's image mid-attach or mid-detach may carry no path yet.
-        let Some(image_path) = image
-            .find(CFString::new("image-path"))
-            .and_then(|path| path.downcast::<CFString>())
-            .map(|path| path.to_string())
-        else {
-            continue;
-        };
+        let image_path = value(&image, "image-path")?
+            .downcast::<CFString>()
+            .ok_or(ToolError::ProtectionUnavailable)?
+            .to_string();
+        if image_path.len() > 4096 {
+            return Err(ToolError::Limit);
+        }
         let Some(name) = STORAGE_NAMES
             .into_iter()
             .find(|name| root.join(format!("{name}.dmg")) == Path::new(&image_path))
@@ -762,13 +791,8 @@ mod tests {
                 assert_eq!(result.unwrap()[0].device, Path::new(device));
             }
         }
-        let pathless = format!(
-            "<plist version=\"1.0\"><dict><key>images</key><array><dict><key>system-entities</key><array/></dict><dict><key>image-path</key><string>{}/workspace.dmg</string><key>system-entities</key><array><dict><key>dev-entry</key><string>/dev/disk7</string></dict></array></dict></array></dict></plist>",
-            root.display()
-        );
-        let found = attachments(pathless.as_bytes(), root).unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].device, Path::new("/dev/disk7"));
+        let pathless = "<plist version=\"1.0\"><dict><key>images</key><array><dict><key>system-entities</key><array/></dict></array></dict></plist>";
+        assert!(attachments(pathless.as_bytes(), root).is_err());
         for bytes in [
             b"not a plist".as_slice(),
             b"<plist><dict/></plist>",

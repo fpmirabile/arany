@@ -300,6 +300,28 @@ struct Ready {
     profile_digest: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CleanupCheck {
+    Inspection,
+    ListingUnavailable,
+    DetachFailed,
+    ImageStillListed,
+    MountStillPresent,
+}
+
+impl CleanupCheck {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Inspection => "inspection",
+            Self::ListingUnavailable => "listing unavailable",
+            Self::DetachFailed => "detach failed",
+            Self::ImageStillListed => "image still listed",
+            Self::MountStillPresent => "mount still present",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BootstrapStage {
@@ -338,6 +360,8 @@ impl BootstrapStage {
 #[serde(deny_unknown_fields)]
 pub struct BootstrapFailure {
     stage: BootstrapStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    check: Option<CleanupCheck>,
 }
 
 impl std::fmt::Display for BootstrapFailure {
@@ -347,6 +371,10 @@ impl std::fmt::Display for BootstrapFailure {
 }
 
 impl BootstrapFailure {
+    pub(super) fn check(&self) -> Option<&'static str> {
+        self.check.map(CleanupCheck::label)
+    }
+
     pub(super) fn failure_stage(&self) -> &'static str {
         match self.stage {
             BootstrapStage::Admission => "admission",
@@ -1131,7 +1159,10 @@ pub(super) fn helper_main() -> ExitCode {
     if result.is_ok() {
         ExitCode::SUCCESS
     } else {
-        let _ = serde_json::to_writer(std::io::stderr().lock(), &BootstrapFailure { stage });
+        let _ = serde_json::to_writer(
+            std::io::stderr().lock(),
+            &BootstrapFailure { stage, check: None },
+        );
         ExitCode::FAILURE
     }
 }
@@ -1455,9 +1486,32 @@ mod tests {
     fn runtime_mount_rejection_reports_its_own_bootstrap_stage() {
         let failure = BootstrapFailure {
             stage: BootstrapStage::RuntimeMounts,
+            check: None,
         };
         assert_eq!(failure.failure_stage(), "runtime mount topology");
         assert_eq!(failure.to_string(), "runtime mount topology");
+    }
+
+    #[test]
+    fn storage_cleanup_failure_carries_a_closed_check_without_changing_its_stage() {
+        let failure: BootstrapFailure =
+            serde_json::from_str(r#"{"stage":"storage_cleanup","check":"detach_failed"}"#).unwrap();
+        assert_eq!(failure.failure_stage(), "storage cleanup");
+        assert_eq!(failure.check(), Some("detach failed"));
+        assert_eq!(
+            serde_json::to_string(&failure).unwrap(),
+            r#"{"stage":"storage_cleanup","check":"detach_failed"}"#
+        );
+        let bare: BootstrapFailure = serde_json::from_str(r#"{"stage":"payload"}"#).unwrap();
+        assert_eq!(bare.check(), None);
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"stage":"payload"}"#
+        );
+        assert!(
+            serde_json::from_str::<BootstrapFailure>(r#"{"stage":"payload","check":"raw text"}"#)
+                .is_err()
+        );
     }
 
     #[test]
