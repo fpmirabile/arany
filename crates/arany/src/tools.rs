@@ -120,8 +120,8 @@ pub enum ToolError {
 
 #[derive(Clone)]
 pub(crate) struct PermissionSnapshot {
-    pub(crate) config: std::sync::Arc<permissions::PermissionConfig>,
-    pub(crate) digest: [u8; 32],
+    config: std::sync::Arc<permissions::PermissionConfig>,
+    digest: [u8; 32],
 }
 
 #[derive(Clone)]

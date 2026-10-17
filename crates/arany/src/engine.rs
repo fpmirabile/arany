@@ -41,6 +41,7 @@ use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
 use progress::ProgressPublisher;
 pub use progress::{DisplayUpdate, RunPreview, RunProgress, RunUpdate};
 use report::goal_report;
+use routing::CallScope;
 use run_loop::{LoopControls, RunIdentity, RunLoop};
 
 /// Checks bounded Workspace input before an attached draft becomes a saved Session.
@@ -1083,9 +1084,11 @@ impl Engine {
                 )
                 .await?;
                 let provider_request = root_request(
-                    session_id,
-                    run_id,
-                    agent_run_id,
+                    CallScope {
+                        session_id,
+                        run_id,
+                        agent_run_id,
+                    },
                     request.policy,
                     identity,
                     &goal,
@@ -1682,14 +1685,8 @@ fn validate_turn_providers(
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Keep the acting identities explicit"
-)]
 fn root_request(
-    session_id: SessionId,
-    run_id: RunId,
-    agent_run_id: AgentRunId,
+    scope: CallScope,
     policy: crate::session::CollaborationPolicy,
     identity: &crate::provider::ProviderIdentity,
     goal: &GoalAdmission,
@@ -1697,6 +1694,11 @@ fn root_request(
     budget: GoalBudget,
     input: RootInput<'_>,
 ) -> ProviderRequest {
+    let CallScope {
+        session_id,
+        run_id,
+        agent_run_id,
+    } = scope;
     let tools = input.tool_context;
     let role = if tools.is_some() {
         PromptRole::Primary
