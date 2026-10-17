@@ -176,6 +176,7 @@ fn scan_session_heads(
                 Event::RunFinished {
                     run_id,
                     disposition: RunDisposition::Finished,
+                    ..
                 } if head
                     .primary
                     .is_some_and(|(primary_run, _)| primary_run == *run_id) =>

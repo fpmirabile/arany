@@ -169,7 +169,14 @@ impl RunLoop<'_> {
         let active_bound =
             delegation_active_bound(research, self.provider.identity().limits.deadline, waves);
         // Covers every child's calls, Tools and terminal facts plus the largest later admission, so a refusal precedes AgentSpawned.
-        let active_segment = match self.reserve_active_segment(active_bound, delegation).await {
+        self.store
+            .admit_operation(
+                self.session_id,
+                delegation.max_events(),
+                delegation.tool_observations(),
+            )
+            .await?;
+        let active_segment = match self.reserve_active_segment(active_bound) {
             Ok(segment) => segment,
             Err(EngineError::GoalBudgetExhausted) => {
                 return self.settle_stopped_primary(primary).await;
@@ -200,7 +207,7 @@ impl RunLoop<'_> {
             });
         }
         if self.controls.cancellation.is_cancelled() {
-            self.settle_active_segment(active_segment).await?;
+            self.settle_active_segment(active_segment)?;
             for mut child in children {
                 self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
                     .await?;
@@ -399,7 +406,7 @@ impl RunLoop<'_> {
             }
         }
 
-        self.settle_active_segment(active_segment).await?;
+        self.settle_active_segment(active_segment)?;
         if matches!(abort_reason, Some(AbortReason::Paused)) {
             self.pause_at_boundary();
         }
@@ -490,7 +497,7 @@ impl RunLoop<'_> {
                 record: call_record(AgentPhase::RootSynthesis, &synthesis, valid_response),
             })
             .await?;
-            self.settle_active_segment(active_segment).await?;
+            self.settle_active_segment(active_segment)?;
             if self.controls.cancellation.is_cancelled() {
                 return self.settle_stopped_primary(primary).await;
             }
@@ -628,6 +635,7 @@ impl RunLoop<'_> {
                 Action::Child {
                     in_flight: self.ledger().in_flight_children(),
                 },
+                0,
             )
             .await?;
             let provider_trace = children[index]
@@ -729,6 +737,7 @@ impl RunLoop<'_> {
             run_id: self.run_id,
             agent_run_id,
             intent: intent.clone(),
+            active_ceiling_ms: self.ledger().active_ceiling(0)?,
         })
         .await?;
         let observation = if self.ledger().allows_tool(&intent.call) {

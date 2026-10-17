@@ -1277,7 +1277,11 @@ impl Engine {
             scope,
             None,
             session_id,
-            Event::RunStarted { run_id, config },
+            Event::RunStarted {
+                run_id,
+                config,
+                active_deadline_ms: ledger.run_active_deadline()?,
+            },
         )
         .await?;
         let trace = self.telemetry.begin_goal_run(

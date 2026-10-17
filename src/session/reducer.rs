@@ -58,9 +58,10 @@ pub struct GoalView {
     pub awaiting_plan_contract: bool,
     pub active_ms: u64,
     pub uncertain_active_ms: u64,
-    /// Run and reserved milliseconds of the unsettled active-time segment.
-    pub reserved_active_run: Option<RunId>,
-    pub reserved_active_ms: Option<u64>,
+    /// The started Run whose active time is not settled yet, with its active deadline.
+    pub active_deadline: Option<(RunId, Option<u64>)>,
+    /// Upper bound of the unsettled active time of the open Run or Goal compaction call.
+    pub active_ceiling_ms: u64,
     pub provider_calls: u32,
     pub unobserved_provider_calls: Vec<AgentRunId>,
     /// Run whose Goal-context compaction call is reserved and not yet settled.
@@ -92,19 +93,35 @@ impl GoalView {
         })
     }
 
-    /// Usage that decides whether an explicit resume admits another Run. Resume settles an unsettled
-    /// active-time reservation as spent and counts unobserved calls as unknown tokens; an unaccepted
-    /// trailing link is not a Run. Saturation fails admission closed.
+    /// A crash charges the last started action's ceiling, capped by the Run deadline and plan narrowing.
+    pub(crate) fn unsettled_active_charge_ms(&self) -> u64 {
+        let ceiling = self
+            .active_deadline
+            .and_then(|(_, deadline)| deadline)
+            .map_or(self.active_ceiling_ms, |deadline| {
+                self.active_ceiling_ms.min(deadline)
+            });
+        self.effective_budget()
+            .max_active_ms
+            .map_or(ceiling, |limit| {
+                ceiling.min(limit.saturating_sub(self.active_ms))
+            })
+    }
+
+    /// Usage that decides whether an explicit resume admits another Run. Resume charges unsettled
+    /// active time as spent and counts unobserved calls as unknown tokens; an unaccepted trailing link
+    /// is not a Run. Saturation fails admission closed.
     pub(crate) fn resume_usage(&self, view: &SessionView) -> GoalUsage {
         let unaccepted_link = self
             .run_ids
             .last()
             .is_some_and(|run_id| !view.runs.iter().any(|run| run.id == *run_id));
-        let reserved_ms = self.reserved_active_ms.unwrap_or_default();
         GoalUsage {
             runs: self.run_ids.len() - usize::from(unaccepted_link),
             provider_calls: self.provider_calls,
-            active_ms: self.active_ms.saturating_add(reserved_ms),
+            active_ms: self
+                .active_ms
+                .saturating_add(self.unsettled_active_charge_ms()),
             known_tokens: self.known_tokens,
             token_usage_unknown: self.token_usage_unknown
                 || !self.unobserved_provider_calls.is_empty()
@@ -518,11 +535,6 @@ impl SessionView {
                 Event::GoalResumed { goal_id } if *goal_id == awaiting
             )
             && !matches!(&envelope.event, Event::GoalStarted { .. })
-            && !matches!(
-                &envelope.event,
-                Event::GoalActiveTimeReserved { goal_id, .. } | Event::GoalActiveTimeSettled { goal_id, .. }
-                    if *goal_id == awaiting
-            )
             && !closes_run_without_plan(&envelope.event)
         {
             return Err(ReplayError::InvalidTransition);
@@ -544,8 +556,6 @@ impl SessionView {
             Event::GoalStarted { .. }
             | Event::GoalRunLinked { .. }
             | Event::GoalResumed { .. }
-            | Event::GoalActiveTimeReserved { .. }
-            | Event::GoalActiveTimeSettled { .. }
             | Event::GoalPlanContractRecorded { .. }
             | Event::GoalProviderCallReserved { .. }
             | Event::GoalCompactionCallReserved { .. }

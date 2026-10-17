@@ -123,8 +123,6 @@ pub(crate) enum TraceEventKind {
     GoalStarted,
     GoalRunLinked,
     GoalResumed,
-    GoalActiveTimeReserved,
-    GoalActiveTimeSettled,
     GoalPlanContractRecorded,
     GoalFinished,
     GoalProviderCallReserved,
@@ -892,8 +890,6 @@ impl TraceEventKind {
             Self::GoalStarted
             | Self::GoalRunLinked
             | Self::GoalResumed
-            | Self::GoalActiveTimeReserved
-            | Self::GoalActiveTimeSettled
             | Self::GoalPlanContractRecorded
             | Self::GoalFinished
             | Self::GoalProviderCallReserved
@@ -917,8 +913,6 @@ impl TraceEventKind {
             Self::GoalStarted => "GoalStarted",
             Self::GoalRunLinked => "GoalRunLinked",
             Self::GoalResumed => "GoalResumed",
-            Self::GoalActiveTimeReserved => "GoalActiveTimeReserved",
-            Self::GoalActiveTimeSettled => "GoalActiveTimeSettled",
             Self::GoalPlanContractRecorded => "GoalPlanContractRecorded",
             Self::GoalFinished => "GoalFinished",
             Self::GoalProviderCallReserved => "GoalProviderCallReserved",

@@ -1749,6 +1749,7 @@ mod tests {
                             compaction_content_digest: None,
                             tool_policy: None,
                         },
+                        active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
                     },
                     Event::AgentSpawned {
                         run_id,
@@ -1772,6 +1773,7 @@ mod tests {
                     Event::RunFinished {
                         run_id,
                         disposition: RunDisposition::Finished,
+                        active_ms: 0,
                     },
                 ] {
                     store
