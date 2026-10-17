@@ -1,6 +1,6 @@
 use super::*;
 use arany::test_support::{
-    engine::{run_routed, run_to_end, run_with},
+    engine::{open, run_routed, run_to_end, run_with},
     scenario::*,
 };
 use arany::{
@@ -21,7 +21,7 @@ fn fixture() -> (tempfile::TempDir, std::path::PathBuf, Engine) {
     std::fs::create_dir_all(workspace.join("notes")).unwrap();
     std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
     let state = StateRoot::admit(&root.path().join("state")).unwrap();
-    let engine = Engine::open(state, EngineConfig::default()).unwrap();
+    let engine = open(state, EngineConfig::default()).unwrap();
     (root, workspace, engine)
 }
 

@@ -585,7 +585,7 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
     let next = route(ScriptedProvider::new(vec![]).with_profile("scripted", "next"));
     let mut bindings = routes(&first);
     bindings.primary.push(next.clone());
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::open_existing(&recovered_state).unwrap(),
         EngineConfig::default(),
     )
