@@ -656,6 +656,8 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         provider_fallbacks: Vec::new(),
     };
     let goal = GoalView {
+        continues: None,
+        budget_closed: false,
         id: goal_id,
         objective: "Report".into(),
         workspace_identity: WorkspaceIdentity {

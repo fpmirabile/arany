@@ -833,6 +833,7 @@
         "tooManySessions",
         "sessionBusy",
         "workspaceBusy",
+        "goalNotContinuable",
         "goalUnavailable",
         "goalAdmissionUncertain",
         "goalBudgetExhausted",
