@@ -1,4 +1,4 @@
-use super::{ConfigError, MAX_PATTERN_BYTES, compile, peer_name};
+use super::{ConfigError, MAX_PATTERN_BYTES, compile, peer_name, valid_call};
 use crate::tools::ToolCall;
 use regex::Regex;
 use serde::Deserialize;
@@ -120,19 +120,32 @@ impl HookConfig {
 }
 
 impl HookGroup {
-    pub fn matches(&self, value: &str) -> bool {
+    pub fn matches(&self, value: &str) -> Result<bool, ConfigError> {
         if value.len() > MAX_PATTERN_BYTES || value.chars().any(char::is_control) {
-            return false;
+            return Err(ConfigError::Hook(
+                "invalid match subject; block the pending action",
+            ));
         }
-        match &self.matcher {
+        Ok(match &self.matcher {
             Matcher::All => true,
             Matcher::Names(names) => names.iter().any(|name| name == value),
             Matcher::Pattern(pattern) => pattern.is_match(value),
-        }
+        })
     }
 
-    pub fn matches_tool(&self, call: &ToolCall) -> bool {
-        self.matches(peer_name(call))
+    pub fn matches_tool(&self, call: &ToolCall) -> Result<bool, ConfigError> {
+        if !valid_call(call) {
+            return Err(ConfigError::Hook(
+                "invalid Tool match subject; block the pending action",
+            ));
+        }
+        if matches!(call, ToolCall::McpCall { server, .. } | ToolCall::McpList { server } if server.contains("__"))
+        {
+            return Err(ConfigError::Hook(
+                "ambiguous MCP server delimiter; block the pending action",
+            ));
+        }
+        self.matches(&peer_name(call))
     }
 
     pub fn commands(&self) -> &[CommandHook] {

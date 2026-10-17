@@ -6,6 +6,7 @@ use super::catalog::Family;
 use super::{ApprovalMode, ToolCall};
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
+use std::borrow::Cow;
 
 pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
 pub const MAX_RULES: usize = 128;
@@ -20,17 +21,6 @@ pub enum PermissionMode {
     Plan,
     Auto,
     DontAsk,
-}
-
-impl PermissionMode {
-    pub fn approval_mode(self) -> Option<ApprovalMode> {
-        match self {
-            Self::Default => Some(ApprovalMode::Request),
-            Self::AcceptEdits => Some(ApprovalMode::AutoEdits),
-            Self::Auto => Some(ApprovalMode::Auto),
-            Self::Plan | Self::DontAsk => None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,6 +107,12 @@ impl PermissionConfig {
                     index,
                     reason,
                 })?;
+                if permissions.default_mode == PermissionMode::Auto
+                    && decision == Decision::Allow
+                    && rule.broad_execution
+                {
+                    continue;
+                }
                 rules.push((decision, rule));
             }
         }
@@ -151,7 +147,7 @@ impl PermissionConfig {
     }
 
     pub fn decision(&self, call: &ToolCall) -> Decision {
-        if serde_json::to_writer(CallSize(0), call).is_err() || !call.valid() {
+        if !valid_call(call) {
             return Decision::Deny;
         }
         let facts = call.facts();
@@ -160,12 +156,26 @@ impl PermissionConfig {
         {
             return Decision::Deny;
         }
+        let auto_review = self.mode == PermissionMode::Auto
+            && (facts.asks_approval
+                || facts.spawns_process
+                || matches!(facts.family, Family::Mcp | Family::Git));
+        let allow_skips_approval = !auto_review
+            && !(self.mode == PermissionMode::AcceptEdits && facts.asks_approval && !facts.mutates);
         let decision = self
             .rules
             .iter()
-            .find_map(|(decision, rule)| rule.matches(call, *decision).then_some(*decision))
+            .find_map(|(decision, rule)| {
+                if *decision == Decision::Allow && !allow_skips_approval {
+                    None
+                } else {
+                    rule.matches(call, *decision).then_some(*decision)
+                }
+            })
             .unwrap_or_else(|| {
-                if !facts.asks_approval
+                if auto_review {
+                    Decision::Ask
+                } else if !facts.asks_approval
                     || (self.mode == PermissionMode::AcceptEdits && facts.mutates)
                 {
                     Decision::Allow
@@ -179,6 +189,10 @@ impl PermissionConfig {
             decision
         }
     }
+}
+
+fn valid_call(call: &ToolCall) -> bool {
+    serde_json::to_writer(CallSize(0), call).is_ok() && call.valid()
 }
 
 struct CallSize(usize);
@@ -201,6 +215,7 @@ impl std::io::Write for CallSize {
 struct Rule {
     tool: Tool,
     pattern: Option<Regex>,
+    broad_execution: bool,
 }
 
 #[derive(Debug)]
@@ -214,6 +229,7 @@ enum Tool {
     Skill,
     Native(&'static str),
     NameGlob(Regex),
+    Mcp { server: Regex, tool: Option<Regex> },
 }
 
 impl Rule {
@@ -251,17 +267,67 @@ impl Rule {
             "Glob" => Tool::Glob,
             "Grep" => Tool::Grep,
             "Skill" => Tool::Skill,
+            name if name.starts_with("mcp__") => {
+                if specifier.is_some() {
+                    return Err("MCP rules do not support specifiers");
+                }
+                let name = &name[5..];
+                let (server, tool) = name
+                    .split_once("__")
+                    .map_or((name, None), |(server, tool)| (server, Some(tool)));
+                if server.is_empty()
+                    || server.len() > 64
+                    || !server.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-*".contains(&byte)
+                    })
+                    || tool == Some("")
+                    || tool.is_some_and(|tool| tool.len() > 128)
+                    || (decision == Decision::Allow && server.contains('*'))
+                {
+                    return Err(
+                        "MCP server/Tool pattern is invalid or over-limit; allow requires a literal server",
+                    );
+                }
+                Tool::Mcp {
+                    server: compile(&format!("\\A{}\\z", command_glob(server)))?,
+                    tool: tool
+                        .map(|tool| compile(&format!("\\A{}\\z", command_glob(tool))))
+                        .transpose()?,
+                }
+            }
             name if name.contains('*') => {
                 if specifier.is_some() || decision == Decision::Allow {
                     return Err("tool-name wildcards support bare deny/ask rules only");
                 }
-                Tool::NameGlob(compile(&format!("\\A{}\\z", command_glob(name)))?)
+                let pattern = compile(&format!("\\A{}\\z", command_glob(name)))?;
+                if !super::catalog::ALL.iter().any(|facts| {
+                    pattern.is_match(facts.name)
+                        || pattern.is_match(peer_operation_name(facts.name))
+                }) {
+                    return Err("Tool-name glob matches no known peer or native operation");
+                }
+                Tool::NameGlob(pattern)
             }
             name => Tool::Native(
                 super::catalog::by_name(name)
                     .ok_or("unknown Tool name")?
                     .name,
             ),
+        };
+        let broad_execution = match &tool {
+            Tool::Bash | Tool::Native("command") => specifier.is_none_or(|pattern| {
+                pattern.contains('*')
+                    && pattern
+                        .split('*')
+                        .next()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .count()
+                        <= 1
+            }),
+            Tool::Native("mcp_call") => specifier.is_none(),
+            Tool::Mcp { tool, .. } => tool.is_none(),
+            _ => false,
         };
         let pattern = match specifier {
             None => None,
@@ -300,7 +366,11 @@ impl Rule {
                 }
             }),
         };
-        Ok(Self { tool, pattern })
+        Ok(Self {
+            tool,
+            pattern,
+            broad_execution,
+        })
     }
 
     fn matches(&self, call: &ToolCall, decision: Decision) -> bool {
@@ -309,6 +379,7 @@ impl Rule {
             Tool::Bash => facts.family == Family::Process,
             Tool::Read => {
                 facts.family == Family::File && (!facts.mutates || decision == Decision::Deny)
+                    || facts.family == Family::Git && decision != Decision::Allow
             }
             Tool::Edit => facts.family == Family::File && facts.mutates,
             Tool::Write => matches!(call, ToolCall::Write { .. }),
@@ -317,8 +388,22 @@ impl Rule {
             Tool::Skill => facts.family == Family::Skill,
             Tool::Native(name) => facts.name == *name,
             Tool::NameGlob(pattern) => {
-                pattern.is_match(peer_name(call)) || pattern.is_match(facts.name)
+                pattern.is_match(&peer_name(call)) || pattern.is_match(facts.name)
             }
+            Tool::Mcp { server, tool } => match call {
+                ToolCall::McpCall {
+                    server: actual_server,
+                    tool: actual_tool,
+                    ..
+                } => {
+                    server.is_match(actual_server)
+                        && tool.as_ref().is_none_or(|tool| tool.is_match(actual_tool))
+                }
+                ToolCall::McpList {
+                    server: actual_server,
+                } => server.is_match(actual_server) && tool.is_none(),
+                _ => false,
+            },
         };
         if !matches_tool {
             return false;
@@ -342,6 +427,10 @@ impl Rule {
                     text.push_str(arg);
                 }
                 pattern.is_match(&text)
+                    || decision != Decision::Allow
+                        && text
+                            .match_indices(' ')
+                            .any(|(index, _)| pattern.is_match(&text[index + 1..]))
             }
             ToolCall::Skill { name, .. } => pattern.is_match(name),
             ToolCall::ApplyChangeset { changeset, .. } => {
@@ -350,15 +439,15 @@ impl Rule {
                         && changeset
                             .files
                             .iter()
-                            .all(|file| pattern.is_match(&file.path))
+                            .all(|file| path_matches(pattern, &file.path, decision))
                 } else {
                     changeset
                         .files
                         .iter()
-                        .any(|file| pattern.is_match(&file.path))
+                        .any(|file| path_matches(pattern, &file.path, decision))
                 }
             }
-            _ => path_of(call).is_some_and(|path| pattern.is_match(path)),
+            _ => path_of(call).is_some_and(|path| path_matches(pattern, path, decision)),
         }
     }
 }
@@ -378,17 +467,29 @@ fn path_of(call: &ToolCall) -> Option<&str> {
     }
 }
 
-pub(super) fn peer_name(call: &ToolCall) -> &'static str {
+pub(super) fn peer_name(call: &ToolCall) -> Cow<'_, str> {
     match call {
-        ToolCall::Command { .. } => "Bash",
-        ToolCall::Read { .. } => "Read",
-        ToolCall::List { .. } => "Glob",
-        ToolCall::Search { .. } => "Grep",
-        ToolCall::Write { .. } => "Write",
-        ToolCall::Mkdir { .. } | ToolCall::Edit { .. } | ToolCall::ApplyChangeset { .. } => "Edit",
-        ToolCall::Skill { .. } => "Skill",
-        _ => call.facts().name,
+        ToolCall::McpCall { server, tool, .. } => Cow::Owned(format!("mcp__{server}__{tool}")),
+        ToolCall::McpList { server } => Cow::Owned(format!("mcp__{server}")),
+        _ => Cow::Borrowed(peer_operation_name(call.facts().name)),
     }
+}
+
+fn peer_operation_name(name: &str) -> &str {
+    match name {
+        "command" => "Bash",
+        "read" => "Read",
+        "list" => "Glob",
+        "search" => "Grep",
+        "write" => "Write",
+        "mkdir" | "edit" | "apply_changeset" => "Edit",
+        "skill" => "Skill",
+        _ => name,
+    }
+}
+
+fn path_matches(pattern: &Regex, path: &str, decision: Decision) -> bool {
+    decision != Decision::Allow && !path.is_ascii() || pattern.is_match(path)
 }
 
 fn command_glob(pattern: &str) -> String {
@@ -400,6 +501,11 @@ fn command_glob(pattern: &str) -> String {
 }
 
 fn path_glob(input: &str, decision: Decision) -> Result<Regex, &'static str> {
+    if decision != Decision::Allow && !input.is_ascii() {
+        return Err(
+            "deny/ask path patterns require ASCII literals; non-ASCII paths conservatively match restrictions",
+        );
+    }
     if input.starts_with(['!', '#']) || input.starts_with("//") || input.starts_with('~') {
         return Err(
             "negation, comments, home and absolute anchors are unsupported; use Workspace-relative paths",
@@ -479,7 +585,11 @@ fn path_glob(input: &str, decision: Decision) -> Result<Regex, &'static str> {
         segment_start = ch == '/';
     }
     expression.push_str("(?:/.*)?\\z");
-    compile(&expression)
+    compile(&if decision == Decision::Allow {
+        expression
+    } else {
+        format!("(?i:{expression})")
+    })
 }
 
 fn compile(pattern: &str) -> Result<Regex, &'static str> {

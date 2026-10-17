@@ -43,35 +43,17 @@ fn permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask() {
     let reads = read("src/lib.rs");
     let edits = write("src/lib.rs");
     let process = command("git", &["diff"]);
-    for (mode, approval, decisions) in [
-        (
-            "default",
-            Some(ApprovalMode::Request),
-            [Decision::Allow, Decision::Ask, Decision::Ask],
-        ),
+    for (mode, decisions) in [
+        ("default", [Decision::Allow, Decision::Ask, Decision::Ask]),
         (
             "acceptEdits",
-            Some(ApprovalMode::AutoEdits),
             [Decision::Allow, Decision::Allow, Decision::Ask],
         ),
-        (
-            "auto",
-            Some(ApprovalMode::Auto),
-            [Decision::Allow, Decision::Ask, Decision::Ask],
-        ),
-        (
-            "plan",
-            None,
-            [Decision::Allow, Decision::Deny, Decision::Deny],
-        ),
-        (
-            "dontAsk",
-            None,
-            [Decision::Allow, Decision::Deny, Decision::Deny],
-        ),
+        ("auto", [Decision::Allow, Decision::Ask, Decision::Ask]),
+        ("plan", [Decision::Allow, Decision::Deny, Decision::Deny]),
+        ("dontAsk", [Decision::Allow, Decision::Deny, Decision::Deny]),
     ] {
         let parsed = config(json!({"defaultMode": mode}));
-        assert_eq!(parsed.mode().approval_mode(), approval, "{mode}");
         for (call, expected) in [&reads, &edits, &process].into_iter().zip(decisions) {
             assert_eq!(parsed.decision(call), expected, "{mode} {call:?}");
         }
@@ -515,18 +497,26 @@ fn hook_schema_accepts_peer_events_defaults_exec_form_and_inert_commands() {
     let parsed = PermissionConfig::parse(&serde_json::to_vec(&settings).unwrap()).unwrap();
     let hook_config = parsed.hooks();
     let pre = &hook_config.groups(HookEvent::PreToolUse)[0];
-    assert!(pre.matches_tool(&command_call()));
-    assert!(!pre.matches_tool(&read("a")));
+    assert!(pre.matches_tool(&command_call()).unwrap());
+    assert!(!pre.matches_tool(&read("a")).unwrap());
     assert_eq!(pre.commands()[0].command(), command);
     assert_eq!(pre.commands()[0].args(), None);
     assert_eq!(pre.commands()[0].timeout_seconds(), 600);
     let post = &hook_config.groups(HookEvent::PostToolUse)[0];
-    assert!(post.matches_tool(&write("a")));
+    assert!(post.matches_tool(&write("a")).unwrap());
     assert_eq!(post.commands()[0].args(), Some([].as_slice()));
     assert_eq!(post.commands()[0].timeout_seconds(), 1);
-    assert!(hook_config.groups(HookEvent::Stop)[0].matches(""));
-    assert!(hook_config.groups(HookEvent::SubagentStop)[0].matches("Explore"));
-    assert!(hook_config.groups(HookEvent::PreCompact)[0].matches("auto"));
+    assert!(hook_config.groups(HookEvent::Stop)[0].matches("").unwrap());
+    assert!(
+        hook_config.groups(HookEvent::SubagentStop)[0]
+            .matches("Explore")
+            .unwrap()
+    );
+    assert!(
+        hook_config.groups(HookEvent::PreCompact)[0]
+            .matches("auto")
+            .unwrap()
+    );
     assert!(config(json!({})).hooks().groups(HookEvent::Stop).is_empty());
 }
 
@@ -542,7 +532,6 @@ fn hook_matchers_use_exact_alternatives_or_bounded_unanchored_regex() {
         ("Edit, Write", "Edit", "NotebookEdit"),
         ("Edit.*", "NotebookEdit", "Read"),
         ("^Edit$", "Edit", "NotebookEdit"),
-        ("mcp__memory__.*", "mcp__memory__read", "mcp__other__read"),
     ] {
         let parsed = hooks(
             "PreToolUse",
@@ -551,9 +540,13 @@ fn hook_matchers_use_exact_alternatives_or_bounded_unanchored_regex() {
         )
         .unwrap();
         let group = &parsed.hooks().groups(HookEvent::PreToolUse)[0];
-        assert!(group.matches(yes), "{matcher}");
-        assert!(!group.matches(no), "{matcher}");
-        assert!(!group.matches(&"x".repeat(MAX_PATTERN_BYTES + 1)));
+        assert!(group.matches(yes).unwrap(), "{matcher}");
+        assert!(!group.matches(no).unwrap(), "{matcher}");
+        assert!(group.matches(&"x".repeat(MAX_PATTERN_BYTES + 1)).is_err());
+        for subject in ["Bash\n", "Bash\0", "Bash\u{1b}"] {
+            assert!(group.matches(subject).is_err());
+        }
+        assert!(group.matches_tool(&read("bad\npath")).is_err());
     }
     for matcher in ["", "*"] {
         let parsed = hooks(
@@ -562,7 +555,11 @@ fn hook_matchers_use_exact_alternatives_or_bounded_unanchored_regex() {
             json!({"type":"command","command":"x"}),
         )
         .unwrap();
-        assert!(parsed.hooks().groups(HookEvent::PreCompact)[0].matches("auto"));
+        assert!(
+            parsed.hooks().groups(HookEvent::PreCompact)[0]
+                .matches("auto")
+                .unwrap()
+        );
     }
 }
 
@@ -697,4 +694,271 @@ fn hostile_rule_text_is_total_and_deterministic() {
             }
         }
     }
+}
+
+fn mcp_call(server: &str, tool: &str) -> ToolCall {
+    ToolCall::McpCall {
+        server: server.into(),
+        tool: tool.into(),
+        schema_digest: "0".repeat(64),
+        arguments: "{}".into(),
+    }
+}
+
+#[test]
+fn auto_allow_rules_never_bypass_execution_review() {
+    for (rule, call) in [
+        ("Bash", command("python", &["script.py"])),
+        ("Bash(*)", command("python", &["script.py"])),
+        ("Bash(python*)", command("python", &["script.py"])),
+        ("Bash(python *)", command("python", &["script.py"])),
+        ("Bash(python:*)", command("python", &["script.py"])),
+        ("Bash(git diff *)", command("git", &["diff"])),
+        ("Bash(git diff)", command("git", &["diff"])),
+        ("Bash(npm run *)", command("npm", &["run", "build"])),
+        ("command", command("python", &["script.py"])),
+        ("mcp_call", mcp_call("memory", "read")),
+        ("mcp__memory", mcp_call("memory", "read")),
+        ("mcp__memory__*", mcp_call("memory", "read")),
+        ("mcp__memory__read", mcp_call("memory", "read")),
+        (
+            "mcp_list",
+            ToolCall::McpList {
+                server: "memory".into(),
+            },
+        ),
+        ("git_status", ToolCall::GitStatus { path: ".".into() }),
+        ("Edit", write("src/a")),
+    ] {
+        let parsed = config(json!({"defaultMode":"auto", "allow":[rule]}));
+        assert_eq!(parsed.decision(&call), Decision::Ask, "{rule}");
+        assert_eq!(
+            parsed.approval_mode(&call),
+            Some(ApprovalMode::Auto),
+            "{rule}"
+        );
+        let human = config(json!({"defaultMode":"auto", "allow":[rule], "ask":[rule]}));
+        assert_eq!(
+            human.approval_mode(&call),
+            Some(ApprovalMode::Request),
+            "{rule}"
+        );
+        let denied = config(json!({"defaultMode":"auto", "allow":[rule], "deny":[rule]}));
+        assert_eq!(denied.decision(&call), Decision::Deny, "{rule}");
+    }
+}
+
+#[test]
+fn default_allows_are_explicit_preapprovals_and_accept_edits_keeps_command_approval() {
+    for (rule, call) in [
+        ("Bash", command("sh", &["-c", "echo x"])),
+        ("Bash(*)", command("sh", &["-c", "echo x"])),
+        ("Bash(git diff *)", command("git", &["diff"])),
+        ("mcp_call", mcp_call("memory", "read")),
+    ] {
+        assert_eq!(
+            config(json!({})).approval_mode(&call),
+            Some(ApprovalMode::Request)
+        );
+        let parsed = config(json!({"defaultMode":"default", "allow":[rule]}));
+        assert_eq!(parsed.decision(&call), Decision::Allow, "{rule}");
+        assert_eq!(parsed.approval_mode(&call), None, "{rule}");
+        let edits = config(json!({"defaultMode":"acceptEdits", "allow":[rule]}));
+        assert_eq!(edits.decision(&call), Decision::Ask, "{rule}");
+        assert_eq!(
+            edits.approval_mode(&call),
+            Some(ApprovalMode::Request),
+            "{rule}"
+        );
+    }
+}
+
+#[test]
+fn restrictive_paths_cover_case_and_normalization_aliases_without_widening_allows() {
+    for (list, expected) in [("deny", Decision::Deny), ("ask", Decision::Ask)] {
+        let parsed = config(json!({list:["Read(./secrets/**)", "Edit(./secrets/**)"]}));
+        for call in [
+            read("Secrets/key"),
+            read("SECRETS/key"),
+            read("secrets/café"),
+            read("secrets/cafe\u{301}"),
+            read("sécrets/key"),
+            read("se\u{301}crets/key"),
+            write("Secrets/key"),
+        ] {
+            assert_eq!(parsed.decision(&call), expected, "{list} {call:?}");
+        }
+        for pattern in [
+            "Read(./sécrets/**)",
+            "Read(./se\u{301}crets/**)",
+            "Edit(./sécrets/**)",
+            "git_diff(./sécrets/**)",
+        ] {
+            assert!(
+                PermissionConfig::parse(
+                    &serde_json::to_vec(&json!({"permissions":{list:[pattern]}})).unwrap()
+                )
+                .is_err(),
+                "{list} {pattern}"
+            );
+        }
+    }
+    let allow = config(json!({"allow":["Edit(./secrets/**)"]}));
+    assert_eq!(allow.decision(&write("secrets/a")), Decision::Allow);
+    assert_eq!(allow.decision(&write("Secrets/a")), Decision::Ask);
+    let unicode = config(json!({"allow":["Edit(./sécrets/**)"]}));
+    assert_eq!(unicode.decision(&write("sécrets/a")), Decision::Allow);
+    assert_eq!(unicode.decision(&write("se\u{301}crets/a")), Decision::Ask);
+}
+
+#[test]
+fn peer_mcp_names_match_real_servers_tools_and_hook_subjects() {
+    for (rule, server, tool, matched) in [
+        ("mcp__*", "memory", "read", true),
+        ("mcp__memory", "memory", "read", true),
+        ("mcp__memory__*", "memory", "read", true),
+        ("mcp__memory__read", "memory", "read", true),
+        ("mcp__memory__read*", "memory", "read_file", true),
+        ("mcp__memory__read", "other", "read", false),
+        ("mcp__memory__read", "memory", "write", false),
+        ("mcp__memory__read", "memory", "read_extra", false),
+        ("mcp__a__b__c", "a__b", "c", false),
+    ] {
+        let parsed = config(json!({"deny":[rule]}));
+        assert_eq!(
+            parsed.decision(&mcp_call(server, tool)),
+            if matched {
+                Decision::Deny
+            } else {
+                Decision::Ask
+            },
+            "{rule} {server} {tool}"
+        );
+    }
+    for rule in ["mcp__*", "mcp__memory"] {
+        assert_eq!(
+            config(json!({"deny":[rule]})).decision(&ToolCall::McpList {
+                server: "memory".into()
+            }),
+            Decision::Deny
+        );
+    }
+    assert_eq!(
+        config(json!({"allow":["mcp__memory__read*"]})).decision(&mcp_call("memory", "read_file")),
+        Decision::Allow
+    );
+    assert_eq!(
+        config(json!({"ask":["mcp__memory__read*"]}))
+            .approval_mode(&mcp_call("memory", "read_file")),
+        Some(ApprovalMode::Request)
+    );
+    for rule in ["Zzz*", "mcp__", "mcp__memory__", "mcp__memory__read(x)"] {
+        assert!(
+            PermissionConfig::parse(
+                &serde_json::to_vec(&json!({"permissions":{"deny":[rule]}})).unwrap()
+            )
+            .is_err(),
+            "{rule}"
+        );
+    }
+    assert!(PermissionConfig::parse(br#"{"permissions":{"allow":["mcp__*"]}}"#).is_err());
+    for matcher in [
+        "mcp__memory__read",
+        "mcp__memory__.*",
+        "^mcp__memory__read$",
+    ] {
+        let parsed = hooks(
+            "PreToolUse",
+            json!(matcher),
+            json!({"type":"command","command":"x"}),
+        )
+        .unwrap();
+        let group = &parsed.hooks().groups(HookEvent::PreToolUse)[0];
+        assert!(
+            group.matches_tool(&mcp_call("memory", "read")).unwrap(),
+            "{matcher}"
+        );
+        assert!(
+            !group.matches_tool(&mcp_call("other", "read")).unwrap(),
+            "{matcher}"
+        );
+        assert!(
+            !group.matches_tool(&read("memory/read")).unwrap(),
+            "{matcher}"
+        );
+        assert!(
+            group
+                .matches_tool(&mcp_call("ambiguous__server", "read"))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn read_restrictions_cover_git_paths_without_preapproving_git() {
+    for (list, expected) in [("deny", Decision::Deny), ("ask", Decision::Ask)] {
+        let parsed = config(json!({list:["Read(./private/**)"]}));
+        for call in [
+            ToolCall::GitStatus {
+                path: "private/key".into(),
+            },
+            ToolCall::GitDiff {
+                path: "private/key".into(),
+                base: None,
+                head: None,
+                staged: false,
+            },
+            ToolCall::GitLog {
+                path: "Private/key".into(),
+                revision: None,
+                max_count: 1,
+            },
+        ] {
+            assert_eq!(parsed.decision(&call), expected, "{list} {call:?}");
+            assert_eq!(
+                parsed.approval_mode(&call),
+                if expected == Decision::Ask {
+                    Some(ApprovalMode::Request)
+                } else {
+                    None
+                }
+            );
+        }
+    }
+    assert_eq!(
+        config(json!({"allow":["Read(./private/**)"]})).decision(&ToolCall::GitStatus {
+            path: "private/key".into()
+        }),
+        Decision::Allow
+    );
+}
+
+#[test]
+fn bash_restrictions_cover_word_boundary_suffixes_without_expanding_allows() {
+    for (program, args) in [
+        ("timeout", vec!["30", "rm", "x"]),
+        ("nice", vec!["rm", "x"]),
+        ("xargs", vec!["rm", "x"]),
+        ("env", vec!["FOO=1", "rm", "x"]),
+        ("timeout", vec!["30", "nice", "-n", "5", "rm", "x"]),
+    ] {
+        let call = command(program, &args);
+        assert_eq!(
+            config(json!({"deny":["Bash(rm *)"]})).decision(&call),
+            Decision::Deny,
+            "{program} {args:?}"
+        );
+        assert_eq!(
+            config(json!({"ask":["Bash(rm *)"], "allow":["Bash"]})).approval_mode(&call),
+            Some(ApprovalMode::Request)
+        );
+        assert_eq!(
+            config(json!({"allow":["Bash(rm *)"]})).decision(&call),
+            Decision::Ask
+        );
+    }
+    assert_eq!(
+        config(json!({"deny":["Bash(rm *)"]})).decision(&command("echo", &["confirm"])),
+        Decision::Ask
+    );
 }
