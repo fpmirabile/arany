@@ -538,6 +538,7 @@ mod tests {
         };
         run.tools[0].intent = intent.clone();
         run.tools[0].observation = Some(crate::tools::ToolObservation {
+            enforcement_cause: None,
             intent,
             disposition: crate::tools::ToolDisposition::Succeeded,
             output: String::new(),

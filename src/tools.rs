@@ -76,10 +76,10 @@ use catalog::Site;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
-    Attestation, CacheUpdate, CommandChangeset, EffectIntent, FileChange, FileVersion,
-    GuardReceipt, MAX_SKILLS, NetworkGrant, ToolCall, ToolContext, ToolDisposition, ToolLimits,
-    ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile,
-    ToolResourceSettings, ToolStep,
+    Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause, FileChange,
+    FileVersion, GuardReceipt, MAX_SKILLS, NetworkGrant, ToolCall, ToolContext, ToolDisposition,
+    ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
+    ToolResourceProfile, ToolResourceSettings, ToolStep,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -96,6 +96,8 @@ pub enum ToolError {
     ChangedInput,
     #[error("Tool path is not admitted")]
     Path,
+    #[error("Guard filesystem boundary denied access")]
+    FilesystemDenied,
     #[error("Tool resource limit reached")]
     Limit,
     #[error("Tool file precondition changed")]
@@ -468,6 +470,7 @@ impl ToolRuntime {
     ) -> ToolObservation {
         if !self.config.allows(&intent.call) {
             return ToolObservation {
+                enforcement_cause: None,
                 intent,
                 disposition: ToolDisposition::Denied,
                 output: "Tool operation is outside the pinned grant".into(),
@@ -552,8 +555,9 @@ impl ToolRuntime {
                 Err(_) => return unattested_limit(intent, "Tool result or resource limit reached"),
             },
         };
-        let (disposition, output) = dispatch::outcome(&intent, result);
+        let (disposition, output, enforcement_cause) = dispatch::outcome(&intent, result);
         let mut observation = ToolObservation {
+            enforcement_cause,
             attestation: Some(Attestation::InProcess {
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
@@ -566,6 +570,7 @@ impl ToolRuntime {
         };
         if !observation.valid() {
             observation.disposition = ToolDisposition::Limit;
+            observation.enforcement_cause = None;
             observation.output = "Tool result exceeded its reserved serialized capacity".into();
         }
         observation
@@ -588,6 +593,7 @@ static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semapho
 
 fn unattested_limit(intent: EffectIntent, output: &str) -> ToolObservation {
     ToolObservation {
+        enforcement_cause: None,
         intent,
         disposition: ToolDisposition::Limit,
         output: output.into(),
@@ -598,6 +604,7 @@ fn unattested_limit(intent: EffectIntent, output: &str) -> ToolObservation {
 
 fn cancelled_read(intent: EffectIntent) -> ToolObservation {
     ToolObservation {
+        enforcement_cause: None,
         intent,
         disposition: ToolDisposition::Cancelled,
         output: "Read cancelled; nothing in the Workspace changed".into(),
@@ -619,7 +626,7 @@ pub(crate) fn failure_stage(error: &ToolError) -> &'static str {
         ToolError::GuardBootstrap(failure) => failure.failure_stage(),
         ToolError::GuardRejected(stage) => stage.failure_stage(),
         ToolError::Configuration => "admission",
-        ToolError::ChangedInput | ToolError::Path => "pinned input",
+        ToolError::ChangedInput | ToolError::Path | ToolError::FilesystemDenied => "pinned input",
         ToolError::ProtectionUnavailable => "native protection",
         ToolError::Limit | ToolError::QueueFull => "resource limit",
         _ => "execution",
@@ -633,6 +640,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     };
     crate::diagnostics::tool_failure(site, &error);
     ToolObservation {
+        enforcement_cause: None,
         output: match error {
             ToolError::QueueFull => format!("{error}. No operation was dispatched."),
             _ => format!(
@@ -655,6 +663,7 @@ fn uncertain_observation(
     crate::diagnostics::tool_failure("Guard", &error);
     let stage = failure_stage(&error);
     ToolObservation {
+        enforcement_cause: None,
         intent,
         disposition: ToolDisposition::Uncertain,
         output: format!(

@@ -31,6 +31,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         use_count: 1,
     };
     let command_observation = crate::tools::ToolObservation {
+        enforcement_cause: None,
         attestation: Some(Attestation::Guard(GuardReceipt {
             contract_version: 1,
             intent_digest: command_intent.digest(),
@@ -73,6 +74,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             use_count: 1,
         };
         let observation = crate::tools::ToolObservation {
+            enforcement_cause: None,
             attestation: Some(Attestation::for_site(&intent)),
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
@@ -259,6 +261,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         use_count: 1,
     };
     let uncertain_observation = crate::tools::ToolObservation {
+        enforcement_cause: None,
         attestation: Some(Attestation::Guard(GuardReceipt {
             contract_version: 1,
             intent_digest: uncertain_intent.digest(),
@@ -351,6 +354,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         use_count: 1,
     };
     let failed_observation = crate::tools::ToolObservation {
+        enforcement_cause: None,
         intent: failed_intent.clone(),
         disposition: ToolDisposition::Denied,
         output: String::new(),
@@ -439,6 +443,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 use_count: 1,
             };
             let observation = crate::tools::ToolObservation {
+                enforcement_cause: None,
                 intent: intent.clone(),
                 disposition: ToolDisposition::Denied,
                 output: String::new(),
@@ -507,6 +512,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     timeout_intent.limits.cache_candidate_bytes = 0;
     timeout_intent.limits.cache_transfer_ms = 0;
     let timeout_observation = crate::tools::ToolObservation {
+        enforcement_cause: None,
         intent: timeout_intent.clone(),
         disposition: ToolDisposition::Limit,
         output: crate::tools::types::command_timeout_limit_message(2_000, 1_000),

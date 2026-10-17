@@ -1312,6 +1312,48 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_git_metadata_is_not_an_enforcement_cause() {
+        use nix::{sys::stat::Mode, unistd::mkfifo};
+        for name in ["HEAD", "config"] {
+            for kind in ["regular", "directory", "hardlink", "fifo"] {
+                let temp = tempfile::tempdir().unwrap();
+                let workspace = temp.path().join("workspace");
+                let git = workspace.join(".git");
+                std::fs::create_dir_all(git.join("objects")).unwrap();
+                std::fs::create_dir(git.join("refs")).unwrap();
+                std::fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+                std::fs::write(git.join("config"), b"[core]\nrepositoryformatversion = 0\n")
+                    .unwrap();
+                let target = git.join(name);
+                match kind {
+                    "regular" => {}
+                    "directory" => {
+                        std::fs::remove_file(&target).unwrap();
+                        std::fs::create_dir(&target).unwrap();
+                    }
+                    "hardlink" => std::fs::hard_link(&target, temp.path().join("alias")).unwrap(),
+                    "fifo" => {
+                        std::fs::remove_file(&target).unwrap();
+                        mkfifo(&target, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let view = temp.path().join("view");
+                let prepared = prepare_view(&workspace, &view);
+                if kind == "regular" {
+                    assert!(matches!(prepared, Ok(Prepared::Ready)), "{name}/{kind}");
+                } else {
+                    assert!(
+                        matches!(prepared, Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT))),
+                        "{name}/{kind} must retain the unsupported-layout outcome"
+                    );
+                    assert!(!view.exists());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_repositories_fail_closed_without_running_git() {
         let check = |name: &str, prepare: &dyn Fn(&Path, &Path), message: &str| {
             let temp = tempfile::tempdir().unwrap();

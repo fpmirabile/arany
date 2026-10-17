@@ -847,6 +847,7 @@ fn not_dispatched(
     output: impl Into<String>,
 ) -> ToolObservation {
     ToolObservation {
+        enforcement_cause: None,
         intent,
         disposition,
         output: output.into(),

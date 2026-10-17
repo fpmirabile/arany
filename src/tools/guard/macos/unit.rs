@@ -1131,16 +1131,16 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                             observation.output = output;
                             if !observation.valid() {
                                 observation.disposition = ToolDisposition::Limit;
+                                observation.enforcement_cause = None;
                                 observation.output =
                                     "Command changeset exceeded its reserved capacity".into();
                             }
                         }
                         Err(error) => {
-                            observation.disposition = match error {
-                                ToolError::Limit => ToolDisposition::Limit,
-                                ToolError::Path => ToolDisposition::Denied,
-                                _ => ToolDisposition::Failed,
-                            };
+                            let (disposition, _, cause) =
+                                crate::tools::dispatch::outcome(&observation.intent, Err(error));
+                            observation.disposition = disposition;
+                            observation.enforcement_cause = cause;
                             observation.output = "Command changeset could not be captured".into();
                         }
                     }

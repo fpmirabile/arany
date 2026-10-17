@@ -882,9 +882,13 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
                 matches!(result, Err(super::ToolError::ChangedInput)),
                 "snapshot identity: {case}"
             ),
+            "excluded" | "set-id-file" | "set-id-directory" => assert!(
+                matches!(result, Err(super::ToolError::FilesystemDenied)),
+                "explicit filesystem boundary: {case}"
+            ),
             _ => assert!(
                 matches!(result, Err(super::ToolError::Path)),
-                "snapshot object: {case}"
+                "snapshot validation: {case}"
             ),
         }
     }
@@ -1300,6 +1304,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         limits: intent.limits.clone(),
     };
     let observation = ToolObservation {
+        enforcement_cause: None,
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         output: "observed".into(),
@@ -1343,6 +1348,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         limits: command_intent.limits.clone(),
     };
     let uncertain_cache = ToolObservation {
+        enforcement_cause: None,
         intent: command_intent,
         disposition: ToolDisposition::Uncertain,
         output: r#"{"exit_code":0,"stdout":"build complete","stderr":"","changeset":{"files":[]}}"#
@@ -1388,6 +1394,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         super::ToolError::ProtectionUnavailable,
         super::ToolError::ChangedInput,
         super::ToolError::Path,
+        super::ToolError::FilesystemDenied,
         super::ToolError::Limit,
         super::ToolError::Conflict,
         super::ToolError::Operation,
@@ -1562,6 +1569,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
         intent.limits.cache_bytes = cache_requested_bytes;
         intent.limits.cache_candidate_bytes = 0;
         ToolObservation {
+            enforcement_cause: None,
             attestation: Some(Attestation::for_site(&intent)),
             intent,
             disposition: ToolDisposition::Succeeded,
