@@ -21,7 +21,7 @@ mod controls;
 mod models;
 mod permissions;
 mod picker;
-mod run;
+pub(crate) mod run;
 mod setup;
 use active::{CompactionOutcome, GoalStart, RunSubmission, compact_current, submit_objective};
 use models::ModelBrowse;

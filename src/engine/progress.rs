@@ -135,6 +135,7 @@ pub(super) struct RunScope<'a> {
     pub(super) publisher: Option<&'a ProgressPublisher>,
 }
 
+#[derive(Clone)]
 pub(super) struct ProgressPublisher {
     progress: RunProgress,
     run_id: RunId,
@@ -256,7 +257,8 @@ pub(super) async fn append_observed(
         Event::AgentFinished { .. } => Some(TraceEventKind::AgentFinished),
         Event::MessageCommitted { .. } => Some(TraceEventKind::MessageCommitted),
         Event::RunFinished { .. } => Some(TraceEventKind::RunFinished),
-        Event::AssistantDisplayRecorded { .. }
+        Event::ProviderFallbackUsed { .. }
+        | Event::AssistantDisplayRecorded { .. }
         | Event::GoalSteeringNoteRecorded { .. }
         | Event::SessionStarted { .. }
         | Event::SessionDefaultChanged { .. }

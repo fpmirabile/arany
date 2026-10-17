@@ -29,13 +29,13 @@ const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
 /// Wall-clock bound of one Tool-review call, excluding its Store overhead.
 const TOOL_REVIEW_DEADLINE: Duration = Duration::from_secs(20);
 
-enum CallResult {
+pub(super) enum CallResult {
     Response(ProviderResponse),
     Failed(CallFailure),
     Cancelled,
 }
 
-enum CallFailure {
+pub(super) enum CallFailure {
     Timeout,
     Unavailable(Option<ProviderFailureReason>),
     Rejected(Option<ProviderFailureReason>),
@@ -101,7 +101,7 @@ impl DisplayCheckpoint {
 
 pub(super) struct RunLoop<'a> {
     store: &'a Store,
-    provider: Arc<dyn Provider>,
+    routing: super::routing::CallRouter<'a>,
     session_id: SessionId,
     run_id: RunId,
     goal_id: crate::session::GoalId,
@@ -132,7 +132,7 @@ pub(super) struct RunIdentity {
 impl<'a> RunLoop<'a> {
     pub(super) fn new(
         store: &'a Store,
-        provider: Arc<dyn Provider>,
+        providers: crate::provider::AdmittedProviders,
         identity: RunIdentity,
         controls: RunControls<'a>,
         ledger: &'a GoalLedger,
@@ -140,8 +140,13 @@ impl<'a> RunLoop<'a> {
         trace: &'a RunTrace,
     ) -> Self {
         Self {
+            routing: super::routing::CallRouter {
+                providers,
+                store,
+                ledger,
+                publisher: progress,
+            },
             store,
-            provider,
             session_id: identity.session_id,
             run_id: identity.run_id,
             goal_id: identity.goal_id,
@@ -157,7 +162,7 @@ impl<'a> RunLoop<'a> {
         self.ledger
     }
 
-    fn scope(&self) -> RunScope<'a> {
+    fn scope(&self) -> RunScope<'_> {
         RunScope {
             ledger: self.ledger,
             publisher: self.progress,
@@ -293,7 +298,7 @@ impl<'a> RunLoop<'a> {
         self.store
             .admit_operation(
                 self.session_id,
-                action.max_events(),
+                action.max_events_for(&self.routing.providers),
                 action.tool_observations(),
             )
             .await?;
@@ -377,7 +382,7 @@ impl<'a> RunLoop<'a> {
         self.store
             .admit_operation(
                 self.session_id,
-                Action::Tool.remaining(0),
+                Action::Tool.remaining(0, &self.routing.providers),
                 Action::Tool.tool_observations(),
             )
             .await?;
@@ -400,9 +405,13 @@ impl<'a> RunLoop<'a> {
             if self.pause_at_boundary() {
                 return self.settle_stopped_primary(primary).await;
             }
+            let call_provider = self
+                .routing
+                .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
+            root_request.model = call_provider.identity().model.clone();
             let first_trace = first_call.then(|| primary.begin_first_provider());
             let next_trace = (!first_call)
-                .then(|| primary.begin_provider(AgentPhase::RootPlan, &root_request.model));
+                .then(|| primary.begin_provider(AgentPhase::RootPlan, call_provider.identity()));
             first_call = false;
             let (first, active_segment) = match self.invoke_primary(&mut root_request).await {
                 Ok(result) => result,
@@ -541,8 +550,14 @@ impl<'a> RunLoop<'a> {
         &self,
         root: &mut ProviderRequest,
     ) -> Result<(CallResult, ActiveSegment), EngineError> {
-        let active_segment =
-            self.reserve_active_segment(self.provider.identity().limits.deadline)?;
+        let provider = self
+            .routing
+            .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
+        root.model = provider.identity().model.clone();
+        root.max_output_tokens = root
+            .max_output_tokens
+            .min(provider.identity().limits.max_output_tokens);
+        let active_segment = self.reserve_active_segment(provider.identity().limits.deadline)?;
         let deadline = active_segment
             .deadline()
             .checked_sub(STORE_ACTION_OVERHEAD)
@@ -574,13 +589,10 @@ impl<'a> RunLoop<'a> {
             .transpose()?
             .flatten();
         let Some(context) = context else {
-            let result = invoke_bounded(
-                self.provider.as_ref(),
-                request,
-                deadline,
-                self.controls.cancellation.clone(),
-            )
-            .await;
+            let result = self
+                .routing
+                .invoke(request, deadline, self.controls.cancellation.clone(), None)
+                .await?;
             self.settle_result(&result);
             return Ok((result, active_segment));
         };
@@ -597,8 +609,7 @@ impl<'a> RunLoop<'a> {
             limited: false,
             limit_recorded: context.limit_recorded,
         };
-        let future = invoke_bounded_with_preview(
-            self.provider.as_ref(),
+        let future = self.routing.invoke(
             request,
             deadline,
             self.controls.cancellation.clone(),
@@ -608,7 +619,7 @@ impl<'a> RunLoop<'a> {
         let mut observing = true;
         let result = loop {
             tokio::select! {
-                result = &mut future => break result,
+                result = &mut future => break result?,
                 changed = receiver.changed(), if observing => {
                     if changed.is_err() { observing = false; continue; }
                     let text = checkpoint.filter(&receiver.borrow_and_update());
@@ -872,16 +883,7 @@ impl<'a> RunLoop<'a> {
     }
 }
 
-async fn invoke_bounded(
-    provider: &dyn Provider,
-    request: ProviderRequest,
-    run_deadline: Instant,
-    cancellation: RunCancellation,
-) -> CallResult {
-    invoke_bounded_with_preview(provider, request, run_deadline, cancellation, None).await
-}
-
-async fn invoke_bounded_with_preview(
+pub(super) async fn invoke_bounded_with_preview(
     provider: &dyn Provider,
     request: ProviderRequest,
     run_deadline: Instant,

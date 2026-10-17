@@ -47,7 +47,7 @@ impl Engine {
         workspace: PathBuf,
         expected_run_id: Option<crate::session::RunId>,
     ) -> Result<Option<CompactionRecord>, EngineError> {
-        let provider = std::sync::Arc::clone(&self.provider);
+        let provider = std::sync::Arc::clone(&self.providers.compaction[0]);
         let identity = super::checked_identity(provider.as_ref())?;
         let mut session_lock = self.lock_session(session_id)?;
         let (events, view) = self.store.load_resolved(session_id).await?;
@@ -65,6 +65,17 @@ impl Engine {
             RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
         ) {
             return Err(EngineError::CompactionNotIdle);
+        }
+        match last_run
+            .config
+            .as_ref()
+            .and_then(|config| config.providers.as_ref())
+        {
+            Some(routes) if routes.compaction != self.providers.identities().compaction => {
+                return Err(EngineError::InvalidRequest);
+            }
+            None if self.providers.compaction.len() > 1 => return Err(EngineError::InvalidRequest),
+            _ => {}
         }
         let covered_run_id = last_run.id;
         let open_view = self
@@ -126,7 +137,7 @@ impl Engine {
                 Action::BoundaryCompaction {
                     goal: goal_id.is_some(),
                 }
-                .max_events(),
+                .max_events_for(&self.providers),
                 0,
             )
             .await?;
@@ -182,7 +193,7 @@ impl Engine {
             model: identity.model.clone(),
             previous_summary: prepared.previous_summary,
             items,
-            max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS,
+            max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS.min(identity.limits.max_output_tokens),
         };
         let source_bytes = crate::provider::compaction_input_bytes(&request)
             .map_err(|_| EngineError::CompactionInputTooLarge)?;
@@ -206,26 +217,78 @@ impl Engine {
                 .await?;
             crate::diagnostics::event_failure(&reserved.event);
         }
-        let provider_deadline =
-            active_reservation_ms.map_or(COMPACTION_CALL_DEADLINE, |reserved| {
+        let provider_deadline = active_reservation_ms
+            .map_or(COMPACTION_CALL_DEADLINE, |reserved| {
                 Duration::from_millis(
                     reserved
                         .saturating_sub(duration_ms(active_started.elapsed()))
                         .saturating_sub(duration_ms(STORE_ACTION_OVERHEAD)),
                 )
                 .min(COMPACTION_CALL_DEADLINE)
-            });
+            })
+            .min(identity.limits.deadline);
+        let actor = last_run.primary().map(|agent| agent.id);
+        let routing = if self.providers.compaction.len() > 1 {
+            let actor = actor.ok_or(EngineError::InvalidRequest)?;
+            let goal_id = open_view
+                .goals
+                .iter()
+                .find(|goal| goal.run_ids.contains(&covered_run_id))
+                .map(|goal| goal.id)
+                .ok_or(EngineError::InvalidHistory)?;
+            Some((
+                super::routing::CallRouter {
+                    providers: self.providers.clone(),
+                    store: &self.store,
+                    ledger: &super::ledger::GoalLedger::new(
+                        self.store
+                            .load_open_view(session_id)
+                            .await?
+                            .ok_or(EngineError::MissingSession)?,
+                        goal_id,
+                    ),
+                    publisher: None,
+                },
+                actor,
+            ))
+        } else {
+            None
+        };
         let provider_trace = trace.begin_provider(&identity.model);
-        let response =
-            tokio::time::timeout(provider_deadline, self.provider.compact(request)).await;
+        let response = tokio::time::timeout(provider_deadline, async {
+            match &routing {
+                Some((routing, actor)) => routing.compact(request, *actor).await,
+                None => Ok((
+                    provider.compact(request).await,
+                    std::sync::Arc::clone(&provider),
+                )),
+            }
+        })
+        .await;
+        let provider = match &routing {
+            Some((routing, actor)) => {
+                routing.provider(crate::provider::ProviderRole::Compaction, *actor)?
+            }
+            None => std::sync::Arc::clone(&provider),
+        };
+        let identity = provider.identity();
         let (status, response_id, usage, wire_provenance) = match response {
-            Ok(Ok(response)) => classify_response(response),
-            Ok(Err(error)) => (
+            Ok(Ok((Ok(response), _))) => classify_response(response),
+            Ok(Err(error)) => return Err(error),
+            Ok(Ok((Err(error), _))) => (
                 CompactionStatus::Failed {
-                    reason: match error.failure_class() {
-                        ProviderFailureClass::Unavailable => CompactionFailure::ProviderUnavailable,
-                        ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
-                        ProviderFailureClass::InvalidOutcome => CompactionFailure::InvalidOutcome,
+                    reason: if matches!(error, crate::provider::ProviderError::CallTimedOut) {
+                        CompactionFailure::TimedOut
+                    } else {
+                        match error.failure_class() {
+                            ProviderFailureClass::Unavailable => {
+                                CompactionFailure::ProviderUnavailable
+                            }
+                            ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
+                            ProviderFailureClass::InvalidOutcome => {
+                                CompactionFailure::InvalidOutcome
+                            }
+                        }
                     },
                 },
                 None,

@@ -1019,6 +1019,7 @@ mod tests {
             tool_compaction_covered_count: 0,
             display: Vec::new(),
             steering_notes: Vec::new(),
+            provider_fallbacks: Vec::new(),
         }
     }
 
@@ -1728,6 +1729,7 @@ mod tests {
                     Event::RunStarted {
                         run_id,
                         config: RunConfig {
+                            providers: None,
                             provider: "scripted".into(),
                             model: "test-model".into(),
                             effort: None,

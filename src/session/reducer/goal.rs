@@ -604,6 +604,7 @@ pub(super) fn apply(
                 || goal.run_ids.last() != Some(run_id)
                 || goal.compaction_call_reserved != Some(*run_id)
                 || !goal.unobserved_provider_calls.is_empty()
+                || !run.compaction_matches(record)
                 || record.covered_run_id != *run_id
                 || run.status != RunStatus::Active
                 || run.tools.iter().any(|tool| tool.observation.is_none())

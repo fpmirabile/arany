@@ -244,8 +244,18 @@ async fn run_with_provider<P: Provider + 'static>(
     let state = StateRoot::admit(&admission.state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     arany::enable_development_diagnostics(&state);
+    let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider);
+    let providers = super::provider::routing::configured_providers(
+        &admission.state_dir,
+        &admission.workspace,
+        std::sync::Arc::clone(&provider),
+    )
+    .await?;
     let mut engine = Engine::open_with_telemetry(state, provider, telemetry)
         .map_err(|_| "state store unavailable".to_owned())?;
+    engine
+        .set_providers(providers)
+        .map_err(|error| error.to_string())?;
     if args.tools {
         if !native_protection_supported() {
             return Err(
@@ -358,6 +368,25 @@ async fn run_with_provider<P: Provider + 'static>(
                     _ => "",
                 },
             );
+            if run.config.as_ref().is_some_and(|config| {
+                config.chatgpt_provenance.is_none()
+                    && config.providers.as_ref().is_some_and(|providers| {
+                        providers.values().iter().any(|chain| {
+                            chain.iter().any(|identity| {
+                                identity.limits.output_token_bound
+                                    == arany::OutputTokenBound::LocalAcceptanceOnly
+                            })
+                        })
+                    })
+            }) {
+                receipt.push_str(
+                    "Output bound: some role routes are local only; remote usage is not capped\n",
+                );
+            }
+            if let Some(notice) = arany::render_provider_fallbacks(run) {
+                receipt.push_str(&notice);
+                receipt.push('\n');
+            }
             if let Some(notice) = arany::render_cache_update_feedback(run) {
                 receipt.push_str(notice);
                 receipt.push('\n');
@@ -981,11 +1010,12 @@ mod tests {
         for (line, event) in run_lines.into_iter().zip(run_events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
-            let bumped = matches!(
-                line["kind"].as_str(),
-                Some("RunStarted" | "GoalProviderCallReserved" | "RunFinished")
-            );
-            assert_eq!(line["event_version"], if bumped { 7 } else { 6 });
+            let version = match line["kind"].as_str() {
+                Some("RunStarted") => 8,
+                Some("GoalProviderCallReserved" | "RunFinished") => 7,
+                _ => 6,
+            };
+            assert_eq!(line["event_version"], version);
         }
         store.close().await.expect("closed store");
 

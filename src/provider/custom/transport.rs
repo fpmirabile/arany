@@ -16,7 +16,9 @@ pub(super) struct CustomTransport {
 #[derive(Clone, Copy)]
 pub(super) enum TransportError {
     Unavailable,
+    PartialTransport,
     Rejected,
+    HttpServerUnavailable,
     InvalidOutcome,
 }
 
@@ -137,18 +139,12 @@ impl CustomTransport {
             .send()
             .await
             .map_err(|_| TransportError::Unavailable)?;
-        if response.url().as_str() != self.endpoint || !response.status().is_success() {
-            return Err(if response.status().is_server_error() {
-                TransportError::Unavailable
-            } else {
-                TransportError::Rejected
-            });
-        }
+        streaming_admission(response.status(), response.url().as_str() == self.endpoint)?;
         crate::provider::openai::read_streamed_reply(&mut response, &self.key, model, preview)
             .await
             .map_err(|error| {
                 if error.failure_class() == crate::provider::ProviderFailureClass::Unavailable {
-                    TransportError::Unavailable
+                    TransportError::PartialTransport
                 } else {
                     TransportError::InvalidOutcome
                 }
@@ -172,7 +168,7 @@ impl CustomTransport {
         }
         if !response.status().is_success() {
             return Err(if response.status().is_server_error() {
-                TransportError::Unavailable
+                TransportError::HttpServerUnavailable
             } else {
                 TransportError::Rejected
             });
@@ -181,6 +177,7 @@ impl CustomTransport {
             .await
             .map_err(|error| match error {
                 ProviderError::Unavailable => TransportError::Unavailable,
+                ProviderError::PartialTransport => TransportError::PartialTransport,
                 _ => TransportError::InvalidOutcome,
             })?;
         if raw_reflects_secret(&bytes, &self.key) {
@@ -188,6 +185,27 @@ impl CustomTransport {
         }
         Ok(bytes)
     }
+}
+
+pub(super) fn streaming_admission(
+    status: reqwest::StatusCode,
+    destination_matches: bool,
+) -> Result<(), TransportError> {
+    if !destination_matches {
+        return Err(if status.is_server_error() {
+            TransportError::Unavailable
+        } else {
+            TransportError::Rejected
+        });
+    }
+    if !status.is_success() {
+        return Err(if status.is_server_error() {
+            TransportError::HttpServerUnavailable
+        } else {
+            TransportError::Rejected
+        });
+    }
+    Ok(())
 }
 
 fn valid_usage(usage: Usage, cap: u32) -> bool {

@@ -15,6 +15,7 @@ Editing constraints: [security rules](../../agents/security.md).
 
 - A Goal span describes one admitted Run segment, with its child Run span and only committed Goal lifecycle and reservation markers. Its start time is no later than its backdated Run and context-compilation spans.
 - A segment that a cancelled Run leaves open exports the Run's `cancelled` outcome with Goal status `running`. No Goal span reports a cancelled Goal status. Terminal attributes are the closed status, provider-call count, known token usage, an unknown-usage flag and active and uncertain time. A later Run or explicit resume starts another segment, because trace context is not persisted. Event markers are capped by the SDK's 32-event span limit and remain lossy.
+- A Provider span identifies the requested role route, including its closed Provider category and bounded model metadata. A configured fallback chain shares that logical-step span; individual attempts and actual switch identities are canonical `ProviderFallbackUsed` facts under the [Provider contract](./provider.md#per-role-selection-and-fallback), and the Goal call count charges each attempt.
 - A Provider span succeeds only when its response passes Engine semantic and usage validation. Invalid outcomes and usage overflow receive a closed `error.type` class.
 
 A Provider span of a child aborted by its parent closes as `cancelled`. `abandoned` is reserved for an unknown terminal state.
@@ -29,6 +30,7 @@ A Provider span of a child aborted by its parent closes as `cancelled`. `abandon
 
 | Scenario | Required outcome | Owner |
 |---|---|---|
+| Per-role request attribution | A child span uses its selected Provider category and model while preserving the admitted agent tree; fallback attempts retain canonical journal provenance. | `src/telemetry/tests.rs::direct_and_team_span_trees_follow_admitted_agents` |
 | Safe product export | Only closed identifiers, counts and markers cross; prompt and content canaries are absent | [`tests/session_run/telemetry.rs::product_exec_exports_only_safe_committed_trace_facts`](../../tests/session_run/telemetry.rs), [telemetry boundary](../../src/telemetry.rs) |
 | Goal segment status | An exhausted segment exports `failed`; a cancelled segment of an open Goal exports the Run's `cancelled` outcome with Goal status `running` | [Telemetry journey](../../tests/session_run/telemetry.rs) |
 | Export failure | Telemetry failure or a full queue leaves Run state, presentation and exit class unchanged | [telemetry boundary](../../src/telemetry.rs) |

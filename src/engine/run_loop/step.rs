@@ -1,7 +1,7 @@
 use super::children::ChildWork;
 use super::{
     ActivePause, ActiveSegment, CallResult, RunLoop, TOOL_CLEANUP_OVERHEAD, TOOL_REVIEW_DEADLINE,
-    call_record, call_trace_result, call_trace_usage, invoke_bounded, valid_finish,
+    call_record, call_trace_result, call_trace_usage, valid_finish,
 };
 use crate::engine::ledger::{Action, duration_ms};
 use crate::engine::progress::ProgressPublisher;
@@ -383,13 +383,19 @@ impl RunLoop<'_> {
                 {
                     return Ok(false);
                 }
-                (Action::Tool.remaining(1), Action::Tool.tool_observations())
+                (
+                    Action::Tool.remaining(1, &self.routing.providers),
+                    Action::Tool.tool_observations(),
+                )
             }
             Grant::Researcher { .. } => {
                 let step = Action::Child {
                     in_flight: self.ledger().in_flight_children(),
                 };
-                (step.max_events(), step.tool_observations())
+                (
+                    step.max_events_for(&self.routing.providers),
+                    step.tool_observations(),
+                )
             }
         };
         self.store
@@ -684,14 +690,17 @@ impl RunLoop<'_> {
         intent: &EffectIntent,
         primary: &AgentTrace,
     ) -> Result<bool, EngineError> {
+        let provider = self
+            .routing
+            .provider(crate::provider::ProviderRole::Review, self.primary_id)?;
         let mut review = ProviderRequest {
             session_id: request.session_id,
             run_id: request.run_id,
             agent_run_id: request.agent_run_id,
             phase: AgentPhase::ToolReview,
             collaboration: CollaborationPolicy::Single,
-            model: request.model.clone(),
-            max_output_tokens: 256,
+            model: provider.identity().model.clone(),
+            max_output_tokens: 256.min(provider.identity().limits.max_output_tokens),
             input: RunInput {
                 goal_budget: Some(self.ledger().effective_budget()?),
                 goal_plan_contract: self.ledger().plan_contract()?,
@@ -702,7 +711,7 @@ impl RunLoop<'_> {
                 )
             },
         };
-        let trace = primary.begin_provider(AgentPhase::ToolReview, &review.model);
+        let trace = primary.begin_provider(AgentPhase::ToolReview, provider.identity());
         let active_segment =
             self.reserve_active_segment(TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD)?;
         if let Err(error) = self
@@ -722,17 +731,19 @@ impl RunLoop<'_> {
             return Err(error);
         }
         review.input.goal_context_facts = Some(self.ledger().context_facts()?);
-        let result = invoke_bounded(
-            self.provider.as_ref(),
-            review,
-            active_segment
-                .deadline()
-                .checked_sub(STORE_ACTION_OVERHEAD)
-                .unwrap_or(active_segment.started)
-                .min(Instant::now() + TOOL_REVIEW_DEADLINE),
-            self.controls.cancellation.clone(),
-        )
-        .await;
+        let result = self
+            .routing
+            .invoke(
+                review,
+                active_segment
+                    .deadline()
+                    .checked_sub(STORE_ACTION_OVERHEAD)
+                    .unwrap_or(active_segment.started)
+                    .min(Instant::now() + TOOL_REVIEW_DEADLINE),
+                self.controls.cancellation.clone(),
+                None,
+            )
+            .await?;
         self.settle_result(&result);
         let valid = matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Finish(finish), .. }) if valid_finish(finish, 1024) && matches!(finish.result.as_str(), "approve" | "ask"));
         let valid = valid && self.ledger().tokens_within_limit();

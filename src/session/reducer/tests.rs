@@ -67,6 +67,7 @@ mod goal_recovery_tests {
                 tool_compaction_covered_count: 0,
                 display: Vec::new(),
                 steering_notes: Vec::new(),
+                provider_fallbacks: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -134,6 +135,7 @@ mod goal_replay_tests {
 
     fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
         RunConfig {
+            providers: None,
             provider: "openai".into(),
             model: "gpt-5.4".into(),
             effort: None,
@@ -313,6 +315,198 @@ mod goal_replay_tests {
                 active_ms: 0,
             },
         ]
+    }
+
+    #[test]
+    fn role_chains_are_canonical_and_tool_history_stays_in_one_adapter_and_account() {
+        use crate::provider::{Provenance, Providers};
+        let mut config = config(CollaborationPolicy::Single, true);
+        let primary = config.identity().unwrap();
+        config.providers = Some(Providers::all(vec![primary.clone()]));
+        assert!(config.validate().is_err());
+        for child in [false, true] {
+            for account_kind in 0..3 {
+                let mut alternate = primary.clone();
+                alternate.model = "alternate".into();
+                if account_kind == 0 {
+                    alternate.profile = "anthropic".into();
+                } else if account_kind == 1 {
+                    alternate.provenance = Provenance::Native {
+                        saved_api_account_id: Some(uuid::Uuid::now_v7()),
+                    };
+                } else {
+                    alternate.profile = "chatgpt".into();
+                    alternate.effort = Some(crate::provider::Effort::High);
+                    alternate.limits.output_token_bound = OutputTokenBound::LocalAcceptanceOnly;
+                    alternate.provenance =
+                        Provenance::ChatGpt(crate::provider::ChatGptProvenance {
+                            account_id: uuid::Uuid::now_v7(),
+                            evidence_fingerprint: [1; 32],
+                            admission: crate::provider::ChatGptAdmission::AccountConsent,
+                        });
+                }
+                let mut routes = Providers::all(vec![primary.clone()]);
+                if child {
+                    routes.child.push(alternate);
+                } else {
+                    routes.primary.push(alternate);
+                }
+                config.providers = Some(routes);
+                assert!(config.validate().is_err());
+                let mut no_tools = config.clone();
+                no_tools.tool_policy = None;
+                assert!(no_tools.validate().is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn provider_fallback_replay_requires_pinned_chain_reservation_role_and_budget() {
+        use crate::provider::{ProviderFallback, ProviderRole, Providers};
+        let (session, goal, run, actor) = (
+            SessionId::new(),
+            GoalId::new(),
+            RunId::new(),
+            AgentRunId::new(),
+        );
+        let mut config = config(CollaborationPolicy::Single, false);
+        let primary = config.identity().unwrap();
+        let mut alternate = primary.clone();
+        alternate.model = "alternate-model".into();
+        config.providers = Some(Providers::all(vec![primary.clone(), alternate.clone()]));
+        let mut facts = vec![goal_started(goal, GoalBudget::default())];
+        facts.extend(start_run(goal, run, actor, config));
+        let mut completion = complete_run_and_goal(goal, run, actor);
+        if let Event::GoalProviderCallReserved {
+            active_ceiling_ms, ..
+        } = &mut completion[0]
+        {
+            *active_ceiling_ms = 7_000;
+        }
+        completion.insert(
+            1,
+            Event::ProviderFallbackUsed {
+                run_id: run,
+                agent_run_id: actor,
+                fallback: ProviderFallback {
+                    role: ProviderRole::Primary,
+                    call_index: 0,
+                    from: primary,
+                    to: alternate,
+                    failure: ProviderCallDisposition::Unavailable,
+                },
+            },
+        );
+        facts.extend(completion);
+        let valid = session_with(session, facts);
+        let switch = valid
+            .iter()
+            .position(|event| matches!(event.event, Event::ProviderFallbackUsed { .. }))
+            .unwrap();
+        let open = SessionView::replay_open(session, &valid[..=switch])
+            .unwrap()
+            .unwrap();
+        assert_eq!(open.goals[0].provider_calls, 2);
+        assert_eq!(open.goals[0].unobserved_provider_calls, [actor]);
+        assert!(open.goals[0].active_ceiling_ms > 0);
+        assert!(open.runs[0].primary().unwrap().provider_calls.is_empty());
+        let closed = SessionView::replay(session, &valid[..=switch])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            closed.goals[0].resume_usage(&closed).active_ms,
+            open.goals[0].active_ceiling_ms
+        );
+        assert_eq!(closed.goals[0].provider_calls, 2);
+        let view = SessionView::replay(session, &valid).unwrap().unwrap();
+        assert_eq!(view.goals[0].provider_calls, 2);
+        assert!(view.goals[0].token_usage_unknown);
+        assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
+        assert_eq!(
+            view.runs[0].provider_fallbacks[0].1.role,
+            ProviderRole::Primary
+        );
+        for case in 0..9 {
+            let mut invalid = valid.clone();
+            match case {
+                0..=4 => {
+                    let fallback = invalid
+                        .iter_mut()
+                        .find_map(|event| match &mut event.event {
+                            Event::ProviderFallbackUsed { fallback, .. } => Some(fallback),
+                            _ => None,
+                        })
+                        .unwrap();
+                    match case {
+                        0 => fallback.from.model = "unknown".into(),
+                        1 => fallback.to.model = "unknown".into(),
+                        2 => fallback.role = ProviderRole::Child,
+                        3 => fallback.call_index = 1,
+                        _ => fallback.failure = ProviderCallDisposition::Rejected,
+                    }
+                }
+                5..=6 => {
+                    let budget = invalid
+                        .iter_mut()
+                        .find_map(|event| match &mut event.event {
+                            Event::GoalStarted { budget, .. } => Some(budget),
+                            _ => None,
+                        })
+                        .unwrap();
+                    if case == 5 {
+                        budget.max_provider_calls = Some(1);
+                    } else {
+                        budget.max_tokens = Some(100);
+                    }
+                }
+                _ => {
+                    let config = invalid
+                        .iter_mut()
+                        .find_map(|event| match &mut event.event {
+                            Event::RunStarted { config, .. } => Some(config),
+                            _ => None,
+                        })
+                        .unwrap();
+                    let providers = config.providers.as_mut().unwrap();
+                    if case == 7 {
+                        providers.primary[0].model = "different".into();
+                    } else {
+                        providers.child[0].profile = "custom:unadmitted".into();
+                    }
+                }
+            }
+            assert!(
+                SessionView::replay(session, &invalid).is_err(),
+                "case {case}"
+            );
+        }
+        for before in [true, false] {
+            let mut invalid: Vec<_> = valid.iter().map(|event| event.event.clone()).collect();
+            let switch = invalid
+                .iter()
+                .position(|event| matches!(event, Event::ProviderFallbackUsed { .. }))
+                .unwrap();
+            if before {
+                invalid.insert(
+                    switch,
+                    Event::AssistantDisplayRecorded {
+                        run_id: run,
+                        agent_run_id: actor,
+                        chunk: crate::session::DisplayChunk {
+                            call_index: 0,
+                            phase: AgentPhase::RootPlan,
+                            category: crate::session::DisplayCategory::Answer,
+                            item: 0,
+                            offset: 0,
+                            text: "partial".into(),
+                        },
+                    },
+                );
+            } else {
+                invalid.swap(switch, switch + 1);
+            }
+            assert!(SessionView::replay(session, &journal(session, invalid)).is_err());
+        }
     }
 
     fn session_with(session_id: SessionId, events: Vec<Event>) -> Vec<EventEnvelope> {
@@ -1595,6 +1789,7 @@ mod goal_replay_tests {
                 tool_compaction_covered_count: 0,
                 display: Vec::new(),
                 steering_notes: Vec::new(),
+                provider_fallbacks: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -2212,6 +2407,7 @@ mod goal_replay_tests {
                 tool_compaction_covered_count: 0,
                 display: Vec::new(),
                 steering_notes: Vec::new(),
+                provider_fallbacks: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -2319,6 +2515,7 @@ mod goal_replay_tests {
                     tool_compaction_covered_count: 0,
                     display: Vec::new(),
                     steering_notes: Vec::new(),
+                    provider_fallbacks: Vec::new(),
                 },
                 RunView {
                     id: run_id,
@@ -2350,6 +2547,7 @@ mod goal_replay_tests {
                     tool_compaction_covered_count: 0,
                     display: Vec::new(),
                     steering_notes: Vec::new(),
+                    provider_fallbacks: Vec::new(),
                 },
             ],
             compactions: Vec::new(),

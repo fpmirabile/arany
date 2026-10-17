@@ -18,6 +18,11 @@ mod native_check;
 mod openai;
 pub(crate) mod prompts;
 mod render;
+mod routing;
+pub use routing::{
+    AdmittedProviders, MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_SWITCHES, ProviderFallback,
+    ProviderRole, ProviderRoutes, Providers,
+};
 mod streaming;
 #[cfg(test)]
 mod test_support;
@@ -78,7 +83,7 @@ async fn read_identity_body(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| ProviderError::Unavailable)?
+        .map_err(|_| ProviderError::PartialTransport)?
     {
         if chunk.len() > max - bytes.len() {
             return Err(ProviderError::InvalidOutcome);
@@ -260,15 +265,20 @@ pub(crate) fn valid_saved_api_account_id(profile: &str, id: Option<Uuid>) -> boo
     })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Provenance {
-    Native { saved_api_account_id: Option<Uuid> },
+    Native {
+        #[serde(deserialize_with = "Option::deserialize")]
+        saved_api_account_id: Option<Uuid>,
+    },
     Custom(CustomProfileProvenance),
     ChatGpt(ChatGptProvenance),
 }
 
 /// Declared ceilings the Engine enforces for every call of one adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CallLimits {
     pub concurrency: u8,
     /// Output tokens a primary call requests; children and Tool review request smaller caps.
@@ -289,10 +299,12 @@ impl Default for CallLimits {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderIdentity {
     pub profile: String,
     pub model: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub effort: Option<Effort>,
     pub provenance: Provenance,
     pub limits: CallLimits,
@@ -652,6 +664,12 @@ fn tool_request_reflects_secret(request: &crate::tools::ToolRequest, secret: &st
 pub enum ProviderError {
     #[error("Provider unavailable")]
     Unavailable,
+    #[error("Provider server unavailable before response admission")]
+    HttpServerUnavailable,
+    #[error("Provider transport failed after response admission")]
+    PartialTransport,
+    #[error("Provider call timed out")]
+    CallTimedOut,
     #[error("Provider rejected the request")]
     Rejected,
     #[error("Provider returned an invalid outcome")]
@@ -664,6 +682,7 @@ pub enum ProviderError {
     InvalidOutcomeContract,
     #[error("Provider reported output above Arany's local token limit")]
     LocalOutputLimit,
+    // Only status-check failures, before any response body is admitted.
     #[error("Provider returned HTTP {0}")]
     RemoteHttp(u16),
     #[error("Provider stream failed: {0}")]
@@ -691,6 +710,13 @@ pub enum ProviderFailureReason {
 }
 
 impl ProviderError {
+    pub(crate) fn allows_fallback(&self) -> bool {
+        matches!(
+            self,
+            Self::HttpServerUnavailable | Self::RemoteHttp(500..=599)
+        )
+    }
+
     pub(crate) fn failure_reason(&self) -> Option<ProviderFailureReason> {
         match self {
             Self::InvalidStream => Some(ProviderFailureReason::StreamProtocol),
@@ -715,7 +741,11 @@ impl ProviderError {
 
     pub(crate) fn failure_class(&self) -> ProviderFailureClass {
         match self {
-            Self::Unavailable | Self::RemoteHttp(500..=599) => ProviderFailureClass::Unavailable,
+            Self::Unavailable
+            | Self::HttpServerUnavailable
+            | Self::PartialTransport
+            | Self::CallTimedOut
+            | Self::RemoteHttp(500..=599) => ProviderFailureClass::Unavailable,
             Self::RemoteStreamCode(_)
                 if self.failure_reason()
                     == Some(ProviderFailureReason::UsageTemporarilyUnavailable) =>
@@ -821,6 +851,29 @@ pub trait Provider: Send + Sync {
     }
 }
 
+#[async_trait::async_trait]
+impl<T: Provider + ?Sized> Provider for std::sync::Arc<T> {
+    fn identity(&self) -> &ProviderIdentity {
+        (**self).identity()
+    }
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        (**self).invoke(request).await
+    }
+    async fn invoke_with_preview(
+        &self,
+        request: ProviderRequest,
+        preview: ResponsePreview,
+    ) -> Result<ProviderResponse, ProviderError> {
+        (**self).invoke_with_preview(request, preview).await
+    }
+    async fn compact(
+        &self,
+        request: CompactionRequest,
+    ) -> Result<CompactionResponse, ProviderError> {
+        (**self).compact(request).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -851,6 +904,46 @@ mod tests {
             catalog: json!({"write": false, "commands": [], "skills": [], "mcp_servers": [], "tool_calls_remaining": 2}).to_string(),
             history_summary: None,
             steps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn fallback_requires_a_server_failure_at_the_http_status_stage() {
+        let anthropic_rate_limit = anthropic::http_failure(reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            anthropic_rate_limit.failure_class(),
+            ProviderFailureClass::Unavailable
+        );
+        assert_eq!(anthropic_rate_limit.failure_reason(), None);
+        assert!(!anthropic_rate_limit.allows_fallback());
+        assert_eq!(
+            ProviderError::HttpServerUnavailable.failure_class(),
+            ProviderError::Unavailable.failure_class()
+        );
+        assert_eq!(
+            ProviderError::HttpServerUnavailable.failure_reason(),
+            ProviderError::Unavailable.failure_reason()
+        );
+        for (error, eligible) in [
+            (ProviderError::HttpServerUnavailable, true),
+            (ProviderError::RemoteHttp(500), true),
+            (ProviderError::RemoteHttp(503), true),
+            (ProviderError::RemoteHttp(529), true),
+            (ProviderError::RemoteHttp(400), false),
+            (ProviderError::RemoteHttp(401), false),
+            (ProviderError::RemoteHttp(402), false),
+            (ProviderError::RemoteHttp(413), false),
+            (ProviderError::RemoteHttp(429), false),
+            (ProviderError::Unavailable, false),
+            (ProviderError::PartialTransport, false),
+            (ProviderError::CallTimedOut, false),
+            (ProviderError::Rejected, false),
+            (
+                ProviderError::RemoteStreamCode("subscription_sharing_usage_unavailable".into()),
+                false,
+            ),
+        ] {
+            assert_eq!(error.allows_fallback(), eligible, "{error:?}");
         }
     }
 

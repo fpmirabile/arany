@@ -61,21 +61,24 @@ fn compaction_context_input(
 impl RunLoop<'_> {
     fn compaction_request(
         &self,
-        request: &ProviderRequest,
         previous_summary: Option<String>,
         assistant: String,
-    ) -> CompactionRequest {
-        CompactionRequest {
+    ) -> Result<CompactionRequest, EngineError> {
+        let provider = self
+            .routing
+            .provider(crate::provider::ProviderRole::Compaction, self.primary_id)?;
+        Ok(CompactionRequest {
             session_id: self.session_id,
             covered_run_id: self.run_id,
-            model: request.model.clone(),
+            model: provider.identity().model.clone(),
             previous_summary,
             items: vec![CompactionItem::Completed(HistoryTurn {
                 user: COMPACTION_USER.to_owned(),
                 assistant,
             })],
-            max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS,
-        }
+            max_output_tokens: MAX_COMPACTION_OUTPUT_TOKENS
+                .min(provider.identity().limits.max_output_tokens),
+        })
     }
 
     /// Replaces the oldest Tool steps with a Provider summary once the context nears its limit.
@@ -106,7 +109,11 @@ impl RunLoop<'_> {
         }
         let active_segment = self.reserve_active_segment(COMPACTION_CALL_DEADLINE)?;
         self.store
-            .admit_operation(self.session_id, Action::Compaction.max_events(), 0)
+            .admit_operation(
+                self.session_id,
+                Action::Compaction.max_events_for(&self.routing.providers),
+                0,
+            )
             .await?;
         self.append(Event::GoalCompactionCallReserved {
             goal_id: self.goal_id,
@@ -213,7 +220,7 @@ impl RunLoop<'_> {
                 &observations,
             ))
             .map_err(|_| EngineError::InvalidRequest)?;
-            let candidate = self.compaction_request(request, previous_summary.clone(), assistant);
+            let candidate = self.compaction_request(previous_summary.clone(), assistant)?;
             let source_len = crate::provider::compaction_input_bytes(&candidate)
                 .map_err(|_| EngineError::InvalidRequest)?;
             if source_len > crate::session::MAX_COMPACTION_INPUT_BYTES {
@@ -272,7 +279,7 @@ impl RunLoop<'_> {
         ))
         .map_err(|_| EngineError::InvalidRequest)?;
         let compaction_request =
-            self.compaction_request(request, window.previous_summary.clone(), assistant);
+            self.compaction_request(window.previous_summary.clone(), assistant)?;
         let source_len = crate::provider::compaction_input_bytes(&compaction_request)
             .map_err(|_| EngineError::InvalidRequest)?;
         if source_len > crate::session::MAX_COMPACTION_INPUT_BYTES
@@ -282,7 +289,14 @@ impl RunLoop<'_> {
         }
         let source_bytes = u32::try_from(source_len).map_err(|_| EngineError::InvalidRequest)?;
 
-        let trace = self.trace.begin_context_compaction();
+        let compaction_provider = self
+            .routing
+            .provider(crate::provider::ProviderRole::Compaction, self.primary_id)?;
+        let trace =
+            self.trace
+                .begin_context_compaction(crate::telemetry::TraceProvider::from_profile(
+                    &compaction_provider.identity().profile,
+                ));
         let provider_trace = trace.begin_provider(&compaction_request.model);
         let call_deadline = deadline
             .saturating_duration_since(Instant::now())
@@ -291,7 +305,7 @@ impl RunLoop<'_> {
         let response = tokio::select! {
             biased;
             () = cancellation.cancelled() => None,
-            response = tokio::time::timeout(call_deadline, self.provider.compact(compaction_request)) => {
+            response = tokio::time::timeout(call_deadline, self.routing.compact(compaction_request, self.primary_id)) => {
                 Some(response)
             }
         };
@@ -305,8 +319,12 @@ impl RunLoop<'_> {
         };
         let (mut status, response_id, usage, wire_provenance) = match response {
             None => failed(CompactionFailure::Cancelled),
-            Some(Ok(Ok(response))) => classify_response(response),
-            Some(Ok(Err(error))) => failed(match error.failure_class() {
+            Some(Ok(Ok((Ok(response), _)))) => classify_response(response),
+            Some(Ok(Err(error))) => return Err(error),
+            Some(Ok(Ok((Err(crate::provider::ProviderError::CallTimedOut), _)))) => {
+                failed(CompactionFailure::TimedOut)
+            }
+            Some(Ok(Ok((Err(error), _)))) => failed(match error.failure_class() {
                 ProviderFailureClass::Unavailable => CompactionFailure::ProviderUnavailable,
                 ProviderFailureClass::Rejected => CompactionFailure::ProviderRejected,
                 ProviderFailureClass::InvalidOutcome => CompactionFailure::InvalidOutcome,
@@ -362,13 +380,16 @@ impl RunLoop<'_> {
         window: CompactionWindow,
         summary: Summary,
     ) -> Result<(), EngineError> {
-        let identity = self.provider.identity();
+        let provider = self
+            .routing
+            .provider(crate::provider::ProviderRole::Compaction, self.primary_id)?;
+        let identity = provider.identity();
         let record = CompactionRecord {
             covered_run_id: self.run_id,
             covered_sequence: window.covered_sequence,
             source_digest: window.source_digest,
             provider: identity.profile.clone(),
-            model: request.model.clone(),
+            model: identity.model.clone(),
             prompt_version: 1,
             schema_version: 1,
             compiler_version: 3,
@@ -385,7 +406,11 @@ impl RunLoop<'_> {
             status: summary.status,
         };
         self.store
-            .admit_operation(self.session_id, Action::Compaction.remaining(1), 0)
+            .admit_operation(
+                self.session_id,
+                Action::Compaction.remaining(1, &self.routing.providers),
+                0,
+            )
             .await?;
         let sequence = append_scoped(
             self.store,

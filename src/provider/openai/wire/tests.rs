@@ -85,6 +85,32 @@ fn function_names(body: &Value) -> Vec<String> {
 
 #[test]
 fn outbound_documents_pin_privacy_schema_and_scope() {
+    for (phase, role, model) in [
+        (
+            AgentPhase::RootPlan,
+            crate::provider::PromptRole::ReadOnly,
+            "primary-model",
+        ),
+        (
+            AgentPhase::ChildWork,
+            crate::provider::PromptRole::ReadOnly,
+            "child-model",
+        ),
+        (
+            AgentPhase::ToolReview,
+            crate::provider::PromptRole::ToolReview,
+            "review-model",
+        ),
+    ] {
+        let mut role_request = read_only_request(model);
+        role_request.phase = phase;
+        role_request.collaboration = CollaborationPolicy::Single;
+        role_request.input.role = role;
+        if phase != AgentPhase::RootPlan {
+            role_request.input.goal_context_facts = None;
+        }
+        assert_eq!(body(&role_request)["model"], model);
+    }
     let request = read_only_request(MODEL);
     let rendered = body(&request);
     assert_eq!(rendered["prompt_cache_key"], request.session_id.to_string());

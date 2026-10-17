@@ -21,6 +21,7 @@ mod ledger;
 mod lifecycle;
 mod progress;
 mod report;
+mod routing;
 mod run_loop;
 pub use crate::tools::Cancellation as RunCancellation;
 pub use ledger::Action;
@@ -55,6 +56,11 @@ const STORE_ACTION_OVERHEAD: std::time::Duration = std::time::Duration::from_sec
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    #[error(
+        "Tool-enabled primary and child fallback chains must keep the same adapter and account"
+    )]
+    IncompatibleProviderChain,
+
     #[error("invalid Run request")]
     InvalidRequest,
     #[error("Session not found")]
@@ -809,7 +815,7 @@ fn resolve_goal_admission(
 pub struct Engine {
     state: StateRoot,
     store: Store,
-    provider: Arc<dyn Provider>,
+    providers: crate::provider::AdmittedProviders,
     telemetry: Telemetry,
     tools: Option<(crate::tools::config::Config, PathBuf)>,
     workspace_permissions: Option<crate::tools::WorkspacePermissions>,
@@ -971,16 +977,33 @@ impl Engine {
         telemetry: Telemetry,
     ) -> Result<Self, EngineError> {
         let store = Store::open(state.try_clone()?)?;
+        let provider: Arc<dyn Provider> = Arc::new(provider);
         Ok(Self {
             state,
             store,
-            provider: Arc::new(provider),
+            providers: crate::provider::Providers::all(vec![Arc::clone(&provider)]),
             telemetry,
             tools: None,
             workspace_permissions: None,
             tool_approvals: None,
             steering: None,
         })
+    }
+
+    pub fn set_providers(
+        &mut self,
+        providers: crate::provider::AdmittedProviders,
+    ) -> Result<(), EngineError> {
+        if !providers.identities().valid() {
+            return Err(EngineError::InvalidRequest);
+        }
+        for chain in providers.values() {
+            for provider in chain {
+                checked_identity(provider.as_ref())?;
+            }
+        }
+        self.providers = providers;
+        Ok(())
     }
 
     pub async fn close(self) -> Result<(), EngineError> {
@@ -1134,8 +1157,45 @@ impl Engine {
             return Err(EngineError::CancelledBeforeStart);
         }
 
-        let provider = Arc::clone(&self.provider);
+        let provider = Arc::clone(&self.providers.primary[0]);
         let identity = checked_identity(provider.as_ref())?;
+        if !self.providers.identities().valid() {
+            return Err(EngineError::InvalidRequest);
+        }
+        for chain in self.providers.values() {
+            for candidate in chain {
+                checked_identity(candidate.as_ref())?;
+            }
+        }
+        if !request.images.is_empty()
+            && self.providers.values().iter().take(2).any(|chain| {
+                chain
+                    .iter()
+                    .any(|candidate| candidate.identity().custom_provenance().is_some())
+            })
+        {
+            return Err(EngineError::ImagesNotAdmitted);
+        }
+        if self.tools.is_some()
+            && [&self.providers.primary, &self.providers.child]
+                .iter()
+                .any(|chain| {
+                    chain
+                        .iter()
+                        .any(|candidate| !candidate.identity().shares_account(chain[0].identity()))
+                })
+        {
+            return Err(EngineError::IncompatibleProviderChain);
+        }
+        if self.tools.is_some()
+            && self.providers.values().iter().take(2).any(|chain| {
+                chain
+                    .iter()
+                    .any(|candidate| candidate.identity().custom_provenance().is_some())
+            })
+        {
+            return Err(EngineError::InvalidRequest);
+        }
         let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
         let finish_after_run = request.goal.finish_after_run;
         let admitted = self
@@ -1351,7 +1411,7 @@ impl Engine {
         Box::pin(
             RunLoop::new(
                 &self.store,
-                Arc::clone(&self.provider),
+                self.providers.clone(),
                 RunIdentity {
                     session_id,
                     run_id,
@@ -1448,7 +1508,7 @@ impl Engine {
             steering: self.steering.is_some(),
         };
         let event_slots = RUN_START_EVENTS
-            + first_action.max_events()
+            + first_action.max_events_for(&self.providers)
             + usize::from(request.session_id.is_none());
         self.store.admit_run_start(session_id, event_slots).await?;
         let provisional_workspace_lock = if goal.phase == crate::session::GoalPhase::Implementation
@@ -1564,9 +1624,22 @@ impl Engine {
         let provider_concurrency = if budget.max_tokens.is_some() {
             1
         } else {
-            identity.limits.concurrency
+            identity.limits.concurrency.min(
+                self.providers
+                    .child
+                    .iter()
+                    .map(|provider| provider.identity().limits.concurrency)
+                    .min()
+                    .unwrap_or(1),
+            )
         };
+        let routes = self.providers.identities();
+        let inherited = routes
+            .values()
+            .iter()
+            .all(|chain| chain.len() == 1 && chain[0] == *identity);
         let config = RunConfig {
+            providers: (!inherited).then_some(routes),
             provider: identity.profile.clone(),
             model: identity.model.clone(),
             effort: identity.effort,

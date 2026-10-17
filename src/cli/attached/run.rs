@@ -15,11 +15,22 @@ pub(super) struct ToolAccess<'a> {
     pub approvals: &'a arany::ToolApprovals,
 }
 
-enum SelectedProvider {
+pub(crate) enum SelectedProvider {
     OpenAi(OpenAiProvider),
     Anthropic(AnthropicProvider),
     ChatGpt(ChatGptProvider),
     Custom(CustomProvider),
+}
+
+impl SelectedProvider {
+    pub(crate) fn into_arc(self) -> std::sync::Arc<dyn Provider> {
+        match self {
+            Self::OpenAi(provider) => std::sync::Arc::new(provider),
+            Self::Anthropic(provider) => std::sync::Arc::new(provider),
+            Self::ChatGpt(provider) => std::sync::Arc::new(provider),
+            Self::Custom(provider) => std::sync::Arc::new(provider),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -41,7 +52,7 @@ impl From<String> for RunAttemptError {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Selection<'a> {
+pub(crate) struct Selection<'a> {
     pub workspace: &'a Path,
     pub profile: &'a str,
     pub model: &'a str,
@@ -208,7 +219,7 @@ pub(super) async fn compact_selected(
     }
 }
 
-async fn select_provider(
+pub(crate) async fn select_provider(
     state_dir: &Path,
     selection: Selection<'_>,
 ) -> Result<SelectedProvider, String> {
@@ -326,8 +337,18 @@ async fn run_with_provider<P: Provider + 'static>(
         !tools.configured && super::permissions::supports_tools(Some(&provider.identity().profile));
     let root = StateRoot::admit(state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+    let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider);
+    let providers = crate::cli::provider::routing::configured_providers(
+        state_dir,
+        &request.workspace,
+        std::sync::Arc::clone(&provider),
+    )
+    .await?;
     let mut engine = Engine::open_with_telemetry(root, provider, telemetry.clone())
         .map_err(|_| "state store unavailable".to_owned())?;
+    engine
+        .set_providers(providers)
+        .map_err(|error| error.to_string())?;
     if tools.configured {
         if !native_protection_supported() {
             return Err(super::permissions::UNAVAILABLE_NOTICE.to_owned().into());
@@ -378,8 +399,18 @@ async fn compact_with_provider<P: Provider + 'static>(
 ) -> Result<Option<CompactionRecord>, String> {
     let root = StateRoot::open_existing(state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+    let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider);
+    let providers = crate::cli::provider::routing::configured_providers(
+        state_dir,
+        workspace,
+        std::sync::Arc::clone(&provider),
+    )
+    .await?;
     let mut engine = Engine::open_with_telemetry(root, provider, telemetry.clone())
         .map_err(|_| "state store unavailable".to_owned())?;
+    engine
+        .set_providers(providers)
+        .map_err(|error| error.to_string())?;
     let result = if let Some(expected_run_id) = expected_run_id {
         engine
             .auto_compact_session(session_id, workspace.to_path_buf(), expected_run_id)

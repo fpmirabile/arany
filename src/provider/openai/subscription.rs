@@ -459,7 +459,7 @@ async fn completed_at_with_preview(
             } else {
                 Stage::ReadTransport
             },
-            ProviderError::Unavailable,
+            ProviderError::PartialTransport,
             decoder.counts(),
         )
     })? {
@@ -493,7 +493,7 @@ pub(super) async fn read_completed_response(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| ProviderError::Unavailable)?
+        .map_err(|_| ProviderError::PartialTransport)?
     {
         if let Some(completed) = decoder.feed(&chunk)? {
             return Ok(completed);

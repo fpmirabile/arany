@@ -117,6 +117,28 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         tool_compaction_covered_count: 0,
         display: Vec::new(),
         steering_notes: Vec::new(),
+        provider_fallbacks: (0..64)
+            .map(|_| {
+                (
+                    AgentRunId::new(),
+                    crate::provider::ProviderFallback {
+                        role: crate::provider::ProviderRole::Child,
+                        call_index: 0,
+                        failure: crate::session::ProviderCallDisposition::Unavailable,
+                        from: crate::provider::ProviderIdentity::new(
+                            "p".repeat(128),
+                            "m".repeat(128),
+                            crate::provider::Provenance::native(),
+                        ),
+                        to: crate::provider::ProviderIdentity::new(
+                            "f".repeat(128),
+                            "n".repeat(128),
+                            crate::provider::Provenance::native(),
+                        ),
+                    },
+                )
+            })
+            .collect(),
     };
     let goal = GoalView {
         id: goal_id,
@@ -164,6 +186,14 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     };
 
     let report = goal_report(&view, &run, &goal);
+    assert_eq!(
+        report
+            .unresolved
+            .iter()
+            .filter(|item| item.starts_with("Provider fallback"))
+            .count(),
+        8
+    );
     assert!(report.evidence.len() < 17, "report retains its byte bound");
     assert!(
         report.evidence.len() > 1,

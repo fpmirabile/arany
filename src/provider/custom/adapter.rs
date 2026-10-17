@@ -122,7 +122,9 @@ impl Provider for CustomProvider {
 fn transport_error(error: TransportError) -> ProviderError {
     match error {
         TransportError::Unavailable => ProviderError::Unavailable,
+        TransportError::PartialTransport => ProviderError::PartialTransport,
         TransportError::Rejected => ProviderError::Rejected,
+        TransportError::HttpServerUnavailable => ProviderError::HttpServerUnavailable,
         TransportError::InvalidOutcome => ProviderError::InvalidOutcome,
     }
 }
@@ -131,6 +133,29 @@ fn transport_error(error: TransportError) -> ProviderError {
 mod tests {
     use super::*;
     use crate::{AgentPhase, AgentRunId, CollaborationPolicy, PromptRole, RunId, RunInput};
+
+    #[test]
+    fn streaming_destination_drift_keeps_legacy_disposition_without_fallback() {
+        use crate::provider::ProviderFailureClass;
+        for (status, disposition) in [
+            (200, ProviderFailureClass::Rejected),
+            (400, ProviderFailureClass::Rejected),
+            (429, ProviderFailureClass::Rejected),
+            (500, ProviderFailureClass::Unavailable),
+            (529, ProviderFailureClass::Unavailable),
+        ] {
+            let error = super::super::transport::streaming_admission(
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                false,
+            )
+            .err()
+            .unwrap();
+            let error = transport_error(error);
+            assert_eq!(error.failure_class(), disposition, "HTTP {status}");
+            assert_eq!(error.failure_reason(), None);
+            assert!(!error.allows_fallback());
+        }
+    }
 
     #[tokio::test]
     async fn readonly_custom_admission_cannot_dispatch_tools_or_child_authority() {

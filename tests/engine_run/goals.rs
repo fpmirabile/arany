@@ -1173,6 +1173,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                providers: None,
                 provider: "scripted".into(),
                 model: "scripted-model".into(),
                 effort: None,
@@ -1640,7 +1641,7 @@ fn facts_plan(sha256: String) -> arany::GoalPlanContract {
     }
 }
 
-fn facts_workspace(root: &Path, text: &str) -> std::path::PathBuf {
+pub(super) fn facts_workspace(root: &Path, text: &str) -> std::path::PathBuf {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(workspace.join("notes/facts.txt"), text).expect("facts file");
@@ -1653,7 +1654,11 @@ fn write_facts(workspace: &Path, text: &'static str) -> impl Fn() + Send + Sync 
 }
 
 /// Opens the Engine with Guard-backed Read access to `notes/facts.txt`.
-fn facts_engine<P: Provider + 'static>(state: StateRoot, state_path: &Path, provider: P) -> Engine {
+pub(super) fn facts_engine<P: Provider + 'static>(
+    state: StateRoot,
+    state_path: &Path,
+    provider: P,
+) -> Engine {
     facts_engine_with_telemetry(state, state_path, provider, arany::Telemetry::disabled())
 }
 
@@ -4369,7 +4374,11 @@ async fn plan_contract_recorded_mid_run_survives_compaction() {
 
 /// Splits a journal at each action's first admission and asserts that the action's bound covers the
 /// Events up to the next admission, or up to the end of the journal (the terminal Events).
-fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steering: bool) {
+pub(super) fn assert_action_bounds(
+    events: &[arany::EventEnvelope],
+    previews: bool,
+    steering: bool,
+) {
     use arany::Action;
     let primaries: std::collections::HashSet<_> = events
         .iter()
@@ -4471,6 +4480,17 @@ fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steerin
                     Some(end),
                 ));
             }
+            Event::ProviderFallbackUsed { fallback, .. } => {
+                let action = match fallback.role {
+                    arany::ProviderRole::Primary => Action::ProviderCall { previews, steering },
+                    arany::ProviderRole::Child => Action::Child {
+                        in_flight: in_flight(index),
+                    },
+                    arany::ProviderRole::Review => Action::Review,
+                    arany::ProviderRole::Compaction => Action::Compaction,
+                };
+                points.push((index, action, None));
+            }
             Event::GoalCompactionCallReserved { .. } => {
                 let between_runs = events[index..]
                     .iter()
@@ -4522,10 +4542,21 @@ fn assert_action_bounds(events: &[arany::EventEnvelope], previews: bool, steerin
                 .unwrap_or(events.len())
         });
         let observed = end - index;
+        let providers = events[..=*index]
+            .iter()
+            .rev()
+            .find_map(|event| match &event.event {
+                Event::RunStarted { config, .. } => Some(config),
+                _ => None,
+            })
+            .and_then(|config| config.providers.as_ref());
+        let bound = providers.map_or_else(
+            || action.max_events(),
+            |providers| action.max_events_for(providers),
+        );
         assert!(
-            action.max_events() >= observed,
-            "{action:?} at {index} bounds {} Events but appends {observed}",
-            action.max_events()
+            bound >= observed,
+            "{action:?} at {index} bounds {bound} Events but appends {observed}",
         );
     }
 }
@@ -4574,6 +4605,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                providers: None,
                 provider: "scripted".into(),
                 model: "scripted-model".into(),
                 effort: None,
