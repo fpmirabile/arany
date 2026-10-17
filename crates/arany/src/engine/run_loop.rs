@@ -481,13 +481,12 @@ impl<'a> RunLoop<'a> {
         &self,
         root: &mut ProviderRequest,
     ) -> Result<(CallResult, ActiveSegment), EngineError> {
-        let provider = self
-            .routing
-            .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
-        root.model = provider.identity().model.clone();
-        root.max_output_tokens = root
-            .max_output_tokens
-            .min(provider.identity().limits.max_output_tokens);
+        let provider = self.routing.bind(
+            crate::provider::ProviderRole::Primary,
+            self.primary_id,
+            &mut root.model,
+            &mut root.max_output_tokens,
+        )?;
         let active_segment = self.reserve_active_segment(provider.identity().limits.deadline)?;
         let deadline = active_segment
             .deadline()

@@ -327,12 +327,12 @@ impl RunLoop<'_> {
                             .active
                             .remove(&task_id)
                             .ok_or(EngineError::CoordinatorFailed)?;
-                        let provider = self.routing.provider(role, active.request.agent_run_id)?;
-                        active.request.model = provider.identity().model.clone();
-                        active.request.max_output_tokens = active
-                            .request
-                            .max_output_tokens
-                            .min(provider.identity().limits.max_output_tokens);
+                        let provider = self.routing.bind(
+                            role,
+                            active.request.agent_run_id,
+                            &mut active.request.model,
+                            &mut active.request.max_output_tokens,
+                        )?;
                         let request = active.request.clone();
                         let cancellation = self.controls.cancellation.clone();
                         let handle = queue.calls.spawn(async move {
@@ -667,22 +667,17 @@ impl RunLoop<'_> {
                     }
                 }
             }
-            let provider = self.routing.provider(
-                crate::provider::ProviderRole::Child,
-                children[index].agent_run_id,
-            )?;
             let cancellation = self.controls.cancellation.clone();
             let researcher = children[index].tools.is_some();
             let root = &root_request.input;
-            let request = ProviderRequest {
+            let mut request = ProviderRequest {
                 session_id: self.session_id,
                 run_id: self.run_id,
                 agent_run_id: children[index].agent_run_id,
                 phase: AgentPhase::ChildWork,
                 collaboration: CollaborationPolicy::Single,
-                model: provider.identity().model.clone(),
-                max_output_tokens: CHILD_OUTPUT_TOKEN_CAP
-                    .min(provider.identity().limits.max_output_tokens),
+                model: String::new(),
+                max_output_tokens: CHILD_OUTPUT_TOKEN_CAP,
                 input: RunInput {
                     images: root
                         .images
@@ -709,6 +704,12 @@ impl RunLoop<'_> {
                     )
                 },
             };
+            let provider = self.routing.bind(
+                crate::provider::ProviderRole::Child,
+                children[index].agent_run_id,
+                &mut request.model,
+                &mut request.max_output_tokens,
+            )?;
             self.reserve_provider_call(
                 children[index].agent_run_id,
                 Action::Child {

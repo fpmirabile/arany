@@ -69,6 +69,20 @@ impl CallRouter<'_> {
         Ok(Arc::clone(&chain[index]))
     }
 
+    pub(super) fn bind(
+        &self,
+        role: ProviderRole,
+        actor: AgentRunId,
+        model: &mut String,
+        max_output_tokens: &mut u32,
+    ) -> Result<Arc<dyn Provider>, EngineError> {
+        let provider = self.provider(role, actor)?;
+        let identity = provider.identity();
+        *model = identity.model.clone();
+        *max_output_tokens = (*max_output_tokens).min(identity.limits.max_output_tokens);
+        Ok(provider)
+    }
+
     pub(super) async fn invoke(
         &self,
         mut request: ProviderRequest,
@@ -78,11 +92,12 @@ impl CallRouter<'_> {
     ) -> Result<CallResult, EngineError> {
         let role = ProviderRole::for_phase(request.phase);
         if self.providers.get(role).len() == 1 {
-            let provider = self.provider(role, request.agent_run_id)?;
-            request.model = provider.identity().model.clone();
-            request.max_output_tokens = request
-                .max_output_tokens
-                .min(provider.identity().limits.max_output_tokens);
+            let provider = self.bind(
+                role,
+                request.agent_run_id,
+                &mut request.model,
+                &mut request.max_output_tokens,
+            )?;
             return Ok(invoke_bounded_with_preview(
                 provider.as_ref(),
                 request,
@@ -94,11 +109,12 @@ impl CallRouter<'_> {
         }
         let preview = preview.unwrap_or_else(|| ResponsePreview::new().0);
         loop {
-            let provider = self.provider(role, request.agent_run_id)?;
-            request.model = provider.identity().model.clone();
-            request.max_output_tokens = request
-                .max_output_tokens
-                .min(provider.identity().limits.max_output_tokens);
+            let provider = self.bind(
+                role,
+                request.agent_run_id,
+                &mut request.model,
+                &mut request.max_output_tokens,
+            )?;
             let attempt = invoke_attempt(
                 provider.as_ref(),
                 request.clone(),
@@ -138,11 +154,12 @@ impl CallRouter<'_> {
         mut cancellation: RunCancellation,
     ) -> Result<Option<CompactionOutcome>, EngineError> {
         loop {
-            let provider = self.provider(ProviderRole::Compaction, actor)?;
-            request.model = provider.identity().model.clone();
-            request.max_output_tokens = request
-                .max_output_tokens
-                .min(provider.identity().limits.max_output_tokens);
+            let provider = self.bind(
+                ProviderRole::Compaction,
+                actor,
+                &mut request.model,
+                &mut request.max_output_tokens,
+            )?;
             if cancellation.is_cancelled() {
                 return Ok(None);
             }
