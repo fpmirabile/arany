@@ -240,7 +240,7 @@ fn push_unresolved_tool_facts(
                 crate::tools::ToolDisposition::Succeeded => push_goal_report_item(
                     report,
                     GoalReportSection::Unresolved,
-                    &format!("{label} reported success without a valid Guard attestation."),
+                    &format!("{label} reported success without a valid attestation."),
                     omitted_facts,
                 ),
             }
@@ -309,7 +309,14 @@ fn push_success_facts(
             push_goal_report_item(
                 report,
                 GoalReportSection::Evidence,
-                &goal_report_evidence(call, &observation.output),
+                &goal_report_evidence(
+                    call,
+                    &observation.output,
+                    matches!(
+                        observation.attestation,
+                        Some(crate::tools::Attestation::InProcess { .. })
+                    ),
+                ),
                 omitted_facts,
             );
         }
@@ -426,7 +433,8 @@ fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
     }
 }
 
-fn goal_report_evidence(call: &crate::tools::ToolCall, output: &str) -> String {
+fn goal_report_evidence(call: &crate::tools::ToolCall, output: &str, in_process: bool) -> String {
+    let attester = if in_process { "The Engine" } else { "Guard" };
     match call {
         crate::tools::ToolCall::Command { program, .. } => {
             serde_json::from_str::<crate::tools::types::CommandResult>(output)
@@ -446,7 +454,7 @@ fn goal_report_evidence(call: &crate::tools::ToolCall, output: &str) -> String {
         }
         crate::tools::ToolCall::ApplyChangeset { changeset, .. } => {
             format!(
-                "Guard attested publication of {} command file change(s).",
+                "{attester} attested publication of {} command file change(s).",
                 changeset.files.len()
             )
         }
@@ -460,13 +468,13 @@ fn goal_report_evidence(call: &crate::tools::ToolCall, output: &str) -> String {
                         .map(str::to_owned)
                 })
                 .map_or_else(
-                    || format!("Guard attested a read of {path}."),
-                    |digest| format!("Guard attested a read of {path} (SHA-256 {digest})."),
+                    || format!("{attester} attested a read of {path}."),
+                    |digest| format!("{attester} attested a read of {path} (SHA-256 {digest})."),
                 )
         }
         crate::tools::ToolCall::McpCall { server, tool, .. } => {
-            format!("Guard attested MCP call {server}.{tool}.")
+            format!("{attester} attested MCP call {server}.{tool}.")
         }
-        _ => format!("Guard attested {}.", goal_report_call_label(call)),
+        _ => format!("{attester} attested {}.", goal_report_call_label(call)),
     }
 }
