@@ -107,12 +107,6 @@ impl PermissionConfig {
                     index,
                     reason,
                 })?;
-                if permissions.default_mode == PermissionMode::Auto
-                    && decision == Decision::Allow
-                    && rule.broad_execution
-                {
-                    continue;
-                }
                 rules.push((decision, rule));
             }
         }
@@ -215,7 +209,6 @@ impl std::io::Write for CallSize {
 struct Rule {
     tool: Tool,
     pattern: Option<Regex>,
-    broad_execution: bool,
 }
 
 #[derive(Debug)]
@@ -229,7 +222,11 @@ enum Tool {
     Skill,
     Native(&'static str),
     NameGlob(Regex),
-    Mcp { server: Regex, tool: Option<Regex> },
+    Mcp {
+        server: Regex,
+        tool: Option<Regex>,
+        restriction: Option<Regex>,
+    },
 }
 
 impl Rule {
@@ -271,6 +268,7 @@ impl Rule {
                 if specifier.is_some() {
                     return Err("MCP rules do not support specifiers");
                 }
+                let full_name = name;
                 let name = &name[5..];
                 let (server, tool) = name
                     .split_once("__")
@@ -293,6 +291,9 @@ impl Rule {
                     tool: tool
                         .map(|tool| compile(&format!("\\A{}\\z", command_glob(tool))))
                         .transpose()?,
+                    restriction: (decision != Decision::Allow)
+                        .then(|| compile(&format!("\\A{}(?:__.*)?\\z", command_glob(full_name))))
+                        .transpose()?,
                 }
             }
             name if name.contains('*') => {
@@ -313,21 +314,6 @@ impl Rule {
                     .ok_or("unknown Tool name")?
                     .name,
             ),
-        };
-        let broad_execution = match &tool {
-            Tool::Bash | Tool::Native("command") => specifier.is_none_or(|pattern| {
-                pattern.contains('*')
-                    && pattern
-                        .split('*')
-                        .next()
-                        .unwrap_or("")
-                        .split_whitespace()
-                        .count()
-                        <= 1
-            }),
-            Tool::Native("mcp_call") => specifier.is_none(),
-            Tool::Mcp { tool, .. } => tool.is_none(),
-            _ => false,
         };
         let pattern = match specifier {
             None => None,
@@ -366,11 +352,7 @@ impl Rule {
                 }
             }),
         };
-        Ok(Self {
-            tool,
-            pattern,
-            broad_execution,
-        })
+        Ok(Self { tool, pattern })
     }
 
     fn matches(&self, call: &ToolCall, decision: Decision) -> bool {
@@ -390,20 +372,30 @@ impl Rule {
             Tool::NameGlob(pattern) => {
                 pattern.is_match(&peer_name(call)) || pattern.is_match(facts.name)
             }
-            Tool::Mcp { server, tool } => match call {
-                ToolCall::McpCall {
-                    server: actual_server,
-                    tool: actual_tool,
-                    ..
-                } => {
-                    server.is_match(actual_server)
-                        && tool.as_ref().is_none_or(|tool| tool.is_match(actual_tool))
-                }
-                ToolCall::McpList {
-                    server: actual_server,
-                } => server.is_match(actual_server) && tool.is_none(),
-                _ => false,
-            },
+            Tool::Mcp {
+                server,
+                tool,
+                restriction,
+            } => {
+                facts.family == Family::Mcp
+                    && restriction
+                        .as_ref()
+                        .is_some_and(|pattern| pattern.is_match(&peer_name(call)))
+                    || match call {
+                        ToolCall::McpCall {
+                            server: actual_server,
+                            tool: actual_tool,
+                            ..
+                        } => {
+                            server.is_match(actual_server)
+                                && tool.as_ref().is_none_or(|tool| tool.is_match(actual_tool))
+                        }
+                        ToolCall::McpList {
+                            server: actual_server,
+                        } => server.is_match(actual_server) && tool.is_none(),
+                        _ => false,
+                    }
+            }
         };
         if !matches_tool {
             return false;

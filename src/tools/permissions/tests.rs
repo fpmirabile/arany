@@ -822,7 +822,7 @@ fn peer_mcp_names_match_real_servers_tools_and_hook_subjects() {
         ("mcp__memory__read", "other", "read", false),
         ("mcp__memory__read", "memory", "write", false),
         ("mcp__memory__read", "memory", "read_extra", false),
-        ("mcp__a__b__c", "a__b", "c", false),
+        ("mcp__a__b__c", "a__b", "c", true),
     ] {
         let parsed = config(json!({"deny":[rule]}));
         assert_eq!(
@@ -862,6 +862,38 @@ fn peer_mcp_names_match_real_servers_tools_and_hook_subjects() {
         );
     }
     assert!(PermissionConfig::parse(br#"{"permissions":{"allow":["mcp__*"]}}"#).is_err());
+    for (rule, call) in [
+        ("mcp__a__b", mcp_call("a__b", "read")),
+        (
+            "mcp__a__b",
+            ToolCall::McpList {
+                server: "a__b".into(),
+            },
+        ),
+        ("mcp__a___b", mcp_call("a_", "b")),
+        ("mcp__a__b__c", mcp_call("a__b", "c")),
+    ] {
+        for (list, expected) in [("deny", Decision::Deny), ("ask", Decision::Ask)] {
+            let parsed = config(json!({list:[rule], "allow":["mcp_call", "mcp_list"]}));
+            assert_eq!(parsed.decision(&call), expected, "{list} {rule} {call:?}");
+        }
+    }
+    for (rule, server, tool) in [
+        ("mcp__a__b", "a__b", "read"),
+        ("mcp__a___b", "a_", "b"),
+        ("mcp__a__b__c", "a__b", "c"),
+    ] {
+        assert_eq!(
+            config(json!({"allow":[rule]})).decision(&mcp_call(server, tool)),
+            Decision::Ask,
+            "allow {rule} {server} {tool}"
+        );
+    }
+    assert_eq!(
+        config(json!({"allow":["mcp__a__b"]})).decision(&mcp_call("a", "b")),
+        Decision::Allow
+    );
+
     for matcher in [
         "mcp__memory__read",
         "mcp__memory__.*",
