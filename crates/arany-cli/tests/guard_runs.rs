@@ -1667,6 +1667,52 @@ async fn primary_tool_step_events_match_the_snapshot() {
 }
 
 #[tokio::test]
+async fn researcher_tool_results_keep_the_child_ceiling_and_primary_keeps_its_own() {
+    let read = || arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: 0,
+        limit: 32,
+    };
+    let finish = || {
+        ProviderOutcome::Finish(Finish {
+            summary: "done".into(),
+            result: "answer".into(),
+        })
+    };
+    let result_bytes = |events: &[String]| {
+        events
+            .iter()
+            .find_map(|line| line.strip_prefix("ToolStarted result_bytes="))
+            .and_then(|tail| tail.split_whitespace().next())
+            .and_then(|value| value.parse::<usize>().ok())
+            .expect("ToolStarted result bound")
+    };
+    let child = tool_step_events(
+        CollaborationPolicy::Team {
+            max_active_children: 1,
+        },
+        vec![
+            ProviderOutcome::Delegate(Delegate {
+                children: vec!["Inspect the fact".into()],
+            }),
+            tool_outcome(read(), None),
+            finish(),
+            finish(),
+        ],
+        READ_ONLY,
+    )
+    .await;
+    let primary = tool_step_events(
+        CollaborationPolicy::Single,
+        vec![tool_outcome(read(), None), finish()],
+        READ_ONLY,
+    )
+    .await;
+    assert_eq!(result_bytes(&child), 16 * 1024);
+    assert!(result_bytes(&primary) > 16 * 1024);
+}
+
+#[tokio::test]
 async fn researcher_tool_step_events_match_the_snapshot() {
     let finish = || {
         ProviderOutcome::Finish(Finish {
@@ -1842,7 +1888,7 @@ ProviderCallRecorded RootPlan
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
-ToolStarted result_bytes=59099 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=16384 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
@@ -1866,7 +1912,7 @@ ProviderCallRecorded RootPlan
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
-ToolStarted result_bytes=59101 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=16384 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
