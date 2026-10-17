@@ -344,11 +344,23 @@ pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> 
         "Do you trust this folder?".into(),
         escape_terminal(&path.to_string_lossy()),
         String::new(),
-        "Trust allows supported project edits, commands and Skills.".into(),
-        "Tools require native OS protection; unavailable Tools stay disabled.".into(),
-        "Supported commands run offline in an isolated copy and ask first.".into(),
-        "Trust is remembered for this folder. Shift+Tab changes supported approval modes.".into(),
+        "Arany can read this folder already. Trusting it also lets Arany edit project files, run commands and use project Skills.".into(),
+        "Every edit and command runs in an isolated copy under native OS protection and publishes only reviewed changes; without that protection Tools stay disabled.".into(),
+        "Commands run offline and ask first unless you change the approval mode later with Shift+Tab.".into(),
+        "Trust is remembered for this exact folder only. Read only keeps today's behavior.".into(),
     ]
+}
+
+/// Shows a path under `home` as `~`-relative; the caller escapes the result.
+pub fn abbreviate_home(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    let Some(home) = home.filter(|home| home.is_absolute()) else {
+        return path.to_string_lossy().into_owned();
+    };
+    match path.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Ok(rest) => format!("~/{}", rest.to_string_lossy()),
+        Err(_) => path.to_string_lossy().into_owned(),
+    }
 }
 
 pub fn render_provider_fallbacks(run: &RunView) -> Option<String> {
@@ -1007,8 +1019,46 @@ pub(crate) fn session_access_label(defaults: &arany::SessionDefaults) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_terminal, escaped_terminal_bytes, user_message_lines};
+    use super::{
+        abbreviate_home, escape_terminal, escaped_terminal_bytes, user_message_lines,
+        workspace_permission_lines,
+    };
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn abbreviate_home_replaces_only_the_home_prefix() {
+        use std::path::Path;
+
+        let home = Path::new("/home/u");
+        assert_eq!(
+            abbreviate_home(Path::new("/home/u/.npm/_cacache"), Some(home)),
+            "~/.npm/_cacache"
+        );
+        assert_eq!(abbreviate_home(home, Some(home)), "~");
+        assert_eq!(
+            abbreviate_home(Path::new("/home/user2/x"), Some(home)),
+            "/home/user2/x"
+        );
+        assert_eq!(abbreviate_home(Path::new("/opt/x"), None), "/opt/x");
+        assert_eq!(
+            abbreviate_home(Path::new("/home/u/x"), Some(Path::new("relative"))),
+            "/home/u/x"
+        );
+    }
+
+    #[test]
+    fn workspace_permission_lines_keep_the_question_and_escaped_path() {
+        use std::path::Path;
+
+        let lines = workspace_permission_lines(Path::new("/projects/\u{1b}[31mred"));
+        assert_eq!(lines[0], "Do you trust this folder?");
+        assert_eq!(lines[1], escape_terminal("/projects/\u{1b}[31mred"));
+        assert!(
+            lines
+                .join("\n")
+                .contains("Read only keeps today's behavior")
+        );
+    }
 
     #[test]
     fn user_message_preview_is_labeled_bounded_and_inert() {
