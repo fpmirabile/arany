@@ -16,7 +16,7 @@ pub use goal::{
     MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES,
     MAX_GOAL_RUNS,
 };
-pub(crate) use goal::{GoalSuccessState, GoalUsage};
+pub(crate) use goal::{GoalSuccessState, GoalUsage, STORE_ACTION_OVERHEAD_MS};
 pub use records::{
     AgentDisposition, AgentRole, ChildGrant, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,

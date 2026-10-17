@@ -407,6 +407,10 @@ impl GoalLedger {
         Ok((requested > maximum).then_some((requested, maximum)))
     }
 
+    pub(super) fn autonomous(&self) -> bool {
+        self.read(|goal, _| goal.autonomous).unwrap_or(false)
+    }
+
     pub(super) fn allows_next_run(&self) -> bool {
         self.read(|goal, in_flight| {
             goal.autonomous

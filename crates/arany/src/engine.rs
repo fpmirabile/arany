@@ -59,7 +59,8 @@ const CHILD_OUTPUT_TOKEN_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
 // GoalStarted or GoalResumed, GoalRunLinked, MessageAccepted, RunStarted and AgentSpawned.
 const RUN_START_EVENTS: usize = 5;
 
-const STORE_ACTION_OVERHEAD: std::time::Duration = std::time::Duration::from_secs(5);
+const STORE_ACTION_OVERHEAD: std::time::Duration =
+    std::time::Duration::from_millis(crate::session::STORE_ACTION_OVERHEAD_MS);
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -1643,7 +1644,7 @@ impl Engine {
                 }
                 crate::session::RunStatus::Failed => Some((
                     GoalStatus::Failed,
-                    budget_stopped && !goal_view.admits_next_run(),
+                    budget_stopped && goal_view.budget_spent(),
                 )),
                 _ => None,
             }

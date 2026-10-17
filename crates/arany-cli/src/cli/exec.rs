@@ -64,6 +64,37 @@ pub(crate) struct ExecArgs {
     pub prompt: Option<String>,
 }
 
+// A continuation submits no text, so the source objective's @-mentions are admitted again.
+async fn continuation_includes(
+    state_dir: &std::path::Path,
+    session_id: Option<SessionId>,
+    mut paths: Vec<PathBuf>,
+    source: arany::GoalId,
+) -> Result<Vec<PathBuf>, String> {
+    let session_id = session_id.ok_or("--continue-goal requires --session-id")?;
+    let root = StateRoot::open_existing(state_dir)
+        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+    let store = Store::open_read_only(root).map_err(|_| "state store unavailable".to_owned())?;
+    let view = store.load_view(session_id).await;
+    store
+        .close()
+        .await
+        .map_err(|_| "store shutdown failed".to_owned())?;
+    let view = view
+        .map_err(|_| "Session history unavailable or invalid".to_owned())?
+        .ok_or("Session not found")?;
+    let objective = view
+        .goal(source)
+        .map(|goal| goal.objective.as_str())
+        .ok_or_else(|| EngineError::GoalNotContinuable.to_string())?;
+    for path in arany::mention_paths(objective).map_err(|error| error.to_string())? {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
 // A continuation keeps the defaults the spec states; saved limits apply to other exec Goals.
 fn apply_saved_limits(
     goal: &mut GoalRequest,
@@ -250,6 +281,18 @@ async fn run_on_engine(
         crate::cli::attached::execution_limits(&admission.state_dir).await?;
     let mut goal = admission.goal;
     apply_saved_limits(&mut goal, goal_budget, resource_settings);
+    let include_paths = match goal.continues {
+        Some(source) => {
+            continuation_includes(
+                &admission.state_dir,
+                admission.session_id,
+                args.include_paths,
+                source,
+            )
+            .await?
+        }
+        None => args.include_paths,
+    };
     let end = run_signalled(
         &engine,
         providers,
@@ -260,7 +303,7 @@ async fn run_on_engine(
             objective: admission.objective,
             images: Vec::new(),
             workspace: admission.workspace,
-            include_paths: args.include_paths,
+            include_paths,
             policy: admission.policy,
             goal,
         },
@@ -809,6 +852,58 @@ mod tests {
             answers: Arc::new(Mutex::new(VecDeque::from([answer]))),
             observed: Arc::clone(observed),
         }
+    }
+
+    #[tokio::test]
+    async fn exec_continuation_readmits_the_source_objective_mentions() {
+        let temp = tempfile::tempdir().expect("private test root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state_dir = temp.path().join("state");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::open(
+            StateRoot::admit(&state_dir).expect("state"),
+            EngineConfig::default(),
+        )
+        .expect("engine");
+        let provider = Arc::new(scripted(
+            Ok(Finish {
+                summary: "summary".into(),
+                result: "first".into(),
+            }),
+            &observed,
+        ));
+        let source = engine
+            .submit(
+                AdmittedProviders::single(provider),
+                RunRequest {
+                    session_id: None,
+                    title: Some("Mentions".into()),
+                    objective: "Fix @notes/a.txt".into(),
+                    images: Vec::new(),
+                    workspace: workspace.clone(),
+                    include_paths: Vec::new(),
+                    policy: CollaborationPolicy::Single,
+                    goal: GoalRequest::default(),
+                },
+                RunControls::default(),
+            )
+            .expect("idle Engine")
+            .await
+            .expect("Run")
+            .run;
+        engine.close().await.expect("engine shutdown");
+
+        let extra = std::path::PathBuf::from("notes/b.txt");
+        let paths = continuation_includes(
+            &state_dir,
+            Some(source.session_id),
+            vec![extra.clone()],
+            source.goal_id,
+        )
+        .await
+        .expect("mentions");
+        assert_eq!(paths, vec![extra, std::path::PathBuf::from("notes/a.txt")]);
     }
 
     #[tokio::test]

@@ -778,7 +778,12 @@ impl<'a> RunLoop<'a> {
             return self.cancel_primary().await;
         }
         if !self.ledger().success_criterion_satisfied() && !self.ledger().allows_next_run() {
-            return self.fail_for_budget().await;
+            // Only an autonomous Goal runs out of Runs; a single-Run Goal with an unmet plan simply fails.
+            return if self.ledger().autonomous() {
+                self.fail_for_budget().await
+            } else {
+                self.fail_primary().await
+            };
         }
         self.append(Event::AgentFinished {
             run_id: self.run_id,

@@ -1413,6 +1413,26 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn active_time_stop_margin_counts_as_spent_before_the_limit() {
+        let budget = GoalBudget {
+            max_active_ms: Some(60_000),
+            ..GoalBudget::default()
+        };
+        let usage = |active_ms| crate::session::GoalUsage {
+            runs: 0,
+            provider_calls: 0,
+            active_ms,
+            known_tokens: 0,
+            token_usage_unknown: false,
+        };
+        let margin = crate::session::STORE_ACTION_OVERHEAD_MS;
+        assert!(!budget.spent(usage(60_000 - margin - 1)));
+        assert!(budget.spent(usage(60_000 - margin)));
+        assert!(budget.admits_next_run(usage(60_000 - margin)));
+        assert!(budget.spent(usage(60_000)));
+    }
+
+    #[test]
     fn goal_continuation_replays_only_from_the_unclaimed_budget_closed_source() {
         let (source, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
         let mut events = vec![started_with(

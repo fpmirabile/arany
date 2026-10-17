@@ -96,6 +96,16 @@ impl GoalView {
         })
     }
 
+    pub(crate) fn budget_spent(&self) -> bool {
+        self.effective_budget().spent(GoalUsage {
+            runs: self.run_ids.len(),
+            provider_calls: self.provider_calls,
+            active_ms: self.active_ms,
+            known_tokens: self.known_tokens,
+            token_usage_unknown: self.token_usage_unknown,
+        })
+    }
+
     pub(crate) fn unsettled_active_charge_ms(&self) -> u64 {
         let ceiling = self
             .active_deadline
@@ -660,7 +670,7 @@ impl SessionView {
             .iter()
             .rev()
             .find_map(|run_id| self.runs.iter().find(|run| run.id == *run_id))
-            .is_some_and(|run| {
+            .is_none_or(|run| {
                 run.tools
                     .iter()
                     .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
