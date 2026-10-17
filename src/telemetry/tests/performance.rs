@@ -5,7 +5,7 @@ use super::super::{
 use super::{Segment, unit_context};
 use crate::session::{Event, RunDisposition};
 use crate::{
-    engine::{Engine, RunRequest},
+    engine::{Engine, EngineConfig, RunControls, RunRequest},
     provider::{
         AgentPhase, Finish, Provider, ProviderError, ProviderOutcome, ProviderRequest,
         ProviderResponse,
@@ -176,7 +176,7 @@ fn marked_segment(telemetry: &Telemetry) -> Segment {
     segment
 }
 
-async fn timed_direct_run(engine: &mut Engine, observer: &Store, workspace: &Path) -> Duration {
+async fn timed_direct_run(engine: &Engine, observer: &Store, workspace: &Path) -> Duration {
     let request = RunRequest {
         session_id: None,
         title: None,
@@ -188,10 +188,18 @@ async fn timed_direct_run(engine: &mut Engine, observer: &Store, workspace: &Pat
         goal: crate::engine::GoalRequest::default(),
     };
     let started = Instant::now();
-    let outcome = tokio::time::timeout(Duration::from_secs(5), engine.run(request))
+    let run = engine
+        .submit(
+            crate::provider::AdmittedProviders::single(std::sync::Arc::new(FastProvider)),
+            request,
+            RunControls::default(),
+        )
+        .expect("idle Engine");
+    let outcome = tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .expect("bounded direct Run")
-        .expect("successful direct Run");
+        .expect("successful direct Run")
+        .run;
     let elapsed = started.elapsed();
     assert_eq!(outcome.run.status, RunStatus::Finished);
     assert_eq!(
@@ -261,15 +269,17 @@ fn healthy_collector_span_end_and_run_delta() {
         .enable_time()
         .build()
         .expect("performance runtime");
-    let mut disabled = Engine::open(
+    let disabled = Engine::open(
         StateRoot::admit(&disabled_state).expect("private disabled State"),
-        FastProvider,
+        EngineConfig::default(),
     )
     .expect("disabled Engine");
-    let mut enabled = Engine::open_with_telemetry(
+    let enabled = Engine::open(
         StateRoot::admit(&enabled_state).expect("private enabled State"),
-        FastProvider,
-        run_telemetry.clone(),
+        EngineConfig {
+            telemetry: run_telemetry.clone(),
+            ..Default::default()
+        },
     )
     .expect("enabled Engine");
     let disabled_observer =
@@ -282,28 +292,15 @@ fn healthy_collector_span_end_and_run_delta() {
     let mut enabled_samples = Vec::with_capacity(SAMPLES);
     for index in 0..WARMUPS + SAMPLES {
         let (disabled_elapsed, enabled_elapsed) = if index % 2 == 0 {
-            let first = runtime.block_on(timed_direct_run(
-                &mut disabled,
-                &disabled_observer,
-                &workspace,
-            ));
-            let second = runtime.block_on(timed_direct_run(
-                &mut enabled,
-                &enabled_observer,
-                &workspace,
-            ));
+            let first =
+                runtime.block_on(timed_direct_run(&disabled, &disabled_observer, &workspace));
+            let second =
+                runtime.block_on(timed_direct_run(&enabled, &enabled_observer, &workspace));
             (first, second)
         } else {
-            let first = runtime.block_on(timed_direct_run(
-                &mut enabled,
-                &enabled_observer,
-                &workspace,
-            ));
-            let second = runtime.block_on(timed_direct_run(
-                &mut disabled,
-                &disabled_observer,
-                &workspace,
-            ));
+            let first = runtime.block_on(timed_direct_run(&enabled, &enabled_observer, &workspace));
+            let second =
+                runtime.block_on(timed_direct_run(&disabled, &disabled_observer, &workspace));
             (second, first)
         };
         if index >= WARMUPS {

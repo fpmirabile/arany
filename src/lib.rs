@@ -28,10 +28,10 @@ pub use diagnostics::{
 #[cfg(feature = "test-support")]
 pub use engine::Action;
 pub use engine::{
-    DisplayUpdate, Engine, EngineError, GoalRequest, RunCancellation, RunOutcome, RunPreview,
-    RunProgress, RunRequest, RunSteering, RunUpdate, SteeringRefused, continue_session,
-    create_session, fork_session, list_sessions, rename_session, resume_session,
-    set_session_defaults, validate_workspace_inputs,
+    DisplayUpdate, Engine, EngineConfig, EngineError, GoalRequest, RunCancellation, RunControls,
+    RunFuture, RunHandle, RunOutcome, RunPreview, RunProgress, RunRequest, RunResult, RunSteering,
+    RunUpdate, SteeringRefused, ToolGrant, continue_session, create_session, fork_session,
+    list_sessions, rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
 };
 #[cfg(feature = "test-support")]
 pub use fault::FaultPlan;

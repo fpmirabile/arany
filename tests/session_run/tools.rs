@@ -10,6 +10,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 const GIT: &str = "/usr/bin/git";
+use crate::engine_support::run_with;
+use arany::{EngineConfig, RunControls, ToolGrant};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -279,36 +281,49 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     );
     let requests = Arc::new(Mutex::new(Vec::new()));
     let compactions = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = Engine::open(
+    let provider = Arc::new(Journey {
+        requests: requests.clone(),
+        compactions: compactions.clone(),
+    });
+    let engine = Engine::open(
         state,
-        Journey {
-            requests: requests.clone(),
-            compactions: compactions.clone(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     let outcome = tokio::time::timeout(
         Duration::from_secs(120),
-        engine.run(RunRequest {
-            session_id: None,
-            title: Some("Tools".into()),
-            objective: "Complete the synthetic coding journey".into(),
-            images: Vec::new(),
-            workspace: workspace.clone(),
-            include_paths: Vec::new(),
-            policy: CollaborationPolicy::Single,
-            goal: arany::GoalRequest::default(),
-        }),
+        run_with(
+            &engine,
+            &provider,
+            RunRequest {
+                session_id: None,
+                title: Some("Tools".into()),
+                objective: "Complete the synthetic coding journey".into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
+            },
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        ),
     )
     .await
     .expect("parent journey deadline")
     .unwrap();
     let compacted = tokio::time::timeout(
         Duration::from_secs(5),
-        engine.compact_session(outcome.session_id, workspace.clone()),
+        engine.compact_session(
+            &arany::AdmittedProviders::single(provider.clone()),
+            outcome.session_id,
+            workspace.clone(),
+        ),
     )
     .await
     .unwrap()
@@ -689,16 +704,17 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
     let state = StateRoot::admit(&state_path).unwrap();
     basic_config(&state_path);
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = Engine::open(
+    let provider = Arc::new(OverTimeoutCommand {
+        requests: Arc::clone(&requests),
+    });
+    let engine = Engine::open(
         state,
-        OverTimeoutCommand {
-            requests: Arc::clone(&requests),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     let mut request = proposal_request(&workspace);
     request.goal = arany::GoalRequest::new(
         arany::GoalBudget::default(),
@@ -706,7 +722,17 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
     );
     request.goal.resource_settings.default_command_timeout_ms = 1_000;
     request.goal.resource_settings.max_command_timeout_ms = 1_000;
-    let outcome = engine.run(request).await.unwrap();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        request,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     engine.close().await.unwrap();
 
     assert_eq!(outcome.run.status, RunStatus::Failed);
@@ -843,11 +869,26 @@ async fn in_process_reads_are_attested_and_replay_after_exit_or_a_crash() {
         &state_path.join("tools.json"),
         br#"{"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     );
-    let mut engine = Engine::open(state, InProcessReads).unwrap();
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
-    let outcome = engine.run(proposal_request(&workspace)).await.unwrap();
+    let provider = Arc::new(InProcessReads);
+    let engine = Engine::open(
+        state,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        proposal_request(&workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     engine.close().await.unwrap();
     assert_eq!(
         outcome.run.status,
@@ -1008,16 +1049,17 @@ async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
     let state = StateRoot::admit(&state_path).unwrap();
     basic_config(&state_path);
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = Engine::open(
+    let provider = Arc::new(ExactTokenTool {
+        requests: Arc::clone(&requests),
+    });
+    let engine = Engine::open(
         state,
-        ExactTokenTool {
-            requests: Arc::clone(&requests),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     let mut request = proposal_request(&workspace);
     request.goal = arany::GoalRequest::new(
         arany::GoalBudget {
@@ -1026,7 +1068,17 @@ async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
         },
         arany::GoalPhase::Implementation,
     );
-    let outcome = engine.run(request).await.unwrap();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        request,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     engine.close().await.unwrap();
 
     assert_eq!(outcome.run.status, RunStatus::Failed);
@@ -1122,16 +1174,17 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
     }
 
     let first_requests = Arc::new(Mutex::new(Vec::new()));
-    let mut first_engine = Engine::open(
+    let first_engine_provider = Arc::new(GoalWorkspaceLease {
+        requests: Arc::clone(&first_requests),
+    });
+    let first_engine = Engine::open(
         StateRoot::open_existing(&first_state_path).unwrap(),
-        GoalWorkspaceLease {
-            requests: Arc::clone(&first_requests),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    first_engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     let mut first = proposal_request(&workspace);
     first.goal = arany::GoalRequest::new(
         arany::GoalBudget {
@@ -1141,7 +1194,17 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
         arany::GoalPhase::Implementation,
     );
     first.goal.finish_after_run = false;
-    let initial = first_engine.run(first).await.unwrap();
+    let initial = run_with(
+        &first_engine,
+        &first_engine_provider,
+        first,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(initial.run.status, RunStatus::Finished);
     let lease_budget = arany::GoalBudget {
         max_runs: 2,
@@ -1154,24 +1217,32 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
     }
 
     let blocked_requests = Arc::new(Mutex::new(Vec::new()));
-    let mut blocked_engine = Engine::open(
+    let blocked_engine_provider = Arc::new(GoalWorkspaceLease {
+        requests: Arc::clone(&blocked_requests),
+    });
+    let blocked_engine = Engine::open(
         StateRoot::open_existing(&second_state_path).unwrap(),
-        GoalWorkspaceLease {
-            requests: Arc::clone(&blocked_requests),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    blocked_engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     // The paused Goal holds no writer lock, so another StateRoot's Goal writes the Workspace.
     assert_eq!(
-        blocked_engine
-            .run(proposal_request(&workspace))
-            .await
-            .unwrap()
-            .run
-            .status,
+        run_with(
+            &blocked_engine,
+            &blocked_engine_provider,
+            proposal_request(&workspace),
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            }
+        )
+        .await
+        .unwrap()
+        .run
+        .status,
         RunStatus::Finished
     );
     assert_eq!(blocked_requests.lock().unwrap().len(), 1);
@@ -1181,7 +1252,17 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
     resumed.session_id = Some(initial.session_id);
     resumed.title = None;
     resumed.goal = arany::GoalRequest::resume(initial.goal_id, true);
-    let terminal = first_engine.run(resumed).await.unwrap();
+    let terminal = run_with(
+        &first_engine,
+        &first_engine_provider,
+        resumed,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(terminal.run.status, RunStatus::Finished);
     {
         let requests = first_requests.lock().unwrap();
@@ -1192,23 +1273,31 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
     }
 
     let released_requests = Arc::new(Mutex::new(Vec::new()));
-    let mut released_engine = Engine::open(
+    let released_engine_provider = Arc::new(GoalWorkspaceLease {
+        requests: Arc::clone(&released_requests),
+    });
+    let released_engine = Engine::open(
         StateRoot::open_existing(&second_state_path).unwrap(),
-        GoalWorkspaceLease {
-            requests: Arc::clone(&released_requests),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    released_engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     assert_eq!(
-        released_engine
-            .run(proposal_request(&workspace))
-            .await
-            .unwrap()
-            .run
-            .status,
+        run_with(
+            &released_engine,
+            &released_engine_provider,
+            proposal_request(&workspace),
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            }
+        )
+        .await
+        .unwrap()
+        .run
+        .status,
         RunStatus::Finished
     );
     {
@@ -1284,23 +1373,32 @@ async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
             }
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let mut engine = Engine::open(
+        let provider = Arc::new(Proposal {
+            call: proposal,
+            requests: requests.clone(),
+            inspect_first: false,
+            plan_on_inspection: false,
+            omit_plan: false,
+        });
+        let engine = Engine::open(
             state,
-            Proposal {
-                call: proposal,
-                requests: requests.clone(),
-                inspect_first: false,
-                plan_on_inspection: false,
-                omit_plan: false,
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
             },
         )
         .unwrap();
-        engine
-            .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-            .unwrap();
         let outcome = tokio::time::timeout(
             Duration::from_secs(15),
-            engine.run(proposal_request(&workspace)),
+            run_with(
+                &engine,
+                &provider,
+                proposal_request(&workspace),
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            ),
         )
         .await
         .expect("MCP case parent deadline")
@@ -1502,26 +1600,37 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
         }
         let previous = if team {
             let failed_requests = Arc::new(Mutex::new(Vec::new()));
-            let mut failed = Engine::open(
+            let failed_provider = Arc::new(Proposal {
+                call: ToolCall::Edit {
+                    path: "src/current.txt".into(),
+                    expected_digest: hash(b"current"),
+                    old: "current".into(),
+                    new: "must not run".into(),
+                },
+                requests: failed_requests.clone(),
+                inspect_first: false,
+                plan_on_inspection: false,
+                omit_plan: false,
+            });
+            let failed = Engine::open(
                 state,
-                Proposal {
-                    call: ToolCall::Edit {
-                        path: "src/current.txt".into(),
-                        expected_digest: hash(b"current"),
-                        old: "current".into(),
-                        new: "must not run".into(),
-                    },
-                    requests: failed_requests.clone(),
-                    inspect_first: false,
-                    plan_on_inspection: false,
-                    omit_plan: false,
+                EngineConfig {
+                    guard_executable: Some("/usr/bin/false".into()),
+                    ..Default::default()
                 },
             )
             .unwrap();
-            failed.enable_tools("/usr/bin/false".into()).unwrap();
             let outcome = tokio::time::timeout(
                 Duration::from_secs(15),
-                failed.run(proposal_request(&workspace)),
+                run_with(
+                    &failed,
+                    &failed_provider,
+                    proposal_request(&workspace),
+                    RunControls {
+                        tools: ToolGrant::Configured,
+                        ..Default::default()
+                    },
+                ),
             )
             .await
             .unwrap()
@@ -1556,19 +1665,19 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
         };
         let state = StateRoot::open_existing(&state_path).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let mut engine = Engine::open(
+        let provider = Arc::new(BoundedLoop {
+            requests: requests.clone(),
+            team,
+        });
+        let engine = Engine::open(
             state,
-            BoundedLoop {
-                requests: requests.clone(),
-                team,
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
             },
         )
         .unwrap();
         let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::AutoEdits);
-        engine.set_tool_approvals(approvals);
-        engine
-            .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-            .unwrap();
         let mut request = proposal_request(&workspace);
         if team {
             request.session_id = Some(previous.as_ref().unwrap().session_id);
@@ -1578,10 +1687,22 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                 max_active_children: 1,
             };
         }
-        let outcome = tokio::time::timeout(Duration::from_secs(20), engine.run(request))
-            .await
-            .unwrap()
-            .unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_with(
+                &engine,
+                &provider,
+                request,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    approvals: Some(approvals.clone()),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         engine.close().await.unwrap();
         let requests = requests.lock().unwrap().clone();
         if team {
@@ -1733,24 +1854,33 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
     let runtime_state = StateRoot::admit(&runtime_state_path).unwrap();
     basic_config(&runtime_state_path);
     let runtime_requests = Arc::new(Mutex::new(Vec::new()));
-    let mut runtime_engine = Engine::open(
+    let runtime_engine_provider = Arc::new(Proposal {
+        call: ToolCall::List { path: "".into() },
+        requests: runtime_requests.clone(),
+        inspect_first: false,
+        plan_on_inspection: false,
+        omit_plan: false,
+    });
+    let runtime_engine = Engine::open(
         runtime_state,
-        Proposal {
-            call: ToolCall::List { path: "".into() },
-            requests: runtime_requests.clone(),
-            inspect_first: false,
-            plan_on_inspection: false,
-            omit_plan: false,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    runtime_engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     assert!(matches!(
         tokio::time::timeout(
             Duration::from_secs(5),
-            runtime_engine.run(proposal_request(Path::new("/usr"))),
+            run_with(
+                &runtime_engine,
+                &runtime_engine_provider,
+                proposal_request(Path::new("/usr")),
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                }
+            ),
         )
         .await
         .expect("runtime-root admission deadline"),
@@ -1894,23 +2024,32 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             );
         }
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let mut engine = Engine::open(
+        let provider = Arc::new(Proposal {
+            call,
+            requests: requests.clone(),
+            inspect_first: matches!(name, "scope" | "unplanned" | "long-mkdir"),
+            plan_on_inspection: name == "long-mkdir",
+            omit_plan: name == "unplanned",
+        });
+        let engine = Engine::open(
             state,
-            Proposal {
-                call,
-                requests: requests.clone(),
-                inspect_first: matches!(name, "scope" | "unplanned" | "long-mkdir"),
-                plan_on_inspection: name == "long-mkdir",
-                omit_plan: name == "unplanned",
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
             },
         )
         .unwrap();
-        engine
-            .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-            .unwrap();
         let outcome = tokio::time::timeout(
             Duration::from_secs(15),
-            engine.run(proposal_request(&workspace)),
+            run_with(
+                &engine,
+                &provider,
+                proposal_request(&workspace),
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            ),
         )
         .await
         .expect("path-case parent deadline")
@@ -2014,27 +2153,36 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         let state = StateRoot::admit(&state_path).unwrap();
         basic_config(&state_path);
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let mut engine = Engine::open(
+        let provider = Arc::new(Proposal {
+            call: ToolCall::Command {
+                program: "bash".into(),
+                args: vec!["-c".into(), script.into()],
+                cwd: "".into(),
+            },
+            requests: requests.clone(),
+            inspect_first: false,
+            plan_on_inspection: false,
+            omit_plan: false,
+        });
+        let engine = Engine::open(
             state,
-            Proposal {
-                call: ToolCall::Command {
-                    program: "bash".into(),
-                    args: vec!["-c".into(), script.into()],
-                    cwd: "".into(),
-                },
-                requests: requests.clone(),
-                inspect_first: false,
-                plan_on_inspection: false,
-                omit_plan: false,
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
             },
         )
         .unwrap();
-        engine
-            .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-            .unwrap();
         let outcome = tokio::time::timeout(
             Duration::from_secs(20),
-            engine.run(proposal_request(&workspace)),
+            run_with(
+                &engine,
+                &provider,
+                proposal_request(&workspace),
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            ),
         )
         .await
         .expect("quota-case parent deadline")
@@ -2184,28 +2332,29 @@ async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
     let state = StateRoot::admit(&state_path).unwrap();
     basic_config(&state_path);
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = Engine::open(
+    let provider = Arc::new(Proposal {
+        call: ToolCall::Command {
+            program: "bash".into(),
+            args: vec!["src/tree.sh".into()],
+            cwd: "".into(),
+        },
+        requests: requests.clone(),
+        inspect_first: false,
+        plan_on_inspection: false,
+        omit_plan: false,
+    });
+    let engine = Engine::open(
         state,
-        Proposal {
-            call: ToolCall::Command {
-                program: "bash".into(),
-                args: vec!["src/tree.sh".into()],
-                cwd: "".into(),
-            },
-            requests: requests.clone(),
-            inspect_first: false,
-            plan_on_inspection: false,
-            omit_plan: false,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     let cancellation = arany::RunCancellation::new();
     let mut progress = arany::RunProgress::new();
     let outcome = tokio::time::timeout(Duration::from_secs(30), async {
-        let running = engine.run_with_progress(proposal_request(&workspace), cancellation.clone(), progress.clone());
+        let running = run_with(&engine, &provider, proposal_request(&workspace), RunControls { tools: ToolGrant::Configured, cancellation: cancellation.clone(), progress: Some(progress.clone()), ..Default::default() });
         tokio::pin!(running);
         let intent = loop {
             tokio::select! {
@@ -2299,27 +2448,36 @@ async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
     let state = StateRoot::admit(&state_path).unwrap();
     basic_config(&state_path);
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = Engine::open(
+    let provider = Arc::new(Proposal {
+        call: ToolCall::Command {
+            program: "bash".into(),
+            args: vec!["src/isolation.sh".into()],
+            cwd: "".into(),
+        },
+        requests: requests.clone(),
+        inspect_first: false,
+        plan_on_inspection: false,
+        omit_plan: false,
+    });
+    let engine = Engine::open(
         state,
-        Proposal {
-            call: ToolCall::Command {
-                program: "bash".into(),
-                args: vec!["src/isolation.sh".into()],
-                cwd: "".into(),
-            },
-            requests: requests.clone(),
-            inspect_first: false,
-            plan_on_inspection: false,
-            omit_plan: false,
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     let outcome = tokio::time::timeout(
         Duration::from_secs(15),
-        engine.run(proposal_request(&workspace)),
+        run_with(
+            &engine,
+            &provider,
+            proposal_request(&workspace),
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        ),
     )
     .await
     .unwrap()
@@ -2370,27 +2528,28 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
         let state = StateRoot::admit(&state_path).unwrap();
         basic_config(&state_path);
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let mut engine = Engine::open(
+        let provider = Arc::new(Proposal {
+            call: ToolCall::Command {
+                program: "bash".into(),
+                args: vec!["src/quotas.sh".into(), mode.into()],
+                cwd: "".into(),
+            },
+            requests: requests.clone(),
+            inspect_first: false,
+            plan_on_inspection: false,
+            omit_plan: false,
+        });
+        let engine = Engine::open(
             state,
-            Proposal {
-                call: ToolCall::Command {
-                    program: "bash".into(),
-                    args: vec!["src/quotas.sh".into(), mode.into()],
-                    cwd: "".into(),
-                },
-                requests: requests.clone(),
-                inspect_first: false,
-                plan_on_inspection: false,
-                omit_plan: false,
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
             },
         )
         .unwrap();
-        engine
-            .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-            .unwrap();
         let mut progress = arany::RunProgress::new();
         let outcome = tokio::time::timeout(Duration::from_secs(25), async {
-            let running = engine.run_with_progress(proposal_request(&workspace), arany::RunCancellation::new(), progress.clone());
+            let running = run_with(&engine, &provider, proposal_request(&workspace), RunControls { tools: ToolGrant::Configured, cancellation: arany::RunCancellation::new(), progress: Some(progress.clone()), ..Default::default() });
             tokio::pin!(running);
             if mode == "memory" {
                 let intent = loop {
@@ -2493,17 +2652,18 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
         store.close().await.unwrap();
         if mode == "memory" {
             let fresh_requests = Arc::new(Mutex::new(Vec::new()));
-            let mut resumed = Engine::open(
+            let resumed_provider = Arc::new(BoundedLoop {
+                requests: fresh_requests.clone(),
+                team: true,
+            });
+            let resumed = Engine::open(
                 StateRoot::open_existing(&state_path).unwrap(),
-                BoundedLoop {
-                    requests: fresh_requests.clone(),
-                    team: true,
+                EngineConfig {
+                    guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                    ..Default::default()
                 },
             )
             .unwrap();
-            resumed
-                .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-                .unwrap();
             let mut next = proposal_request(&workspace);
             next.session_id = Some(outcome.session_id);
             next.title = None;
@@ -2511,10 +2671,21 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
             next.policy = CollaborationPolicy::Team {
                 max_active_children: 1,
             };
-            let fresh = tokio::time::timeout(Duration::from_secs(20), resumed.run(next))
-                .await
-                .unwrap()
-                .unwrap();
+            let fresh = tokio::time::timeout(
+                Duration::from_secs(20),
+                run_with(
+                    &resumed,
+                    &resumed_provider,
+                    next,
+                    RunControls {
+                        tools: ToolGrant::Configured,
+                        ..Default::default()
+                    },
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
             resumed.close().await.unwrap();
             assert_eq!(fresh.run.status, RunStatus::Finished);
             assert_eq!(
@@ -2684,20 +2855,20 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             }
         };
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let mut engine = Engine::open(
+        let provider = Arc::new(ApprovalJourney {
+            requests: requests.clone(),
+            call: call.clone(),
+            review,
+        });
+        let engine = Engine::open(
             state,
-            ApprovalJourney {
-                requests: requests.clone(),
-                call: call.clone(),
-                review,
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
             },
         )
         .unwrap();
-        engine
-            .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-            .unwrap();
-        let (controls, mut inbox) = ToolApprovals::new(mode);
-        engine.set_tool_approvals(controls);
+        let (approvals, mut inbox) = ToolApprovals::new(mode);
         let cancellation = RunCancellation::new();
         let pending = cancellation.clone();
         let approve = async {
@@ -2719,10 +2890,17 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         };
         let (outcome, ()) = tokio::time::timeout(Duration::from_secs(30), async {
             tokio::join!(
-                engine.run_with_progress(
+                run_with(
+                    &engine,
+                    &provider,
                     proposal_request(&workspace),
-                    cancellation,
-                    RunProgress::new()
+                    RunControls {
+                        tools: ToolGrant::Configured,
+                        approvals: Some(approvals.clone()),
+                        cancellation,
+                        progress: Some(RunProgress::new()),
+                        ..Default::default()
+                    }
                 ),
                 approve
             )
@@ -3056,28 +3234,37 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         &serde_json::to_vec(&config).unwrap(),
     );
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = Engine::open(
+    let provider = Arc::new(GitJourney {
+        requests: requests.clone(),
+    });
+    let engine = Engine::open(
         state,
-        GitJourney {
-            requests: requests.clone(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     let outcome = tokio::time::timeout(
         Duration::from_secs(120),
-        engine.run(RunRequest {
-            session_id: None,
-            title: Some("Git".into()),
-            objective: "Inspect Git state".into(),
-            images: Vec::new(),
-            workspace: workspace.clone(),
-            include_paths: Vec::new(),
-            policy: CollaborationPolicy::Single,
-            goal: arany::GoalRequest::default(),
-        }),
+        run_with(
+            &engine,
+            &provider,
+            RunRequest {
+                session_id: None,
+                title: Some("Git".into()),
+                objective: "Inspect Git state".into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
+            },
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        ),
     )
     .await
     .expect("Git journey deadline")

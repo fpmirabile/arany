@@ -1,5 +1,6 @@
+use super::engine_support::run_routed;
 use super::*;
-use arany::{AdmittedProviders, ProviderRole, Providers};
+use arany::{ProviderRole, Providers};
 
 fn finish(text: &str) -> ProviderOutcome {
     ProviderOutcome::Finish(Finish {
@@ -31,7 +32,19 @@ fn route(provider: ScriptedProvider) -> Arc<ScriptedProvider> {
 }
 
 fn routes(primary: &Arc<ScriptedProvider>) -> AdmittedProviders {
-    Providers::all(vec![Arc::clone(primary) as Arc<dyn Provider>])
+    AdmittedProviders::single(primary.clone())
+}
+
+fn open(state: &Path) -> Engine {
+    Engine::open(StateRoot::admit(state).unwrap(), EngineConfig::default()).unwrap()
+}
+
+/// Tool grants that read `notes/facts.txt` through the Guard.
+fn configured() -> RunControls {
+    RunControls {
+        tools: ToolGrant::Configured,
+        ..RunControls::default()
+    }
 }
 
 #[tokio::test]
@@ -65,16 +78,17 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
     let mut bindings = routes(&primary);
     bindings.child = vec![child.clone()];
     bindings.compaction = vec![compact.clone()];
-    let mut engine = Engine::open(StateRoot::admit(&state).unwrap(), primary.clone()).unwrap();
-    engine.set_providers(bindings).unwrap();
+    let engine = open(&state);
     let mut request = input(&workspace);
     request.policy = CollaborationPolicy::Auto {
         max_active_children: 1,
     };
-    let result = engine.run(request).await.unwrap();
+    let result = run_routed(&engine, bindings.clone(), request, RunControls::default())
+        .await
+        .unwrap();
     assert_eq!(result.run.status, RunStatus::Finished);
     let record = engine
-        .compact_session(result.session_id, workspace)
+        .compact_session(&bindings, result.session_id, workspace)
         .await
         .unwrap();
     assert_eq!(record.model, "compact-model");
@@ -165,16 +179,18 @@ async fn fallback_only_on_pre_output_call_failure_and_never_after_partial_output
             primary.clone() as Arc<dyn Provider>,
             fallback.clone() as Arc<dyn Provider>,
         ]);
-        let mut engine = Engine::open(StateRoot::admit(&state).unwrap(), primary.clone()).unwrap();
-        engine.set_providers(bindings).unwrap();
-        let result = engine
-            .run_with_progress(
-                input(&workspace),
-                RunCancellation::new(),
-                RunProgress::with_previews(),
-            )
-            .await
-            .unwrap();
+        let engine = open(&state);
+        let result = run_routed(
+            &engine,
+            bindings,
+            input(&workspace),
+            RunControls {
+                progress: Some(RunProgress::with_previews()),
+                ..RunControls::default()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(
             result.run.status,
             if fallback_expected {
@@ -255,8 +271,7 @@ async fn fallback_chain_is_ordered_and_call_and_unknown_token_budgets_stop_it() 
             second.clone() as Arc<dyn Provider>,
             third.clone() as Arc<dyn Provider>,
         ]);
-        let mut engine = Engine::open(StateRoot::admit(&state).unwrap(), primary.clone()).unwrap();
-        engine.set_providers(bindings).unwrap();
+        let engine = open(&state);
         let mut request = input(&workspace);
         if budget == Some(1) {
             request.goal.budget.as_mut().unwrap().max_provider_calls = Some(1);
@@ -264,7 +279,9 @@ async fn fallback_chain_is_ordered_and_call_and_unknown_token_budgets_stop_it() 
         if budget == Some(2) {
             request.goal.budget.as_mut().unwrap().max_tokens = Some(100);
         }
-        let result = engine.run(request).await.unwrap();
+        let result = run_routed(&engine, bindings, request, RunControls::default())
+            .await
+            .unwrap();
         engine.close().await.unwrap();
         let (_, view) = reopen(&state, result.session_id).await;
         let allowed = budget.is_none();
@@ -332,16 +349,17 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
     let mut bindings = routes(&primary);
     bindings.child = vec![child.clone(), fallback.clone()];
     bindings.compaction = vec![compaction.clone(), compaction_fallback.clone()];
-    let mut engine = Engine::open(StateRoot::admit(&state).unwrap(), primary.clone()).unwrap();
-    engine.set_providers(bindings).unwrap();
+    let engine = open(&state);
     let mut request = input(&workspace);
     request.policy = CollaborationPolicy::Auto {
         max_active_children: 2,
     };
-    let result = engine.run(request).await.unwrap();
+    let result = run_routed(&engine, bindings.clone(), request, RunControls::default())
+        .await
+        .unwrap();
     assert_eq!(result.run.status, RunStatus::Finished);
     let record = engine
-        .compact_session(result.session_id, workspace)
+        .compact_session(&bindings, result.session_id, workspace)
         .await
         .unwrap();
     assert_eq!(record.model, "compact-fallback");
@@ -387,12 +405,12 @@ async fn fallback_after_a_tool_observation_never_redispatches_the_tool() {
     let primary = route(primary);
     let fallback =
         route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "fallback"));
-    let mut engine =
-        super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state, primary.clone());
+    let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
     let mut bindings = routes(&primary);
     bindings.primary.push(fallback.clone());
-    engine.set_providers(bindings).unwrap();
-    let result = engine.run(input(&workspace)).await.unwrap();
+    let result = run_routed(&engine, bindings, input(&workspace), configured())
+        .await
+        .unwrap();
     assert_eq!(result.run.status, RunStatus::Finished);
     engine.close().await.unwrap();
     let (events, view) = reopen(&state, result.session_id).await;
@@ -455,19 +473,31 @@ async fn review_role_fallback_does_not_dispatch_the_proposed_tool_twice() {
     let fallback = route(
         ScriptedProvider::new(vec![finish("approve")]).with_profile("scripted", "review-fallback"),
     );
-    let mut engine = Engine::open(StateRoot::admit(&state).unwrap(), primary.clone()).unwrap();
+    let engine = Engine::open(
+        StateRoot::admit(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..EngineConfig::default()
+        },
+    )
+    .unwrap();
     let config = state.join("tools.json");
     std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
-    engine.set_tool_approvals(approvals);
     let mut bindings = routes(&primary);
     bindings.review = vec![review.clone(), fallback.clone()];
-    engine.set_providers(bindings).unwrap();
-    let result = engine.run(input(&workspace)).await.unwrap();
+    let result = run_routed(
+        &engine,
+        bindings,
+        input(&workspace),
+        RunControls {
+            approvals: Some(approvals.clone()),
+            ..configured()
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(result.run.status, RunStatus::Finished);
     engine.close().await.unwrap();
     let (events, view) = reopen(&state, result.session_id).await;
@@ -525,14 +555,9 @@ async fn tool_enabled_chains_refuse_different_adapters_and_accounts_before_dispa
             let mut bindings = routes(&primary);
             bindings.get_mut(role).push(alternate.clone());
             let state = temp.path().join("state");
-            let mut engine = super::goals::facts_engine(
-                StateRoot::admit(&state).unwrap(),
-                &state,
-                primary.clone(),
-            );
-            engine.set_providers(bindings).unwrap();
+            let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
             assert!(matches!(
-                engine.run(input(&workspace)).await,
+                run_routed(&engine, bindings, input(&workspace), configured()).await,
                 Err(EngineError::IncompatibleProviderChain)
             ));
             assert!(primary.requests.lock().unwrap().is_empty());
@@ -554,8 +579,7 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
     let next = route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "next"));
     let mut bindings = routes(&first);
     bindings.primary.push(next.clone());
-    let mut engine = Engine::open(StateRoot::admit(&state).unwrap(), first.clone()).unwrap();
-    engine.set_providers(bindings).unwrap();
+    let engine = open(&state);
     let mut initial = input(&workspace);
     initial.goal = arany::GoalRequest::new(
         arany::GoalBudget {
@@ -564,7 +588,9 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
         },
         arany::GoalPhase::Implementation,
     );
-    let outcome = engine.run(initial).await.unwrap();
+    let outcome = run_routed(&engine, bindings, initial, RunControls::default())
+        .await
+        .unwrap();
     engine.close().await.unwrap();
     let (mut events, _) = reopen(&state, outcome.session_id).await;
     let switched = events
@@ -614,17 +640,18 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
     let next = route(ScriptedProvider::new(vec![]).with_profile("scripted", "next"));
     let mut bindings = routes(&first);
     bindings.primary.push(next.clone());
-    let mut engine = Engine::open(
+    let engine = Engine::open(
         StateRoot::open_existing(&recovered_state).unwrap(),
-        first.clone(),
+        EngineConfig::default(),
     )
     .unwrap();
-    engine.set_providers(bindings).unwrap();
     let mut resume = input(&workspace);
     resume.session_id = Some(outcome.session_id);
     resume.title = None;
     resume.goal = arany::GoalRequest::resume(outcome.goal_id, true);
-    let recovered = engine.run(resume).await.unwrap();
+    let recovered = run_routed(&engine, bindings, resume, RunControls::default())
+        .await
+        .unwrap();
     assert_eq!(recovered.run.status, RunStatus::Finished);
     assert_eq!(first.requests.lock().unwrap().len(), 1);
     assert!(next.requests.lock().unwrap().is_empty());

@@ -1,11 +1,12 @@
 use crate::cli::{chatgpt, credentials};
 use arany::{
-    AnthropicProvider, ChatGptProvider, CompactionRecord, CustomProvider, Effort, Engine,
-    NativeApiCredentials, OpenAiProvider, Provider, RunCancellation, RunId, RunOutcome,
-    RunProgress, RunRequest, RunSteering, SessionId, StateRoot, Telemetry,
+    AdmittedProviders, AnthropicProvider, CompactionRecord, CustomProvider, Effort, Engine,
+    NativeApiCredentials, OpenAiProvider, Provider, RunCancellation, RunControls, RunId,
+    RunOutcome, RunProgress, RunRequest, RunResult, RunSteering, SessionId, StateRoot, ToolGrant,
     native_protection_supported, resolve_native_effort_for_run,
 };
 use std::path::Path;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Clone, Copy)]
@@ -13,24 +14,6 @@ pub(super) struct ToolAccess<'a> {
     pub configured: bool,
     pub permissions: Option<&'a arany::WorkspacePermissions>,
     pub approvals: &'a arany::ToolApprovals,
-}
-
-pub(crate) enum SelectedProvider {
-    OpenAi(OpenAiProvider),
-    Anthropic(AnthropicProvider),
-    ChatGpt(ChatGptProvider),
-    Custom(CustomProvider),
-}
-
-impl SelectedProvider {
-    pub(crate) fn into_arc(self) -> std::sync::Arc<dyn Provider> {
-        match self {
-            Self::OpenAi(provider) => std::sync::Arc::new(provider),
-            Self::Anthropic(provider) => std::sync::Arc::new(provider),
-            Self::ChatGpt(provider) => std::sync::Arc::new(provider),
-            Self::Custom(provider) => std::sync::Arc::new(provider),
-        }
-    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -90,8 +73,8 @@ pub(super) async fn preflight_selected(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_selected(
+    engine: &Engine,
     state_dir: &Path,
-    telemetry: &Telemetry,
     selection: Selection<'_>,
     request: RunRequest,
     cancellation: RunCancellation,
@@ -100,129 +83,137 @@ pub(super) async fn run_selected(
     steering: RunSteering,
 ) -> Result<RunOutcome, RunAttemptError> {
     let mut admission_cancellation = cancellation.clone();
-    let provider = tokio::select! {
+    let admit = async {
+        let provider = select_provider(state_dir, selection).await?;
+        // Fail closed before route resolution can recreate a removed State directory.
+        engine
+            .readmit_state()
+            .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+        crate::cli::provider::routing::configured_providers(state_dir, &request.workspace, provider)
+            .await
+    };
+    let providers = tokio::select! {
         biased;
         () = admission_cancellation.cancelled() => return Err(RunAttemptError::InterruptedBeforeRun),
-        result = select_provider(state_dir, selection) => {
-            result.map_err(RunAttemptError::Failed)?
+        result = admit => result.map_err(RunAttemptError::Failed)?,
+    };
+    run_with_providers(
+        engine,
+        providers,
+        request,
+        cancellation,
+        progress,
+        tools,
+        steering,
+    )
+    .await
+}
+
+async fn run_with_providers(
+    engine: &Engine,
+    providers: AdmittedProviders,
+    request: RunRequest,
+    cancellation: RunCancellation,
+    progress: RunProgress,
+    tools: ToolAccess<'_>,
+    steering: RunSteering,
+) -> Result<RunOutcome, RunAttemptError> {
+    // Each submission fails closed when the held State became unsafe or its path was swapped.
+    engine
+        .readmit_state()
+        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+    let trusted_tools =
+        super::permissions::supports_tools(Some(&providers.primary[0].identity().profile));
+    let grant = if tools.configured {
+        if !native_protection_supported() {
+            return Err(super::permissions::UNAVAILABLE_NOTICE.to_owned().into());
+        }
+        ToolGrant::Configured
+    } else {
+        match tools
+            .permissions
+            .filter(|permissions| trusted_tools && permissions.is_trusted())
+        {
+            Some(permissions) => ToolGrant::Trusted(permissions.clone()),
+            None => ToolGrant::None,
         }
     };
-    match provider {
-        SelectedProvider::OpenAi(provider) => {
-            run_with_provider(
-                state_dir,
-                telemetry,
-                provider,
-                request,
+    let grants_tools = !matches!(grant, ToolGrant::None);
+    let handle = engine
+        .submit(
+            providers,
+            request,
+            RunControls {
+                tools: grant,
+                approvals: Some(tools.approvals.clone()),
+                steering: Some(steering),
                 cancellation,
-                progress,
-                tools,
-                steering,
-            )
-            .await
-        }
-        SelectedProvider::Anthropic(provider) => {
-            run_with_provider(
-                state_dir,
-                telemetry,
-                provider,
-                request,
-                cancellation,
-                progress,
-                tools,
-                steering,
-            )
-            .await
-        }
-        SelectedProvider::ChatGpt(provider) => {
-            run_with_provider(
-                state_dir,
-                telemetry,
-                provider,
-                request,
-                cancellation,
-                progress,
-                tools,
-                steering,
-            )
-            .await
-        }
-        SelectedProvider::Custom(provider) => {
-            run_with_provider(
-                state_dir,
-                telemetry,
-                provider,
-                request,
-                cancellation,
-                progress,
-                tools,
-                steering,
-            )
-            .await
-        }
+                progress: Some(progress),
+            },
+        )
+        .map_err(|error| {
+            if grants_tools {
+                arany::record_development_failure(arany::DevelopmentFailure::ToolAdmission);
+            }
+            error.to_string()
+        })?;
+    match handle.await {
+        Ok(RunResult {
+            run,
+            stopped: Some(reason),
+        }) => Err(RunAttemptError::Stopped {
+            outcome: Box::new(run),
+            reason: reason.to_string(),
+        }),
+        Ok(RunResult { run, stopped: None }) => Ok(run),
+        Err(error) => Err(classify_run_error(error)),
+    }
+}
+
+fn classify_run_error(error: arany::EngineError) -> RunAttemptError {
+    match error {
+        arany::EngineError::CancelledBeforeStart => RunAttemptError::InterruptedBeforeRun,
+        error => RunAttemptError::Failed(error.to_string()),
     }
 }
 
 pub(super) async fn compact_selected(
+    engine: &Engine,
     state_dir: &Path,
-    telemetry: &Telemetry,
     selection: Selection<'_>,
     session_id: SessionId,
     workspace: &Path,
     expected_run_id: Option<RunId>,
 ) -> Result<Option<CompactionRecord>, String> {
-    match select_provider(state_dir, selection).await? {
-        SelectedProvider::OpenAi(provider) => {
-            compact_with_provider(
-                state_dir,
-                telemetry,
-                provider,
-                session_id,
-                workspace,
-                expected_run_id,
-            )
-            .await
+    let provider = select_provider(state_dir, selection).await?;
+    engine
+        .readmit_state()
+        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+    let providers =
+        crate::cli::provider::routing::configured_providers(state_dir, workspace, provider).await?;
+    match expected_run_id {
+        Some(expected_run_id) => {
+            engine
+                .auto_compact_session(
+                    &providers,
+                    session_id,
+                    workspace.to_path_buf(),
+                    expected_run_id,
+                )
+                .await
         }
-        SelectedProvider::Anthropic(provider) => {
-            compact_with_provider(
-                state_dir,
-                telemetry,
-                provider,
-                session_id,
-                workspace,
-                expected_run_id,
-            )
+        None => engine
+            .compact_session(&providers, session_id, workspace.to_path_buf())
             .await
-        }
-        SelectedProvider::ChatGpt(provider) => {
-            compact_with_provider(
-                state_dir,
-                telemetry,
-                provider,
-                session_id,
-                workspace,
-                expected_run_id,
-            )
-            .await
-        }
-        SelectedProvider::Custom(provider) => {
-            compact_with_provider(
-                state_dir,
-                telemetry,
-                provider,
-                session_id,
-                workspace,
-                expected_run_id,
-            )
-            .await
-        }
+            .map(Some),
     }
+    .map_err(|error| error.to_string())
 }
 
 pub(crate) async fn select_provider(
     state_dir: &Path,
     selection: Selection<'_>,
-) -> Result<SelectedProvider, String> {
+) -> Result<Arc<dyn Provider>, String> {
     select_provider_inner(state_dir, selection)
         .await
         .inspect_err(|_| {
@@ -233,7 +224,7 @@ pub(crate) async fn select_provider(
 async fn select_provider_inner(
     state_dir: &Path,
     selection: Selection<'_>,
-) -> Result<SelectedProvider, String> {
+) -> Result<Arc<dyn Provider>, String> {
     validate_local_selection(selection)?;
     match selection.profile {
         "openai" => {
@@ -252,7 +243,7 @@ async fn select_provider_inner(
                 ),
             }
             .map_err(|_| "selected OpenAI API key unavailable".to_owned())?;
-            Ok(SelectedProvider::OpenAi(provider))
+            Ok(Arc::new(provider))
         }
         "anthropic" => {
             let credentials = native_key(selection).await?;
@@ -263,7 +254,7 @@ async fn select_provider_inner(
                 selection.account_id,
             )
             .map_err(|_| "selected Anthropic API key unavailable".to_owned())?;
-            Ok(SelectedProvider::Anthropic(provider))
+            Ok(Arc::new(provider))
         }
         "chatgpt" => {
             let account_id = selection
@@ -280,7 +271,7 @@ async fn select_provider_inner(
             )
             .await
             .map_err(|error| error.to_string())?;
-            Ok(SelectedProvider::ChatGpt(provider))
+            Ok(Arc::new(provider))
         }
         _ => {
             if selection.account_id.is_some() {
@@ -295,7 +286,7 @@ async fn select_provider_inner(
             let provider = CustomProvider::admit(&root, name, selection.model, selection.effort)
                 .await
                 .map_err(|error| error.to_string())?;
-            Ok(SelectedProvider::Custom(provider))
+            Ok(Arc::new(provider))
         }
     }
 }
@@ -309,122 +300,6 @@ async fn native_key(selection: Selection<'_>) -> Result<NativeApiCredentials, St
             "selected native API credentials or workspace configuration unavailable".to_owned()
         }),
     }
-}
-
-fn classify_run_error(error: arany::EngineError) -> RunAttemptError {
-    match error {
-        arany::EngineError::CancelledBeforeStart => RunAttemptError::InterruptedBeforeRun,
-        arany::EngineError::StoppedAfterRun { run, reason } => RunAttemptError::Stopped {
-            outcome: run,
-            reason: reason.to_string(),
-        },
-        error => RunAttemptError::Failed(error.to_string()),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_with_provider<P: Provider + 'static>(
-    state_dir: &Path,
-    telemetry: &Telemetry,
-    provider: P,
-    request: RunRequest,
-    cancellation: RunCancellation,
-    progress: RunProgress,
-    tools: ToolAccess<'_>,
-    steering: RunSteering,
-) -> Result<RunOutcome, RunAttemptError> {
-    let trusted_tools =
-        !tools.configured && super::permissions::supports_tools(Some(&provider.identity().profile));
-    let root = StateRoot::admit(state_dir)
-        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-    let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider);
-    let providers = crate::cli::provider::routing::configured_providers(
-        state_dir,
-        &request.workspace,
-        std::sync::Arc::clone(&provider),
-    )
-    .await?;
-    let mut engine = Engine::open_with_telemetry(root, provider, telemetry.clone())
-        .map_err(|_| "state store unavailable".to_owned())?;
-    engine
-        .set_providers(providers)
-        .map_err(|error| error.to_string())?;
-    if tools.configured {
-        if !native_protection_supported() {
-            return Err(super::permissions::UNAVAILABLE_NOTICE.to_owned().into());
-        }
-        engine
-            .enable_tools(
-                std::env::current_exe().map_err(|_| "Guard executable unavailable".to_owned())?,
-            )
-            .map_err(|error| {
-                arany::record_development_failure(arany::DevelopmentFailure::ToolAdmission);
-                error.to_string()
-            })?;
-    }
-    if let Some(permissions) = tools
-        .permissions
-        .filter(|permissions| trusted_tools && permissions.is_trusted())
-    {
-        engine
-            .enable_trusted_workspace(
-                permissions.clone(),
-                &request.workspace,
-                std::env::current_exe().map_err(|_| "Guard executable unavailable".to_owned())?,
-                tools.approvals.clone(),
-            )
-            .map_err(|error| {
-                arany::record_development_failure(arany::DevelopmentFailure::ToolAdmission);
-                error.to_string()
-            })?;
-    }
-    engine.set_tool_approvals(tools.approvals.clone());
-    engine.set_steering(steering);
-    let result = engine
-        .run_with_progress(request, cancellation, progress)
-        .await;
-    let closed = engine.close().await;
-    let outcome = result.map_err(classify_run_error)?;
-    closed.map_err(|_| "store shutdown failed".to_owned())?;
-    Ok(outcome)
-}
-
-async fn compact_with_provider<P: Provider + 'static>(
-    state_dir: &Path,
-    telemetry: &Telemetry,
-    provider: P,
-    session_id: SessionId,
-    workspace: &Path,
-    expected_run_id: Option<RunId>,
-) -> Result<Option<CompactionRecord>, String> {
-    let root = StateRoot::open_existing(state_dir)
-        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-    let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(provider);
-    let providers = crate::cli::provider::routing::configured_providers(
-        state_dir,
-        workspace,
-        std::sync::Arc::clone(&provider),
-    )
-    .await?;
-    let mut engine = Engine::open_with_telemetry(root, provider, telemetry.clone())
-        .map_err(|_| "state store unavailable".to_owned())?;
-    engine
-        .set_providers(providers)
-        .map_err(|error| error.to_string())?;
-    let result = if let Some(expected_run_id) = expected_run_id {
-        engine
-            .auto_compact_session(session_id, workspace.to_path_buf(), expected_run_id)
-            .await
-    } else {
-        engine
-            .compact_session(session_id, workspace.to_path_buf())
-            .await
-            .map(Some)
-    };
-    let closed = engine.close().await;
-    let record = result.map_err(|error| error.to_string())?;
-    closed.map_err(|_| "store shutdown failed".to_owned())?;
-    Ok(record)
 }
 
 // Linux release builds have no tests here: each one is debug-only or macOS-only.
@@ -1169,7 +1044,7 @@ mod tests {
             } else {
                 args.continue_session = true;
             }
-            let error = super::super::run(args, Telemetry::disabled())
+            let error = super::super::run(args, arany::Telemetry::disabled())
                 .await
                 .unwrap_err();
             assert!(error.contains(if case == Case::ResumeLocked {
@@ -1188,7 +1063,7 @@ mod tests {
             store.close().await.unwrap();
             return;
         }
-        super::super::run(args, Telemetry::disabled())
+        super::super::run(args, arany::Telemetry::disabled())
             .await
             .unwrap();
         if case == Case::Cancel {
@@ -1436,12 +1311,23 @@ mod tests {
             let state = root.join(profile);
             let account_id = Uuid::now_v7();
             let observed = Arc::new(Mutex::new(Vec::new()));
+            let engine = Engine::open(
+                StateRoot::admit(&state).unwrap(),
+                arany::EngineConfig {
+                    guard_executable: std::env::current_exe().ok(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             let mut session = None;
             for _ in 0..2 {
-                let outcome = run_with_provider(
-                    &state,
-                    &Telemetry::disabled(),
-                    Greeting::new(profile, account_id, observed.clone()),
+                let outcome = run_with_providers(
+                    &engine,
+                    AdmittedProviders::single(Arc::new(Greeting::new(
+                        profile,
+                        account_id,
+                        observed.clone(),
+                    ))),
                     RunRequest {
                         session_id: session,
                         title: None,
@@ -1507,10 +1393,13 @@ mod tests {
             std::fs::write(&private, serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["."],"write":true,
                 "commands":[{"name":"sh","executable":"/bin/sh","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]})).unwrap()).unwrap();
             std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
-            let error = run_with_provider(
-                &state,
-                &Telemetry::disabled(),
-                Greeting::new(profile, account_id, observed.clone()),
+            let error = run_with_providers(
+                &engine,
+                AdmittedProviders::single(Arc::new(Greeting::new(
+                    profile,
+                    account_id,
+                    observed.clone(),
+                ))),
                 RunRequest {
                     session_id: session,
                     title: None,
@@ -1558,6 +1447,7 @@ mod tests {
                 "explicit rejection preserves the committed prefix"
             );
             store.close().await.unwrap();
+            engine.close().await.unwrap();
         }
         let choice = match arany::WorkspacePermissions::open(&workspace) {
             Ok(access) => Some(

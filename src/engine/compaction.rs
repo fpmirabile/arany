@@ -1,7 +1,8 @@
 use super::ledger::{Action, duration_ms};
 use super::{Engine, EngineError, STORE_ACTION_OVERHEAD, ensure_session_workspace};
 use crate::provider::{
-    CompactionRequest, CompactionResponse, MAX_REPORTED_INPUT_TOKENS, ProviderFailureClass, Usage,
+    AdmittedProviders, CompactionRequest, CompactionResponse, MAX_REPORTED_INPUT_TOKENS,
+    ProviderFailureClass, Usage,
 };
 use crate::session::input::WorkspaceInputs;
 use crate::session::{
@@ -19,11 +20,12 @@ pub(super) const COMPACTION_CALL_DEADLINE: Duration = Duration::from_secs(120);
 impl Engine {
     /// Returns a committed success or failure record; admission and storage errors remain errors.
     pub async fn compact_session(
-        &mut self,
+        &self,
+        providers: &AdmittedProviders,
         session_id: SessionId,
         workspace: PathBuf,
     ) -> Result<CompactionRecord, EngineError> {
-        self.compact_session_inner(session_id, workspace, None)
+        self.compact_session_inner(providers, session_id, workspace, None)
             .await
             .and_then(|record| record.ok_or(EngineError::CompactionInputEmpty))
             .inspect_err(crate::diagnostics::engine_failure)
@@ -31,23 +33,27 @@ impl Engine {
 
     /// Returns `None` when the expected Run is no longer latest or its boundary was already attempted.
     pub async fn auto_compact_session(
-        &mut self,
+        &self,
+        providers: &AdmittedProviders,
         session_id: SessionId,
         workspace: PathBuf,
         expected_run_id: crate::session::RunId,
     ) -> Result<Option<CompactionRecord>, EngineError> {
-        self.compact_session_inner(session_id, workspace, Some(expected_run_id))
+        self.compact_session_inner(providers, session_id, workspace, Some(expected_run_id))
             .await
             .inspect_err(crate::diagnostics::engine_failure)
     }
 
     async fn compact_session_inner(
-        &mut self,
+        &self,
+        providers: &AdmittedProviders,
         session_id: SessionId,
         workspace: PathBuf,
         expected_run_id: Option<crate::session::RunId>,
     ) -> Result<Option<CompactionRecord>, EngineError> {
-        let provider = std::sync::Arc::clone(&self.providers.compaction[0]);
+        let _slot = self.claim()?;
+        super::admit_providers(providers)?;
+        let provider = std::sync::Arc::clone(&providers.compaction[0]);
         let identity = super::checked_identity(provider.as_ref())?;
         let mut session_lock = self.lock_session(session_id)?;
         let (events, view) = self.journal.store().load_resolved(session_id).await?;
@@ -71,10 +77,10 @@ impl Engine {
             .as_ref()
             .and_then(|config| config.providers.as_ref())
         {
-            Some(routes) if routes.compaction != self.providers.identities().compaction => {
+            Some(routes) if routes.compaction != providers.identities().compaction => {
                 return Err(EngineError::InvalidRequest);
             }
-            None if self.providers.compaction.len() > 1 => return Err(EngineError::InvalidRequest),
+            None if providers.compaction.len() > 1 => return Err(EngineError::InvalidRequest),
             _ => {}
         }
         let covered_run_id = last_run.id;
@@ -138,7 +144,7 @@ impl Engine {
                 Action::BoundaryCompaction {
                     goal: goal_id.is_some(),
                 }
-                .max_events_for(&self.providers),
+                .max_events_for(providers),
                 0,
             )
             .await?;
@@ -149,7 +155,7 @@ impl Engine {
             CompactionInputError::TooLarge => EngineError::CompactionInputTooLarge,
         })?;
         let compiler_version = prepared.compiler_version;
-        let trace = self.telemetry.begin_compaction(
+        let trace = self.config.telemetry.begin_compaction(
             session_id,
             covered_run_id,
             TraceProvider::from_profile(&identity.profile),
@@ -227,7 +233,7 @@ impl Engine {
             })
             .min(identity.limits.deadline);
         let actor = last_run.primary().map(|agent| agent.id);
-        let routing = if self.providers.compaction.len() > 1 {
+        let routing = if providers.compaction.len() > 1 {
             let actor = actor.ok_or(EngineError::InvalidRequest)?;
             let goal_id = open_view
                 .goals
@@ -237,7 +243,7 @@ impl Engine {
                 .ok_or(EngineError::InvalidHistory)?;
             Some((
                 super::routing::CallRouter {
-                    providers: self.providers.clone(),
+                    providers: providers.clone(),
                     journal: &self.journal,
                     ledger: &super::ledger::GoalLedger::new(
                         self.journal

@@ -105,12 +105,12 @@ pub(super) struct RunLoop<'a> {
     run_id: RunId,
     goal_id: crate::session::GoalId,
     primary_id: AgentRunId,
-    controls: RunControls<'a>,
+    controls: LoopControls<'a>,
     ledger: &'a GoalLedger,
     progress: Option<&'a ProgressPublisher>,
 }
 
-pub(super) struct RunControls<'a> {
+pub(super) struct LoopControls<'a> {
     pub(super) policy: CollaborationPolicy,
     pub(super) concurrency: u8,
     pub(super) goal_phase: GoalPhase,
@@ -132,7 +132,7 @@ impl<'a> RunLoop<'a> {
         journal: &'a Journal,
         providers: crate::provider::AdmittedProviders,
         identity: RunIdentity,
-        controls: RunControls<'a>,
+        controls: LoopControls<'a>,
         ledger: &'a GoalLedger,
         progress: Option<&'a ProgressPublisher>,
     ) -> Self {

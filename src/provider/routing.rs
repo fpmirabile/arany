@@ -76,6 +76,11 @@ pub type ProviderRoutes = Providers<Vec<ProviderIdentity>>;
 pub type AdmittedProviders = Providers<Vec<Arc<dyn Provider>>>;
 
 impl AdmittedProviders {
+    /// One Provider for every role, with no fallback.
+    pub fn single(provider: Arc<dyn Provider>) -> Self {
+        Self::all(vec![provider])
+    }
+
     pub(crate) fn identities(&self) -> ProviderRoutes {
         Providers {
             primary: identities(&self.primary),

@@ -163,7 +163,6 @@ async fn admit(
         },
     )
     .await
-    .map(|provider| provider.into_arc())
     .map_err(|error| {
         format!(
             "Provider role route {}/{} refused: {error}",

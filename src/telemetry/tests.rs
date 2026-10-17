@@ -1,6 +1,6 @@
 use super::config::{parse_endpoint, resolve_endpoint};
 use super::*;
-use crate::engine::{Engine, RunRequest};
+use crate::engine::{Engine, EngineConfig, RunControls, RunRequest};
 use crate::provider::{
     Delegate, Finish, Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome,
     ProviderRequest, ProviderResponse,
@@ -218,10 +218,13 @@ fn failed_child_aborts_sibling_provider_span_as_cancelled() {
                 failure,
                 requests: Arc::clone(&requests),
             };
-            let mut engine = Engine::open_with_telemetry(
+            let provider = Arc::new(provider);
+            let engine = Engine::open(
                 StateRoot::admit(&temp.path().join("state")).expect("private State"),
-                provider,
-                telemetry.clone(),
+                EngineConfig {
+                    telemetry: telemetry.clone(),
+                    ..Default::default()
+                },
             )
             .expect("traced Engine");
             let request = RunRequest {
@@ -237,7 +240,14 @@ fn failed_child_aborts_sibling_provider_span_as_cancelled() {
                 goal: crate::engine::GoalRequest::default(),
             };
             let mut run = tokio::spawn(async move {
-                let outcome = engine.run(request).await;
+                let outcome = match engine.submit(
+                    crate::provider::AdmittedProviders::single(provider),
+                    request,
+                    RunControls::default(),
+                ) {
+                    Ok(handle) => handle.await.map(|result| result.run),
+                    Err(error) => Err(error),
+                };
                 engine.close().await.expect("Engine close");
                 outcome
             });
@@ -361,10 +371,13 @@ fn timed_out_provider_call_exports_closed_error_type() {
             started,
             requests: Arc::clone(&requests),
         };
-        let mut engine = Engine::open_with_telemetry(
+        let provider = Arc::new(provider);
+        let engine = Engine::open(
             StateRoot::admit(&temp.path().join("state")).expect("private State"),
-            provider,
-            telemetry.clone(),
+            EngineConfig {
+                telemetry: telemetry.clone(),
+                ..Default::default()
+            },
         )
         .expect("traced Engine");
         let request = RunRequest {
@@ -378,7 +391,14 @@ fn timed_out_provider_call_exports_closed_error_type() {
             goal: crate::engine::GoalRequest::default(),
         };
         let mut run = tokio::spawn(async move {
-            let outcome = engine.run(request).await;
+            let outcome = match engine.submit(
+                crate::provider::AdmittedProviders::single(provider),
+                request,
+                RunControls::default(),
+            ) {
+                Ok(handle) => handle.await.map(|result| result.run),
+                Err(error) => Err(error),
+            };
             engine.close().await.expect("Engine close");
             outcome
         });

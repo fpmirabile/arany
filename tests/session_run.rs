@@ -65,6 +65,9 @@ use arany::semantic;
 #[path = "common/process.rs"]
 pub mod process;
 
+#[path = "common/engine.rs"]
+pub mod engine_support;
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "common/git.rs"]
 pub mod git;
@@ -2585,7 +2588,9 @@ impl arany::Provider for HeldProvider {
 #[test]
 #[ignore = "supervised process helper"]
 fn process_lock_holder() {
-    use arany::{CollaborationPolicy, Engine, RunRequest};
+    use arany::{CollaborationPolicy, Engine, EngineConfig, RunRequest};
+    use engine_support::run_to_end;
+    use std::sync::Arc;
 
     let state_path = std::env::var_os("ARANY_TEST_STATE_PATH").expect("state path");
     let workspace = std::env::var_os("ARANY_TEST_WORKSPACE_PATH").expect("Workspace path");
@@ -2599,15 +2604,18 @@ fn process_lock_holder() {
         .build()
         .expect("runtime");
     runtime.block_on(async {
-        let mut engine = Engine::open(
+        let provider = Arc::new(HeldProvider {
+            ready_path: ready_path.into(),
+        });
+        let engine = Engine::open(
             StateRoot::admit(std::path::Path::new(&state_path)).expect("state admission"),
-            HeldProvider {
-                ready_path: ready_path.into(),
-            },
+            EngineConfig::default(),
         )
         .expect("held Engine");
-        engine
-            .run(RunRequest {
+        run_to_end(
+            &engine,
+            &provider,
+            RunRequest {
                 session_id: Some(session_id),
                 title: None,
                 objective: "Held in another process".into(),
@@ -2616,9 +2624,10 @@ fn process_lock_holder() {
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal: arany::GoalRequest::default(),
-            })
-            .await
-            .expect("Provider remains held");
+            },
+        )
+        .await
+        .expect("Provider remains held");
     });
 }
 

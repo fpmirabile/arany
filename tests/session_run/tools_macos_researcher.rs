@@ -14,6 +14,7 @@ fn researcher_tools_survive_closed_replay_without_widening_authority() {
 
 #[cfg(any(debug_assertions, arany_ci))]
 mod journey {
+    use crate::engine_support::run_with;
     use crate::{hash, private_file};
     use arany::{
         AgentPhase, Attestation, ChildGrant, CollaborationPolicy, CompactionRequest,
@@ -21,6 +22,7 @@ mod journey {
         ProviderRequest, ProviderResponse, RunRequest, RunStatus, SessionView, StateRoot, Store,
         ToolCall, ToolDisposition, ToolResourceProfile,
     };
+    use arany::{EngineConfig, RunControls, ToolGrant};
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use std::path::Path;
@@ -243,37 +245,46 @@ done
                 }),
             );
             let requests = Arc::new(Mutex::new(Vec::new()));
-            let mut engine = Engine::open(
+            let provider = Arc::new(ResearchJourney {
+                requests: requests.clone(),
+                outcomes,
+            });
+            let engine = Engine::open(
                 state,
-                ResearchJourney {
-                    requests: requests.clone(),
-                    outcomes,
+                EngineConfig {
+                    guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                    ..Default::default()
                 },
             )
             .unwrap();
-            engine
-                .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-                .unwrap();
             let outcome = tokio::time::timeout(
                 Duration::from_secs(120),
-                engine.run(RunRequest {
-                    session_id: None,
-                    title: Some("Native researcher".into()),
-                    objective: "Research native facts without mutation".into(),
-                    images: Vec::new(),
-                    workspace: workspace.clone(),
-                    include_paths: Vec::new(),
-                    policy: CollaborationPolicy::Team {
-                        max_active_children: 1,
-                    },
-                    goal: arany::GoalRequest {
-                        budget: Some(arany::GoalBudget {
-                            max_provider_calls: Some(32),
+                run_with(
+                    &engine,
+                    &provider,
+                    RunRequest {
+                        session_id: None,
+                        title: Some("Native researcher".into()),
+                        objective: "Research native facts without mutation".into(),
+                        images: Vec::new(),
+                        workspace: workspace.clone(),
+                        include_paths: Vec::new(),
+                        policy: CollaborationPolicy::Team {
+                            max_active_children: 1,
+                        },
+                        goal: arany::GoalRequest {
+                            budget: Some(arany::GoalBudget {
+                                max_provider_calls: Some(32),
+                                ..Default::default()
+                            }),
                             ..Default::default()
-                        }),
+                        },
+                    },
+                    RunControls {
+                        tools: ToolGrant::Configured,
                         ..Default::default()
                     },
-                }),
+                ),
             )
             .await
             .expect("native researcher deadline")

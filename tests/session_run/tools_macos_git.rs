@@ -1,4 +1,6 @@
 #[cfg(any(debug_assertions, arany_ci))]
+use crate::engine_support::run_with;
+#[cfg(any(debug_assertions, arany_ci))]
 use crate::git::{host_git, tree_snapshot};
 #[cfg(any(debug_assertions, arany_ci))]
 use crate::{hash, private_file};
@@ -8,6 +10,8 @@ use arany::{
     ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, RunRequest, RunStatus,
     SessionView, StateRoot, Store, ToolCall, ToolDisposition,
 };
+#[cfg(any(debug_assertions, arany_ci))]
+use arany::{EngineConfig, RunControls, ToolGrant};
 #[cfg(any(debug_assertions, arany_ci))]
 use serde_json::json;
 #[cfg(any(debug_assertions, arany_ci))]
@@ -217,28 +221,37 @@ async fn native_git_journey_helper() {
         &serde_json::to_vec(&config).unwrap(),
     );
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let mut engine = Engine::open(
+    let provider = Arc::new(GitJourney {
+        requests: requests.clone(),
+    });
+    let engine = Engine::open(
         state,
-        GitJourney {
-            requests: requests.clone(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
         },
     )
     .unwrap();
-    engine
-        .enable_tools(env!("CARGO_BIN_EXE_arany").into())
-        .unwrap();
     let outcome = tokio::time::timeout(
         Duration::from_secs(120),
-        engine.run(RunRequest {
-            session_id: None,
-            title: Some("Git".into()),
-            objective: "Inspect Git state".into(),
-            images: Vec::new(),
-            workspace: workspace.clone(),
-            include_paths: Vec::new(),
-            policy: CollaborationPolicy::Single,
-            goal: arany::GoalRequest::default(),
-        }),
+        run_with(
+            &engine,
+            &provider,
+            RunRequest {
+                session_id: None,
+                title: Some("Git".into()),
+                objective: "Inspect Git state".into(),
+                images: Vec::new(),
+                workspace: workspace.clone(),
+                include_paths: Vec::new(),
+                policy: CollaborationPolicy::Single,
+                goal: arany::GoalRequest::default(),
+            },
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        ),
     )
     .await
     .expect("Git journey deadline")

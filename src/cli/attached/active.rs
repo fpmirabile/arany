@@ -280,6 +280,7 @@ pub(super) fn preflight_idle_run(
 }
 
 pub(super) async fn submit_objective(
+    engine: &arany::Engine,
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     goal: GoalStart,
@@ -340,8 +341,8 @@ pub(super) async fn submit_objective(
     draw_active_snapshot(terminal, view, composer, false, ActiveStop::Running, None)
         .map_err(|error| error.to_string())?;
     let future = run::run_selected(
+        engine,
         &admission.state_dir,
-        &admission.telemetry,
         run::Selection {
             workspace: &admission.workspace,
             profile: &profile,
@@ -839,6 +840,7 @@ fn draw_active_snapshot(
 }
 
 pub(super) async fn compact_current(
+    engine: &arany::Engine,
     terminal: &mut AttachedTerminal,
     admission: &Admission,
     view: &SessionView,
@@ -895,8 +897,8 @@ pub(super) async fn compact_current(
         )
         .map_err(|error| error.to_string())?;
     let future = run::compact_selected(
+        engine,
         &admission.state_dir,
-        &admission.telemetry,
         selection,
         view.id,
         &admission.workspace,

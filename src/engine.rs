@@ -12,7 +12,9 @@ use crate::session::{
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
 use crate::telemetry::Telemetry;
 use std::collections::HashMap;
+use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
@@ -35,7 +37,7 @@ use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
 use progress::ProgressPublisher;
 pub use progress::{DisplayUpdate, RunPreview, RunProgress, RunUpdate};
 use report::goal_report;
-use run_loop::{RunControls, RunIdentity, RunLoop};
+use run_loop::{LoopControls, RunIdentity, RunLoop};
 
 /// Checks bounded Workspace input before an attached draft becomes a saved Session.
 /// Run admission reads and validates the inputs again before disclosure.
@@ -82,12 +84,10 @@ pub enum EngineError {
     GoalAdmissionUncertain,
     #[error("Goal budget is exhausted")]
     GoalBudgetExhausted,
-    /// An autonomous Goal stopped after `run` committed; `reason` says why no further Run was admitted.
-    #[error("Goal stopped after a committed Run: {reason}")]
-    StoppedAfterRun {
-        run: Box<RunOutcome>,
-        reason: Box<EngineError>,
-    },
+    #[error("Engine has an active operation")]
+    Busy,
+    #[error("Guard executable unavailable")]
+    GuardUnavailable,
     #[error("Session is not idle")]
     SessionNotIdle,
     #[error("Session has no committed Run boundary to fork")]
@@ -226,6 +226,104 @@ pub struct RunOutcome {
     pub session_id: SessionId,
     pub goal_id: crate::session::GoalId,
     pub run: RunView,
+}
+
+/// Process-wide settings fixed when the Engine opens.
+#[derive(Clone, Default)]
+pub struct EngineConfig {
+    pub telemetry: Telemetry,
+    /// Launched by every Tool grant; a grant without one is refused at submission.
+    pub guard_executable: Option<PathBuf>,
+}
+
+/// The Tools one submission may use.
+#[derive(Clone, Default)]
+pub enum ToolGrant {
+    #[default]
+    None,
+    /// The State's private `tools.json`, loaded at submission.
+    Configured,
+    /// The trusted Workspace's built-in grant.
+    Trusted(crate::tools::WorkspacePermissions),
+}
+
+/// What the caller holds for one submission; every Run of its Goal loop uses them.
+#[derive(Clone, Default)]
+pub struct RunControls {
+    pub tools: ToolGrant,
+    pub approvals: Option<crate::tools::ToolApprovals>,
+    /// A pause request is sticky for the steering handle's lifetime, so each submission needs its own.
+    pub steering: Option<RunSteering>,
+    pub cancellation: RunCancellation,
+    pub progress: Option<RunProgress>,
+}
+
+/// The last committed Run of a submission.
+#[derive(Debug)]
+pub struct RunResult {
+    pub run: RunOutcome,
+    /// Why an autonomous Goal admitted no further Run after `run` committed.
+    pub stopped: Option<EngineError>,
+}
+
+pub type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<RunResult, EngineError>> + Send + 'a>>;
+
+/// One admitted submission. Awaiting the handle, or `result`, drives its Runs; dropping it first
+/// abandons the open Run as an abrupt stop. The controls are the caller's, shared with the Engine.
+pub struct RunHandle<'a> {
+    pub cancel: RunCancellation,
+    pub steer: Option<RunSteering>,
+    pub approvals: Option<crate::tools::ToolApprovals>,
+    /// Events the Engine appends from submission on; see `Subscription` for its gaps.
+    pub events: Subscription,
+    pub result: RunFuture<'a>,
+}
+
+impl<'a> IntoFuture for RunHandle<'a> {
+    type Output = Result<RunResult, EngineError>;
+    type IntoFuture = RunFuture<'a>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        self.result
+    }
+}
+
+/// One submission's Provider and resolved controls, fixed for every Run of its Goal loop.
+struct AdmittedSubmission {
+    providers: crate::provider::AdmittedProviders,
+    grant: ToolGrant,
+    tools: Option<(crate::tools::config::Config, PathBuf)>,
+    approvals: Option<crate::tools::ToolApprovals>,
+    steering: Option<RunSteering>,
+}
+
+impl AdmittedSubmission {
+    /// A pause requested while no Run is open stops the Run before it is admitted.
+    fn cancel_if_paused(&self, cancellation: &RunCancellation) {
+        if self
+            .steering
+            .as_ref()
+            .is_some_and(RunSteering::pause_requested)
+        {
+            cancellation.cancel();
+        }
+    }
+
+    fn permissions(&self) -> Option<&crate::tools::WorkspacePermissions> {
+        match &self.grant {
+            ToolGrant::Trusted(permissions) => Some(permissions),
+            ToolGrant::None | ToolGrant::Configured => None,
+        }
+    }
+}
+
+/// Frees the Engine's single operation slot when the operation ends or is dropped.
+struct OperationSlot<'a>(&'a AtomicBool);
+
+impl Drop for OperationSlot<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 struct AdmittedTurn {
@@ -452,6 +550,17 @@ mod goal_workspace_lease_tests {
         }
     }
 
+    fn submit(engine: &Engine, request: RunRequest) -> RunFuture<'_> {
+        engine
+            .submit(
+                crate::provider::AdmittedProviders::single(Arc::new(NeverProvider)),
+                request,
+                RunControls::default(),
+            )
+            .expect("idle Engine")
+            .result
+    }
+
     #[tokio::test]
     async fn dropped_start_acknowledgment_releases_the_lease_once_the_goal_is_paused() {
         let temp = tempfile::tempdir().expect("temporary root");
@@ -460,7 +569,7 @@ mod goal_workspace_lease_tests {
         let account_root = temp.path().join("account");
         let state = StateRoot::admit(&state_path).expect("private State root");
         let second_state = StateRoot::admit(&second_state_path).expect("second private State root");
-        let engine = Engine::open(state, NeverProvider).expect("Engine");
+        let engine = Engine::open(state, EngineConfig::default()).expect("Engine");
         let session_id = SessionId::new();
         let goal_id = GoalId::new();
         let workspace_identity = (7, 11);
@@ -552,7 +661,7 @@ mod goal_workspace_lease_tests {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("workspace");
         let state = StateRoot::admit(&state_path).expect("private State root");
-        let mut engine = Engine::open(state, NeverProvider).expect("Engine");
+        let engine = Engine::open(state, EngineConfig::default()).expect("Engine");
         let session_id = SessionId::new();
         let workspace_identity = crate::tools::workspace_identity(&workspace).expect("identity");
         engine
@@ -580,7 +689,7 @@ mod goal_workspace_lease_tests {
             policy: CollaborationPolicy::Single,
             goal: GoalRequest::default(),
         };
-        let mut run = Box::pin(engine.run(request));
+        let mut run = submit(&engine, request);
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::select! {
                 result = &mut run => panic!("Run returned before its link was held: {}", result.is_ok()),
@@ -601,7 +710,7 @@ mod goal_workspace_lease_tests {
     const RESUMABLE_OBJECTIVE: &str = "Resume the paused Goal after a failed append";
 
     async fn paused_goal_session(
-        engine: &mut Engine,
+        engine: &Engine,
         workspace: &std::path::Path,
     ) -> (SessionId, GoalId) {
         let session_id = SessionId::new();
@@ -667,15 +776,12 @@ mod goal_workspace_lease_tests {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("workspace");
         let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
-        let mut engine = Engine::open(state, NeverProvider).expect("Engine");
-        let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
+        let engine = Engine::open(state, EngineConfig::default()).expect("Engine");
+        let (session_id, goal_id) = paused_goal_session(&engine, &workspace).await;
         crate::fault::FaultPlan::fail_goal_append(session_id, |event| {
             matches!(event, Event::GoalResumed { .. })
         });
-        match engine
-            .run(resume_request(session_id, goal_id, &workspace))
-            .await
-        {
+        match submit(&engine, resume_request(session_id, goal_id, &workspace)).await {
             Err(EngineError::Store(_)) => {}
             Err(error) => panic!("an uncommitted resume must report its Store error, not {error}"),
             Ok(_) => panic!("Run resumed without a committed GoalResumed"),
@@ -696,13 +802,13 @@ mod goal_workspace_lease_tests {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("workspace");
         let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
-        let mut engine = Engine::open(state, NeverProvider).expect("Engine");
-        let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
+        let engine = Engine::open(state, EngineConfig::default()).expect("Engine");
+        let (session_id, goal_id) = paused_goal_session(&engine, &workspace).await;
         let (resume_entered, release_resume) =
             crate::fault::FaultPlan::gate_goal_append_acknowledgment(session_id, |event| {
                 matches!(event, Event::GoalResumed { .. })
             });
-        let mut run = Box::pin(engine.run(resume_request(session_id, goal_id, &workspace)));
+        let mut run = submit(&engine, resume_request(session_id, goal_id, &workspace));
         tokio::time::timeout(Duration::from_secs(5), async {
             tokio::select! {
                 result = &mut run => panic!("Run returned before its resume was held: {}", result.is_ok()),
@@ -726,15 +832,12 @@ mod goal_workspace_lease_tests {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("workspace");
         let state = StateRoot::admit(&temp.path().join("state")).expect("private State root");
-        let mut engine = Engine::open(state, NeverProvider).expect("Engine");
-        let (session_id, goal_id) = paused_goal_session(&mut engine, &workspace).await;
+        let engine = Engine::open(state, EngineConfig::default()).expect("Engine");
+        let (session_id, goal_id) = paused_goal_session(&engine, &workspace).await;
         crate::fault::FaultPlan::fail_goal_append(session_id, |event| {
             matches!(event, Event::GoalRunLinked { .. })
         });
-        match engine
-            .run(resume_request(session_id, goal_id, &workspace))
-            .await
-        {
+        match submit(&engine, resume_request(session_id, goal_id, &workspace)).await {
             Err(EngineError::Store(_)) => {}
             Err(error) => panic!("an uncommitted link must report its Store error, not {error}"),
             Ok(_) => panic!("Run completed without a committed link"),
@@ -816,15 +919,12 @@ fn resolve_goal_admission(
     }
 }
 
+/// One per process: it owns the Store thread until `close`, and runs one operation at a time.
 pub struct Engine {
     state: StateRoot,
     journal: Journal,
-    providers: crate::provider::AdmittedProviders,
-    telemetry: Telemetry,
-    tools: Option<(crate::tools::config::Config, PathBuf)>,
-    workspace_permissions: Option<crate::tools::WorkspacePermissions>,
-    tool_approvals: Option<crate::tools::ToolApprovals>,
-    steering: Option<RunSteering>,
+    config: EngineConfig,
+    busy: AtomicBool,
 }
 
 /// Writer locks held by one call. A paused Goal holds none: the call drops them when it returns.
@@ -952,7 +1052,7 @@ impl Engine {
     /// Closes a paused Goal that explicit resume finds out of budget, so it is no longer resumable. It
     /// runs under the Session lock and acquires no Workspace lease; no Goal span exists yet to close.
     async fn close_exhausted_goal(
-        &mut self,
+        &self,
         session_id: SessionId,
         view: &crate::session::SessionView,
         goal: &GoalAdmission,
@@ -979,43 +1079,14 @@ impl Engine {
         Ok(())
     }
 
-    pub fn open(state: StateRoot, provider: impl Provider + 'static) -> Result<Self, EngineError> {
-        Self::open_with_telemetry(state, provider, Telemetry::disabled())
-    }
-
-    pub fn open_with_telemetry(
-        state: StateRoot,
-        provider: impl Provider + 'static,
-        telemetry: Telemetry,
-    ) -> Result<Self, EngineError> {
+    pub fn open(state: StateRoot, config: EngineConfig) -> Result<Self, EngineError> {
         let journal = Journal::new(Store::open(state.try_clone()?)?);
-        let provider: Arc<dyn Provider> = Arc::new(provider);
         Ok(Self {
             state,
             journal,
-            providers: crate::provider::Providers::all(vec![provider]),
-            telemetry,
-            tools: None,
-            workspace_permissions: None,
-            tool_approvals: None,
-            steering: None,
+            config,
+            busy: AtomicBool::new(false),
         })
-    }
-
-    pub fn set_providers(
-        &mut self,
-        providers: crate::provider::AdmittedProviders,
-    ) -> Result<(), EngineError> {
-        if !providers.identities().valid() {
-            return Err(EngineError::InvalidRequest);
-        }
-        for chain in providers.values() {
-            for provider in chain {
-                checked_identity(provider.as_ref())?;
-            }
-        }
-        self.providers = providers;
-        Ok(())
     }
 
     pub async fn close(self) -> Result<(), EngineError> {
@@ -1023,43 +1094,25 @@ impl Engine {
         Ok(())
     }
 
+    /// Fails unless the State path is still private and still names the directory this Engine holds.
+    pub fn readmit_state(&self) -> Result<(), EngineError> {
+        Ok(self.state.readmit()?)
+    }
+
     /// Events this Engine appends from now on, in commit order; see `Subscription` for its gaps.
     pub fn subscribe(&self) -> Subscription {
         self.journal.subscribe()
     }
 
-    pub fn enable_tools(&mut self, guard_executable: PathBuf) -> Result<(), EngineError> {
-        let config = crate::tools::config::Config::load(&self.state)?;
-        self.tools = Some((config, guard_executable));
-        self.workspace_permissions = None;
-        Ok(())
-    }
-
-    pub fn set_tool_approvals(&mut self, approvals: crate::tools::ToolApprovals) {
-        self.tool_approvals = Some(approvals);
-    }
-
-    /// Installs the caller's handle. Its pause request is sticky for the handle's lifetime, so a
-    /// caller creates one `RunSteering` per submission.
-    pub fn set_steering(&mut self, steering: RunSteering) {
-        self.steering = Some(steering);
-    }
-
-    pub fn enable_trusted_workspace(
-        &mut self,
-        permissions: crate::tools::WorkspacePermissions,
-        workspace: &std::path::Path,
-        guard_executable: PathBuf,
-        approvals: crate::tools::ToolApprovals,
-    ) -> Result<(), EngineError> {
-        self.tools = Some((permissions.config(workspace)?, guard_executable));
-        self.workspace_permissions = Some(permissions);
-        self.tool_approvals = Some(approvals);
-        Ok(())
+    fn claim(&self) -> Result<OperationSlot<'_>, EngineError> {
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| OperationSlot(&self.busy))
+            .map_err(|_| EngineError::Busy)
     }
 
     pub async fn fork_session(
-        &mut self,
+        &self,
         source_session_id: SessionId,
         workspace: PathBuf,
         title: Option<String>,
@@ -1074,44 +1127,90 @@ impl Engine {
         .await
     }
 
-    pub async fn run(&mut self, request: RunRequest) -> Result<RunOutcome, EngineError> {
-        self.run_with_cancel(request, RunCancellation::new()).await
-    }
-
-    pub async fn run_with_cancel(
-        &mut self,
+    /// Admits one submission and returns its handle. It is refused with `Busy` while another
+    /// operation holds this Engine, when a Provider chain is invalid, and when its Tool grant
+    /// cannot be loaded. The per-role Provider chains are this submission's: the next one may bring
+    /// others.
+    pub fn submit(
+        &self,
+        providers: crate::provider::AdmittedProviders,
         request: RunRequest,
-        cancellation: RunCancellation,
-    ) -> Result<RunOutcome, EngineError> {
-        self.run_inner(request, cancellation, None)
-            .await
-            .inspect_err(crate::diagnostics::engine_failure)
-    }
-
-    pub async fn run_with_progress(
-        &mut self,
-        request: RunRequest,
-        cancellation: RunCancellation,
-        progress: RunProgress,
-    ) -> Result<RunOutcome, EngineError> {
-        self.run_inner(request, cancellation, Some(progress))
-            .await
-            .inspect_err(crate::diagnostics::engine_failure)
+        controls: RunControls,
+    ) -> Result<RunHandle<'_>, EngineError> {
+        let slot = self.claim()?;
+        admit_providers(&providers)?;
+        let guard = || {
+            self.config
+                .guard_executable
+                .clone()
+                .ok_or(EngineError::GuardUnavailable)
+        };
+        let tools = match &controls.tools {
+            ToolGrant::None => None,
+            ToolGrant::Configured => {
+                let guard = guard()?;
+                Some((crate::tools::config::Config::load(&self.state)?, guard))
+            }
+            ToolGrant::Trusted(permissions) => {
+                let guard = guard()?;
+                Some((permissions.config(&request.workspace)?, guard))
+            }
+        };
+        let RunControls {
+            tools: grant,
+            approvals,
+            steering,
+            cancellation,
+            progress,
+        } = controls;
+        let submission = AdmittedSubmission {
+            providers,
+            grant,
+            tools,
+            approvals: approvals.clone(),
+            steering: steering.clone(),
+        };
+        let events = self.journal.subscribe();
+        let run_cancellation = cancellation.clone();
+        let result = Box::pin(async move {
+            let _slot = slot;
+            let result = self
+                .run_inner(&submission, request, run_cancellation, progress)
+                .await;
+            match &result {
+                Ok(RunResult {
+                    stopped: Some(reason),
+                    ..
+                }) => crate::diagnostics::engine_failure(reason),
+                Ok(_) => {}
+                Err(error) => crate::diagnostics::engine_failure(error),
+            }
+            result
+        });
+        Ok(RunHandle {
+            cancel: cancellation,
+            steer: steering,
+            approvals,
+            events,
+            result,
+        })
     }
 
     /// Runs one admitted Run, then keeps an autonomous Goal iterating on its pinned objective.
     async fn run_inner(
-        &mut self,
+        &self,
+        submission: &AdmittedSubmission,
         request: RunRequest,
         cancellation: RunCancellation,
         progress: Option<RunProgress>,
-    ) -> Result<RunOutcome, EngineError> {
+    ) -> Result<RunResult, EngineError> {
         let workspace = request.workspace.clone();
         let include_paths = request.include_paths.clone();
         let policy = request.policy;
         let mut leases = WorkspaceLeases::new();
         // Boxed: keeps the large Run future off the caller stack in debug builds.
         let mut turn = Box::pin(self.run_turn(
+            submission,
             request,
             cancellation.clone(),
             progress.clone(),
@@ -1132,6 +1231,7 @@ impl Engine {
             };
             // Settlement left the Goal open under the same admits_next_run check, so this cannot be refused for budget.
             turn = match Box::pin(self.run_turn(
+                submission,
                 next,
                 cancellation.clone(),
                 progress.clone(),
@@ -1145,47 +1245,38 @@ impl Engine {
                 Err(EngineError::CancelledBeforeStart) => break,
                 // The earlier Finished Run stays committed; the caller gets it with the reason the loop stopped.
                 Err(error) => {
-                    return Err(EngineError::StoppedAfterRun {
-                        run: Box::new(turn.outcome),
-                        reason: Box::new(error),
+                    return Ok(RunResult {
+                        run: turn.outcome,
+                        stopped: Some(error),
                     });
                 }
             };
         }
-        if turn.exhausted() {
-            return Err(EngineError::StoppedAfterRun {
-                run: Box::new(turn.outcome),
-                reason: Box::new(EngineError::GoalBudgetExhausted),
-            });
-        }
-        Ok(turn.outcome)
+        let stopped = turn.exhausted().then_some(EngineError::GoalBudgetExhausted);
+        Ok(RunResult {
+            run: turn.outcome,
+            stopped,
+        })
     }
 
     async fn run_turn(
-        &mut self,
+        &self,
+        submission: &AdmittedSubmission,
         request: RunRequest,
         cancellation: RunCancellation,
         progress: Option<RunProgress>,
         continuation: bool,
         leases: &mut WorkspaceLeases,
     ) -> Result<RunTurn, EngineError> {
-        self.cancel_if_paused(&cancellation);
+        submission.cancel_if_paused(&cancellation);
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
 
-        let provider = Arc::clone(&self.providers.primary[0]);
-        let identity = checked_identity(provider.as_ref())?;
-        if !self.providers.identities().valid() {
-            return Err(EngineError::InvalidRequest);
-        }
-        for chain in self.providers.values() {
-            for candidate in chain {
-                checked_identity(candidate.as_ref())?;
-            }
-        }
+        let identity = checked_identity(submission.providers.primary[0].as_ref())?;
+        let providers = &submission.providers;
         if !request.images.is_empty()
-            && self.providers.values().iter().take(2).any(|chain| {
+            && providers.values().iter().take(2).any(|chain| {
                 chain
                     .iter()
                     .any(|candidate| candidate.identity().custom_provenance().is_some())
@@ -1193,19 +1284,17 @@ impl Engine {
         {
             return Err(EngineError::ImagesNotAdmitted);
         }
-        if self.tools.is_some()
-            && [&self.providers.primary, &self.providers.child]
-                .iter()
-                .any(|chain| {
-                    chain
-                        .iter()
-                        .any(|candidate| !candidate.identity().shares_account(chain[0].identity()))
-                })
+        if submission.tools.is_some()
+            && [&providers.primary, &providers.child].iter().any(|chain| {
+                chain
+                    .iter()
+                    .any(|candidate| !candidate.identity().shares_account(chain[0].identity()))
+            })
         {
             return Err(EngineError::IncompatibleProviderChain);
         }
-        if self.tools.is_some()
-            && self.providers.values().iter().take(2).any(|chain| {
+        if submission.tools.is_some()
+            && providers.values().iter().take(2).any(|chain| {
                 chain
                     .iter()
                     .any(|candidate| candidate.identity().custom_provenance().is_some())
@@ -1216,9 +1305,16 @@ impl Engine {
         let previews = progress.as_ref().is_some_and(RunProgress::previews_enabled);
         let finish_after_run = request.goal.finish_after_run;
         let admitted = self
-            .admit_turn(&request, identity, continuation, previews, leases)
+            .admit_turn(
+                submission,
+                &request,
+                identity,
+                continuation,
+                previews,
+                leases,
+            )
             .await?;
-        let prepared = self.prepare_turn(&request, identity, &admitted)?;
+        let prepared = self.prepare_turn(submission, &request, identity, &admitted)?;
         let AdmittedTurn {
             session_id,
             workspace_identity,
@@ -1263,9 +1359,10 @@ impl Engine {
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
-        let trace = self
-            .telemetry
-            .trace_run(session_id, goal.id, (context_started, context_ended));
+        let trace =
+            self.config
+                .telemetry
+                .trace_run(session_id, goal.id, (context_started, context_ended));
         // Reduces the open state that appends validate; the closed view would reject this Run's links.
         let view = self
             .journal
@@ -1409,28 +1506,28 @@ impl Engine {
                         ..RunInput::new(role, objective)
                     },
                 };
-                if let Some(steering) = &self.steering {
+                if let Some(steering) = &submission.steering {
                     steering.begin_run();
                 }
                 // Boxed: the Run loop's future is large and would overflow a small caller stack.
                 Box::pin(
                     RunLoop::new(
                         &self.journal,
-                        self.providers.clone(),
+                        submission.providers.clone(),
                         RunIdentity {
                             session_id,
                             run_id,
                             goal_id: goal.id,
                             primary_id: agent_run_id,
                         },
-                        RunControls {
+                        LoopControls {
                             policy: request.policy,
                             concurrency: provider_concurrency,
                             goal_phase: goal.phase,
                             cancellation,
                             tools: tools.as_ref(),
-                            approvals: self.tool_approvals.as_ref(),
-                            steering: self.steering.clone(),
+                            approvals: submission.approvals.as_ref(),
+                            steering: submission.steering.clone(),
                         },
                         &ledger,
                         publisher.as_ref(),
@@ -1460,7 +1557,8 @@ impl Engine {
 
     /// Resolves the Goal and takes the Session, lineage and Workspace admissions a Run needs.
     async fn admit_turn(
-        &mut self,
+        &self,
+        submission: &AdmittedSubmission,
         request: &RunRequest,
         identity: &crate::provider::ProviderIdentity,
         continuation: bool,
@@ -1468,7 +1566,7 @@ impl Engine {
         leases: &WorkspaceLeases,
     ) -> Result<AdmittedTurn, EngineError> {
         self.validate_request(request)?;
-        if self.tools.is_some() && identity.custom_provenance().is_some() {
+        if submission.tools.is_some() && identity.custom_provenance().is_some() {
             return Err(EngineError::InvalidRequest);
         }
         if identity.custom_provenance().is_some() && !request.images.is_empty() {
@@ -1515,21 +1613,28 @@ impl Engine {
         // Run start reserves the GoalStarted objective envelope, the MessageAccepted objective and image envelopes, the Goal lifecycle and the first action; each later action admits its own.
         let first_action = Action::ProviderCall {
             previews,
-            steering: self.steering.is_some(),
+            steering: submission.steering.is_some(),
         };
         let event_slots = RUN_START_EVENTS
-            + first_action.max_events_for(&self.providers)
+            + first_action.max_events_for(&submission.providers)
             + usize::from(request.session_id.is_none());
         self.journal
             .admit_run_start(session_id, event_slots)
             .await?;
-        let provisional_workspace_lock = if goal.phase == crate::session::GoalPhase::Implementation
-            && self.tools.as_ref().is_some_and(|(config, _)| config.write)
-        {
-            self.acquire_goal_workspace(leases, goal.id, workspace_identity)?
-        } else {
-            None
+        let writes = match &submission.grant {
+            ToolGrant::None => false,
+            ToolGrant::Configured => submission
+                .tools
+                .as_ref()
+                .is_some_and(|(config, _)| config.write),
+            ToolGrant::Trusted(_) => true,
         };
+        let provisional_workspace_lock =
+            if goal.phase == crate::session::GoalPhase::Implementation && writes {
+                self.acquire_goal_workspace(leases, goal.id, workspace_identity)?
+            } else {
+                None
+            };
         Ok(AdmittedTurn {
             session_id,
             workspace_identity,
@@ -1546,6 +1651,7 @@ impl Engine {
     /// Admits the Tools, loads the pinned Workspace inputs and compiles the Run's context and config.
     fn prepare_turn(
         &self,
+        submission: &AdmittedSubmission,
         request: &RunRequest,
         identity: &crate::provider::ProviderIdentity,
         admitted: &AdmittedTurn,
@@ -1555,10 +1661,10 @@ impl Engine {
         let goal = &admitted.goal;
         let objective = &admitted.objective;
         let budget = admitted.budget;
-        if let Some(permissions) = &self.workspace_permissions {
+        if let Some(permissions) = submission.permissions() {
             permissions.verify(&request.workspace)?;
         }
-        let mut tools = self
+        let mut tools = submission
             .tools
             .as_ref()
             .map(|(config, executable)| {
@@ -1575,7 +1681,7 @@ impl Engine {
         {
             return Err(crate::tools::ToolError::ChangedInput.into());
         }
-        if let (Some(permissions), Some(runtime)) = (&self.workspace_permissions, &tools)
+        if let (Some(permissions), Some(runtime)) = (submission.permissions(), &tools)
             && !permissions.matches_identity(runtime.workspace_identity())
         {
             return Err(crate::tools::ToolError::ChangedInput.into());
@@ -1601,7 +1707,7 @@ impl Engine {
             ensure_session_workspace(view, workspace_device, workspace_inode)?;
         }
         let context_started = SystemTime::now();
-        let steering_reserved = if self.steering.is_some() {
+        let steering_reserved = if submission.steering.is_some() {
             MAX_STEERING_CONTEXT_BYTES
         } else {
             0
@@ -1637,7 +1743,8 @@ impl Engine {
             1
         } else {
             identity.limits.concurrency.min(
-                self.providers
+                submission
+                    .providers
                     .child
                     .iter()
                     .map(|provider| provider.identity().limits.concurrency)
@@ -1645,7 +1752,7 @@ impl Engine {
                     .unwrap_or(1),
             )
         };
-        let routes = self.providers.identities();
+        let routes = submission.providers.identities();
         let inherited = routes
             .values()
             .iter()
@@ -1775,17 +1882,6 @@ impl Engine {
         })
     }
 
-    /// A pause requested while no Run is open stops the Run before it is admitted.
-    fn cancel_if_paused(&self, cancellation: &RunCancellation) {
-        if self
-            .steering
-            .as_ref()
-            .is_some_and(RunSteering::pause_requested)
-        {
-            cancellation.cancel();
-        }
-    }
-
     fn validate_request(&self, request: &RunRequest) -> Result<(), EngineError> {
         if (request.objective.trim().is_empty()
             && request.images.is_empty()
@@ -1811,6 +1907,19 @@ impl Engine {
         }
         Ok(())
     }
+}
+
+/// Admits a submission's per-role Provider chains before any of them is called.
+fn admit_providers(providers: &crate::provider::AdmittedProviders) -> Result<(), EngineError> {
+    if !providers.identities().valid() {
+        return Err(EngineError::InvalidRequest);
+    }
+    for chain in providers.values() {
+        for provider in chain {
+            checked_identity(provider.as_ref())?;
+        }
+    }
+    Ok(())
 }
 
 fn checked_identity(
