@@ -151,9 +151,21 @@ impl Fixture {
             }
         };
         let requests = provider.requests.lock().unwrap().clone();
+        let unconsumed = provider.responses.lock().unwrap().len();
         assert!(
-            provider.responses.lock().unwrap().is_empty(),
-            "all expected calls consumed"
+            unconsumed == 0,
+            "all expected calls consumed: {unconsumed} left, run {:?}, tools {:?}",
+            result.run.status,
+            result
+                .run
+                .tools
+                .iter()
+                .map(|tool| tool.observation.as_ref().map(|observation| (
+                    observation.disposition,
+                    observation.attestation.is_some(),
+                    &observation.output
+                )))
+                .collect::<Vec<_>>()
         );
         (result, requests, humans)
     }
