@@ -95,6 +95,8 @@ pub enum ToolError {
     MissingConfiguration,
     #[error("Tool configuration is invalid or unsafe")]
     Configuration,
+    #[error("another process is updating private account state; retry when that update finishes")]
+    AccountBusy,
     #[error("required native Tool protection is unavailable")]
     ProtectionUnavailable,
     #[error("Guard waiting queue is full; retry when capacity is available")]
@@ -412,6 +414,7 @@ impl ToolRuntime {
         let mut receipt = self.config.receipt();
         receipt.max_context_bytes = self.context_limit_bytes as u32;
         receipt.permissions_digest = self.permissions.as_ref().map(|snapshot| snapshot.digest);
+        receipt.unguarded_rules_digest = self.exact_command_rules().map(|rules| rules.digest);
         receipt
     }
 
@@ -421,21 +424,24 @@ impl ToolRuntime {
             .map(|snapshot| snapshot.config.as_ref())
     }
 
-    #[expect(dead_code, reason = "consumed by the unguarded approval integration")]
-    pub(crate) fn exact_command_rules(&self) -> Option<&unguarded_rules::ExactCommandRules> {
+    fn exact_command_rules(&self) -> Option<&unguarded_rules::ExactCommandRules> {
         self.unguarded_rules.as_ref()
     }
 
-    #[expect(dead_code, reason = "consumed by the unguarded approval integration")]
-    pub(crate) fn workspace_path(&self) -> &Path {
-        &self.workspace
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the unguarded approval integration")
+    )]
+    pub(crate) fn matches_exact_command_rule(&self, call: &ToolCall) -> bool {
+        self.exact_command_rules()
+            .is_some_and(|rules| rules.matches(call, self.workspace_identity, &self.workspace))
     }
 
-    #[expect(dead_code, reason = "consumed by the unguarded approval integration")]
-    pub(crate) fn record_exact_command_rule(
-        &self,
-        command: unguarded_rules::ExactCommand<'_>,
-    ) -> Result<(), ToolError> {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the unguarded approval integration")
+    )]
+    pub(crate) fn record_exact_command_rule(&self, call: &ToolCall) -> Result<(), ToolError> {
         fs::validate_workspace(self)?;
         let state = self
             .cache_state
@@ -445,7 +451,7 @@ impl ToolRuntime {
             state,
             &self.workspace,
             self.workspace_identity,
-            command,
+            call,
         )
     }
 

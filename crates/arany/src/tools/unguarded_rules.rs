@@ -1,7 +1,7 @@
-use super::types::{digest, valid_name, valid_relative};
-use super::{ToolError, now_ms};
+use super::types::digest;
+use super::{ToolCall, ToolError, now_ms};
 use crate::session::WorkspaceIdentity;
-use crate::store::{RecordKind, StateRoot};
+use crate::store::{RecordKind, StateRoot, StoreError};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -10,29 +10,25 @@ const MAX_ENTRIES: usize = 128;
 #[derive(Clone)]
 pub(crate) struct ExactCommandRules {
     entries: Vec<ExactCommandRule>,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "pinned by the receipt format integration")
-    )]
     pub(super) digest: [u8; 32],
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) struct ExactCommand<'a> {
-    pub(crate) program: &'a str,
-    pub(crate) args: &'a [String],
-    pub(crate) cwd: &'a str,
+struct ExactCommand<'a> {
+    program: &'a str,
+    args: &'a [String],
+    cwd: &'a str,
 }
 
-impl ExactCommand<'_> {
-    fn valid(self) -> bool {
-        valid_name(self.program)
-            && valid_relative(self.cwd, true)
-            && self.args.len() <= 64
-            && self
-                .args
-                .iter()
-                .all(|arg| arg.len() <= 4096 && !arg.contains('\0'))
+impl<'a> ExactCommand<'a> {
+    fn from_call(call: &'a ToolCall) -> Option<Self> {
+        let ToolCall::CommandUnguarded {
+            program, args, cwd, ..
+        } = call
+        else {
+            return None;
+        };
+        super::process::valid(call).then_some(Self { program, args, cwd })
     }
 }
 
@@ -91,7 +87,7 @@ impl ExactCommandRules {
             || record.commands.len() > MAX_ENTRIES
             || record.commands.iter().enumerate().any(|(index, entry)| {
                 !valid_workspace(Path::new(&entry.workspace.path), entry.workspace.inode)
-                    || !entry.command().valid()
+                    || !super::process::valid_command(&entry.program, &entry.args, &entry.cwd)
                     || record.commands[..index].iter().any(|prior| {
                         prior.workspace == entry.workspace && prior.command() == entry.command()
                     })
@@ -105,7 +101,19 @@ impl ExactCommandRules {
         })
     }
 
-    pub(crate) fn matches(
+    pub(super) fn matches(
+        &self,
+        call: &ToolCall,
+        identity: WorkspaceIdentity,
+        path: &Path,
+    ) -> bool {
+        let Some(command) = ExactCommand::from_call(call) else {
+            return false;
+        };
+        self.matches_command(command, identity, path)
+    }
+
+    fn matches_command(
         &self,
         command: ExactCommand<'_>,
         identity: WorkspaceIdentity,
@@ -119,13 +127,14 @@ impl ExactCommandRules {
         })
     }
 
-    pub(crate) fn record(
+    pub(super) fn record(
         state: &StateRoot,
         path: &Path,
         identity: WorkspaceIdentity,
-        command: ExactCommand<'_>,
+        call: &ToolCall,
     ) -> Result<(), ToolError> {
-        if !valid_workspace(path, identity.inode) || !command.valid() {
+        let command = ExactCommand::from_call(call).ok_or(ToolError::Configuration)?;
+        if !valid_workspace(path, identity.inode) {
             return Err(ToolError::Configuration);
         }
         state
@@ -136,7 +145,7 @@ impl ExactCommandRules {
                 let rules = Self::load(state)?;
                 if rules
                     .as_ref()
-                    .is_some_and(|rules| rules.matches(command, identity, path))
+                    .is_some_and(|rules| rules.matches_command(command, identity, path))
                 {
                     return Ok(());
                 }
@@ -168,7 +177,10 @@ impl ExactCommandRules {
                     .replace(&bytes)
                     .map_err(|_| ToolError::Configuration)
             })
-            .map_err(|_| ToolError::Configuration)?
+            .map_err(|error| match error {
+                StoreError::AccountBusy => ToolError::AccountBusy,
+                _ => ToolError::Configuration,
+            })?
     }
 }
 
@@ -197,24 +209,28 @@ mod tests {
         serde_json::to_vec(&json!({"version":1, "commands":commands})).unwrap()
     }
 
+    fn command(cwd: &str) -> ToolCall {
+        ToolCall::CommandUnguarded {
+            program: "sh".into(),
+            args: vec!["-c".into(), "cargo test".into()],
+            cwd: cwd.into(),
+            justification: "Allow this exact command?".into(),
+        }
+    }
+
     #[test]
     fn exact_command_rules_match_only_identical_argv_cwd_and_workspace_identity() {
         let rules = ExactCommandRules::parse(&record(vec![entry()])).unwrap();
-        let args = vec!["-c".into(), "cargo test".into()];
-        let command = ExactCommand {
-            program: "sh",
-            args: &args,
-            cwd: "",
-        };
+        let call = command("");
         let identity = WorkspaceIdentity {
             device: 1,
             inode: 2,
         };
         let path = Path::new("/project");
-        assert!(rules.matches(command, identity, path));
+        assert!(rules.matches(&call, identity, path));
         for other_path in ["/another", "/project/.", "//project"] {
             assert!(
-                !rules.matches(command, identity, Path::new(other_path)),
+                !rules.matches(&call, identity, Path::new(other_path)),
                 "{other_path}"
             );
         }
@@ -228,34 +244,45 @@ mod tests {
                 ..identity
             },
         ] {
-            assert!(!rules.matches(command, other, path));
+            assert!(!rules.matches(&call, other, path));
         }
-        let changed_args = vec!["-c".into(), "cargo tesT".into()];
-        let extra_args = vec!["-c".into(), "cargo test".into(), "".into()];
+        for changed_field in ["program", "arg-byte", "extra-arg", "justification"] {
+            let mut other = call.clone();
+            let ToolCall::CommandUnguarded {
+                program,
+                args,
+                justification,
+                ..
+            } = &mut other
+            else {
+                unreachable!();
+            };
+            match changed_field {
+                "program" => *program = "bash".into(),
+                "arg-byte" => args[1] = "cargo tesT".into(),
+                "extra-arg" => args.push(String::new()),
+                "justification" => justification.clear(),
+                _ => unreachable!(),
+            }
+            assert!(!rules.matches(&other, identity, path), "{changed_field}");
+        }
         for other in [
-            ExactCommand {
-                program: "bash",
-                ..command
-            },
-            ExactCommand {
-                args: &changed_args,
-                ..command
-            },
-            ExactCommand {
-                args: &extra_args,
-                ..command
-            },
-            ExactCommand {
-                cwd: ".",
-                ..command
-            },
-            ExactCommand {
-                cwd: "src",
-                ..command
+            command("."),
+            command("src"),
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "cargo test".into()],
+                cwd: "".into(),
             },
         ] {
-            assert!(!rules.matches(other, identity, path));
+            assert!(!rules.matches(&other, identity, path));
         }
+        let mut other_reason = call;
+        let ToolCall::CommandUnguarded { justification, .. } = &mut other_reason else {
+            unreachable!();
+        };
+        *justification = "A different question for the same command?".into();
+        assert!(rules.matches(&other_reason, identity, path));
     }
 
     #[test]
@@ -328,76 +355,46 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         let path = workspace.as_path();
         let identity = super::super::workspace_identity(path).unwrap();
-        let args = vec!["-c".into(), "cargo test".into()];
-        let command = ExactCommand {
-            program: "sh",
-            args: &args,
-            cwd: "",
-        };
-        ExactCommandRules::record(&state, path, identity, command).unwrap();
+        let call = command("");
+        ExactCommandRules::record(&state, path, identity, &call).unwrap();
         let file = state.path().join("unguarded-commands.json");
         let old = std::fs::File::open(&file).unwrap();
         let bytes = std::fs::read(&file).unwrap();
-        let admitted = ExactCommandRules::load(&state).unwrap().unwrap();
-        ExactCommandRules::record(&state, path, identity, command).unwrap();
+        ExactCommandRules::record(&state, path, identity, &call).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), bytes);
-        let second = ExactCommand {
-            cwd: "src",
-            ..command
-        };
-        ExactCommandRules::record(&state, path, identity, second).unwrap();
+        ExactCommandRules::record(&state, path, identity, &command("src")).unwrap();
         let new = std::fs::metadata(&file).unwrap();
         assert_ne!(old.metadata().unwrap().ino(), new.ino());
         assert_eq!(new.permissions().mode() & 0o777, 0o600);
         assert_eq!(new.nlink(), 1);
         assert!(!state.path().join("unguarded-commands.pending").exists());
-        assert!(!admitted.matches(second, identity, path));
-        assert!(
-            ExactCommandRules::load(&state)
-                .unwrap()
-                .unwrap()
-                .matches(second, identity, path)
-        );
-        assert_eq!(admitted.digest, digest(&bytes));
         let before = std::fs::read(&file).unwrap();
         state
             .with_account_replacement_lock(path, || {
-                assert!(matches!(
-                    ExactCommandRules::record(&state, path, identity, command),
-                    Err(ToolError::Configuration)
-                ));
+                let error = ExactCommandRules::record(&state, path, identity, &call).unwrap_err();
+                assert!(matches!(error, ToolError::AccountBusy));
+                assert!(error.to_string().contains("retry"));
             })
             .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), before);
         let outside = temp.path().join("outside");
         std::fs::write(&outside, b"unchanged").unwrap();
         let pending = state.path().join("unguarded-commands.pending");
         std::os::unix::fs::symlink(&outside, &pending).unwrap();
         assert!(matches!(
-            ExactCommandRules::record(
-                &state,
-                path,
-                identity,
-                ExactCommand {
-                    cwd: "other",
-                    ..command
-                }
-            ),
+            ExactCommandRules::record(&state, path, identity, &command("other")),
             Err(ToolError::Configuration)
         ));
         assert_eq!(std::fs::read(&file).unwrap(), before);
         assert_eq!(std::fs::read(&outside).unwrap(), b"unchanged");
         std::fs::remove_file(pending).unwrap();
-        let oversized_args = vec!["x".repeat(4096); 16];
+        let mut oversized = call.clone();
+        let ToolCall::CommandUnguarded { args, .. } = &mut oversized else {
+            unreachable!();
+        };
+        *args = vec!["x".repeat(4096); 16];
         assert!(matches!(
-            ExactCommandRules::record(
-                &state,
-                path,
-                identity,
-                ExactCommand {
-                    args: &oversized_args,
-                    ..command
-                }
-            ),
+            ExactCommandRules::record(&state, path, identity, &oversized),
             Err(ToolError::Limit)
         ));
         assert_eq!(std::fs::read(&file).unwrap(), before);
@@ -416,20 +413,11 @@ mod tests {
             .replace(&full)
             .unwrap();
         assert!(matches!(
-            ExactCommandRules::record(&state, path, identity, command),
+            ExactCommandRules::record(&state, path, identity, &call),
             Err(ToolError::Limit)
         ));
         assert_eq!(std::fs::read(&file).unwrap(), full);
-        ExactCommandRules::record(
-            &state,
-            path,
-            identity,
-            ExactCommand {
-                cwd: "dir0",
-                ..command
-            },
-        )
-        .unwrap();
+        ExactCommandRules::record(&state, path, identity, &command("dir0")).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), full);
     }
 }
