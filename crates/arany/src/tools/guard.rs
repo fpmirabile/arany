@@ -543,7 +543,10 @@ pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<
             Err(ToolError::ProtectionUnavailable | ToolError::Operation)
                 if attempt < attempts && tokio::time::Instant::now() < deadline =>
             {
-                tokio::time::sleep(pause * attempt as u32).await;
+                tokio::time::sleep_until(
+                    deadline.min(tokio::time::Instant::now() + pause * attempt as u32),
+                )
+                .await;
                 attempt += 1;
             }
             result => return result,
