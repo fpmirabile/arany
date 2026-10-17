@@ -557,3 +557,14 @@ fn optional_effort_schema(_: &mut SchemaGenerator) -> Schema {
 fn optional_disposition_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"enum": ["succeeded", "denied", "failed", "conflict", "limit", "cancelled", "uncertain", null]})
 }
+
+// A new ToolDisposition variant fails this match until the schema enum above lists it.
+const _: fn(arany::ToolDisposition) = |disposition| match disposition {
+    arany::ToolDisposition::Succeeded
+    | arany::ToolDisposition::Denied
+    | arany::ToolDisposition::Failed
+    | arany::ToolDisposition::Conflict
+    | arany::ToolDisposition::Limit
+    | arany::ToolDisposition::Cancelled
+    | arany::ToolDisposition::Uncertain => {}
+};
