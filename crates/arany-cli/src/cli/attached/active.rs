@@ -910,10 +910,12 @@ pub(super) async fn compact_current(
     loop {
         tokio::select! {
             result = &mut future => return Ok(match result {
-                Ok(record) => CompactionOutcome::Notice(record.as_ref().map_or_else(
-                    || "Automatic compaction skipped; Run boundary changed or already compacted".into(),
-                    compaction_notice,
-                )),
+                Ok(Some(record)) => CompactionOutcome::Notice(
+                    with_compaction_switches(&admission.state_dir, view, compaction_notice(&record)).await,
+                ),
+                Ok(None) => CompactionOutcome::Notice(
+                    "Automatic compaction skipped; Run boundary changed or already compacted".into(),
+                ),
                 Err(error) => CompactionOutcome::Unavailable(error),
             }),
             input = terminal.next_input() => {
@@ -981,6 +983,40 @@ pub(super) async fn compact_current(
             }
         }
     }
+}
+
+fn compaction_switches(view: &SessionView) -> Vec<&arany::ProviderFallback> {
+    view.runs.last().map_or_else(Vec::new, |run| {
+        run.provider_fallbacks
+            .iter()
+            .filter(|(_, fallback)| fallback.role == arany::ProviderRole::Compaction)
+            .map(|(_, fallback)| fallback)
+            .collect()
+    })
+}
+
+/// Appends the Provider switches this compaction committed; earlier switches are already shown.
+async fn with_compaction_switches(
+    state_dir: &std::path::Path,
+    before: &SessionView,
+    notice: String,
+) -> String {
+    let shown = compaction_switches(before).len();
+    match super::load_view(state_dir, before.id).await {
+        Ok(after) => append_switch_notices(notice, &compaction_switches(&after)[shown..]),
+        Err(error) => {
+            format!("{notice}\nError: compaction Provider switches could not be reloaded: {error}")
+        }
+    }
+}
+
+fn append_switch_notices(notice: String, switches: &[&arany::ProviderFallback]) -> String {
+    switches.iter().fold(notice, |text, fallback| {
+        format!(
+            "{text}\n{}",
+            crate::presentation::escape_terminal(&fallback.notice())
+        )
+    })
 }
 
 fn compaction_notice(record: &CompactionRecord) -> String {
@@ -1074,6 +1110,27 @@ mod tests {
             .expect("Session")
             .goals
             .remove(0)
+    }
+
+    #[test]
+    fn compaction_notice_appends_only_this_compactions_switches() {
+        let identity = |model: &str| {
+            arany::ProviderIdentity::new("openai", model, arany::Provenance::native())
+        };
+        let switch = arany::ProviderFallback {
+            role: arany::ProviderRole::Compaction,
+            call_index: 0,
+            failure: arany::ProviderCallDisposition::Unavailable,
+            from: identity("gpt-5.4"),
+            to: identity("gpt-5.4-mini"),
+        };
+        assert_eq!(
+            append_switch_notices("Compaction saved".into(), &[]),
+            "Compaction saved"
+        );
+        let text = append_switch_notices("Compaction saved".into(), &[&switch]);
+        assert_eq!(text, format!("Compaction saved\n{}", switch.notice()));
+        assert!(text.contains("compaction"));
     }
 
     #[test]
