@@ -88,7 +88,7 @@ async fn rejected_child_feedback_uses_the_committed_account_failure() {
     engine.close().await.unwrap();
     let (replay, _) = committed(root.path(), run.session_id).await;
     assert!(
-        render_run_feedback(&replay.runs[0])
+        run_feedback(&replay.runs[0])
             .unwrap()
             .contains("Provider denied account access.")
     );
@@ -137,7 +137,7 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                 engine.close().await.unwrap();
                 let (replay, events) = committed(root.path(), outcome.session_id).await;
                 if !cancel && call_disposition != ProviderCallDisposition::Finished {
-                    let feedback = render_run_feedback(&replay.runs[0]).expect("failure guidance");
+                    let feedback = run_feedback(&replay.runs[0]).expect("failure guidance");
                     for (reason, text) in [
                         (
                             arany::ProviderFailureReason::StreamProtocol,
@@ -256,7 +256,7 @@ async fn fallback_feedback_names_the_committed_replacement_model() {
     engine.close().await.unwrap();
     let (view, _) = committed(root.path(), run.session_id).await;
     assert!(
-        render_run_feedback(&view.runs[0])
+        render_provider_fallbacks(&view.runs[0])
             .unwrap()
             .contains("fallback-model")
     );

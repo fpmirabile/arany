@@ -1655,7 +1655,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                 b"current"
             );
             assert!(
-                arany_cli::presentation::render_run_feedback(&outcome.run)
+                arany_cli::presentation::run_feedback(&outcome.run)
                     .unwrap()
                     .contains("before the action started")
             );
@@ -1801,7 +1801,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
             assert!(outcome.run.assistant_message.is_none());
             assert_proposal_requests(&requests, 17);
             assert!(
-                !arany_cli::presentation::render_run_feedback(&outcome.run)
+                !arany_cli::presentation::run_feedback(&outcome.run)
                     .unwrap()
                     .contains("approval expired")
             );
@@ -3029,7 +3029,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
         );
         if outcome.run.status == RunStatus::Failed {
             assert!(
-                arany_cli::presentation::render_run_feedback(&replay.runs[0])
+                arany_cli::presentation::run_feedback(&replay.runs[0])
                     .unwrap()
                     .contains("Action denied or approval expired"),
                 "{name}: a failed optional review must not hide the human denial"

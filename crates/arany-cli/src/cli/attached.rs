@@ -1383,9 +1383,7 @@ fn paused_goal_notice(resume_admitted: bool) -> &'static str {
     }
 }
 
-/// A paused Goal's notice follows the Run's feedback. Cancelled Run feedback only
-/// restates the cancellation that the notice already covers, so the notice replaces it;
-/// provider fallback notices are kept in every case.
+// Cancelled Run feedback repeats the cancellation that the paused notice covers; fallbacks stay.
 fn submission_notice(
     paused_goal: Option<&'static str>,
     run_status: RunStatus,

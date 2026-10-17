@@ -532,7 +532,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             },
         ]);
         let view = replay(denied).unwrap().unwrap();
-        let feedback = arany_cli::presentation::render_run_feedback(&view.runs[0]).unwrap();
+        let feedback = arany_cli::presentation::run_feedback(&view.runs[0]).unwrap();
         if later_failure {
             assert!(
                 feedback.contains("structured outcome contract"),
@@ -758,7 +758,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Some("Build cache outcome is uncertain; inspect Session history before retrying.")
     );
     assert_eq!(
-        arany_cli::presentation::render_run_feedback(&view.runs[0]).as_deref(),
+        arany_cli::presentation::run_feedback(&view.runs[0]).as_deref(),
         Some(
             "Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed."
         )
