@@ -162,19 +162,19 @@ fn push_unguarded_facts(
     goal: &crate::session::GoalView,
     omitted_facts: &mut bool,
 ) {
-    for tool in view
+    let count = view
         .runs
         .iter()
         .filter(|task_run| goal.run_ids.contains(&task_run.id))
         .flat_map(|task_run| &task_run.tools)
         .filter(|tool| tool.ran_unguarded())
-    {
+        .count();
+    if count > 0 {
         push_goal_report_item(
             report,
             GoalReportSection::Unresolved,
             &format!(
-                "{} ran on the host outside the Guard; its effects were not validated as a changeset.",
-                goal_report_call_label(&tool.intent.call)
+                "{count} unguarded host run(s) executed outside the Guard; their effects were not validated as a changeset."
             ),
             omitted_facts,
         );

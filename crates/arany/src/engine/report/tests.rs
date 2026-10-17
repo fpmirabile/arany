@@ -646,7 +646,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         status: RunStatus::Finished,
         accepted_sequence: 1,
         finished_sequence: Some(2),
-        tools: vec![tool],
+        tools: vec![tool; 100],
         tool_compaction_summary: None,
         tool_compaction_covered_count: 0,
         display: Vec::new(),
@@ -708,7 +708,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         report
             .unresolved
             .iter()
-            .any(|item| item.contains("Unguarded command cargo ran on the host outside the Guard"))
+            .any(|item| item.contains("100 unguarded host run(s) executed outside the Guard"))
     );
     assert!(
         report
