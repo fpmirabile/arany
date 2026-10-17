@@ -942,6 +942,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
                             let permissions = match permissions::open_or_recover(
                                 &mut terminal,
                                 &admission.workspace,
+                                "Cancel",
                             )
                             .await?
                             {

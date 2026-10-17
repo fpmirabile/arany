@@ -88,10 +88,10 @@ pub struct RuntimeProfileOption {
 pub enum TrustRecordError {
     #[error("workspace-permissions.json uses unsupported version {0}; this Arany reads version 2")]
     UnsupportedVersion(u64),
-    #[error("workspace-permissions.json is malformed or larger than 64 KiB")]
+    #[error("workspace-permissions.json is malformed")]
     Malformed,
     #[error(
-        "workspace-permissions.json is not a private owner-only regular file; fix its permissions or remove it"
+        "workspace-permissions.json is not a private owner-only regular file within 64 KiB; fix or remove it"
     )]
     RecordNotPrivate,
     #[error("the Arany state directory is not private; fix its permissions")]
@@ -137,7 +137,7 @@ struct Entry {
 
 fn record_error(error: StoreError) -> TrustRecordError {
     match error {
-        // A symlink or non-regular record fails to open rather than failing the check.
+        // Only a symlink fails to open; FIFOs and directories fail the privacy check instead.
         StoreError::StateNotPrivate | StoreError::Io(_) => TrustRecordError::RecordNotPrivate,
         _ => TrustRecordError::StateUnavailable,
     }
@@ -1152,6 +1152,27 @@ mod tests {
             .unwrap();
         let error = WorkspacePermissions::load(&path, &root).err().unwrap();
         assert_eq!(error, TrustRecordError::Malformed);
+        assert_eq!(error.to_string(), "workspace-permissions.json is malformed");
         assert!(!error.to_string().contains("not json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversize_trust_record_is_named_as_not_private_and_never_reset() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let path = temp.path().join("project");
+        std::fs::create_dir(&path).unwrap();
+        let record = root.path().join("workspace-permissions.json");
+        std::fs::write(&record, vec![b' '; 64 * 1024 + 1]).unwrap();
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let error = WorkspacePermissions::load(&path, &root).err().unwrap();
+        assert_eq!(error, TrustRecordError::RecordNotPrivate);
+        assert!(error.to_string().contains("within 64 KiB"));
+        assert!(!error.is_resettable());
+        assert!(prepare_reset_with(&path, root.try_clone().unwrap()).is_err());
+        assert!(record.exists());
     }
 }
