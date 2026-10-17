@@ -491,7 +491,7 @@ impl<'a> RunLoop<'a> {
                         Ok(false) if self.ledger().active_time_exhausted() => {
                             return self.settle_stopped_primary().await;
                         }
-                        Ok(false) => return self.fail_for_budget().await,
+                        Ok(false) => return self.fail_primary().await,
                         Err(EngineError::GoalBudgetExhausted) => {
                             return self.settle_stopped_primary().await;
                         }

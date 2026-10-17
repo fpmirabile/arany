@@ -1499,6 +1499,42 @@ mod goal_replay_tests {
             "a Goal not closed by exhaustion is not continuable"
         );
 
+        for (disposition, cache_update) in [
+            (
+                ToolDisposition::Succeeded,
+                crate::tools::CacheUpdate::Uncertain,
+            ),
+            (
+                ToolDisposition::Cancelled,
+                crate::tools::CacheUpdate::NotApplicable,
+            ),
+            (
+                ToolDisposition::Uncertain,
+                crate::tools::CacheUpdate::NotApplicable,
+            ),
+        ] {
+            let mut unknown = base.clone();
+            let intent = read_intent(run_id, agent_run_id, "src/lib.rs");
+            unknown.runs[0].tools.push(ToolView {
+                intent: intent.clone(),
+                observation: Some(ToolObservation {
+                    intent,
+                    disposition,
+                    enforcement_cause: None,
+                    output: String::new(),
+                    attestation: None,
+                    cache_update,
+                }),
+                review_call_index: None,
+                permission_verdict: None,
+                finished_sequence: Some(2),
+            });
+            assert!(
+                unknown.continuable_goal().is_none(),
+                "an unknown Tool outcome in the last Run ({disposition:?}, {cache_update:?})"
+            );
+        }
+
         let target = GoalId::new();
         let view = replay(vec![continued(target, &|_| {})])
             .expect("a matching continuation replays")

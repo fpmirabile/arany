@@ -657,9 +657,9 @@ impl SessionView {
                     .find_map(|run_id| self.runs.iter().find(|run| run.id == *run_id))
                     .is_some_and(|run| {
                         run.tools.iter().all(|tool| {
-                            tool.observation.as_ref().is_some_and(|observation| {
-                                observation.disposition != crate::tools::ToolDisposition::Uncertain
-                            })
+                            tool.observation
+                                .as_ref()
+                                .is_some_and(|observation| !observation.stops_run())
                         })
                     })
                 && !self
