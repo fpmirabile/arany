@@ -160,13 +160,23 @@ impl Host {
         };
         let requests = provider.requests.lock().unwrap().len();
         let unconsumed = provider.responses.lock().unwrap().len();
-        assert!(replies.is_empty(), "every scripted reply is consumed");
-        Seen {
+        let seen = Seen {
             outcome,
             prompts,
             requests,
             unconsumed,
-        }
+        };
+        assert!(
+            replies.is_empty(),
+            "every scripted reply is consumed; first tool: {:?}",
+            seen.outcome
+                .run
+                .tools
+                .first()
+                .and_then(|tool| tool.observation.as_ref())
+                .map(|o| (o.disposition, &o.output))
+        );
+        seen
     }
 
     async fn reopen(self, session: SessionId) -> (Vec<arany::EventEnvelope>, SessionView) {

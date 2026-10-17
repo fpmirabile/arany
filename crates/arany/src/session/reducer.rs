@@ -208,15 +208,21 @@ pub struct ToolView {
 }
 
 impl ToolView {
-    /// A host run that may have had effects: attested, or left uncertain.
+    /// A host run that may have had effects: attested or uncertain, or approved without a recorded outcome.
     pub fn ran_unguarded(&self) -> bool {
         self.intent.call.is_unguarded()
-            && self.observation.as_ref().is_some_and(|observation| {
-                matches!(
-                    observation.attestation,
-                    Some(crate::tools::Attestation::Unguarded(_))
-                ) || observation.disposition == crate::tools::ToolDisposition::Uncertain
-            })
+            && match &self.observation {
+                Some(observation) => {
+                    matches!(
+                        observation.attestation,
+                        Some(crate::tools::Attestation::Unguarded(_))
+                    ) || observation.disposition == crate::tools::ToolDisposition::Uncertain
+                }
+                None => self
+                    .permission_verdict
+                    .as_ref()
+                    .is_some_and(|verdict| verdict.approved),
+            }
     }
 }
 

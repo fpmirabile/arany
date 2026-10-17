@@ -730,6 +730,13 @@ const GUARD_ALIASES: [&str; 8] = [
 
 // Inside the Guard these roots name private mounts; on the host the same bytes name other or no paths.
 pub(crate) fn uses_guard_alias(args: &[String]) -> bool {
+    // The Guard exports these variables; the host environment sets only ARANY_TOOL_WORKSPACE.
+    if args.iter().any(|arg| {
+        arg.match_indices("ARANY_TOOL_")
+            .any(|(at, _)| !arg[at..].starts_with("ARANY_TOOL_WORKSPACE"))
+    }) {
+        return true;
+    }
     let name_byte = |byte: u8| byte.is_ascii_alphanumeric() || b"_-.".contains(&byte);
     args.iter().any(|arg| {
         let bytes = arg.as_bytes();
@@ -1266,6 +1273,8 @@ mod unguarded_vocabulary_tests {
             &["--out=/scratch/x"],
             &["/inputs/sh/data"],
             &["a:/programs/b"],
+            &["$ARANY_TOOL_INPUTS/build"],
+            &["${ARANY_TOOL_SKILLS}/x"],
         ] {
             assert!(uses_guard_alias(&owned(args)), "{args:?}");
             let call = unguarded(args, "");

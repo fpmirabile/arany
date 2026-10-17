@@ -3024,6 +3024,47 @@ mod goal_replay_tests {
         }
     }
 
+    #[test]
+    fn an_approved_host_run_without_an_outcome_counts_as_unguarded() {
+        use crate::tools::permissions::{Decision, PermissionSource};
+        let mut scenario = unguarded_scenario(
+            Some(("exit 7", ToolDisposition::Failed, None)),
+            false,
+            false,
+        );
+        let count = |view: &SessionView| view.runs[0].unguarded_tools();
+        assert_eq!(count(&scenario.view), 0);
+        let (host, run, agent) = (scenario.host.clone(), scenario.run, scenario.agent);
+        let mut refused = scenario.view.clone();
+        apply(
+            &mut refused,
+            verdict_event(
+                &host,
+                None,
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::UnavailableApproval,
+                false,
+            ),
+        )
+        .unwrap();
+        assert_eq!(count(&refused), 0);
+        let _ = (run, agent);
+        apply(
+            &mut scenario.view,
+            verdict_event(
+                &host,
+                None,
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::Human,
+                true,
+            ),
+        )
+        .unwrap();
+        assert_eq!(count(&scenario.view), 1);
+    }
+
     fn verdict_event(
         intent: &EffectIntent,
         mode: Option<crate::tools::permissions::PermissionMode>,

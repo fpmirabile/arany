@@ -79,7 +79,7 @@ pub(crate) struct RunTrace {
     compaction_requested: Option<ProviderIdentity>,
     run_end: Option<(TraceOutcome, SystemTime)>,
     goal_end: Option<(GoalStatus, SystemTime)>,
-    unguarded_effects: i64,
+    unguarded: Vec<crate::session::ToolView>,
 }
 
 struct AgentSpan {
@@ -212,7 +212,7 @@ impl Telemetry {
             compaction_requested: None,
             run_end: None,
             goal_end: None,
-            unguarded_effects: 0,
+            unguarded: Vec::new(),
         })
     }
 
@@ -334,6 +334,13 @@ impl RunTrace {
         self.open(&envelope.event, at);
         self.mark(envelope, at);
         self.close(envelope, at);
+    }
+
+    fn unguarded_effects(&self) -> i64 {
+        self.unguarded
+            .iter()
+            .filter(|tool| tool.ran_unguarded())
+            .count() as i64
     }
 
     fn run_id(&self) -> Option<RunId> {
@@ -496,15 +503,32 @@ impl RunTrace {
                 record,
                 ..
             } => self.provider_call(*agent_run_id, record, at),
-            Event::ToolFinished { observation, .. }
-                if observation.intent.call.is_unguarded()
-                    && (matches!(
-                        observation.attestation,
-                        Some(crate::tools::Attestation::Unguarded(_))
-                    ) || observation.disposition
-                        == crate::tools::ToolDisposition::Uncertain) =>
-            {
-                self.unguarded_effects += 1;
+            Event::ToolStarted { intent, .. } if intent.call.is_unguarded() => {
+                self.unguarded.push(crate::session::ToolView {
+                    intent: intent.clone(),
+                    observation: None,
+                    review_call_index: None,
+                    permission_verdict: None,
+                    finished_sequence: None,
+                });
+            }
+            Event::ToolPermissionDecided { verdict, .. } => {
+                if let Some(tool) = self
+                    .unguarded
+                    .iter_mut()
+                    .find(|tool| tool.intent.digest() == verdict.intent_digest)
+                {
+                    tool.permission_verdict = Some(verdict.clone());
+                }
+            }
+            Event::ToolFinished { observation, .. } => {
+                if let Some(tool) = self
+                    .unguarded
+                    .iter_mut()
+                    .find(|tool| tool.intent == observation.intent)
+                {
+                    tool.observation = Some(observation.clone());
+                }
             }
             Event::AgentFinished {
                 agent_run_id,
@@ -566,7 +590,7 @@ impl RunTrace {
                     if let Some(context) = &span.context {
                         context.span().set_attribute(KeyValue::new(
                             "arany.run.unguarded_effects",
-                            self.unguarded_effects,
+                            self.unguarded_effects(),
                         ));
                     }
                     span.finish_at(outcome, at);
@@ -674,7 +698,7 @@ impl RunTrace {
                         "arany.goal.uncertain_active_ms",
                         saturating_i64(goal.uncertain_active_ms),
                     ),
-                    KeyValue::new("arany.goal.unguarded_effects", self.unguarded_effects),
+                    KeyValue::new("arany.goal.unguarded_effects", self.unguarded_effects()),
                 ] {
                     context.span().set_attribute(attribute);
                 }
