@@ -260,7 +260,8 @@ impl Engine {
                     ledger,
                     publisher: None,
                 };
-                match router
+                // A fresh token is never cancelled, so the router always yields an outcome.
+                let (response, provider) = router
                     .compact(
                         request,
                         *actor,
@@ -268,22 +269,9 @@ impl Engine {
                         crate::RunCancellation::new(),
                     )
                     .await?
-                {
-                    Some((response, provider)) => {
-                        let (status, response_id, usage, wire_provenance) =
-                            compaction_outcome(response);
-                        (status, response_id, usage, wire_provenance, provider)
-                    }
-                    None => (
-                        CompactionStatus::Failed {
-                            reason: CompactionFailure::Cancelled,
-                        },
-                        None,
-                        Usage::default(),
-                        None,
-                        std::sync::Arc::clone(&provider),
-                    ),
-                }
+                    .ok_or(EngineError::CoordinatorFailed)?;
+                let (status, response_id, usage, wire_provenance) = compaction_outcome(response);
+                (status, response_id, usage, wire_provenance, provider)
             }
             None => {
                 let response = tokio::time::timeout(provider_deadline, provider.compact(request))
