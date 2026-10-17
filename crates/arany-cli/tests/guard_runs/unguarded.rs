@@ -306,7 +306,7 @@ async fn unguarded_rerun_is_offered_only_after_an_attested_guard_failure_and_run
         report
             .unresolved
             .iter()
-            .any(|item| item.contains("ran on the host outside the Guard"))
+            .any(|item| item.contains("unguarded host run(s) executed outside the Guard"))
     );
 }
 
