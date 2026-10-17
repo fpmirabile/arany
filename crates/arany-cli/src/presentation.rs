@@ -377,7 +377,7 @@ pub fn render_run_feedback(run: &RunView) -> Option<String> {
     }
 }
 
-fn run_feedback(run: &RunView) -> Option<String> {
+pub fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {

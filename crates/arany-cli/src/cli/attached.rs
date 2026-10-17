@@ -1,6 +1,5 @@
 use super::exec::ProviderArg;
 use crate::accounts::chatgpt;
-use crate::presentation::render_run_feedback;
 use crate::terminal::{
     AttachedTerminal, Composer, ComposerEdit, InteractiveCommand, Submission, TerminalInput,
     parse_submission,
@@ -1385,19 +1384,25 @@ fn paused_goal_notice(resume_admitted: bool) -> &'static str {
 }
 
 /// A paused Goal's notice follows the Run's feedback. Cancelled Run feedback only
-/// restates the cancellation that the notice already covers, so the notice replaces it.
+/// restates the cancellation that the notice already covers, so the notice replaces it;
+/// provider fallback notices are kept in every case.
 fn submission_notice(
     paused_goal: Option<&'static str>,
     run_status: RunStatus,
     run_feedback: Option<String>,
+    fallbacks: Option<String>,
 ) -> Option<String> {
-    match paused_goal {
+    let feedback = match paused_goal {
         Some(notice) if run_status == RunStatus::Cancelled => Some(notice.to_owned()),
         Some(notice) => Some(match run_feedback {
             Some(feedback) => format!("{feedback} {notice}"),
             None => notice.to_owned(),
         }),
         None => run_feedback,
+    };
+    match (fallbacks, feedback) {
+        (Some(fallbacks), Some(feedback)) => Some(format!("{fallbacks}\n{feedback}")),
+        (fallbacks, feedback) => fallbacks.or(feedback),
     }
 }
 
@@ -1494,7 +1499,7 @@ async fn finish_submission(
         .map_err(|error| error.to_string())?;
     let mut notice = retained_draft_notice(composer);
     // A cancelled autonomous loop keeps its Goal open; the reloaded view says how to continue it.
-    let run_feedback = render_run_feedback(&outcome.run);
+    let run_feedback = crate::presentation::run_feedback(&outcome.run);
     let run_feedback = match stop {
         Some(reason) => Some(match run_feedback {
             Some(feedback) => format!("Error: Goal stopped after this Run: {reason}. {feedback}"),
@@ -1507,7 +1512,12 @@ async fn finish_submission(
         .goal(outcome.goal_id)
         .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
         .map(|goal| paused_goal_notice(goal.admits_resume(view)));
-    let feedback = submission_notice(paused_goal, outcome.run.status, run_feedback);
+    let feedback = submission_notice(
+        paused_goal,
+        outcome.run.status,
+        run_feedback,
+        crate::presentation::render_provider_fallbacks(&outcome.run),
+    );
     if let Some(feedback) = feedback {
         if composer.is_empty() {
             notice = Some(Feedback::History(feedback));
@@ -2271,28 +2281,42 @@ mod tests {
             submission_notice(
                 Some(INTERRUPTED_GOAL_NOTICE),
                 RunStatus::Cancelled,
-                cancelled.clone()
+                cancelled.clone(),
+                None
             ),
             Some(INTERRUPTED_GOAL_NOTICE.to_owned())
         );
         assert_eq!(
-            submission_notice(None, RunStatus::Cancelled, cancelled.clone()),
+            submission_notice(None, RunStatus::Cancelled, cancelled.clone(), None),
             cancelled
         );
-        assert_eq!(submission_notice(None, RunStatus::Finished, None), None);
+        assert_eq!(
+            submission_notice(None, RunStatus::Finished, None, None),
+            None
+        );
     }
 
     #[test]
     fn interrupted_goal_notice_keeps_feedback_from_a_finished_run() {
         let cache = Some("Cache updated for the next Run.".to_owned());
         assert_eq!(
-            submission_notice(Some(INTERRUPTED_GOAL_NOTICE), RunStatus::Finished, cache),
+            submission_notice(
+                Some(INTERRUPTED_GOAL_NOTICE),
+                RunStatus::Finished,
+                cache,
+                None
+            ),
             Some(format!(
                 "Cache updated for the next Run. {INTERRUPTED_GOAL_NOTICE}"
             ))
         );
         assert_eq!(
-            submission_notice(Some(INTERRUPTED_GOAL_NOTICE), RunStatus::Finished, None),
+            submission_notice(
+                Some(INTERRUPTED_GOAL_NOTICE),
+                RunStatus::Finished,
+                None,
+                None
+            ),
             Some(INTERRUPTED_GOAL_NOTICE.to_owned())
         );
     }
@@ -2306,9 +2330,24 @@ mod tests {
             submission_notice(
                 Some(paused_goal_notice(false)),
                 RunStatus::Cancelled,
-                Some("Run cancelled.".to_owned())
+                Some("Run cancelled.".to_owned()),
+                None
             ),
             Some(OUT_OF_BUDGET_GOAL_NOTICE.to_owned())
+        );
+    }
+
+    #[test]
+    fn paused_goal_notice_keeps_provider_fallbacks_of_a_cancelled_run() {
+        let fallback = "Provider fallback (primary): the failed call may have consumed usage.";
+        assert_eq!(
+            submission_notice(
+                Some(INTERRUPTED_GOAL_NOTICE),
+                RunStatus::Cancelled,
+                Some("Run cancelled.".to_owned()),
+                Some(fallback.to_owned())
+            ),
+            Some(format!("{fallback}\n{INTERRUPTED_GOAL_NOTICE}"))
         );
     }
 
