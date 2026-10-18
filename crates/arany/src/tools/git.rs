@@ -745,6 +745,8 @@ mod tests {
 
     fn host_git_output(repository: &Path, home: &Path, args: &[&str]) -> std::process::Output {
         std::process::Command::new(discover().expect("pinned git").executable)
+            // `git commit` otherwise detaches `maintenance run --auto`, which can write `.git` after the fixture returns.
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
             .args(args)
             .current_dir(repository)
             .env_clear()
@@ -904,6 +906,35 @@ mod tests {
         let mut out = Vec::new();
         walk(root, root, &mut out);
         out
+    }
+
+    fn assert_unchanged(root: &Path, before: &[(PathBuf, Vec<u8>)]) {
+        let after = tree(root);
+        if after == before {
+            return;
+        }
+        let find = |set: &[(PathBuf, Vec<u8>)], path: &Path| {
+            set.iter().find(|e| e.0 == path).map(|e| e.1.len())
+        };
+        let mut diff = Vec::new();
+        for (path, bytes) in before {
+            match after.iter().find(|e| &e.0 == path) {
+                None => diff.push(format!("removed {}", path.display())),
+                Some(e) if &e.1 != bytes => diff.push(format!(
+                    "changed {} ({:?} -> {:?} bytes)",
+                    path.display(),
+                    find(before, path),
+                    find(&after, path)
+                )),
+                _ => {}
+            }
+        }
+        for (path, _) in &after {
+            if !before.iter().any(|e| &e.0 == path) {
+                diff.push(format!("added {}", path.display()));
+            }
+        }
+        panic!("repository .git changed: {diff:#?}");
     }
 
     fn scratch(temp: &Path, index: usize) -> PathBuf {
@@ -1569,7 +1600,7 @@ mod tests {
             }
         }
         assert_eq!(std::fs::read_dir(&markers).unwrap().count(), 0);
-        assert_eq!(tree(&workspace.join(".git")), before);
+        assert_unchanged(&workspace.join(".git"), &before);
     }
 
     #[test]
