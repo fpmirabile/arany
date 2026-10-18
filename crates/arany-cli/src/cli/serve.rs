@@ -8,6 +8,7 @@ use tokio::{
     sync::{mpsc, watch},
 };
 
+mod approvals;
 mod items;
 mod server;
 mod threads;
