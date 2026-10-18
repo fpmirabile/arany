@@ -361,6 +361,15 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
+    // The profile an unassigned child resolves to; spawns and their proposals must agree on it.
+    pub(super) fn default_child_profile(&self) -> Option<String> {
+        self.routing
+            .providers
+            .roster
+            .as_ref()
+            .map(|roster| roster.snapshot.providers.child.clone())
+    }
+
     pub(super) fn pause_requested(&self) -> bool {
         self.controls
             .steering
@@ -465,7 +474,7 @@ impl<'a> RunLoop<'a> {
             self.append(Event::ProviderCallRecorded {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
-                record: call_record(phase, &first, valid_response),
+                record: call_record(phase, &first, valid_response, self.default_child_profile()),
             })
             .await?;
             self.settle_active_segment(active_segment)?;
@@ -972,7 +981,12 @@ fn call_usage(result: &CallResult) -> (Option<u32>, Option<u32>) {
     }
 }
 
-fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> ProviderCallRecord {
+fn call_record(
+    phase: AgentPhase,
+    result: &CallResult,
+    valid_response: bool,
+    default_profile: Option<String>,
+) -> ProviderCallRecord {
     let disposition = match result {
         CallResult::Response(ProviderResponse {
             outcome: ProviderOutcome::Finish(_),
@@ -1018,6 +1032,7 @@ fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> 
                             |child| crate::session::worker::ChildAssignment::Researcher {
                                 objective: child.objective.clone(),
                                 definition: d.agent.clone(),
+                                profile: child.profile.clone().or_else(|| default_profile.clone()),
                             },
                         )
                         .collect(),

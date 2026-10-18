@@ -196,6 +196,7 @@ mod goal_replay_tests {
                 vec![crate::session::worker::ChildAssignment::Researcher {
                     objective: "Check the child result".into(),
                     definition: None,
+                    profile: None,
                 }]
             }),
             phase,
@@ -222,10 +223,12 @@ mod goal_replay_tests {
                             role: AgentRole::Child,
                             objective: Some(objective),
                             definition,
+                            profile,
                             ..
                         } => Some(crate::session::worker::ChildAssignment::Researcher {
                             objective: objective.clone(),
                             definition: definition.clone(),
+                            profile: profile.clone(),
                         }),
                         _ => None,
                     })

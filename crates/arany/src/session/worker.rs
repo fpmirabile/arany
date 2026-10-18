@@ -170,6 +170,8 @@ pub enum ChildAssignment {
         objective: String,
         #[serde(deserialize_with = "Option::deserialize")]
         definition: Option<String>,
+        #[serde(deserialize_with = "Option::deserialize")]
+        profile: Option<String>,
     },
     Editor {
         assignment: Box<EditorAssignment>,
@@ -182,9 +184,13 @@ impl ChildAssignment {
             Self::Researcher {
                 objective,
                 definition,
+                profile,
             } => {
                 !objective.is_empty()
                     && objective.len() <= 2048
+                    && profile
+                        .as_deref()
+                        .is_none_or(crate::provider::valid_profile_name)
                     && definition
                         .as_ref()
                         .is_none_or(|n| crate::tools::types::valid_name(n))

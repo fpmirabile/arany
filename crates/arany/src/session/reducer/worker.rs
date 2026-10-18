@@ -329,6 +329,7 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
         ordinal,
         objective,
         definition,
+        profile,
         grant,
         assignment: pins,
         ..
@@ -357,10 +358,12 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
             ChildAssignment::Researcher {
                 objective: expected,
                 definition: selected,
+                profile: selected_profile,
             },
             None,
         ) if objective.as_ref() == Some(expected)
             && definition == selected
+            && profile == selected_profile
             && grant != Some(ChildGrant::EditOnly) =>
         {
             Ok(())
@@ -369,6 +372,7 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
             if assignment.as_ref() == &p.request
                 && objective.as_ref() == Some(&p.request.mission)
                 && definition.as_ref() == Some(&p.request.definition)
+                && profile.is_none()
                 && grant == Some(ChildGrant::EditOnly) =>
         {
             let goal = active_run_goal(view, run_id).ok_or(ReplayError::InvalidTransition)?;

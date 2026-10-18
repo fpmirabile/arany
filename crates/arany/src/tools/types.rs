@@ -251,7 +251,10 @@ impl ToolCall {
 
     // Engine preparation steps over snapshot-pinned input; never a model Tool, so no hook sees or narrows them.
     pub(crate) fn is_internal(&self) -> bool {
-        matches!(self, Self::ParseAgentDefinition { .. })
+        matches!(
+            self,
+            Self::ParseAgentDefinition { .. } | Self::PrepareWorker { .. }
+        )
     }
 
     pub(crate) fn is_git_read(&self) -> bool {
@@ -1392,5 +1395,35 @@ mod unguarded_vocabulary_tests {
         ] {
             assert!(!uses_guard_alias(&owned(args)), "{args:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod internal_call_tests {
+    use super::*;
+
+    #[test]
+    fn engine_preparation_calls_are_internal_and_model_calls_are_not() {
+        let preparation = ToolCall::PrepareWorker {
+            preparation: crate::session::worker::WorkerPreparation {
+                assignment_id: crate::session::AgentRunId::new(),
+                purpose: crate::session::worker::WorkerDataPurpose::Base,
+                max_bytes: 1,
+                max_chunks: 1,
+            },
+        };
+        let parse = ToolCall::ParseAgentDefinition {
+            index: 0,
+            raw_digest: [1; 32],
+        };
+        assert!(preparation.is_internal() && parse.is_internal());
+        assert!(
+            !ToolCall::Read {
+                path: "a".into(),
+                offset: 0,
+                limit: 1
+            }
+            .is_internal()
+        );
     }
 }

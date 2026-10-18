@@ -540,7 +540,7 @@ impl RunLoop<'_> {
 
     fn permission(&self, grant: &Grant<'_>, runtime: &ToolRuntime, call: &ToolCall) -> Permission {
         // Definition parsing is an internal Engine step, never a model Tool; it runs only in the fixed Guard grant.
-        if matches!(call, ToolCall::ParseAgentDefinition { .. }) {
+        if call.is_internal() {
             return Permission {
                 decision: Decision::Allow,
                 basis: PermissionSource::Mode,
@@ -1186,7 +1186,7 @@ impl RunLoop<'_> {
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id: intent.agent_run_id,
-            record: call_record(AgentPhase::ToolReview, &result, valid),
+            record: call_record(AgentPhase::ToolReview, &result, valid, None),
         })
         .await?;
         if let Some(active_segment) = active_segment {

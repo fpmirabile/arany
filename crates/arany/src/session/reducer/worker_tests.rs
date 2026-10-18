@@ -1158,6 +1158,38 @@ fn fixture_from(f: &Fixture) -> Fixture {
 }
 
 #[test]
+fn worker_protocol_researcher_spawn_must_match_its_proposed_profile() {
+    for (proposed, spawned) in [(Some("spare"), None), (None, Some("spare"))] {
+        let mut f = fixture();
+        let Event::ProviderCallRecorded { record, .. } = f.events.iter_mut().rev().find(|e| matches!(e, Event::ProviderCallRecorded { record, .. } if record.delegation.is_some())).unwrap() else { unreachable!() };
+        record
+            .delegation
+            .as_mut()
+            .unwrap()
+            .push(ChildAssignment::Researcher {
+                objective: "Research".into(),
+                definition: None,
+                profile: proposed.map(str::to_owned),
+            });
+        refused(
+            &f,
+            Event::AgentSpawned {
+                run_id: f.run,
+                agent_run_id: AgentRunId::new(),
+                ordinal: 2,
+                role: AgentRole::Child,
+                objective: Some("Research".into()),
+                grant: Some(ChildGrant::ReadOnly),
+                definition: None,
+                profile: spawned.map(str::to_owned),
+                assignment: None,
+            },
+            "profile differs from the proposal",
+        );
+    }
+}
+
+#[test]
 fn worker_protocol_private_loss_is_local_and_c1_failure_remains_fatal() {
     for research_fails in [false, true] {
         let mut f = fixture();
@@ -1170,6 +1202,7 @@ fn worker_protocol_private_loss_is_local_and_c1_failure_remains_fatal() {
             .push(ChildAssignment::Researcher {
                 objective: "Research".into(),
                 definition: None,
+                profile: None,
             });
         f.push(Event::AgentSpawned {
             run_id: f.run,
