@@ -685,6 +685,11 @@ async fn native_file_journey_helper() {
                 assert_eq!(receipt.limits, observation.intent.limits);
             }
             arany::Attestation::Unguarded(_) => panic!("macOS journeys never run unguarded"),
+            arany::Attestation::WorkerRead { .. }
+            | arany::Attestation::WorkerMutation { .. }
+            | arany::Attestation::WorkerData { .. } => {
+                panic!("macOS journeys never run worker Tools")
+            }
         }
     }
     let command: serde_json::Value =

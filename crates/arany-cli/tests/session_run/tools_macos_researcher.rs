@@ -486,6 +486,9 @@ done
                     assert_eq!(receipt.limits, observation.intent.limits);
                 }
                 Attestation::Unguarded(_) => panic!("researchers never run unguarded"),
+                Attestation::WorkerRead { .. }
+                | Attestation::WorkerMutation { .. }
+                | Attestation::WorkerData { .. } => panic!("researchers never run worker Tools"),
             }
         }
         let output =

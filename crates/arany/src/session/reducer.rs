@@ -870,6 +870,33 @@ fn compute_definition_registry(
     ))
 }
 
+// Every permission mode that narrows an agent: the worker parent grant, its own grant and the definition.
+fn mode_restrictions(
+    run: &RunView,
+    actor: AgentRunId,
+) -> Result<Vec<crate::tools::permissions::PermissionMode>, ReplayError> {
+    let Some(agent) = run.agents.iter().find(|agent| agent.id == actor) else {
+        return Ok(Vec::new());
+    };
+    let Some(name) = agent.definition.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let definition = definition_registry(run)?
+        .get(name)
+        .ok_or(ReplayError::InvalidTransition)?
+        .permission_mode;
+    let (parent, grant) = agent.assignment.as_ref().map_or((None, None), |w| {
+        (
+            run.config
+                .as_ref()
+                .and_then(|c| c.worker_policy.as_ref())
+                .and_then(|p| p.parent_grant.permission_mode),
+            w.pins.grant.permission_mode,
+        )
+    });
+    Ok(parent.into_iter().chain(grant).chain(definition).collect())
+}
+
 fn definition_mode(
     run: &RunView,
     actor: AgentRunId,

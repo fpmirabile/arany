@@ -1510,18 +1510,6 @@ fn worker_protocol_bulk_file_content_and_serialized_bounds() {
     ] {
         assert!(decode_data(raw, WorkerDataPurpose::Handover).is_err());
     }
-    for chunks in [0, 1, WORKER_CHUNKS] {
-        for attempts in 0..=8 {
-            let bound = worker_event_bound(chunks, attempts, 8, 8, 8).unwrap();
-            assert_eq!(
-                bound,
-                chunks as u32 + 12 + 4 * u32::from(attempts) + 6 + 7 + 7 * u32::from(attempts) + 7
-            );
-        }
-    }
-    assert_eq!(worker_event_bound(usize::MAX, 8, 8, 8, 8), None);
-    assert_eq!(worker_event_bound(1, 9, 8, 8, 8), None);
-    assert_eq!(worker_event_bound(1, 8, 0, 8, 8), None);
 }
 
 pub(crate) fn completed_fixture() -> Fixture {
@@ -1678,7 +1666,7 @@ fn worker_protocol_nonoverlap_and_completion_order() {
 }
 
 #[test]
-fn worker_protocol_escaped_assignment_and_action_bounds() {
+fn worker_protocol_escaped_assignment_bounds() {
     let mut f = fixture();
     let mut spawn = f.events.pop().unwrap();
     if let Event::AgentSpawned {
@@ -1700,24 +1688,6 @@ fn worker_protocol_escaped_assignment_and_action_bounds() {
         };
     }
     assert!(spawn.payload().is_err(), "escaped metadata exceeds 64 KiB");
-    let f = completed_fixture();
-    for (index, event) in f.events.iter().enumerate() {
-        if let Event::ToolStarted { intent, .. } = event {
-            let observed=f.events[index+1..].iter().position(|e|matches!(e,Event::ToolFinished {observation,..} if observation.intent.id==intent.id)).unwrap()+1;
-            let chunks = if let ToolCall::PrepareWorker { preparation } = &intent.call {
-                usize::from(preparation.max_chunks)
-            } else {
-                usize::from(matches!(intent.target, EffectTarget::WorkerView { .. }))
-            };
-            let terminal_tail = 4 + 6;
-            assert!(
-                observed + terminal_tail
-                    <= worker_event_bound(chunks, 1, 1, 1, 1).unwrap() as usize,
-                "action {}",
-                intent.call.label()
-            );
-        }
-    }
 }
 
 #[test]
@@ -2101,6 +2071,402 @@ fn worker_protocol_publication_cannot_be_reclassified_as_discarded() {
             },
             "publication receipt or uncertainty survives stop",
         );
+    }
+}
+
+#[test]
+fn worker_protocol_in_flight_integration_blocks_discard_and_release() {
+    for observed in [false, true] {
+        let mut f = fixture();
+        f.mutation();
+        let data = f.finish_worker();
+        let h = f.handover(data.clone());
+        let intent = f.intent(
+            f.primary,
+            ToolCall::ApplyChangeset {
+                source: ChangesetSource::WorkerHandover {
+                    assignment_id: f.child,
+                    handover_sequence: h,
+                    data,
+                },
+            },
+            EffectTarget::Workspace,
+        );
+        f.started(&intent);
+        if observed {
+            let attestation = Some(Attestation::Guard(receipt(&intent)));
+            f.observed(&intent, ToolDisposition::Succeeded, attestation, "{}");
+        }
+        let stopped = f.push(Event::WorkerStopObserved {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            record: WorkerStopRecord {
+                reason: WorkerStopReason::Cancelled,
+            },
+        });
+        let settlement = WorkerSettlement {
+            assignment_id: f.child,
+            handover_sequence: Some(h),
+            reason: WorkerSettlementReason::Stopped,
+            cause_sequence: stopped,
+        };
+        refused(
+            &f,
+            Event::WorkerHandoverDiscarded {
+                run_id: f.run,
+                agent_run_id: f.primary,
+                record: settlement.clone(),
+            },
+            "discard while the integration is in flight",
+        );
+        refused(
+            &f,
+            Event::WorkerLeaseReleased {
+                run_id: f.run,
+                agent_run_id: f.primary,
+                record: settlement,
+            },
+            "release while the integration is in flight",
+        );
+    }
+}
+
+#[test]
+fn worker_protocol_refused_base_capture_spends_its_slot_and_other_workers_proceed() {
+    let mut f = fixture();
+    let first = f.child;
+    let cut = f
+        .events
+        .iter()
+        .position(|e| {
+            matches!(e, Event::ToolStarted { intent, .. }
+                if matches!(intent.call, ToolCall::PrepareWorker { .. }))
+        })
+        .unwrap();
+    f.events.truncate(cut);
+    let mut second = None;
+    for event in &mut f.events {
+        if let Event::ProviderCallRecorded { record, .. } = event
+            && let Some(plan) = record.delegation.as_mut()
+        {
+            let ChildAssignment::Editor { assignment } = plan[0].clone() else {
+                unreachable!()
+            };
+            let mut other = assignment;
+            other.lease = vec!["src/b".into()];
+            other.mission = "Edit src b".into();
+            plan.push(ChildAssignment::Editor {
+                assignment: other.clone(),
+            });
+            second = Some(*other);
+        }
+    }
+    let second = second.unwrap();
+    let refused = f.intent(
+        f.primary,
+        ToolCall::PrepareWorker {
+            preparation: WorkerPreparation {
+                assignment_id: first,
+                purpose: WorkerDataPurpose::Base,
+                max_bytes: 4096,
+                max_chunks: 1,
+            },
+        },
+        EffectTarget::Workspace,
+    );
+    f.started(&refused);
+    f.observed(&refused, ToolDisposition::Denied, None, "refused");
+    f.child = AgentRunId::new();
+    let prep = f.intent(
+        f.primary,
+        ToolCall::PrepareWorker {
+            preparation: WorkerPreparation {
+                assignment_id: f.child,
+                purpose: WorkerDataPurpose::Base,
+                max_bytes: 4096,
+                max_chunks: 1,
+            },
+        },
+        EffectTarget::Workspace,
+    );
+    f.started(&prep);
+    f.base = f.data(
+        &prep,
+        WorkerDataPurpose::Base,
+        &serde_json::to_vec(&WorkerManifest {
+            entries: vec![WorkerManifestEntry {
+                path: "src".into(),
+                version: WorkerBaseVersion::Directory,
+            }],
+        })
+        .unwrap(),
+    );
+    f.observed(
+        &prep,
+        ToolDisposition::Succeeded,
+        Some(Attestation::WorkerData {
+            guard: None,
+            intent_digest: prep.digest(),
+            data: f.base.clone(),
+        }),
+        "{}",
+    );
+    let grant = WorkerGrant {
+        read_paths: vec!["src".into()],
+        write_paths: second.lease.clone(),
+        tools: vec![WorkerTool::Read, WorkerTool::Write],
+        skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        permission_mode: None,
+    };
+    f.push(Event::AgentSpawned {
+        run_id: f.run,
+        agent_run_id: f.child,
+        role: AgentRole::Child,
+        ordinal: 1,
+        objective: Some(second.mission.clone()),
+        grant: Some(ChildGrant::EditOnly),
+        definition: Some("editor".into()),
+        assignment: Some(WorkerAssignment {
+            request: second,
+            grant,
+            policy_digest: [1; 32],
+            permissions_digest: None,
+            base: f.base.clone(),
+            data_bytes: WORKER_DATA_BYTES as u32,
+        }),
+    });
+    let view = f.view();
+    assert_eq!(view.runs[0].agents.len(), 2);
+}
+
+#[test]
+fn worker_protocol_private_reads_require_the_worker_read_attestation() {
+    let mut f = fixture();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let intent = f.intent(
+        f.child,
+        ToolCall::Read {
+            path: "src/base".into(),
+            offset: 0,
+            limit: 32,
+        },
+        f.target(0),
+    );
+    f.started(&intent);
+    let finished = |attestation| Event::ToolFinished {
+        run_id: f.run,
+        agent_run_id: f.child,
+        observation: ToolObservation {
+            intent: intent.clone(),
+            disposition: ToolDisposition::Succeeded,
+            attestation: Some(attestation),
+            output: "{}".into(),
+            enforcement_cause: None,
+            cache_update: CacheUpdate::NotApplicable,
+        },
+    };
+    for wrong in [
+        Attestation::WorkerRead {
+            intent_digest: [9; 32],
+            guard: None,
+        },
+        Attestation::for_site(&intent),
+        Attestation::WorkerRead {
+            intent_digest: intent.digest(),
+            guard: Some(Box::new(receipt(&intent))),
+        },
+    ] {
+        refused(&f, finished(wrong), "private read attestation");
+    }
+    f.events.push(finished(Attestation::WorkerRead {
+        intent_digest: intent.digest(),
+        guard: None,
+    }));
+    f.view();
+}
+
+#[test]
+fn worker_protocol_background_workers_let_the_primary_continue_before_release() {
+    for background in [false, true] {
+        let mut f = fixture();
+        if background {
+            for event in &mut f.events {
+                match event {
+                    Event::ProviderCallRecorded { record, .. } => {
+                        for plan in record.delegation.iter_mut().flatten() {
+                            if let ChildAssignment::Editor { assignment } = plan {
+                                assignment.mode = WorkerMode::Background;
+                            }
+                        }
+                    }
+                    Event::AgentSpawned {
+                        assignment: Some(pins),
+                        ..
+                    } => pins.request.mode = WorkerMode::Background,
+                    _ => {}
+                }
+            }
+        }
+        f.push(Event::GoalProviderCallReserved {
+            goal_id: f.goal,
+            run_id: f.run,
+            agent_run_id: f.primary,
+            active_ceiling_ms: 0,
+        });
+        let recorded = Event::ProviderCallRecorded {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            record: ProviderCallRecord {
+                delegation: None,
+                phase: AgentPhase::RootSynthesis,
+                disposition: ProviderCallDisposition::ToolRequested,
+                requested_tools: 1,
+                response_id: None,
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                wire_provenance: None,
+                failure_reason: None,
+            },
+        };
+        if background {
+            f.push(recorded);
+            f.view();
+        } else {
+            refused(&f, recorded, "foreground worker still active");
+        }
+    }
+}
+
+#[test]
+fn worker_protocol_lineage_accepts_only_released_children_of_the_goal() {
+    for reference in ["released", "unknown"] {
+        let mut f = fixture();
+        let first = f.child;
+        f.mutation();
+        let data = f.finish_worker();
+        let h = f.handover(data.clone());
+        let integrated = f.integrate(h, data, ToolDisposition::Succeeded);
+        f.release(Some(h), integrated);
+        f.verify();
+        let Some(Event::ProviderCallRecorded { record, .. }) = f
+            .events
+            .iter()
+            .find(|e| matches!(e, Event::ProviderCallRecorded { record, .. } if record.delegation.is_some()))
+        else {
+            unreachable!()
+        };
+        let ChildAssignment::Editor { assignment } = record.delegation.as_ref().unwrap()[0].clone()
+        else {
+            unreachable!()
+        };
+        let mut request = *assignment;
+        request.lease = vec!["src/c".into()];
+        request.mission = "Edit src c".into();
+        request.wave = 2;
+        request.resumes = Some(if reference == "released" {
+            first
+        } else {
+            AgentRunId::new()
+        });
+        f.push(Event::GoalProviderCallReserved {
+            goal_id: f.goal,
+            run_id: f.run,
+            agent_run_id: f.primary,
+            active_ceiling_ms: 0,
+        });
+        let recorded = Event::ProviderCallRecorded {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            record: ProviderCallRecord {
+                delegation: Some(vec![ChildAssignment::Editor {
+                    assignment: Box::new(request.clone()),
+                }]),
+                phase: AgentPhase::RootSynthesis,
+                disposition: ProviderCallDisposition::Delegated,
+                requested_tools: 0,
+                response_id: None,
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                wire_provenance: None,
+                failure_reason: None,
+            },
+        };
+        if reference == "unknown" {
+            refused(&f, recorded, "resumes an unknown child");
+            continue;
+        }
+        f.push(recorded);
+        f.child = AgentRunId::new();
+        let prep = f.intent(
+            f.primary,
+            ToolCall::PrepareWorker {
+                preparation: WorkerPreparation {
+                    assignment_id: f.child,
+                    purpose: WorkerDataPurpose::Base,
+                    max_bytes: 4096,
+                    max_chunks: 1,
+                },
+            },
+            EffectTarget::Workspace,
+        );
+        f.started(&prep);
+        f.base = f.data(
+            &prep,
+            WorkerDataPurpose::Base,
+            &serde_json::to_vec(&WorkerManifest {
+                entries: vec![WorkerManifestEntry {
+                    path: "src".into(),
+                    version: WorkerBaseVersion::Directory,
+                }],
+            })
+            .unwrap(),
+        );
+        f.observed(
+            &prep,
+            ToolDisposition::Succeeded,
+            Some(Attestation::WorkerData {
+                guard: None,
+                intent_digest: prep.digest(),
+                data: f.base.clone(),
+            }),
+            "{}",
+        );
+        let grant = WorkerGrant {
+            read_paths: vec!["src".into()],
+            write_paths: request.lease.clone(),
+            tools: vec![WorkerTool::Read, WorkerTool::Write],
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            permission_mode: None,
+        };
+        f.push(Event::AgentSpawned {
+            run_id: f.run,
+            agent_run_id: f.child,
+            role: AgentRole::Child,
+            ordinal: 2,
+            objective: Some(request.mission.clone()),
+            grant: Some(ChildGrant::EditOnly),
+            definition: Some("editor".into()),
+            assignment: Some(WorkerAssignment {
+                request,
+                grant,
+                policy_digest: [1; 32],
+                permissions_digest: None,
+                base: f.base.clone(),
+                data_bytes: WORKER_DATA_BYTES as u32,
+            }),
+        });
+        assert_eq!(f.view().runs[0].agents.len(), 3);
     }
 }
 

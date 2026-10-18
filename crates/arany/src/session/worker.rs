@@ -728,32 +728,6 @@ pub struct WorkerCleanupReceipt {
     pub last_intent_digest: Option<[u8; 32]>,
 }
 
-pub fn worker_event_bound(
-    chunks: usize,
-    attempts: u8,
-    review_chain: u8,
-    child_chain: u8,
-    primary_chain: u8,
-) -> Option<u32> {
-    if chunks > WORKER_CHUNKS
-        || attempts > 8
-        || [review_chain, child_chain, primary_chain]
-            .iter()
-            .any(|n| !(1..=8).contains(n))
-    {
-        return None;
-    }
-    let switches = u32::from(review_chain - 1)
-        .checked_add(u32::from(attempts).checked_mul(u32::from(child_chain - 1))?)?
-        .checked_add(u32::from(primary_chain - 1))?;
-    u32::try_from(chunks)
-        .ok()?
-        .checked_add(12)?
-        .checked_add(u32::from(attempts).checked_mul(4)?)?
-        .checked_add(6)?
-        .checked_add(switches)
-}
-
 fn bounded_files<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: serde::Deserializer<'de>,

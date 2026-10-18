@@ -103,8 +103,6 @@ Chunk and seal Events use SQLite schema 4, the existing 10,000 lineage Event and
 
 `WorkerHandoverDiscarded` and `WorkerLeaseReleased` name the assignment, explicit nullable handover, closed settlement reason and exact causal sequence. Release requires committed successful integration or terminal disposal/discard, never a report alone. No-change settles without an empty ApplyChangeset. After release, `WorkerVerificationRecorded` checks the pinned criterion digest against fresh primary Workspace observations, including intervening invalidations; reports, private receipts and integration alone cannot pass. Later Workspace mutations invalidate earlier worker verification. Successful primary completion requires every worker terminal and settled and every integrated/no-change criterion freshly passed. Goal completion still needs its separate criterion.
 
-The conservative per-action Event bound is `N + 12 + (4*A + 6) + switches`, where N is the admitted chunk count, A is remaining attempts (0–8), and switches is `(review_chain_len−1) + A*(child_chain_len−1) + (primary_chain_len−1)`. Arithmetic and unsupported bounds fail closed. Runtime admission and charging remain prerequisites to editor execution, rather than uncharged protocol work.
-
 The [worker reducer corpus](../../crates/arany/src/session/reducer/worker_tests.rs) owns decoded/current-format lifecycle, cold prefixes, parent intersection, overlap, revision/receipt/source rejection, stop, mixed C1/C2 outcomes, data limits, integration order and fresh verification. The [Store corpus](../../crates/arany/src/store/journal/tests.rs) owns file-backed cold reopen and byte-preserving refusal of old versions. Native/runtime evidence remains separate.
 
 ## Accepted outcomes

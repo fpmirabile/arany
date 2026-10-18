@@ -24,6 +24,7 @@ pub(super) fn apply(
             .and_then(|config| config.tool_policy.as_ref())
             .is_some_and(|policy| policy.permissions_digest.is_some());
         let definition_mode = super::definition_mode(run, *agent_run_id)?;
+        let restrictions = super::mode_restrictions(run, *agent_run_id)?;
         let unguarded = observation.intent.call.is_unguarded();
         if configured || definition_mode.is_some() || unguarded {
             let tool = pending_tool(run, *agent_run_id)?;
@@ -31,7 +32,7 @@ pub(super) fn apply(
                 .permission_verdict
                 .as_ref()
                 .ok_or(ReplayError::InvalidTransition)?;
-            if let Some(mode) = definition_mode {
+            for mode in restrictions {
                 let restriction = crate::tools::permissions::PermissionConfig::evaluate_mode(
                     mode,
                     &observation.intent.call,
