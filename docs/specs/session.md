@@ -47,7 +47,7 @@ Only exact Workspace-root `AGENTS.md` is discovered, with exact `CLAUDE.md` as a
 
 An explicit editor assignment may name an exact historical child AgentRun ID in `resumes`. The source must be a terminal or interrupted child of this Session's same Goal, with its lease released or its Run closed. Unknown, primary, active and other-Goal IDs reject before child disclosure. An active ID remains inspectable; it cannot acquire a second runner. `supersedes` retains the explicit replacement relationship. Both are lineage data, never permission or a retry instruction.
 
-Every accepted reassignment receives a new UUIDv7 AgentRun ID and current definition admission, grant, base capture and Run-scoped lease. The selected source contributes at most 2 KiB of report plus bounded typed disposition, publication, verification and lineage facts, labelled untrusted task data. No historical Tool steps, private bytes, permission, approval or lease resume. This is the owner-accepted divergence from Claude Code's retained-worker continuation.
+Every accepted reassignment receives a new UUIDv7 AgentRun ID and current definition admission, grant, base capture and Run-scoped lease. The selected source contributes its objective, summary and at most 2 KiB of report (each bounded by its journaled limit, about 7 KiB in total) plus bounded typed disposition, publication, verification and lineage facts, labelled untrusted task data. No historical Tool steps, private bytes, permission, approval or lease resume. This is the owner-accepted divergence from Claude Code's retained-worker continuation.
 
 ## Worker replay
 

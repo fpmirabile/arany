@@ -19,11 +19,12 @@ Arany is a harness for multi-agent coding teams that can be trusted to work auto
 4. **Spec diet** (process, owner-approved). Done: release and Tool review ledgers are collapsed and `agents/` holds working practice only. Keep new behavior facts in their single owning spec.
 5. **Ledger diet.** Done: the [Goal contract](./docs/specs/goals.md#lifecycle-budgets-and-recovery) owns action headroom and crash ceilings.
 6. **Hook seam and permission modes.** Remaining: delegated/research hook execution (matching researcher Tools are denied today), hooks on handover integration, and `PreToolUse`/in-Run `PreCompact` `continue:false` stopping the Run (peer parity; both deny or skip only the pending action today). The [Hook execution contract](./docs/specs/tools.md#hook-execution) owns behavior, divergences, bounds and acceptance scenarios.
-7. **Sandbox escape hatch with approval.** Remaining: owner-run live attached journey and a macOS run of the unguarded tests; a rule remover in `/permissions` and `setrlimit` limits only if dogfooding needs them; explicit `ChildGrant` inheritance and the hook origin wait for items 6 and 11. Spec owner: [Tools spec](./docs/specs/tools.md#unguarded-re-run-after-a-guard-failure). The hook-origin interlock rule lives in the [Hook execution contract](./docs/specs/tools.md#hook-execution).
+7. **Sandbox escape hatch with approval.** Remaining: owner-run live attached journey and a macOS run of the unguarded tests; a rule remover in `/permissions` and `setrlimit` limits only if dogfooding needs them; explicit `ChildGrant` inheritance and the hook origin wait for item 6 (item 11's C2 grants have landed). Spec owner: [Tools spec](./docs/specs/tools.md#unguarded-re-run-after-a-guard-failure). The hook-origin interlock rule lives in the [Hook execution contract](./docs/specs/tools.md#hook-execution).
 8. **`arany serve --stdio` follow-up.** The [serve contract](./docs/specs/serve.md) owns the implemented wire and loop; only the deferred extraction below remains.
    - **Conditional `arany-journal` crate extraction stays deferred.** Schema export and the Server remain binary-only; re-evaluate extraction for an external SDK or item 13's separate adapter when measured dependency, ownership or release pressure justifies it. Resolve `tools::Cancellation` runtime ownership before any dependency-free vocabulary split. Preserve the library dependency boundary.
 9. **Provider roster: separately deferred D work.** Judge-only adapters and a durable per-agent pause/retry/switch lifecycle after exhausted routes need accepted contracts first; current fail-and-drain recovery with explicit new-Run resume stays authoritative ([Provider contract](./docs/specs/provider.md#named-roster-presets)). Unverified: macOS attached roster evidence (manifest and Ctrl+C cancellation) and macOS saved-account roster evidence, because those roster tests are Linux-only; live account/Provider and human terminal support retain the user-owned checks below.
 10. **Multi-call steps (Stage D)** after probe P2; copy Anthropic parallel `tool_use` with the journal's four-call cap.
+11. Reserved (C2 edit-only workers are done; [Execution](./docs/specs/execution.md#worker-journal-protocol) and [Session](./docs/specs/session.md#worker-identity-and-explicit-reassignment) own the behavior).
 12. **C3 command-capable views and the Supervisor as hook adapters.** Owner decision before signal enforcement: calibrate loop/probing/disproportion thresholds from shadow-mode corpus and dogfooding. Thresholds remain open, not implemented behavior.
 13. **ACP adapter** (`arany acp`) over the stdio protocol (Goose's `goose acp` shape) for Zed, JetBrains and Neovim, using the vocabulary boundary from item 8.
 
@@ -33,9 +34,11 @@ Teams support read-only researchers (C1) and Run-scoped edit-only workers (C2) w
 
 ### Freeze until item 11 lands
 
+Item 11 (C2) has landed. Lifting this freeze is an owner decision; it stays in force until the owner records the lift here.
+
 CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; the Supervisor as loop code; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
 
-- **E4 checkpoints and rewind.** Remain frozen until item 11 lands. Set exact per-file/per-Goal checkpoint quotas before implementation when the freeze lifts.
+- **E4 checkpoints and rewind.** Remain frozen until the owner lifts this freeze. Set exact per-file/per-Goal checkpoint quotas before implementation when the freeze lifts.
 
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1). API-key billing is a separate route; another harness's implementation or credentials do not authorize Arany access.
 
@@ -52,8 +55,8 @@ CI stays green; no new features, spec sections or evidence gates for: terminal v
 ## Architecture follow-ups
 
 Found by the macOS architecture review after A5b; no behavior change is
-claimed until each lands. Keep the existing freeze until item 11 for macOS
-Guard internals.
+claimed until each lands. Keep the existing freeze for macOS
+Guard internals until the owner lifts it.
 
 - **Native Git profile probe hardening (needs a Mac).** Add a service-specific Mach-lookup denial with an unsandboxed success baseline to the Seatbelt Git probe. A direct lookup needs new test-only `unsafe` FFI, which requires the dedicated review in [AGENTS.md](./AGENTS.md#global-rules) rule 7.
 

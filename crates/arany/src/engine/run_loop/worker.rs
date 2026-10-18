@@ -546,11 +546,7 @@ impl RunLoop<'_> {
                     .view(|v| {
                         let (run, agent) = v.worker_resume_source(self.goal_id?, source)?;
                         let mut report = agent.result.clone().unwrap_or_default();
-                        let mut end = report.len().min(2048);
-                        while !report.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        report.truncate(end);
+                        report.truncate(crate::tools::types::truncate_utf8(&report, 2048).len());
                         let disposition = run
                             .worker_history()
                             .into_iter()

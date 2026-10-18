@@ -56,7 +56,10 @@ async fn worker_id_resume_survives_exit_show_fork_and_compaction_without_reexecu
     }
     engine.close().await.unwrap();
     for session in [observed.session, fork] {
-        let (events, view) = arany::test_support::goals::replayed(&state, session).await;
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let events = store.load_session(session).await.unwrap();
+        let view = store.load_view(session).await.unwrap().unwrap();
+        store.close().await.unwrap();
         assert_eq!(
             view.runs, observed.view.runs,
             "fork/compaction changed worker history"

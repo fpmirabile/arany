@@ -112,11 +112,7 @@ impl RunView {
                     .clone()
                     .or_else(|| a.summary.clone())
                     .unwrap_or_default();
-                let mut end = report.len().min(2048);
-                while !report.is_char_boundary(end) {
-                    end -= 1;
-                }
-                report.truncate(end);
+                report.truncate(crate::tools::types::truncate_utf8(&report, 2048).len());
                 Some(WorkerHistory {
                     run_id: self.id,
                     assignment_id: a.id,
@@ -492,22 +488,7 @@ fn validate_request(
         return Err(ReplayError::InvalidTransition);
     }
     for source in request.resumes.iter().chain(request.supersedes.iter()) {
-        if Some(*source) == spawning
-            || !view
-                .runs
-                .iter()
-                .filter(|r| goal.run_ids.contains(&r.id))
-                .any(|r| {
-                    r.agents.iter().any(|a| {
-                        a.id == *source
-                            && a.role == AgentRole::Child
-                            && a.status != AgentStatus::Active
-                            && a.assignment.as_ref().is_none_or(|w| {
-                                w.released.is_some() || r.status != RunStatus::Active
-                            })
-                    })
-                })
-        {
+        if Some(*source) == spawning || view.worker_resume_source(goal.id, *source).is_none() {
             return Err(ReplayError::InvalidTransition);
         }
     }

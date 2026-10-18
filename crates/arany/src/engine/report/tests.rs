@@ -801,3 +801,59 @@ fn worker_recovery_report_preserves_exact_ids_disposal_and_unverified_publicatio
         );
     }
 }
+
+#[test]
+fn many_worker_lines_never_displace_unguarded_or_unknown_facts() {
+    let f = crate::session::worker_protocol_fixture();
+    let events = f.envelopes();
+    let mut view = crate::session::SessionView::replay(f.session, &events)
+        .unwrap()
+        .unwrap();
+    let run = view.runs.last_mut().unwrap();
+    let template = run
+        .agents
+        .iter()
+        .find(|a| a.assignment.is_some())
+        .unwrap()
+        .clone();
+    for _ in 0..40 {
+        let mut agent = template.clone();
+        agent.id = AgentRunId::new();
+        run.agents.push(agent);
+    }
+    let call = ToolCall::CommandUnguarded {
+        program: "cargo".into(),
+        args: vec!["check".into()],
+        cwd: String::new(),
+        justification: "Run the failed command once".into(),
+    };
+    let mut intent = read_intent(&call);
+    intent.run_id = run.id;
+    run.tools.push(ToolView {
+        observation: Some(crate::tools::ToolObservation {
+            enforcement_cause: None,
+            attestation: Some(Attestation::for_site(&intent)),
+            intent: intent.clone(),
+            disposition: ToolDisposition::Succeeded,
+            output: serde_json::json!({"exit_code": 0, "stdout": "", "stderr": "", "changeset": {"files": []}}).to_string(),
+            cache_update: CacheUpdate::NotApplicable,
+        }),
+        intent,
+        review_call_index: None,
+        permission_verdict: None,
+        hooks: Vec::new(),
+        hook_sequence: None,
+        finished_sequence: None,
+    });
+    let run = view.runs.last().unwrap();
+    let goal = view.goal(f.goal).unwrap();
+    assert!(run.worker_history().len() > 40);
+    let report = goal_report(&view, run, goal);
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .any(|item| item.contains("unguarded host run(s) executed outside the Guard"))
+    );
+    assert!(serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES);
+}
