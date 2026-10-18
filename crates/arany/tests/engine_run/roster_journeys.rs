@@ -536,7 +536,12 @@ async fn explicit_resume_continues_the_read_only_researcher_only_with_the_same_p
     let child = &view.runs[1].agents[1];
     assert_eq!(child.profile.as_deref(), Some("spare"));
     assert_ne!(child.id, view.runs[0].agents[1].id);
-    assert_eq!(child.grant, Some(arany::ChildGrant::ReadOnly));
+    assert_eq!(
+        child.grant,
+        Some(arany::ChildGrant::ReadOnly {
+            unguarded: arany::UnguardedGrant::Denied
+        })
+    );
     assert_eq!(child.status, AgentStatus::Finished);
     assert_eq!(child.tools.len(), 1);
 }

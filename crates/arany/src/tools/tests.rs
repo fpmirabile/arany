@@ -21,6 +21,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         version: 1,
         workspace_paths: vec![".agents/skills".into()],
         write: false,
+        child_unguarded: crate::tools::UnguardedGrant::Denied,
         commands: Vec::new(),
         skills: vec![Skill {
             name: "review".into(),
@@ -236,6 +237,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         version: 1,
         workspace_paths: vec!["nested/file".into(), "empty".into(), "script".into()],
         write: true,
+        child_unguarded: crate::tools::UnguardedGrant::Denied,
         commands: vec![pinned, copied_program],
         skills: Vec::new(),
         mcp: Vec::new(),
@@ -1088,6 +1090,20 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
     let config: Config = serde_json::from_value(value.clone()).unwrap();
     config.validate().unwrap();
     assert!(config.receipt().valid());
+    assert_eq!(config.child_unguarded, UnguardedGrant::Denied);
+    let mut widened = value.clone();
+    widened["child_unguarded"] = json!("human_only");
+    assert!(
+        serde_json::from_value::<Config>(widened)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    for invalid in [json!(true), json!(null), json!("automatic")] {
+        let mut row = value.clone();
+        row["child_unguarded"] = invalid;
+        assert!(serde_json::from_value::<Config>(row).is_err());
+    }
     for roots in [
         json!([]),
         json!(["src", "src/child"]),

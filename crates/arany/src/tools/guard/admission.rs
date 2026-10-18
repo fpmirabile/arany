@@ -1140,6 +1140,7 @@ mod tests {
             version: 1,
             workspace_paths: vec!["sample".into()],
             write: false,
+            child_unguarded: crate::tools::UnguardedGrant::Denied,
             commands: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),

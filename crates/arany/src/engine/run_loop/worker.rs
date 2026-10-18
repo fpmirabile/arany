@@ -519,7 +519,14 @@ impl RunLoop<'_> {
             objective: Some(assignment.mission.clone()),
             definition: Some(assignment.definition.clone()),
             profile: None,
-            grant: Some(ChildGrant::EditOnly),
+            grant: Some(ChildGrant::EditOnly {
+                unguarded: self
+                    .controls
+                    .tools
+                    .ok_or(EngineError::InvalidRequest)?
+                    .receipt()
+                    .child_unguarded,
+            }),
             assignment: Some(WorkerAssignment {
                 request: *assignment.clone(),
                 grant: grant.clone(),

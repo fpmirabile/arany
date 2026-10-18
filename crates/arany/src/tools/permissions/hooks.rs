@@ -336,6 +336,9 @@ impl HookResult {
         let not_completed = Self::Ignored {
             why: HookIgnoreReason::NotCompleted,
         };
+        if observation.enforcement_cause.is_some() {
+            return not_completed;
+        }
         if !matches!(event, HookEvent::PreToolUse | HookEvent::PostToolUse)
             && observation.disposition == crate::tools::ToolDisposition::Denied
         {

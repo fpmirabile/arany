@@ -90,7 +90,7 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
         .filter_map(|envelope| match &envelope.event {
             Event::AgentSpawned {
                 agent_run_id,
-                grant: Some(crate::ChildGrant::ReadOnly),
+                grant: Some(crate::ChildGrant::ReadOnly { .. }),
                 ..
             } => Some(*agent_run_id),
             _ => None,
@@ -166,7 +166,9 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                     index,
                     Action::Delegation {
                         children: spawned.len(),
-                        research: spawned.contains(&Some(crate::ChildGrant::ReadOnly)),
+                        research: spawned
+                            .iter()
+                            .any(|grant| matches!(grant, Some(crate::ChildGrant::ReadOnly { .. }))),
                     },
                     Some(end),
                 ));

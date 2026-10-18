@@ -3976,7 +3976,9 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
     let child = view.runs[0].agents[1].id;
     assert_eq!(
         view.runs[0].agents[1].grant,
-        Some(arany::ChildGrant::ReadOnly)
+        Some(arany::ChildGrant::ReadOnly {
+            unguarded: arany::UnguardedGrant::Denied
+        })
     );
     assert_eq!(child_tool_starts(&events, child), 1);
     assert!(view.runs[0].tools.is_empty());
@@ -3984,7 +3986,7 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
 }
 
 #[tokio::test]
-async fn child_mcp_call_or_write_is_rejected_before_dispatch() {
+async fn child_mcp_write_or_unguarded_request_is_rejected_before_dispatch() {
     let outcomes = [
         arany::ToolCall::McpCall {
             server: "local".into(),
@@ -3996,6 +3998,12 @@ async fn child_mcp_call_or_write_is_rejected_before_dispatch() {
             path: "notes/facts.txt".into(),
             expected_digest: None,
             content: "v2".into(),
+        },
+        arany::ToolCall::CommandUnguarded {
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: String::new(),
+            justification: "Request forbidden host authority".into(),
         },
         arany::ToolCall::GitStatus { path: ".".into() },
     ];

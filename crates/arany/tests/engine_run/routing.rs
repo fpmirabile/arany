@@ -1334,7 +1334,12 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
     }
     assert_eq!(view.runs[0].provider_fallbacks.len(), 2);
     for child in view.runs[0].agents.iter().skip(1) {
-        assert_eq!(child.grant, Some(arany::ChildGrant::ReadOnly));
+        assert_eq!(
+            child.grant,
+            Some(arany::ChildGrant::ReadOnly {
+                unguarded: arany::UnguardedGrant::Denied
+            })
+        );
         assert_eq!(child.tools.len(), 1);
         assert_eq!(
             child.tools[0].observation.as_ref().unwrap().disposition,

@@ -34,10 +34,12 @@ pub(super) enum CompactionOutcome {
 }
 
 fn approval_choices(pending: &Option<arany::ToolApproval>) -> usize {
-    if pending
-        .as_ref()
-        .is_some_and(|approval| approval.unguarded.is_some())
-    {
+    if pending.as_ref().is_some_and(|approval| {
+        approval
+            .unguarded
+            .as_ref()
+            .is_some_and(|prompt| prompt.remember)
+    }) {
         3
     } else {
         2
