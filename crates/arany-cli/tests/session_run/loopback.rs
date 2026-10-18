@@ -89,6 +89,7 @@ thread_local! {
 }
 
 // The reply format follows the "stream" field of the request this thread read last.
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn send_response(stream: &mut TcpStream, index: usize, text: serde_json::Value) {
     let streaming = LAST_REQUEST_STREAMING
         .get()
