@@ -6,7 +6,7 @@ use crate::session::Event;
 use crate::tools::permissions::{
     CommandHook, ConfigError, Decision, HOOK_RESULT_BYTES, HookEvent, HookInvocation, HookOutcome,
     HookResult, MAX_HOOK_FEEDBACK_BYTES, MAX_HOOK_INPUT_BYTES, PermissionConfig, feedback_lines,
-    post_tool_use_input, pre_tool_use_input,
+    narrows, peer_name, post_tool_use_input, pre_tool_use_input,
 };
 use crate::tools::types::model_observation;
 use crate::tools::{EffectIntent, ToolCall, ToolDisposition, ToolObservation, ToolRuntime};
@@ -23,6 +23,7 @@ pub(super) enum HookStop {
 pub(super) struct HookFold {
     pub(super) restriction: Option<Decision>,
     pub(super) count: u8,
+    pub(super) narrowed: Option<ToolCall>,
     reason: Option<String>,
     stop: HookStop,
 }
@@ -50,6 +51,7 @@ impl HookFold {
         Self {
             restriction: None,
             count: 0,
+            narrowed: None,
             reason: None,
             stop: HookStop::None,
         }
@@ -59,6 +61,7 @@ impl HookFold {
         Self {
             restriction: Some(Decision::Deny),
             count,
+            narrowed: None,
             reason: Some(reason.into()),
             stop: HookStop::None,
         }
@@ -87,6 +90,20 @@ impl HookFold {
                 refused: true,
                 active_time: None,
             },
+            HookStop::None if self.narrowed.is_some() => Answer {
+                observation: not_dispatched(
+                    intent,
+                    ToolDisposition::Denied,
+                    format!(
+                        "Hook narrowed this Tool to: {}",
+                        self.narrowed
+                            .as_ref()
+                            .map_or_else(Default::default, peer_name)
+                    ),
+                ),
+                refused: false,
+                active_time: None,
+            },
             HookStop::None => {
                 let room = (intent.limits.result_bytes as usize).saturating_sub(32);
                 let reason = self.reason.as_deref().unwrap_or_default();
@@ -110,6 +127,19 @@ impl HookFold {
             }
         }
     }
+}
+
+// The replacement must narrow the call and be no more permissive than the original under the pinned rules.
+fn narrowing_holds(
+    runtime: &ToolRuntime,
+    config: &PermissionConfig,
+    original: &ToolCall,
+    updated: &ToolCall,
+) -> bool {
+    let decision = config.decision(updated);
+    narrows(original, updated)
+        && config.decision(original).narrow(decision) == decision
+        && runtime.allows(updated)
 }
 
 fn hook_call(runtime: &ToolRuntime, hook: &CommandHook) -> Option<ToolCall> {
@@ -216,6 +246,7 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         config: &PermissionConfig,
         intent: &EffectIntent,
+        narrowable: bool,
     ) -> Result<HookFold, EngineError> {
         let plans = match self.hook_plans(runtime, config, HookEvent::PreToolUse, &intent.call) {
             Ok(plans) => plans,
@@ -304,6 +335,17 @@ impl RunLoop<'_> {
                 } => {
                     fold.restriction = Some(Decision::Deny);
                     fold.reason = reason;
+                    return Ok(fold);
+                }
+                HookResult::Narrowed { call } => {
+                    fold.restriction = Some(Decision::Deny);
+                    if !narrowable {
+                        fold.reason = Some("hook narrowing limit".into());
+                    } else if narrowing_holds(&runtime, config, &intent.call, &call) {
+                        fold.narrowed = Some(call);
+                    } else {
+                        fold.reason = Some("hook input update does not narrow".into());
+                    }
                     return Ok(fold);
                 }
                 HookResult::Restricted {

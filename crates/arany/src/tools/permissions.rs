@@ -274,6 +274,77 @@ impl PermissionConfig {
     }
 }
 
+// Provable narrowing only: a window or subtree strictly inside the original. Argv, arguments and content
+// have no order, so every other operation is a new intent the model must propose.
+pub(crate) fn narrows(original: &ToolCall, updated: &ToolCall) -> bool {
+    use ToolCall::{GitDiff, GitLog, GitStatus, List, Read, Search};
+    if !updated.valid() {
+        return false;
+    }
+    let within = |parent: &str, child: &str| {
+        matches!(parent, "" | ".")
+            || child == parent
+            || child
+                .strip_prefix(parent)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    match (original, updated) {
+        (
+            Read {
+                path,
+                offset,
+                limit,
+            },
+            Read {
+                path: new_path,
+                offset: new_offset,
+                limit: new_limit,
+            },
+        ) => {
+            path == new_path
+                && new_offset >= offset
+                && u64::from(*new_offset) + u64::from(*new_limit)
+                    <= u64::from(*offset) + u64::from(*limit)
+        }
+        (List { path }, List { path: new_path })
+        | (GitStatus { path }, GitStatus { path: new_path }) => within(path, new_path),
+        (
+            Search { path, query },
+            Search {
+                path: new_path,
+                query: new_query,
+            },
+        ) => query == new_query && within(path, new_path),
+        (
+            GitDiff {
+                path,
+                base,
+                head,
+                staged,
+            },
+            GitDiff {
+                path: new_path,
+                base: new_base,
+                head: new_head,
+                staged: new_staged,
+            },
+        ) => (base, head, staged) == (new_base, new_head, new_staged) && within(path, new_path),
+        (
+            GitLog {
+                path,
+                revision,
+                max_count,
+            },
+            GitLog {
+                path: new_path,
+                revision: new_revision,
+                max_count: new_max,
+            },
+        ) => (revision, max_count) == (new_revision, new_max) && within(path, new_path),
+        _ => false,
+    }
+}
+
 fn valid_call(call: &ToolCall) -> bool {
     serde_json::to_writer(CallSize(0), call).is_ok() && call.valid()
 }
@@ -551,7 +622,7 @@ fn path_of(call: &ToolCall) -> Option<&str> {
     }
 }
 
-pub(super) fn peer_name(call: &ToolCall) -> Cow<'_, str> {
+pub(crate) fn peer_name(call: &ToolCall) -> Cow<'_, str> {
     match call {
         ToolCall::McpCall { server, tool, .. } => Cow::Owned(format!("mcp__{server}__{tool}")),
         ToolCall::McpList { server } => Cow::Owned(format!("mcp__{server}")),

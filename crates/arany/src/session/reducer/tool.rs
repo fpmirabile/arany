@@ -282,12 +282,19 @@ pub(super) fn apply(
             active_ceiling_ms,
         } => {
             let goal = active_run_goal(current, *run_id).ok_or(ReplayError::InvalidTransition)?;
+            // The narrowed call stays inside the original, which the plan already admitted.
+            let narrowing = current
+                .runs
+                .iter()
+                .find(|run| run.id == *run_id)
+                .is_some_and(|run| valid_narrowing_source(run, intent));
             let phase_allows_call =
                 goal.phase == GoalPhase::Implementation || intent.call.is_goal_plan_prelude();
-            let plan_allows_call = if matches!(
-                intent.call,
-                crate::tools::ToolCall::ParseAgentDefinition { .. }
-            ) {
+            let plan_allows_call = if narrowing
+                || matches!(
+                    intent.call,
+                    crate::tools::ToolCall::ParseAgentDefinition { .. }
+                ) {
                 true
             } else if let Some(contract) = &goal.plan_contract {
                 !goal.awaiting_plan_contract
@@ -335,7 +342,8 @@ pub(super) fn apply(
                 } else {
                     primary.provider_calls.last().is_some_and(|call| {
                         call.disposition == ProviderCallDisposition::ToolRequested
-                    }) && pending_tool_requests(run).is_some_and(|pending| pending >= 1)
+                    }) && (pending_tool_requests(run).is_some_and(|pending| pending >= 1)
+                        || valid_narrowing_source(run, intent))
                         && run
                             .tools
                             .last()
@@ -571,6 +579,20 @@ fn pending_tool(
             .and_then(|agent| agent.tools.last_mut())
     }
     .ok_or(ReplayError::InvalidTransition)
+}
+
+// The intent is exactly the call the last denied Tool's hook narrowed it to, at most once per request.
+fn valid_narrowing_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
+    let Some(last) = run.tools.len().checked_sub(1) else {
+        return false;
+    };
+    let tool = &run.tools[last];
+    super::narrowed_call(tool) == Some(&intent.call)
+        && crate::tools::permissions::narrows(&tool.intent.call, &intent.call)
+        && tool.permission_verdict.as_ref().is_some_and(|verdict| {
+            verdict.source == crate::tools::permissions::PermissionSource::Hook && !verdict.approved
+        })
+        && (last == 0 || !super::narrowing_source(run, last - 1))
 }
 
 fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {

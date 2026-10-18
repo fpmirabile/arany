@@ -72,7 +72,10 @@ enum Verdict {
         queue_pause: Option<ActivePause>,
     },
     Deny(Answer),
+    Narrow(Answer, ToolCall),
 }
+
+const MAX_NARROWINGS_PER_STEP: usize = 1;
 
 #[derive(Clone, Copy)]
 struct Permission {
@@ -194,6 +197,7 @@ impl RunLoop<'_> {
             Grant::Primary { .. } => None,
             Grant::Researcher { child, .. } => Some(child.tool_calls_remaining.saturating_sub(1)),
         };
+        let mut narrowings = 0;
         let mut step = ToolStep {
             turn,
             requests: vec![request],
@@ -210,9 +214,11 @@ impl RunLoop<'_> {
             };
             let command = matches!(intent.call, ToolCall::Command { .. });
             let source_intent_digest = intent.digest();
+            let narrowable = narrowings < MAX_NARROWINGS_PER_STEP;
             // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
-            let Some(observation) =
-                Box::pin(self.run_intent(&grant, runtime, intent, &source_call)).await?
+            let Some((observation, narrowed)) =
+                Box::pin(self.run_intent(&grant, runtime, intent, &source_call, narrowable))
+                    .await?
             else {
                 return Ok(false);
             };
@@ -234,6 +240,11 @@ impl RunLoop<'_> {
                 None
             };
             step.observations.push(observation);
+            if let Some(narrowed) = narrowed {
+                narrowings += 1;
+                call = narrowed;
+                continue;
+            }
             let Some(changeset) = changeset.filter(|changeset| !changeset.files.is_empty()) else {
                 break;
             };
@@ -255,17 +266,17 @@ impl RunLoop<'_> {
         // The hooks see the published tree: a Command's changeset is integrated first.
         if matches!(grant, Grant::Primary { .. })
             && let Some(config) = runtime.permissions()
-            && let Some(source) = step.observations.first()
+            && let Some(source) = step.observations.get(narrowings)
             && source.disposition == ToolDisposition::Succeeded
             && !source.intent.call.is_internal()
-            && step.observations[1..]
+            && step.observations[narrowings + 1..]
                 .iter()
                 .all(|integration| integration.disposition == ToolDisposition::Succeeded)
         {
             let post = Box::pin(self.post_tool_use_hooks(runtime, config, source)).await?;
             match post.stop {
                 HookStop::None if !post.feedback.is_empty() => {
-                    step.hook_feedback.insert(0, post.feedback);
+                    step.hook_feedback.insert(narrowings, post.feedback);
                 }
                 HookStop::None => {}
                 HookStop::Uncertain => return Ok(false),
@@ -439,12 +450,13 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: EffectIntent,
         post_call: &ToolCall,
-    ) -> Result<Option<ToolObservation>, EngineError> {
+        narrowable: bool,
+    ) -> Result<Option<(ToolObservation, Option<ToolCall>)>, EngineError> {
         let permission = self.permission(grant, runtime, &intent.call);
         let (hook_events, pre_ms, post_ms) =
             self.hook_admission(grant, runtime, &intent.call, post_call);
         if !self
-            .admit_tool(grant, runtime, &intent, permission, hook_events)
+            .admit_tool(grant, runtime, &intent, permission, hook_events, narrowable)
             .await?
         {
             return Ok(None);
@@ -464,11 +476,16 @@ impl RunLoop<'_> {
             active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
         })
         .await?;
+        let mut narrowed = None;
         let answer = match self
-            .before_dispatch(grant, runtime, intent, permission)
+            .before_dispatch(grant, runtime, intent, permission, narrowable)
             .await?
         {
             Verdict::Deny(answer) => answer,
+            Verdict::Narrow(answer, call) => {
+                narrowed = Some(call);
+                answer
+            }
             Verdict::Dispatch {
                 intent,
                 queue_pause,
@@ -498,7 +515,7 @@ impl RunLoop<'_> {
                 return Err(EngineError::GoalBudgetExhausted);
             }
         }
-        Ok((!answer.refused).then_some(answer.observation))
+        Ok((!answer.refused).then_some((answer.observation, narrowed)))
     }
 
     async fn admit_tool(
@@ -508,6 +525,7 @@ impl RunLoop<'_> {
         intent: &EffectIntent,
         permission: Permission,
         hook_events: usize,
+        narrowable: bool,
     ) -> Result<bool, EngineError> {
         let (tail, observations) = match grant {
             Grant::Primary { review_allowed, .. } => {
@@ -521,11 +539,20 @@ impl RunLoop<'_> {
                 {
                     return Ok(false);
                 }
+                // A hook may narrow this Tool: the replacement is a second intent with its own hook set.
+                let narrowing = if narrowable && hook_events > 0 {
+                    hook_events
+                } else {
+                    0
+                };
                 (
                     Action::Tool
                         .remaining(1, &self.routing.providers)
-                        .saturating_add(2 * hook_events),
-                    Action::Tool.tool_observations().saturating_add(hook_events),
+                        .saturating_add(2 * (hook_events + narrowing))
+                        .saturating_add(if narrowing > 0 { 3 } else { 0 }),
+                    Action::Tool
+                        .tool_observations()
+                        .saturating_add(hook_events + narrowing),
                 )
             }
             Grant::Researcher { .. } => {
@@ -622,6 +649,7 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: EffectIntent,
         permission: Permission,
+        narrowable: bool,
     ) -> Result<Verdict, EngineError> {
         let config = runtime.permissions();
         let unguarded = intent.call.is_unguarded();
@@ -638,7 +666,8 @@ impl RunLoop<'_> {
                     && self.ledger().allows_tool(&intent.call) =>
             {
                 // Boxed like the other Tool futures so the hook loop does not inflate every agent step.
-                Box::pin(self.pre_tool_use_hooks(grant, runtime, config, &intent)).await?
+                Box::pin(self.pre_tool_use_hooks(grant, runtime, config, &intent, narrowable))
+                    .await?
             }
             _ => HookFold::none(),
         };
@@ -667,26 +696,30 @@ impl RunLoop<'_> {
                 source,
             )
         } else if decision == Decision::Deny || hooks.exhausted() {
+            let answer = if hooks.exhausted() || source == PermissionSource::Hook {
+                hooks.denial(intent)
+            } else {
+                Answer {
+                    observation: not_dispatched(
+                        intent,
+                        ToolDisposition::Denied,
+                        match source {
+                            PermissionSource::Rule => "Permission deny rule blocked this Tool",
+                            PermissionSource::PinnedGrant => {
+                                "Tool operation is outside the pinned grant"
+                            }
+                            _ => "Permission mode denied this Tool",
+                        },
+                    ),
+                    refused: false,
+                    active_time: None,
+                }
+            };
             (
-                Verdict::Deny(if hooks.exhausted() || source == PermissionSource::Hook {
-                    hooks.denial(intent)
-                } else {
-                    Answer {
-                        observation: not_dispatched(
-                            intent,
-                            ToolDisposition::Denied,
-                            match source {
-                                PermissionSource::Rule => "Permission deny rule blocked this Tool",
-                                PermissionSource::PinnedGrant => {
-                                    "Tool operation is outside the pinned grant"
-                                }
-                                _ => "Permission mode denied this Tool",
-                            },
-                        ),
-                        refused: false,
-                        active_time: None,
-                    }
-                }),
+                match hooks.narrowed.clone() {
+                    Some(call) => Verdict::Narrow(answer, call),
+                    None => Verdict::Deny(answer),
+                },
                 source,
             )
         } else {
@@ -742,7 +775,9 @@ impl RunLoop<'_> {
                 run_id: self.run_id,
                 agent_run_id: match &verdict {
                     Verdict::Dispatch { intent, .. } => intent.agent_run_id,
-                    Verdict::Deny(answer) => answer.observation.intent.agent_run_id,
+                    Verdict::Deny(answer) | Verdict::Narrow(answer, _) => {
+                        answer.observation.intent.agent_run_id
+                    }
                 },
                 verdict: PermissionVerdict {
                     intent_digest: digest,
@@ -1433,8 +1468,8 @@ impl RunLoop<'_> {
                 review_allowed: false,
             };
             let post_call = intent.call.clone();
-            let Some(observation) =
-                Box::pin(self.run_intent(&grant, runtime, intent, &post_call)).await?
+            let Some((observation, _)) =
+                Box::pin(self.run_intent(&grant, runtime, intent, &post_call, false)).await?
             else {
                 return Ok(false);
             };
