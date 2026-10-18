@@ -492,7 +492,8 @@ done
                 Attestation::Unguarded(_) => panic!("researchers never run unguarded"),
                 Attestation::WorkerRead { .. }
                 | Attestation::WorkerMutation { .. }
-                | Attestation::WorkerData { .. } => panic!("researchers never run worker Tools"),
+                | Attestation::WorkerData { .. }
+                | Attestation::WorkerCommand { .. } => panic!("researchers never run worker Tools"),
             }
         }
         let output =
