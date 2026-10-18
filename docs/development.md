@@ -45,6 +45,20 @@ differently, plus unit assertions. The same [test action](../.github/actions/ci-
 owns standard and focused lanes. Watch the complete CI run and fix a red result
 before handoff. A new integration target with debug-only coverage must also be
 included in the debug selection.
+
+Both native debug lanes also check ordinary production builds without
+`test-support` and compile all release targets with all features. These checks
+clear CI's `RUSTFLAGS` so they also cover configurations without `arany_ci`.
+A separate production-only Clippy pass rejects `unwrap()` while allowing
+`expect()` for proven invariants:
+
+```sh
+RUSTFLAGS='' cargo check --workspace --lib --bins --locked --offline
+RUSTFLAGS='' cargo check --workspace --lib --bins --release --locked --offline
+RUSTFLAGS='' cargo check --workspace --all-targets --all-features --release --locked --offline
+RUSTFLAGS='' cargo clippy --workspace --lib --bins --locked --offline -- -D warnings -D clippy::unwrap_used
+```
+
 Run the full suite locally only when CI is unavailable or the change is
 cross-cutting:
 
