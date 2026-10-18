@@ -96,6 +96,69 @@ impl LinearState {
         self.write_view(&mut io::stderr(), view, notice)
     }
 
+    pub(super) fn write_transcript(
+        &mut self,
+        writer: &mut impl Write,
+        view: &SessionView,
+    ) -> io::Result<()> {
+        if self.newline_pending || self.line_open {
+            writeln!(writer)?;
+            self.newline_pending = false;
+            self.line_open = false;
+        }
+        writeln!(writer, "Transcript details:")?;
+        let mut remaining = super::history::MAX_CLASSIC_HISTORY_BYTES;
+        for run in view
+            .runs
+            .iter()
+            .rev()
+            .take(super::history::MAX_CLASSIC_HISTORY_RUNS)
+            .rev()
+        {
+            let mut parts = Vec::new();
+            if run.assistant_message.is_none()
+                && let Some(answer) = crate::presentation::display_answer(run)
+            {
+                parts.push(format!("Arany · incomplete:\n{answer}"));
+            }
+            parts.extend(
+                crate::presentation::display_commentary(run)
+                    .into_iter()
+                    .map(|(_, _, text)| format!("Arany · public commentary:\n{text}")),
+            );
+            if run
+                .display
+                .iter()
+                .any(|chunk| chunk.category == arany::DisplayCategory::Limit)
+            {
+                parts.push(arany::DISPLAY_LIMIT_TEXT.to_owned());
+            }
+            let parts = parts
+                .into_iter()
+                .chain(run.tools.iter().map(crate::presentation::tool_detail_text))
+                .chain(crate::presentation::supervisor_lines(run));
+            for text in parts {
+                let text = crate::presentation::escape_terminal(&text);
+                if text.len().saturating_add(1) > remaining {
+                    writeln!(
+                        writer,
+                        "Transcript detail limit reached; use show --output jsonl for the complete journal."
+                    )?;
+                    return Ok(());
+                }
+                remaining = remaining.saturating_sub(text.len() + 1);
+                writeln!(writer, "{text}")?;
+            }
+        }
+        if view.runs.len() > super::history::MAX_CLASSIC_HISTORY_RUNS {
+            writeln!(
+                writer,
+                "Transcript detail limit reached; use show --output jsonl for the complete journal."
+            )?;
+        }
+        writer.flush()
+    }
+
     pub(super) fn write_help(&mut self, writer: &mut impl Write) -> io::Result<()> {
         if self.newline_pending || self.line_open {
             writeln!(writer)?;
@@ -775,6 +838,38 @@ mod tests {
             .write_agents(&mut refreshed, &model, false)
             .expect("progress redraw after partial choice");
         assert!(refreshed.starts_with(b"\nCurrent Run:"));
+
+        view.runs[0].supervisor =
+            crate::presentation::supervisor_fixture(view.runs[0].agents[0].id, 1);
+        let mut linear = LinearState::new("screen-reader");
+        let mut output = Vec::new();
+        linear.write_transcript(&mut output, &view).unwrap();
+        assert_eq!(output, b"Transcript details:\nSupervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken\n");
+        let inspector = AgentInspectorModel::from_session(&view, 0, 200, false);
+        let mut inspected = Vec::new();
+        linear
+            .write_agents(&mut inspected, &inspector, false)
+            .unwrap();
+        assert!(String::from_utf8(inspected).unwrap().contains("Supervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken\n"));
+        view.runs = vec![view.runs[0].clone(); 17];
+        output.clear();
+        linear.write_transcript(&mut output, &view).unwrap();
+        let text = std::str::from_utf8(&output).unwrap();
+        assert_eq!(text.matches("Supervisor (shadow):").count(), 16);
+        assert!(text.ends_with(
+            "Transcript detail limit reached; use show --output jsonl for the complete journal.\n"
+        ));
+        for run in &mut view.runs {
+            run.supervisor = crate::presentation::supervisor_fixture(run.agents[0].id, 256);
+        }
+        output.clear();
+        linear.write_transcript(&mut output, &view).unwrap();
+        assert!(output.ends_with(
+            b"Transcript detail limit reached; use show --output jsonl for the complete journal.\n"
+        ));
+        assert!(output.len() < 64 * 1024 + 256);
+        assert!(!output.contains(&0x1b));
+        assert!(!output.contains(&b'\r'));
 
         view.runs.clear();
         view.created_sequence = 0;

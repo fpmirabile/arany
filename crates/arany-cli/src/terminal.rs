@@ -931,51 +931,10 @@ impl AttachedTerminal {
 
     pub fn toggle_transcript(&mut self, view: &SessionView) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
-        if self.is_linear() {
-            writeln!(io::stderr(), "Transcript details:")?;
-            let mut remaining = history::MAX_CLASSIC_HISTORY_BYTES;
-            for run in view
-                .runs
-                .iter()
-                .rev()
-                .take(history::MAX_CLASSIC_HISTORY_RUNS)
-                .rev()
-            {
-                let mut parts = Vec::new();
-                if run.assistant_message.is_none()
-                    && let Some(answer) = crate::presentation::display_answer(run)
-                {
-                    parts.push(format!("Arany · incomplete:\n{answer}"));
-                }
-                parts.extend(
-                    crate::presentation::display_commentary(run)
-                        .into_iter()
-                        .map(|(_, _, text)| format!("Arany · public commentary:\n{text}")),
-                );
-                if run
-                    .display
-                    .iter()
-                    .any(|chunk| chunk.category == arany::DisplayCategory::Limit)
-                {
-                    parts.push(arany::DISPLAY_LIMIT_TEXT.to_owned());
-                }
-                let parts = parts
-                    .into_iter()
-                    .chain(run.tools.iter().map(crate::presentation::tool_detail_text));
-                for text in parts {
-                    let text = crate::presentation::escape_terminal(&text);
-                    if text.len() > remaining {
-                        writeln!(
-                            io::stderr(),
-                            "Transcript detail limit reached; use show --output jsonl for the complete journal."
-                        )?;
-                        return Ok(());
-                    }
-                    remaining = remaining.saturating_sub(text.len() + 1);
-                    writeln!(io::stderr(), "{text}")?;
-                }
-            }
-            return Ok(());
+        if let Some(linear) = &mut self.linear {
+            return linear
+                .write_transcript(&mut io::stderr(), view)
+                .map_err(Into::into);
         }
         if self.transcript_open {
             if self.parked_terminal.is_some() {

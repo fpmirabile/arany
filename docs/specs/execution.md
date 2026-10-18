@@ -154,7 +154,8 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 | `RunFinished`, `ProviderCallRecorded` | 8 |
 | `GoalStarted`, `GoalFinished`, `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
 | `ToolPermissionDecided` | 4 |
-| `SupervisorVerdictRecorded`, `ProviderFallbackUsed`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerHandoverRecorded`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
+| `SupervisorVerdictRecorded` | 1 |
+| `ProviderFallbackUsed`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerHandoverRecorded`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
 | `HookStarted` | 2 |
 | `HookFinished` | 4 |
 | All other supported Event kinds | 6 |

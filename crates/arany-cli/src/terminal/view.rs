@@ -816,6 +816,8 @@ pub(super) fn draw_frame_with_history(
     {
         let style = if line.matched {
             palette.selection()
+        } else if line.speaker == MessageKind::Supervisor {
+            Style::default().add_modifier(Modifier::DIM)
         } else if line.heading {
             match line.speaker {
                 MessageKind::User => Style::default().add_modifier(Modifier::BOLD),
@@ -825,6 +827,7 @@ pub(super) fn draw_frame_with_history(
                 MessageKind::Tool | MessageKind::ToolDetails | MessageKind::Commentary => {
                     palette.accent()
                 }
+                MessageKind::Supervisor => Style::default().add_modifier(Modifier::DIM),
                 MessageKind::Notice => palette.accent().add_modifier(Modifier::BOLD),
                 MessageKind::Error => palette.error().add_modifier(Modifier::BOLD),
             }
@@ -1783,7 +1786,13 @@ pub(super) fn draw_agent_inspector_frame(
         .enumerate()
     {
         frame.render_widget(
-            Paragraph::new(safe_truncate(line, usize::from(area.width))),
+            Paragraph::new(safe_truncate(line, usize::from(area.width))).style(
+                if line.starts_with("Supervisor (") {
+                    Style::default().add_modifier(Modifier::DIM)
+                } else {
+                    Style::default()
+                },
+            ),
             Rect::new(area.x, detail_y + index as u16, area.width, 1),
         );
     }

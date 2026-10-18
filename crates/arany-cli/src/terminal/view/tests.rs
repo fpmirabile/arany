@@ -2843,3 +2843,62 @@ fn unguarded_approval_pages_show_the_risk_copy_then_three_choices_with_deny_focu
         }
     }
 }
+
+#[test]
+fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
+    let actor = arany::AgentRunId::new();
+    let state = crate::presentation::supervisor_fixture(actor, 1);
+    let text = crate::presentation::supervisor_line(&state.verdicts()[0].1);
+    let model = PresentationModel {
+        status_line: "ready".into(),
+        activity_lines: Vec::new(),
+        setup_required: false,
+        draft_action: DraftAction::Submit,
+        empty_chat: false,
+    };
+    for width in [16, 40, 80, 160] {
+        for color in [false, true] {
+            let rows = super::super::history::display_rows(
+                MessageKind::Supervisor,
+                &text,
+                usize::from(width),
+            );
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_frame_with_history(
+                        frame,
+                        &model,
+                        &Composer::default(),
+                        None,
+                        Palette { color },
+                        &rows,
+                        None,
+                    )
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let label_row = (0..20)
+                .find(|y| buffer_row(buffer, *y).contains("Supervisor"))
+                .unwrap();
+            assert!(buffer[(2, label_row)].modifier.contains(Modifier::DIM));
+            if width == 160 {
+                assert!(buffer_row(buffer, label_row).contains("; no action taken"));
+            }
+            assert!(buffer.content().iter().all(|cell| cell.bg == Color::Reset));
+            let inspector = AgentInspectorModel {
+                selected: 0,
+                choices: Vec::new(),
+                lines: vec!["Agent".into(), safe_truncate(&text, usize::from(width))],
+            };
+            terminal
+                .draw(|frame| draw_agent_inspector_frame(frame, &inspector, 0, Palette { color }))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let label_row = (0..20)
+                .find(|y| buffer_row(buffer, *y).contains("Supervisor"))
+                .unwrap();
+            assert!(buffer[(0, label_row)].modifier.contains(Modifier::DIM));
+        }
+    }
+}

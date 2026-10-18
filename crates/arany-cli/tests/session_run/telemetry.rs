@@ -189,7 +189,7 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
     );
     let (first_team_export, team_export_gate) = mpsc::channel();
     let provider = thread::spawn(move || {
-        for index in 0..9 {
+        for index in 0..14 {
             let mut stream = crate::process::accept_with_deadline(
                 &provider_listener,
                 Duration::from_secs(10),
@@ -214,7 +214,44 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
                     serde_json::json!({"outcome":{"type":"finish","summary":"SUMMARY_SECRET_CANARY","result":"RESULT_SECRET_CANARY"}})
                 }
             };
-            send_response(&mut stream, index, text);
+            if index >= 9 {
+                assert!(
+                    !body
+                        .windows(b"SupervisorVerdictRecorded".len())
+                        .any(|part| part == b"SupervisorVerdictRecorded"),
+                    "shadow verdict entered model input"
+                );
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["tool_choice"], "required");
+                let (name, arguments) = if index < 13 {
+                    (
+                        "arany_read",
+                        serde_json::json!({"path":"supervisor-path-canary.txt","offset":0,"limit":64,"plan_contract":null}),
+                    )
+                } else {
+                    (
+                        "arany_finish",
+                        serde_json::json!({"summary":"SUMMARY_SECRET_CANARY","result":"RESULT_SECRET_CANARY"}),
+                    )
+                };
+                let response = serde_json::json!({"id":format!("resp_shadow_{index}"),"status":"completed","model":"model-1","output":[
+                    {"type":"function_call","id":format!("fc_shadow_{index}"),"call_id":format!("call_shadow_{index}"),"name":name,"arguments":arguments.to_string(),"status":"completed"}
+                ],"usage":{"input_tokens":20,"output_tokens":10}});
+                let (content_type, response) = if request["stream"] == true {
+                    (
+                        "text/event-stream",
+                        format!(
+                            "data: {}\n\n",
+                            serde_json::json!({"type":"response.completed","response":response})
+                        ),
+                    )
+                } else {
+                    ("application/json", response.to_string())
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
+            } else {
+                send_response(&mut stream, index, text);
+            }
             if index == 4 {
                 team_export_gate
                     .recv_timeout(Duration::from_secs(10))
@@ -567,7 +604,6 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let unavailable_result = wait_product(unavailable.spawn().expect("unavailable Collector run"));
-    provider.join().expect("Provider server");
     assert!(
         unavailable_result.status.success(),
         "Collector outage is nonfatal"
@@ -590,6 +626,157 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
         .expect("unavailable Session");
     assert_eq!(unavailable_view.runs.len(), 1);
     assert_eq!(unavailable_view.runs[0].status, RunStatus::Finished);
+
+    std::fs::write(
+        workspace.join("supervisor-path-canary.txt"),
+        b"SUPERVISOR_FILE_CONTENT_CANARY",
+    )
+    .unwrap();
+    crate::private_file(
+        &state.join("tools.json"),
+        &serde_json::to_vec(&serde_json::json!({
+            "version": 1, "workspace_paths": ["supervisor-path-canary.txt"], "write": false,
+            "commands": [], "skills": [], "mcp": []
+        }))
+        .unwrap(),
+    );
+    let shadow_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    shadow_listener.set_nonblocking(true).unwrap();
+    let shadow_address = shadow_listener.local_addr().unwrap();
+    let (shadow_done, shadow_wait) = mpsc::channel();
+    let shadow_collector =
+        thread::spawn(move || collect_trace_requests(shadow_listener, shadow_wait, None));
+    let mut shadow = Command::new(env!("CARGO_BIN_EXE_arany"));
+    shadow
+        .env_clear()
+        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .current_dir(&workspace)
+        .args([
+            "--otlp-endpoint",
+            &format!("http://{shadow_address}"),
+            "exec",
+        ])
+        .arg("--state-dir")
+        .arg(&state)
+        .arg("--workspace")
+        .arg(&workspace)
+        .args([
+            "--provider",
+            "custom:local",
+            "--model",
+            "model-1",
+            "--collaboration",
+            "single",
+            "--tools",
+            "--output",
+            "jsonl",
+            "SUPERVISOR_OBJECTIVE_CANARY",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let shadow_result = wait_product(shadow.spawn().unwrap());
+    shadow_done.send(()).unwrap();
+    let shadow_bodies = shadow_collector.join().unwrap();
+    provider.join().expect("Provider server");
+    assert!(shadow_result.status.success(), "shadow exec failed");
+    assert!(shadow_result.stderr.is_empty());
+    for canary in [
+        "supervisor-path-canary.txt",
+        "SUPERVISOR_FILE_CONTENT_CANARY",
+        "SUPERVISOR_OBJECTIVE_CANARY",
+        "SUMMARY_SECRET_CANARY",
+        "RESULT_SECRET_CANARY",
+    ] {
+        assert!(
+            shadow_bodies.iter().all(|body| !body
+                .windows(canary.len())
+                .any(|part| part == canary.as_bytes())),
+            "Supervisor trace canary leaked"
+        );
+    }
+    let shadow_lines = String::from_utf8(shadow_result.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let shadow_session =
+        SessionId::from_str(shadow_lines[0]["session_id"].as_str().unwrap()).unwrap();
+    let shadow_view = runtime
+        .block_on(store.load_view(shadow_session))
+        .unwrap()
+        .unwrap();
+    let persisted = runtime
+        .block_on(store.load_session(shadow_session))
+        .unwrap();
+    assert!(
+        persisted
+            .iter()
+            .map(|event| serde_json::to_value(arany_cli::protocol::EventLine::from(event)).unwrap())
+            .collect::<Vec<_>>()
+            == shadow_lines,
+        "JSONL differs from committed history"
+    );
+    assert_eq!(shadow_view.runs[0].status, RunStatus::Finished);
+    let verdicts: Vec<_> = shadow_lines
+        .iter()
+        .filter(|line| line["kind"] == "SupervisorVerdictRecorded")
+        .collect();
+    assert_eq!(verdicts.len(), 2);
+    assert_eq!(
+        shadow_view.runs[0].supervisor.verdicts().len(),
+        verdicts.len()
+    );
+    let shadow_spans = trace_spans(&shadow_bodies);
+    let shadow_run = shadow_spans
+        .iter()
+        .find(|span| span.name == "invoke_workflow arany.run")
+        .unwrap();
+    let exported: Vec<_> = shadow_run
+        .events
+        .iter()
+        .filter(|event| event.name == "arany.supervisor.verdict")
+        .collect();
+    assert_eq!(exported.len(), verdicts.len());
+    for (event, verdict) in exported.iter().zip(verdicts) {
+        assert_eq!(
+            event.time_unix_nano,
+            verdict["created_at_ms"].as_u64().unwrap() * 1_000_000
+        );
+        assert_eq!(event.attributes.len(), 2);
+        for (key, expected) in [
+            ("arany.supervisor.signals", vec!["loop"]),
+            (
+                "arany.supervisor.levels",
+                vec![verdict["payload"]["signals"][0]["level"].as_str().unwrap()],
+            ),
+        ] {
+            let value = event
+                .attributes
+                .iter()
+                .find(|attr| attr.key == key)
+                .unwrap()
+                .value
+                .as_ref()
+                .unwrap()
+                .value
+                .as_ref()
+                .unwrap();
+            let Value::ArrayValue(array) = value else {
+                panic!("closed enum array");
+            };
+            assert_eq!(
+                array
+                    .values
+                    .iter()
+                    .map(|value| match value.value.as_ref().unwrap() {
+                        Value::StringValue(value) => value.as_str(),
+                        _ => panic!("closed string enum"),
+                    })
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
 
     let show_listener = TcpListener::bind("127.0.0.1:0").expect("show Collector listener");
     show_listener

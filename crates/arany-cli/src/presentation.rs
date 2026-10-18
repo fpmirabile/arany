@@ -20,6 +20,82 @@ pub enum Output {
     Jsonl,
 }
 
+pub(crate) fn supervisor_line(verdict: &arany::supervisor::SupervisorVerdict) -> String {
+    use arany::supervisor::SignalKind;
+    let signals = verdict
+        .signals
+        .iter()
+        .map(|signal| match signal.signal {
+            SignalKind::Loop => "possible loop",
+            SignalKind::Probing => "possible probing",
+            SignalKind::Disproportion => "possibly disproportionate changes",
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Supervisor (shadow): {signals}; no action taken{}",
+        if verdict.capped {
+            "; verdict limit reached"
+        } else {
+            ""
+        }
+    )
+}
+
+pub(crate) fn supervisor_lines(run: &RunView) -> impl Iterator<Item = String> + '_ {
+    run.supervisor
+        .verdicts()
+        .iter()
+        .map(|(_, verdict)| supervisor_line(verdict))
+}
+
+#[cfg(test)]
+pub(crate) fn supervisor_fixture(
+    actor: arany::AgentRunId,
+    count: usize,
+) -> arany::supervisor::SupervisorState {
+    use arany::supervisor::*;
+    SupervisorState::with_verdicts_for_test(
+        (0..count)
+            .map(|index| {
+                (
+                    actor,
+                    SupervisorVerdict {
+                        subject_sequence: 1,
+                        site: Site::ToolOutcome,
+                        evaluator: 1,
+                        mode: Mode::Shadow,
+                        signals: vec![
+                            Signal {
+                                signal: SignalKind::Loop,
+                                level: Level::Notice,
+                                would_response: None,
+                                features: Features::Loop(Default::default()),
+                                evidence: vec![1],
+                            },
+                            Signal {
+                                signal: SignalKind::Probing,
+                                level: Level::WouldNarrow,
+                                would_response: Some(Response::Revoke),
+                                features: Features::Probing(Default::default()),
+                                evidence: vec![1],
+                            },
+                            Signal {
+                                signal: SignalKind::Disproportion,
+                                level: Level::WouldNarrow,
+                                would_response: Some(Response::RequireApproval),
+                                features: Features::Disproportion(Default::default()),
+                                evidence: vec![1],
+                            },
+                        ],
+                        capped: index == 255,
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     use arany::{ToolCall, ToolDisposition};
     let operation = match &tool.intent.call {
