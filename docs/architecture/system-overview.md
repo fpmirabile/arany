@@ -137,9 +137,10 @@ functions because the host kernel, not runtime configuration, selects them.
 
 Researcher children are direct read-only AgentRuns: without Tools they make one reasoning
 call; with Tools they may make up to 16 read-only Tool calls before reporting.
-One foreground editor instead edits its leased private base/overlay through the shared Tool step,
-returns one handover and waits for primary integration and fresh criterion verification.
-Mixed/background editor teams and later waves remain refused.
+Run-scoped foreground/background editors use leased private bases/overlays through the shared Tool step,
+return one handover each and wait for primary integration and fresh criterion verification.
+Explicit ID reassignment creates a fresh attempt; the reducer projects historical dispositions and lineage,
+while native Guard admission alone owns abandoned-storage containment and cleanup.
 The [researcher contract](../specs/execution.md#researcher-children) owns their
 catalog, budgets, ordering and failure rules; children never inherit a broader
 grant than their parent.

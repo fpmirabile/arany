@@ -53,45 +53,34 @@ pub(super) fn goal_report(
             &mut omitted_facts,
         );
     }
-    for worker in view
+    let mut workers: Vec<_> = view
         .runs
         .iter()
-        .filter(|run| goal.run_ids.contains(&run.id))
-        .flat_map(|run| &run.agents)
-        .filter_map(|a| a.assignment.as_ref())
-    {
-        if let Some((_, outcome)) = &worker.outcome {
-            let fact = match outcome.disposition {
-                crate::session::worker::WorkerDisposition::PrivateUncertain => Some(
-                    "A private worker effect remains unknown; its contained private work was discarded without Workspace publication.",
-                ),
-                crate::session::worker::WorkerDisposition::Failed
-                | crate::session::worker::WorkerDisposition::Lost
-                | crate::session::worker::WorkerDisposition::Cancelled => Some(
-                    "A worker failed or stopped; its private work was discarded without Workspace publication.",
-                ),
-                _ if worker.integration.as_ref().is_some_and(|(_, i)| {
-                    i.outcome == crate::session::worker::WorkerIntegrationOutcome::Conflict
-                }) =>
-                {
-                    Some(
-                        "Worker integration conflicted; the whole changeset was discarded before publication.",
-                    )
-                }
-                _ if worker.verification.as_ref().is_none_or(|(_, v)| !v.passed) => {
-                    Some("A worker criterion has no passing fresh primary verification.")
-                }
-                _ => None,
-            };
-            if let Some(fact) = fact {
-                push_goal_report_item(
-                    &mut report,
-                    GoalReportSection::Unresolved,
-                    fact,
-                    &mut omitted_facts,
-                );
-            }
+        .filter(|r| goal.run_ids.contains(&r.id))
+        .flat_map(|r| r.worker_history())
+        .collect();
+    workers.sort_by_key(|w| {
+        use crate::worker::WorkerPublication;
+        if w.publication == WorkerPublication::Unknown || w.private_outcome_unknown {
+            0
+        } else if w.publication == WorkerPublication::Confirmed && !w.verified {
+            1
+        } else if w.publication == WorkerPublication::Unpublished {
+            2
+        } else {
+            3
         }
+    });
+    let (critical, workers): (Vec<_>, Vec<_>) = workers.into_iter().partition(|w| {
+        w.publication == crate::worker::WorkerPublication::Unknown || w.private_outcome_unknown
+    });
+    for worker in &critical {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            &worker.description(),
+            &mut omitted_facts,
+        );
     }
     push_cache_facts(&mut report, view, goal, &mut omitted_facts);
     push_unguarded_facts(&mut report, view, goal, &mut omitted_facts);
@@ -114,6 +103,7 @@ pub(super) fn goal_report(
             &mut omitted_facts,
         );
     }
+    push_settled_workers(&mut report, workers, &mut omitted_facts);
     // The serialized-size loop below is the only truncation; it starts from the full summary.
     let mut summary_bytes = raw_summary.len();
     let mut summary_notice_added = false;
@@ -131,7 +121,7 @@ pub(super) fn goal_report(
             report.summary = summary;
             summary_notice_added = true;
         }
-        report.summary = truncate_utf8(raw_summary, summary_bytes).to_owned();
+        report.summary = crate::tools::types::truncate_utf8(raw_summary, summary_bytes).to_owned();
         assert!(summary_bytes > 0 || goal_report_fits_with_omission(&mut report));
     }
     let protected_unresolved_count = report.unresolved.len();
@@ -191,6 +181,45 @@ fn push_cache_facts(
             report,
             GoalReportSection::Unresolved,
             "One or more Commands have an uncertain build cache publication; inspect Session history before retrying.",
+            omitted_facts,
+        );
+    }
+}
+
+fn push_settled_workers(
+    report: &mut GoalReport,
+    workers: Vec<crate::worker::WorkerHistory>,
+    omitted_facts: &mut bool,
+) {
+    let mut verified = Vec::new();
+    for worker in workers {
+        if worker.verified {
+            verified.push(worker.assignment_id);
+            continue;
+        }
+        push_goal_report_item(
+            report,
+            GoalReportSection::Unresolved,
+            &worker.description(),
+            omitted_facts,
+        );
+        if worker.publication == crate::worker::WorkerPublication::Confirmed {
+            push_goal_report_item(
+                report,
+                GoalReportSection::Unresolved,
+                &format!(
+                    "Worker {}: confirmed Workspace publication needs fresh primary verification.",
+                    worker.assignment_id
+                ),
+                omitted_facts,
+            );
+        }
+    }
+    for id in verified {
+        push_goal_report_item(
+            report,
+            GoalReportSection::Changes,
+            &format!("Worker {id}: settled and verified."),
             omitted_facts,
         );
     }
@@ -394,13 +423,14 @@ fn push_success_facts(
 #[cfg(test)]
 mod tests;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum GoalReportSection {
     Changes,
     Evidence,
     Unresolved,
 }
 
+const GOAL_REPORT_ITEM_LIMIT: usize = 32;
 const GOAL_REPORT_OMISSION: &str =
     "Some lower-priority Goal facts were omitted to fit the report limits.";
 
@@ -415,11 +445,11 @@ fn push_goal_report_item(
         GoalReportSection::Evidence => report.evidence.len(),
         GoalReportSection::Unresolved => report.unresolved.len(),
     };
-    if count >= 32 {
+    if count >= GOAL_REPORT_ITEM_LIMIT - usize::from(section == GoalReportSection::Unresolved) {
         *omitted_facts = true;
         return;
     }
-    let item = truncate_utf8(text, 512).to_owned();
+    let item = crate::tools::types::truncate_utf8(text, 512).to_owned();
     match section {
         GoalReportSection::Changes => report.changes.push(item),
         GoalReportSection::Evidence => report.evidence.push(item),
@@ -427,7 +457,8 @@ fn push_goal_report_item(
     }
     if serde_json::to_vec(report).map_or(true, |bytes| {
         bytes.len() > crate::session::MAX_GOAL_REPORT_BYTES
-    }) {
+    }) || section == GoalReportSection::Unresolved && !goal_report_fits_with_omission(report)
+    {
         match section {
             GoalReportSection::Changes => report.changes.pop(),
             GoalReportSection::Evidence => report.evidence.pop(),
@@ -439,7 +470,9 @@ fn push_goal_report_item(
 
 fn append_goal_report_omission(report: &mut GoalReport, protected_unresolved_count: usize) {
     while !goal_report_fits_with_omission(report) {
-        if report.unresolved.len() >= 32 && report.unresolved.len() > protected_unresolved_count {
+        if report.unresolved.len() >= GOAL_REPORT_ITEM_LIMIT
+            && report.unresolved.len() > protected_unresolved_count
+        {
             report.unresolved.pop();
             continue;
         }
@@ -452,7 +485,8 @@ fn append_goal_report_omission(report: &mut GoalReport, protected_unresolved_cou
         }
         if !report.summary.is_empty() {
             let summary_bytes = report.summary.len().saturating_sub(128);
-            report.summary = truncate_utf8(&report.summary, summary_bytes).to_owned();
+            report.summary =
+                crate::tools::types::truncate_utf8(&report.summary, summary_bytes).to_owned();
             continue;
         }
         unreachable!("priority Goal report facts and omission notice fit their bounds");
@@ -461,7 +495,7 @@ fn append_goal_report_omission(report: &mut GoalReport, protected_unresolved_cou
 }
 
 fn goal_report_fits_with_omission(report: &mut GoalReport) -> bool {
-    if report.unresolved.len() >= 32 {
+    if report.unresolved.len() >= GOAL_REPORT_ITEM_LIMIT {
         return false;
     }
     report.unresolved.push(GOAL_REPORT_OMISSION.to_owned());
@@ -469,17 +503,6 @@ fn goal_report_fits_with_omission(report: &mut GoalReport) -> bool {
         .is_ok_and(|bytes| bytes.len() <= crate::session::MAX_GOAL_REPORT_BYTES);
     report.unresolved.pop();
     fits
-}
-
-fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
-    if text.len() <= max_bytes {
-        return text;
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {

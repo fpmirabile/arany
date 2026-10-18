@@ -764,7 +764,7 @@ mod account_default_tests {
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
         assert_eq!(payload_version("RunStarted"), Some(14));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(7));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(8));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
@@ -964,7 +964,7 @@ mod provider_call_tests {
     use super::*;
 
     #[test]
-    fn provider_call_record_v7_rejects_v6_and_inconsistent_cache_fields() {
+    fn provider_call_record_v8_rejects_v6_and_inconsistent_cache_fields() {
         let current = payload_version("ProviderCallRecorded").expect("payload version");
         let run = RunId::new();
         let agent = AgentRunId::new();
@@ -1554,6 +1554,7 @@ mod payload_version_tests {
             ("HookFinished", 2),
             ("AgentFinished", 7),
             ("RunFinished", 7),
+            ("ProviderCallRecorded", 7),
         ] {
             assert!(matches!(
                 Event::decode(kind, old, "{}", None, None),

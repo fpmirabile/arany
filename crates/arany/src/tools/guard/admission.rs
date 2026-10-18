@@ -839,6 +839,52 @@ pub(super) async fn acquire(
     .await
 }
 
+pub(super) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
+    if ids.len() > 8 * 17 || ids.iter().any(|id| id.is_nil()) {
+        return Err(ToolError::Limit);
+    }
+    let path = crate::store::StateRoot::account_path()
+        .map_err(|_| ToolError::Path)?
+        .join("guard");
+    let directory = open_directory(&path, true).map_err(|_| ToolError::Path)?;
+    let parent = Path::new(if cfg!(target_os = "linux") {
+        "/tmp"
+    } else {
+        "/private/tmp"
+    });
+    recover_private_in(&directory, parent, ids).await
+}
+
+async fn recover_private_in(
+    directory: &PrivateDirectory,
+    parent: &Path,
+    ids: &[uuid::Uuid],
+) -> Result<(), ToolError> {
+    let mut recovery = RecoveryBudget {
+        remaining: Duration::from_secs(30),
+        attempts: RECOVERY_ATTEMPTS,
+    };
+    let now = crate::tools::now_ms();
+    recovery
+        .recover(directory, parent, now.saturating_add(30_000), now)
+        .await?;
+    for id in ids {
+        for suffix in ["unit", "seed", "seed.next"] {
+            if open_file(&directory.dir, &format!("{id}.{suffix}"), false)?.is_some() {
+                return Err(ToolError::ProtectionUnavailable);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        match std::fs::symlink_metadata(parent.join(format!("arany-tools-{id}"))) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(ToolError::ProtectionUnavailable),
+        }
+        #[cfg(target_os = "macos")]
+        super::macos::private_recovered(parent, *id)?;
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 async fn recover_reservations(
     dir: &cap_std::fs::Dir,
@@ -1314,6 +1360,12 @@ mod tests {
                 1,
                 "live stage {stage}"
             );
+            assert!(
+                recover_private_in(&directory, fixture.path(), &[id])
+                    .await
+                    .is_err(),
+                "live private recovery {stage}"
+            );
             child.child.kill().unwrap();
             let observed =
                 crate::test_process::capture(&mut child.child, Duration::from_secs(5), 8192);
@@ -1360,6 +1412,9 @@ mod tests {
                 .await
                 .unwrap();
             assert!(!seed_path.exists(), "recovered stage {stage}");
+            recover_private_in(&directory, fixture.path(), &[id])
+                .await
+                .unwrap();
             if let Some(group) = native_group {
                 match group.read_to_string("cgroup.events") {
                     Ok(events) => assert!(events.lines().any(|line| line == "populated 0")),

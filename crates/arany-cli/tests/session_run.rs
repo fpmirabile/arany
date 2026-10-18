@@ -8,6 +8,10 @@ use arany::{
 use process::BoundedOutput;
 use std::process::Command;
 
+#[cfg(unix)]
+#[path = "session_run/worker.rs"]
+mod worker;
+
 #[test]
 fn account_path_uses_the_private_binary_fixture() {
     let root = arany::test_support::isolate_account_root();

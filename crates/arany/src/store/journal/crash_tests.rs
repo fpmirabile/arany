@@ -165,9 +165,23 @@ fn crash_append_child() {
         .expect("crash child Store");
     runtime().block_on(async {
         store
-            .append(session_id, terminal_event(run_id))
+            .append(
+                session_id,
+                if let Some(path) = std::env::var_os("ARANY_TEST_CRASH_EVENT") {
+                    let (kind, version, payload, run, actor): (
+                        String,
+                        i64,
+                        String,
+                        Option<RunId>,
+                        Option<AgentRunId>,
+                    ) = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                    Event::decode(&kind, version, &payload, run, actor).unwrap()
+                } else {
+                    terminal_event(run_id)
+                },
+            )
             .await
-            .expect("acknowledged terminal Event");
+            .expect("acknowledged crash Event");
     });
     if stage == "after" {
         std::fs::write(marker, b"acknowledged").expect("post-commit marker");
@@ -181,50 +195,15 @@ fn crash_append_child() {
 #[test]
 #[ignore = "native Linux Store transaction crash release gate"]
 fn process_death_preserves_only_acknowledged_terminal_events() {
-    for (stage, marker_bytes, expected_len, expected_status) in [
-        ("before", b"inserted".as_slice(), 5, RunStatus::Interrupted),
-        ("after", b"acknowledged".as_slice(), 6, RunStatus::Failed),
+    for (stage, expected_len, expected_status) in [
+        ("before", 5, RunStatus::Interrupted),
+        ("after", 6, RunStatus::Failed),
     ] {
         let temp = tempfile::tempdir().expect("private crash test root");
         let state = temp.path().join("state");
         let marker = temp.path().join("crash-stage");
         let (session_id, run_id) = seed_interrupted_run(&state);
-        let child = Command::new(std::env::current_exe().expect("test binary path"))
-            .env_clear()
-            .env("ARANY_TEST_CRASH_STATE", &state)
-            .env("ARANY_TEST_CRASH_MARKER", &marker)
-            .env("ARANY_TEST_CRASH_STAGE", stage)
-            .env("ARANY_TEST_CRASH_SESSION", session_id.to_string())
-            .env("ARANY_TEST_CRASH_RUN", run_id.to_string())
-            .args([
-                "--exact",
-                "store::journal::crash_tests::crash_append_child",
-                "--ignored",
-                "--nocapture",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn crash child");
-        let mut child = CrashChild(Some(child));
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let marker_ready = if marker.exists() {
-                let observed = std::fs::read(&marker).expect("stage marker");
-                assert!(marker_bytes.starts_with(&observed), "invalid stage marker");
-                observed == marker_bytes
-            } else {
-                false
-            };
-            if marker_ready {
-                assert!(child.poll().is_none(), "crash child exited before kill");
-                break;
-            }
-            assert!(child.poll().is_none(), "crash child exited before stage");
-            assert!(Instant::now() < deadline, "crash stage deadline exceeded");
-            thread::yield_now();
-        }
-        child.kill_and_reap();
+        kill_at_append(&state, session_id, run_id, &marker, stage, None);
 
         let store = Store::open(StateRoot::open_existing(&state).expect("recovered State"))
             .expect("recovery Store");
@@ -265,5 +244,141 @@ fn process_death_preserves_only_acknowledged_terminal_events() {
             }
             store.close().await.expect("recovery Store close");
         });
+    }
+}
+
+fn kill_at_append(
+    state: &Path,
+    session_id: SessionId,
+    run_id: RunId,
+    marker: &Path,
+    stage: &str,
+    event_path: Option<&Path>,
+) {
+    let marker_bytes = if stage == "before" {
+        b"inserted".as_slice()
+    } else {
+        b"acknowledged".as_slice()
+    };
+    let mut command = Command::new(std::env::current_exe().expect("test binary path"));
+    command.env_clear();
+    if let Some(path) = event_path {
+        command.env("ARANY_TEST_CRASH_EVENT", path);
+    }
+    let child = command
+        .env("ARANY_TEST_CRASH_STATE", state)
+        .env("ARANY_TEST_CRASH_MARKER", marker)
+        .env("ARANY_TEST_CRASH_STAGE", stage)
+        .env("ARANY_TEST_CRASH_SESSION", session_id.to_string())
+        .env("ARANY_TEST_CRASH_RUN", run_id.to_string())
+        .args([
+            "--exact",
+            "store::journal::crash_tests::crash_append_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn crash child");
+    let mut child = CrashChild(Some(child));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let marker_ready = if marker.exists() {
+            let observed = std::fs::read(marker).expect("stage marker");
+            assert!(marker_bytes.starts_with(&observed), "invalid stage marker");
+            observed == marker_bytes
+        } else {
+            false
+        };
+        if marker_ready {
+            assert!(child.poll().is_none(), "crash child exited before kill");
+            break;
+        }
+        assert!(child.poll().is_none(), "crash child exited before stage");
+        assert!(Instant::now() < deadline, "crash stage deadline exceeded");
+        thread::yield_now();
+    }
+    child.kill_and_reap();
+}
+
+#[test]
+#[ignore = "native Linux Store worker transaction crash release gate"]
+fn worker_process_death_preserves_exact_recovery_prefixes() {
+    let f = crate::session::worker_protocol_fixture();
+    for (index, event) in f.events.iter().enumerate().filter(|(_, e)| {
+        matches!(
+            e,
+            Event::AgentSpawned {
+                assignment: Some(_),
+                ..
+            } | Event::WorkerDataChunk { .. }
+                | Event::WorkerDataSealed { .. }
+                | Event::WorkerHandoverRecorded { .. }
+                | Event::WorkerIntegrationRecorded { .. }
+                | Event::WorkerLeaseReleased { .. }
+                | Event::ToolStarted { .. }
+                | Event::ToolFinished { .. }
+                | Event::AgentFinished {
+                    worker: Some(_),
+                    ..
+                }
+                | Event::ProviderCallRecorded {
+                    record: crate::session::ProviderCallRecord {
+                        disposition: crate::session::ProviderCallDisposition::Finished,
+                        ..
+                    },
+                    ..
+                }
+        )
+    }) {
+        for stage in ["before", "after"] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = temp.path().join("state");
+            let event_path = temp.path().join("event.json");
+            let marker = temp.path().join("stage");
+            let store = Store::open(StateRoot::admit(&state).unwrap()).unwrap();
+            runtime().block_on(async {
+                for event in &f.events[..index] {
+                    store.append(f.session, event.clone()).await.unwrap();
+                }
+                store.close().await.unwrap();
+            });
+            let (run, actor) = event.scope();
+            std::fs::write(
+                &event_path,
+                serde_json::to_vec(&(
+                    event.kind(),
+                    event.version(),
+                    event.payload().unwrap(),
+                    run,
+                    actor,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+            kill_at_append(&state, f.session, f.run, &marker, stage, Some(&event_path));
+            let expected_len = index + usize::from(stage == "after");
+            let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
+            runtime().block_on(async {
+                let events = store.load_session(f.session).await.unwrap();
+                assert_eq!(
+                    events.iter().map(|e| &e.event).collect::<Vec<_>>(),
+                    f.events[..expected_len].iter().collect::<Vec<_>>(),
+                    "{} {stage}",
+                    event.kind()
+                );
+                let actual = store.load_view(f.session).await.unwrap().unwrap();
+                let expected = SessionView::replay(f.session, &f.envelopes()[..expected_len])
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(actual, expected, "{} {stage}", event.kind());
+                assert_eq!(
+                    actual.runs[0].worker_history(),
+                    expected.runs[0].worker_history()
+                );
+                store.close().await.unwrap();
+            });
+        }
     }
 }

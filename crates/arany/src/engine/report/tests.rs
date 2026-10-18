@@ -756,3 +756,128 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
             .any(|item| item.starts_with("An unguarded host run attested"))
     );
 }
+
+#[test]
+fn worker_recovery_report_preserves_exact_ids_disposal_and_unverified_publication() {
+    let f = crate::session::worker_protocol_fixture();
+    let events = f.envelopes();
+    for end in 1..=events.len() {
+        let view = crate::session::SessionView::replay(f.session, &events[..end])
+            .unwrap()
+            .unwrap();
+        let Some(run) = view.runs.last() else {
+            continue;
+        };
+        let goal = view.goal(f.goal).unwrap();
+        let report = goal_report(&view, run, goal);
+        for worker in run.worker_history() {
+            let text = report
+                .unresolved
+                .iter()
+                .chain(&report.changes)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains(&worker.assignment_id.to_string()),
+                "prefix {end} lost worker ID"
+            );
+            if worker.publication == crate::worker::WorkerPublication::Confirmed && !worker.verified
+            {
+                assert!(
+                    text.contains(
+                        "confirmed Workspace publication needs fresh primary verification"
+                    ),
+                    "prefix {end}"
+                );
+            }
+            if worker.private_outcome_unknown {
+                assert!(
+                    text.contains("private_outcome_unknown=true"),
+                    "prefix {end}"
+                );
+            }
+        }
+        assert!(
+            serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES
+        );
+    }
+}
+
+#[test]
+fn many_worker_lines_never_displace_unguarded_or_unknown_facts() {
+    let f = crate::session::worker_protocol_fixture();
+    let events = f.envelopes();
+    let mut view = crate::session::SessionView::replay(f.session, &events)
+        .unwrap()
+        .unwrap();
+    let run = view.runs.last_mut().unwrap();
+    let template = run
+        .agents
+        .iter()
+        .find(|a| a.assignment.is_some())
+        .unwrap()
+        .clone();
+    for _ in 0..40 {
+        let mut agent = template.clone();
+        agent.id = AgentRunId::new();
+        run.agents.push(agent);
+    }
+    let call = ToolCall::CommandUnguarded {
+        program: "cargo".into(),
+        args: vec!["check".into()],
+        cwd: String::new(),
+        justification: "Run the failed command once".into(),
+    };
+    let mut intent = read_intent(&call);
+    intent.run_id = run.id;
+    run.tools.push(ToolView {
+        observation: Some(crate::tools::ToolObservation {
+            enforcement_cause: None,
+            attestation: Some(Attestation::for_site(&intent)),
+            intent: intent.clone(),
+            disposition: ToolDisposition::Succeeded,
+            output: serde_json::json!({"exit_code": 0, "stdout": "", "stderr": "", "changeset": {"files": []}}).to_string(),
+            cache_update: CacheUpdate::NotApplicable,
+        }),
+        intent,
+        review_call_index: None,
+        permission_verdict: None,
+        hooks: Vec::new(),
+        hook_sequence: None,
+        finished_sequence: None,
+    });
+    let run = view.runs.last().unwrap();
+    let goal = view.goal(f.goal).unwrap();
+    assert!(run.worker_history().len() > 40);
+    let report = goal_report(&view, run, goal);
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .any(|item| item.contains("unguarded host run(s) executed outside the Guard"))
+    );
+    assert!(serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES);
+}
+
+#[test]
+fn unresolved_facts_always_leave_room_for_the_omission_marker() {
+    let mut report = GoalReport {
+        summary: "Summary".into(),
+        cached_input_tokens: 0,
+        changes: Vec::new(),
+        evidence: Vec::new(),
+        unresolved: Vec::new(),
+    };
+    let mut omitted = false;
+    for index in 0..64 {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            &format!("fact {index} {}", "x".repeat(500)),
+            &mut omitted,
+        );
+    }
+    assert!(omitted);
+    assert!(goal_report_fits_with_omission(&mut report));
+}
