@@ -2640,3 +2640,198 @@ async fn hook_post_tool_use_denies_a_researcher_tool_before_dispatch() {
     );
     assert!(tool.hooks.is_empty());
 }
+
+fn narrowing_script(updated: &Value, only_when: &str) -> String {
+    let output = json!({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "allow",
+        "updatedInput": updated,
+    }});
+    format!("case \"$(cat)\" in *'{only_when}'*) printf '%s' '{output}';; esac")
+}
+
+struct NarrowCase {
+    tools: Vec<arany::ToolView>,
+    events: Vec<arany::EventEnvelope>,
+    observed: Vec<String>,
+    session: SessionId,
+}
+
+async fn narrow_case(script: String) -> NarrowCase {
+    narrow_run(script, Vec::new()).await
+}
+
+async fn narrow_run(script: String, later: Vec<arany::ToolCall>) -> NarrowCase {
+    let fixture = Fixture::new(
+        Some(&hook_settings(json!({}), vec![shell_hook(&script)])),
+        true,
+    );
+    let (result, requests, _) = fixture
+        .run(
+            std::iter::once(tool_outcome(call("read"), None))
+                .chain(later.into_iter().map(|call| tool_outcome(call, None)))
+                .chain([finish("answer")])
+                .collect(),
+            None,
+            false,
+        )
+        .await;
+    let observed = requests
+        .get(1)
+        .map(|request| {
+            request.input.tools.as_ref().unwrap().steps[0]
+                .observations
+                .iter()
+                .map(|observation| observation.output.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let session = result.session_id;
+    let (events, view) = fixture.reopen(session).await;
+    NarrowCase {
+        tools: view.runs[0].tools.clone(),
+        events,
+        observed,
+        session,
+    }
+}
+
+#[tokio::test]
+async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
+    let narrowed = arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: 0,
+        limit: 8,
+    };
+    let case = narrow_case(narrowing_script(&json!(narrowed), "\"limit\":32")).await;
+    assert_eq!(case.tools.len(), 2);
+    let (original, replacement) = (&case.tools[0], &case.tools[1]);
+    assert_eq!(
+        original.observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Denied
+    );
+    assert_eq!(
+        original.observation.as_ref().unwrap().output,
+        "Hook narrowed this Tool to: Read"
+    );
+    let verdict = original.permission_verdict.as_ref().unwrap();
+    assert_eq!(
+        (verdict.decision, verdict.basis, verdict.hook_restriction),
+        (Decision::Deny, PermissionSource::Hook, Some(Decision::Deny))
+    );
+    assert_eq!(
+        original.hooks[0].outcome.as_ref().unwrap().result,
+        arany::permissions::HookResult::Narrowed {
+            call: narrowed.clone()
+        }
+    );
+    assert_eq!(replacement.intent.call, narrowed);
+    assert_eq!(
+        replacement.observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Succeeded
+    );
+    assert!(replacement.permission_verdict.as_ref().unwrap().approved);
+    assert_eq!(replacement.hooks.len(), 1);
+    assert_eq!(
+        replacement.hooks[0].outcome.as_ref().unwrap().result,
+        arany::permissions::HookResult::Passed
+    );
+    let verdicts = case
+        .events
+        .iter()
+        .filter(|event| matches!(event.event, Event::ToolPermissionDecided { .. }))
+        .count();
+    let dispatched = case
+        .tools
+        .iter()
+        .filter(|tool| {
+            tool.observation
+                .as_ref()
+                .is_some_and(|o| o.attestation.is_some())
+        })
+        .count();
+    assert_eq!((verdicts, dispatched), (2, 1));
+    assert_eq!(case.observed.len(), 2);
+    assert_eq!(case.observed[0], "Hook narrowed this Tool to: Read");
+    assert_eq!(
+        case.observed[1],
+        replacement.observation.as_ref().unwrap().output
+    );
+
+    assert!(SessionView::replay(case.session, &case.events).is_ok());
+    let mut forged = case.events.clone();
+    let second = forged
+        .iter_mut()
+        .filter_map(|event| match &mut event.event {
+            Event::ToolStarted { intent, .. } => Some(intent),
+            _ => None,
+        })
+        .nth(1)
+        .unwrap();
+    second.call = arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: 0,
+        limit: 32,
+    };
+    assert!(SessionView::replay(case.session, &forged).is_err());
+}
+
+#[tokio::test]
+async fn hook_widening_or_repeated_updates_deny_without_a_second_dispatch() {
+    let widening =
+        json!({"operation": "read", "path": "notes/facts.txt", "offset": 0, "limit": 64});
+    let case = narrow_case(narrowing_script(&widening, "\"limit\":32")).await;
+    assert_eq!(case.tools.len(), 1);
+    assert_eq!(
+        case.observed,
+        vec!["Hook denied this Tool: hook input update does not narrow"]
+    );
+    let other = json!({"operation": "read", "path": "notes/other.txt", "offset": 0, "limit": 8});
+    let case = narrow_case(narrowing_script(&other, "\"limit\"")).await;
+    assert_eq!(case.tools.len(), 1);
+
+    let read = |limit: u32| arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: 0,
+        limit,
+    };
+    // 32 narrows to 8, 8 narrows to 4: the replacement's own narrowing is the second one in the step.
+    let chain = format!(
+        "in=$(cat); {}; {}",
+        narrowing_script(&json!(read(8)), "\"limit\":32,").replace("$(cat)", "$in"),
+        narrowing_script(&json!(read(4)), "\"limit\":8,").replace("$(cat)", "$in"),
+    );
+    let case = narrow_case(chain.clone()).await;
+    assert_eq!(case.tools.len(), 2);
+    assert_eq!(
+        case.tools[1].observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Denied
+    );
+    assert_eq!(
+        case.observed,
+        vec![
+            "Hook narrowed this Tool to: Read".to_owned(),
+            "Hook denied this Tool: hook narrowing limit".to_owned()
+        ]
+    );
+    assert!(SessionView::replay(case.session, &case.events).is_ok());
+
+    // A later step may request the very call an earlier replacement was denied for.
+    let case = narrow_run(chain, vec![read(8)]).await;
+    assert!(SessionView::replay(case.session, &case.events).is_ok());
+    assert_eq!(case.tools.len(), 4);
+}
+
+#[tokio::test]
+async fn hook_identity_update_proceeds_unchanged() {
+    let same = json!({"operation": "read", "path": "notes/facts.txt", "offset": 0, "limit": 32});
+    let case = narrow_case(narrowing_script(&same, "\"limit\"")).await;
+    assert_eq!(case.tools.len(), 1);
+    assert!(case.tools[0].permission_verdict.as_ref().unwrap().approved);
+    assert_eq!(
+        case.tools[0].observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Succeeded
+    );
+    assert!(SessionView::replay(case.session, &case.events).is_ok());
+    assert!(SessionView::replay(case.session, &case.events).is_ok());
+}

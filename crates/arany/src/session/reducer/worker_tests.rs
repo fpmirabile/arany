@@ -2054,6 +2054,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
             approved: true,
             hook_restriction: None,
             hooks: 0,
+            narrowed: false,
         },
     });
     let data = f.data(
