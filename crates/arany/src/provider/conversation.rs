@@ -60,6 +60,9 @@ pub struct StopHookFeedback {
     pub after_step: usize,
     pub turn: ProviderTurn,
     pub text: String,
+    /// Newer facts and notes of the continuation that follows, kept here so the earlier request prefix stays byte-stable.
+    pub facts: Option<GoalContextFacts>,
+    pub steering_notes: Vec<String>,
 }
 
 impl RunInput {

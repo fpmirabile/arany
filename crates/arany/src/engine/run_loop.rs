@@ -357,14 +357,18 @@ impl<'a> RunLoop<'a> {
         })
         .await?;
         steering.note_recorded();
-        match request
-            .input
-            .tools
-            .as_mut()
-            .and_then(|tools| tools.steps.last_mut())
-        {
-            Some(step) => step.steering_notes.push(text),
-            None => request.input.steering_notes.push(text),
+        if let Some(feedback) = continuation_feedback(&mut request.input) {
+            feedback.steering_notes.push(text);
+        } else {
+            match request
+                .input
+                .tools
+                .as_mut()
+                .and_then(|tools| tools.steps.last_mut())
+            {
+                Some(step) => step.steering_notes.push(text),
+                None => request.input.steering_notes.push(text),
+            }
         }
         Ok(())
     }
@@ -507,6 +511,7 @@ impl<'a> RunLoop<'a> {
                         Err(EngineError::GoalBudgetExhausted) => {
                             return self.settle_stopped_primary().await;
                         }
+                        Err(EngineError::ContextTooLarge) => return self.fail_primary().await,
                         Err(error) => return Err(error),
                     }
                 }
@@ -595,6 +600,8 @@ impl<'a> RunLoop<'a> {
                 after_step,
                 turn,
                 text: feedback,
+                facts: None,
+                steering_notes: Vec::new(),
             });
         Ok(true)
     }
@@ -625,14 +632,18 @@ impl<'a> RunLoop<'a> {
         }
         self.record_steering_note(root).await?;
         let facts = self.ledger().context_facts()?;
-        match root
-            .input
-            .tools
-            .as_mut()
-            .and_then(|tools| tools.steps.last_mut())
-        {
-            Some(step) => step.facts = Some(facts),
-            None => root.input.goal_context_facts = Some(facts),
+        if let Some(feedback) = continuation_feedback(&mut root.input) {
+            feedback.facts = Some(facts);
+        } else {
+            match root
+                .input
+                .tools
+                .as_mut()
+                .and_then(|tools| tools.steps.last_mut())
+            {
+                Some(step) => step.facts = Some(facts),
+                None => root.input.goal_context_facts = Some(facts),
+            }
         }
         let request = root.clone();
         let context = self
@@ -1126,6 +1137,17 @@ fn call_record(
             _ => None,
         },
     }
+}
+
+// The Stop feedback directly before the next call owns that call's facts and notes.
+fn continuation_feedback(
+    input: &mut crate::provider::RunInput,
+) -> Option<&mut crate::provider::StopHookFeedback> {
+    let steps = input.tools.as_ref().map_or(0, |tools| tools.steps.len());
+    input
+        .stop_hook_feedback
+        .last_mut()
+        .filter(|feedback| feedback.after_step == steps)
 }
 
 fn valid_finish(finish: &Finish, result_limit: usize) -> bool {

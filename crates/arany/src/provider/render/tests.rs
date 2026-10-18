@@ -493,6 +493,8 @@ fn stop_hook_feedback_is_user_data_and_keeps_prior_conversation_prefix() {
             after_step: 1,
             turn: ProviderTurn::scripted(),
             text: "verify the result".into(),
+            facts: None,
+            steering_notes: Vec::new(),
         });
     let continued = conversation(&request).unwrap();
     assert_eq!(
@@ -518,4 +520,25 @@ fn stop_hook_feedback_is_user_data_and_keeps_prior_conversation_prefix() {
         continued.messages,
         later.messages[..continued.messages.len()]
     );
+}
+
+#[test]
+fn continuation_notes_follow_the_stop_feedback_without_touching_the_prefix() {
+    let mut request = request(vec![step("first", "src/lib.rs")]);
+    request
+        .input
+        .stop_hook_feedback
+        .push(crate::provider::StopHookFeedback {
+            after_step: 1,
+            turn: ProviderTurn::scripted(),
+            text: "verify the result".into(),
+            facts: None,
+            steering_notes: Vec::new(),
+        });
+    let before = conversation(&request).unwrap();
+    request.input.stop_hook_feedback[0].steering_notes = vec!["later note".into()];
+    let after = conversation(&request).unwrap();
+    let kept = before.messages.len() - 1;
+    assert_eq!(before.messages[..kept], after.messages[..kept]);
+    assert!(after.messages.last().unwrap().blocks.len() > 1);
 }

@@ -240,19 +240,20 @@ impl Engine {
             return Ok(false);
         };
         let primary_id = run.primary().ok_or(EngineError::InvalidHistory)?.id;
+        // A fork inherits Runs without their Goals, so its hook runs without Goal time.
         let goal = view
             .goals
             .iter()
-            .find(|goal| goal.run_ids.contains(&run.id))
-            .ok_or(EngineError::InvalidHistory)?;
-        let ledger = super::ledger::GoalLedger::new(view.clone(), Some(goal.id));
+            .find(|goal| goal.run_ids.contains(&run.id));
+        let goal_id = goal.map(|goal| goal.id);
+        let ledger = super::ledger::GoalLedger::new(view.clone(), goal_id);
         let runner = super::run_loop::RunLoop::new(
             &self.journal,
             providers.clone(),
             super::run_loop::RunIdentity {
                 session_id,
                 run_id: run.id,
-                goal_id: goal.id,
+                goal_id: goal_id.unwrap_or_else(crate::session::GoalId::new),
                 primary_id,
             },
             super::run_loop::LoopControls {
@@ -262,7 +263,8 @@ impl Engine {
                     .ok_or(EngineError::InvalidHistory)?
                     .policy,
                 concurrency: 1,
-                goal_phase: goal.phase,
+                goal_phase: goal
+                    .map_or(crate::session::GoalPhase::Implementation, |goal| goal.phase),
                 cancellation: super::RunCancellation::new(),
                 tools: Some(&runtime),
                 approvals: None,

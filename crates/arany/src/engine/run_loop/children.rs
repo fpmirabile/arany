@@ -636,6 +636,8 @@ impl RunLoop<'_> {
                 after_step: child.tools.as_ref().map_or(0, |tools| tools.steps.len()),
                 turn,
                 text: feedback,
+                facts: None,
+                steering_notes: Vec::new(),
             });
         self.ledger().child_call_finished()?;
         if child.turns_remaining > 0

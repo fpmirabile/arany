@@ -2869,6 +2869,11 @@ mod lifecycle_hooks {
             assert_eq!(requests.len(), expected);
             assert!(requests[0].input.stop_hook_feedback.is_empty());
             for (index, request) in requests.iter().enumerate().skip(1) {
+                assert_eq!(
+                    request.input.goal_context_facts,
+                    requests[0].input.goal_context_facts
+                );
+                assert!(request.input.stop_hook_feedback[index - 1].facts.is_some());
                 assert_eq!(request.input.stop_hook_feedback.len(), index);
                 assert_eq!(
                     request.input.stop_hook_feedback.last().unwrap().text,
@@ -3143,5 +3148,32 @@ mod lifecycle_hooks {
                 .iter()
                 .any(|event| matches!(event.event, Event::RunFinished { .. }))
         );
+    }
+
+    #[tokio::test]
+    async fn pre_compact_runs_at_a_fork_boundary_without_goals() {
+        let settings = json!({"hooks":{"PreCompact":[{"hooks":[shell_hook("echo keep-context >&2; exit 2")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let (result, _, _) = fixture.run(vec![finish("done")], None, false).await;
+        let fork = fixture
+            .engine
+            .fork_session(result.session_id, fixture.workspace.clone(), None)
+            .await
+            .unwrap();
+        let providers = arany::AdmittedProviders::single(Arc::new(ScriptedProvider::new(vec![])));
+        assert!(matches!(
+            fixture
+                .engine
+                .compact_session(&providers, fork, fixture.workspace.clone())
+                .await,
+            Err(arany::EngineError::CompactionBlockedByHook)
+        ));
+        fixture.engine.close().await.unwrap();
+        let store =
+            Store::open_read_only(StateRoot::open_existing(&fixture.state).unwrap()).unwrap();
+        let view = store.load_open_view(fork).await.unwrap().unwrap();
+        assert_eq!(view.runs[0].lifecycle_hooks.len(), 1);
+        assert!(view.goals.is_empty());
+        store.close().await.unwrap();
     }
 }

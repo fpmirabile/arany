@@ -1594,6 +1594,12 @@ fn lifecycle_hook_inputs_and_results_are_bounded_and_fail_closed() {
                 reason: Some("verify".into()),
             },
         ),
+        (
+            0,
+            r#"{"continue":false,"stopReason":"halt","decision":"block","reason":"verify"}"#,
+            "",
+            HookResult::Passed,
+        ),
     ] {
         assert_eq!(
             parse_lifecycle_output(HookEvent::Stop, Some(exit), stdout, stderr),

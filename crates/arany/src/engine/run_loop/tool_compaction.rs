@@ -411,6 +411,7 @@ impl RunLoop<'_> {
             context.history_summary = Some(summary.clone());
             for feedback in &mut input.stop_hook_feedback {
                 feedback.after_step = feedback.after_step.saturating_sub(window.prefix_steps);
+                feedback.turn.without_thinking();
             }
             for step in context.steps.drain(..window.prefix_steps) {
                 input.steering_notes.extend(step.steering_notes);

@@ -53,10 +53,14 @@ fn append_stop_feedback(messages: &mut Vec<Message>, request: &ProviderRequest, 
             role: Role::Assistant,
             blocks: vec![Block::AssistantTurn(feedback.turn.clone())],
         });
-        messages.push(user(vec![data_block(
-            "stop_hook_feedback",
-            json!(feedback.text),
-        )]));
+        let mut blocks = vec![data_block("stop_hook_feedback", json!(feedback.text))];
+        if !feedback.steering_notes.is_empty() {
+            blocks.push(steering_block(&feedback.steering_notes));
+        }
+        if let Some(facts) = feedback.facts {
+            blocks.push(data_block("goal_context_facts", json!(facts)));
+        }
+        messages.push(user(blocks));
     }
 }
 

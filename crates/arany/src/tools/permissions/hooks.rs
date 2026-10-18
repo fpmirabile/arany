@@ -19,6 +19,7 @@ pub const HOOK_RESULT_BYTES: u32 = 32 * 1024;
 pub const MAX_HOOK_FEEDBACK_BYTES: usize = 4 * 1024;
 pub const MAX_STOP_CONTINUATIONS: usize = 8;
 pub const MAX_STOP_FEEDBACK_BYTES: usize = 8 * 1024;
+const _: () = assert!(MAX_STOP_CONTINUATIONS * MAX_HOOK_REASON_BYTES <= MAX_STOP_FEEDBACK_BYTES);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum HookEvent {
@@ -689,18 +690,13 @@ pub(super) fn parse_lifecycle_output(
     else {
         return HookResult::Passed;
     };
-    if output.get("decision").and_then(Value::as_str) == Some("block") {
+    // The peer stops instead of continuing, so it never becomes feedback; a Run-wide stop outcome is not built.
+    if event != HookEvent::PreCompact && output.get("continue") == Some(&Value::Bool(false)) {
+        HookResult::Passed
+    } else if output.get("decision").and_then(Value::as_str) == Some("block") {
         HookResult::Blocked {
             reason: output
                 .get("reason")
-                .and_then(Value::as_str)
-                .and_then(bounded_reason),
-        }
-    } else if event != HookEvent::PreCompact && output.get("continue") == Some(&Value::Bool(false))
-    {
-        HookResult::Blocked {
-            reason: output
-                .get("stopReason")
                 .and_then(Value::as_str)
                 .and_then(bounded_reason),
         }
