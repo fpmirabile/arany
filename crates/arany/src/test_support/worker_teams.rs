@@ -806,14 +806,28 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
                 _ => false,
             })
             .expect("named recovery checkpoint");
+        let last = if checkpoint == "private_unknown"
+            && matches!(
+                original.events[last + 1].event,
+                Event::ToolPermissionDecided { .. }
+            ) {
+            last + 1
+        } else {
+            last
+        };
         let mut prefix: Vec<_> = original.events[..=last]
             .iter()
             .map(|e| e.event.clone())
             .collect();
         if checkpoint == "private_unknown" {
-            let Event::ToolStarted { intent, .. } = prefix.last().unwrap() else {
-                unreachable!()
-            };
+            let intent = prefix
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Event::ToolStarted { intent, .. } => Some(intent),
+                    _ => None,
+                })
+                .unwrap();
             prefix.push(Event::ToolFinished {
                 run_id: intent.run_id,
                 agent_run_id: intent.agent_run_id,
@@ -853,7 +867,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
     let old_base = old_assignment.pins.base.sha256;
     let old_grant = old_assignment.pins.policy_digest;
     std::fs::write(workspace.join("notes/0"), b"resume base").unwrap();
-    std::fs::write(state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes/0"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::write(state.join("tools.json"), br#"{"version":1,"workspace_paths":["docs","notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
     let engine = super::engine::open(
         StateRoot::open_existing(&state).unwrap(),
         EngineConfig {

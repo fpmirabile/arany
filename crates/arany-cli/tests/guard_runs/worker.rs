@@ -413,15 +413,12 @@ async fn worker_recovery_handoff_is_honest_at_each_lifecycle_point() {
     }
 }
 
+// The case advances the paused clock by an hour, so no wall-clock timeout can wrap it.
 #[tokio::test]
 async fn worker_primary_background_tool_active_time_exhaustion_settles_the_team() {
-    tokio::time::timeout(
-        Duration::from_secs(180),
-        arany::test_support::worker_teams::run_case(
-            Path::new(env!("CARGO_BIN_EXE_arany")),
-            "primary_time",
-        ),
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "primary_time",
     )
-    .await
-    .expect("background primary active-time exhaustion");
+    .await;
 }
