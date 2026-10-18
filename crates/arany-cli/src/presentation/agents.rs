@@ -114,7 +114,13 @@ impl AgentInspectorModel {
             choices,
             lines: lines
                 .into_iter()
-                .map(|line| safe_truncate(&line, width))
+                .map(|line| {
+                    if line.starts_with("Supervisor (shadow):") {
+                        line
+                    } else {
+                        safe_truncate(&line, width)
+                    }
+                })
                 .collect(),
         }
     }
@@ -294,25 +300,30 @@ mod tests {
         let mut run = run(0);
         run.supervisor = crate::presentation::supervisor_fixture(run.agents[0].id, 256);
         view.runs.push(run);
-        let primary = AgentInspectorModel::from_session(&view, 0, 200, false);
-        let lines: Vec<_> = primary
-            .lines
-            .iter()
-            .filter(|line| line.starts_with("Supervisor (shadow):"))
-            .collect();
-        assert_eq!(lines.len(), 256);
-        assert_eq!(
-            lines[0].as_str(),
-            "Supervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken"
-        );
-        assert!(lines[255].ends_with("; verdict limit reached"));
-        let child = AgentInspectorModel::from_session(&view, 1, 200, false);
-        assert!(
-            !child
+        for width in [80, 120, 200] {
+            let primary = AgentInspectorModel::from_session(&view, 0, width, false);
+            let lines: Vec<_> = primary
                 .lines
                 .iter()
-                .any(|line| line.starts_with("Supervisor (shadow):"))
-        );
+                .filter(|line| line.starts_with("Supervisor (shadow):"))
+                .collect();
+            assert_eq!(lines.len(), 256);
+            assert_eq!(
+                lines[0].as_str(),
+                "Supervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken"
+            );
+            assert_eq!(
+                lines[255].as_str(),
+                "Supervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken; verdict limit reached"
+            );
+            let child = AgentInspectorModel::from_session(&view, 1, width, false);
+            assert!(
+                !child
+                    .lines
+                    .iter()
+                    .any(|line| line.starts_with("Supervisor (shadow):"))
+            );
+        }
     }
 
     #[test]

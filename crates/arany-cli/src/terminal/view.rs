@@ -1742,6 +1742,24 @@ pub(super) fn session_picker_index(
     (index < count).then_some(index)
 }
 
+pub(super) fn agent_detail_lines(model: &AgentInspectorModel, width: u16) -> Vec<Line<'static>> {
+    model
+        .lines
+        .iter()
+        .skip(1)
+        .flat_map(|line| {
+            if line.starts_with("Supervisor (shadow):") {
+                wrap_cells(line, usize::from(width), 0)
+                    .into_iter()
+                    .map(|row| Line::from(row).style(Style::default().add_modifier(Modifier::DIM)))
+                    .collect::<Vec<_>>()
+            } else {
+                vec![Line::from(safe_truncate(line, usize::from(width)))]
+            }
+        })
+        .collect()
+}
+
 pub(super) fn draw_agent_inspector_frame(
     frame: &mut Frame,
     model: &AgentInspectorModel,
@@ -1777,22 +1795,14 @@ pub(super) fn draw_agent_inspector_frame(
         .y
         .saturating_add(1 + u16::try_from(choices).unwrap_or(u16::MAX));
     let detail_rows = agent_detail_rows(area.height, model.choices.len());
-    for (index, line) in model
-        .lines
-        .iter()
-        .skip(1)
+    for (index, line) in agent_detail_lines(model, area.width)
+        .into_iter()
         .skip(scroll)
         .take(detail_rows)
         .enumerate()
     {
         frame.render_widget(
-            Paragraph::new(safe_truncate(line, usize::from(area.width))).style(
-                if line.starts_with("Supervisor (") {
-                    Style::default().add_modifier(Modifier::DIM)
-                } else {
-                    Style::default()
-                },
-            ),
+            Paragraph::new(line),
             Rect::new(area.x, detail_y + index as u16, area.width, 1),
         );
     }

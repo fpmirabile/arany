@@ -845,12 +845,20 @@ mod tests {
         let mut output = Vec::new();
         linear.write_transcript(&mut output, &view).unwrap();
         assert_eq!(output, b"Transcript details:\nSupervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken\n");
-        let inspector = AgentInspectorModel::from_session(&view, 0, 200, false);
+        view.runs[0].supervisor =
+            crate::presentation::supervisor_fixture(view.runs[0].agents[0].id, 256);
+        let inspector = AgentInspectorModel::from_session(&view, 0, 120, false);
         let mut inspected = Vec::new();
         linear
             .write_agents(&mut inspected, &inspector, false)
             .unwrap();
-        assert!(String::from_utf8(inspected).unwrap().contains("Supervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken\n"));
+        let inspected = String::from_utf8(inspected).unwrap();
+        assert_eq!(inspected.matches("Supervisor (shadow):").count(), 256);
+        assert_eq!(inspected.matches("; no action taken").count(), 256);
+        assert!(inspected.contains("Supervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken; verdict limit reached\n"));
+        assert!(!inspected.contains(['\u{1b}', '\r']));
+        view.runs[0].supervisor =
+            crate::presentation::supervisor_fixture(view.runs[0].agents[0].id, 1);
         view.runs = vec![view.runs[0].clone(); 17];
         output.clear();
         linear.write_transcript(&mut output, &view).unwrap();

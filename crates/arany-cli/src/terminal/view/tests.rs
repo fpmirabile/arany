@@ -2847,8 +2847,8 @@ fn unguarded_approval_pages_show_the_risk_copy_then_three_choices_with_deny_focu
 #[test]
 fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
     let actor = arany::AgentRunId::new();
-    let state = crate::presentation::supervisor_fixture(actor, 1);
-    let text = crate::presentation::supervisor_line(&state.verdicts()[0].1);
+    let state = crate::presentation::supervisor_fixture(actor, 256);
+    let text = crate::presentation::supervisor_line(&state.verdicts()[255].1);
     let model = PresentationModel {
         status_line: "ready".into(),
         activity_lines: Vec::new(),
@@ -2856,7 +2856,7 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
         draft_action: DraftAction::Submit,
         empty_chat: false,
     };
-    for width in [16, 40, 80, 160] {
+    for width in [16, 40, 80, 120, 160] {
         for color in [false, true] {
             let rows = super::super::history::display_rows(
                 MessageKind::Supervisor,
@@ -2889,16 +2889,22 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
             let inspector = AgentInspectorModel {
                 selected: 0,
                 choices: Vec::new(),
-                lines: vec!["Agent".into(), safe_truncate(&text, usize::from(width))],
+                lines: vec!["Agent".into(), text.clone()],
             };
-            terminal
-                .draw(|frame| draw_agent_inspector_frame(frame, &inspector, 0, Palette { color }))
-                .unwrap();
-            let buffer = terminal.backend().buffer();
-            let label_row = (0..20)
-                .find(|y| buffer_row(buffer, *y).contains("Supervisor"))
-                .unwrap();
-            assert!(buffer[(0, label_row)].modifier.contains(Modifier::DIM));
+            let count = agent_detail_lines(&inspector, width).len();
+            let mut seen = Vec::new();
+            for scroll in 0..count {
+                terminal
+                    .draw(|frame| {
+                        draw_agent_inspector_frame(frame, &inspector, scroll, Palette { color })
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let detail_y = 7;
+                seen.push(buffer_row(buffer, detail_y).trim_end().to_owned());
+                assert!(buffer[(0, detail_y)].modifier.contains(Modifier::DIM));
+            }
+            assert_eq!(seen.join(" "), text, "width {width}, color {color}");
         }
     }
 }

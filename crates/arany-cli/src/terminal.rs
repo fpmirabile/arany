@@ -44,9 +44,9 @@ use input::TerminalReader;
 pub use input::{ShutdownSignal, TerminalInput};
 use linear::LinearState;
 use view::{
-    Palette, agent_detail_rows, agent_picker_index, bottom_area, completion_height,
-    composer_height, draw_agent_inspector_frame, draw_frame_with_history, draw_help_frame,
-    draw_model_catalog_frame, draw_quick_actions_frame, draw_session_picker_frame,
+    Palette, agent_detail_lines, agent_detail_rows, agent_picker_index, bottom_area,
+    completion_height, composer_height, draw_agent_inspector_frame, draw_frame_with_history,
+    draw_help_frame, draw_model_catalog_frame, draw_quick_actions_frame, draw_session_picker_frame,
     draw_setup_choices_frame, draw_setup_frame, draw_setup_text_frame, draw_setup_warning_frame,
     history_top_padding, screen_terminal, session_picker_index,
 };
@@ -1981,10 +1981,8 @@ impl AttachedTerminal {
         let (_, screen_height) = size()?;
         let height = screen_height.clamp(1, 14);
         panel.scroll = panel.scroll.min(
-            model
-                .lines
+            agent_detail_lines(&model, width)
                 .len()
-                .saturating_sub(1)
                 .saturating_sub(agent_detail_rows(height, model.choices.len())),
         );
         let scroll = panel.scroll;
