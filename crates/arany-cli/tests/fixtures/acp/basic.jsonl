@@ -1,5 +1,5 @@
 {"client":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"test","version":"1"}}}}
-{"server":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false,"promptCapabilities":{"image":false,"audio":false,"embeddedContext":false},"mcpCapabilities":{"http":false,"sse":false},"sessionCapabilities":{}},"agentInfo":{"name":"arany","title":"Arany","version":"$version"},"authMethods":[{"id":"arany-setup","type":"agent","name":"Set up Arany","description":"Run `arany --setup` in a terminal"}]}}}
+{"server":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":false,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":false,"sse":false},"sessionCapabilities":{}},"agentInfo":{"name":"arany","title":"Arany","version":"$version"},"authMethods":[{"id":"arany-setup","type":"agent","name":"Set up Arany","description":"Run `arany --setup` in a terminal"}]}}}
 {"client":{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"$workspace","mcpServers":[]}}}
 {"server":{"jsonrpc":"2.0","id":2,"result":{"sessionId":"$session"}}}
 {"client":{"jsonrpc":"2.0","id":"prompt","method":"session/prompt","params":{"sessionId":"$session","prompt":[{"type":"text","text":"Hi"}]}}}

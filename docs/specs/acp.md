@@ -3,8 +3,8 @@
 ## Scope and related contracts
 
 This contract owns `arany acp`, an ACP v1 subprocess on stdio. The current
-surface is core text turns only. [Serve](./serve.md) owns the shared Server
-loop, admission, committed projections, cancellation and shutdown;
+surface includes core turns, guarded Tools, one-use permissions and rich prompts.
+[Serve](./serve.md) owns the shared Server loop, admission, committed projections, cancellation and shutdown;
 [Session](./session.md), [Goals](./goals.md), [execution](./execution.md) and
 [Tools](./tools.md) retain Engine policy. ACP translates the serve vocabulary;
 it adds no execution runtime or library protocol dependency.
@@ -16,9 +16,8 @@ journal-first truth and avoids chunks that cannot be retracted after a failed
 Provider validation. The hand-written wire subset is checked against the
 [pinned upstream v1 schema fixture](../../crates/arany-cli/tests/fixtures/acp/README.md).
 
-Tools, images, audio, embedded resources, history loading, session
-discovery/closure, modes, model selection and Goal commands are unavailable.
-Their remaining slices belong to
+Audio, history loading, session discovery/closure, modes, model selection and
+Goal commands are unavailable. Their remaining slices belong to
 [NEXT_STEPS item 13](../../NEXT_STEPS.md#pursue-in-order). Unadvertised requests
 fail with method-not-found; unsupported prompt blocks fail invalid-params.
 
@@ -27,9 +26,10 @@ fail with method-not-found; unsupported prompt blocks fail invalid-params.
 `arany acp --provider PROVIDER --model MODEL [--effort LEVEL]` pins the same
 selection path as `exec`; `--profile NAME` selects a private roster and refuses
 a conflicting explicit tuple. Collaboration and maximum children use `exec`
-defaults and bounds. `--state-dir` selects State. Tools are off; `--tools` is an
-unknown flag, refused before State admission with the standard invalid-arguments
-diagnostic and exit 1. No permission channel is exposed, including human-only asks. Neither client capabilities nor `_meta` supply authority.
+defaults and bounds. `--state-dir` selects State. Tools stay off unless `--tools`
+opts into the existing private Tool grant and serve admission, including native
+Guard availability. No client capability or `_meta` supplies authority. Human-only
+approvals are unavailable under the [Tools contract](./tools.md#modes-and-approval-decisions).
 
 TTY stdin or stdout is refused before State admission, exit 2 with
 `error: acp requires piped stdin and stdout`. Authority configuration, State,
@@ -50,15 +50,77 @@ admission wait for `session/new`. Authentication alone grants no Run authority.
 |---|---|---|
 | `initialize` | `{protocolVersion,clientInfo?,clientCapabilities?}` → `{protocolVersion:1,agentInfo,agentCapabilities,authMethods}` | First request; a repeat is `alreadyInitialized`. The client version is a u16 integer; unsupported integer versions negotiate down/up to 1, and the client disconnects if it cannot speak 1. Malformed versions fail `invalidParams`. Client info fields pass through serve's 256-byte checks. |
 | `authenticate` | `{methodId:"arany-setup"}` → `{}` | Re-probes credentials for the pinned selection without inference or Workspace admission. Exactly one agent auth method directs the user to `arany --setup` in a terminal. Missing credentials give `auth_required`; another method ID is invalid. No credential is accepted or returned. |
-| `session/new` | `{cwd,mcpServers,additionalDirectories?}` → `{sessionId}` | Maps to typed `thread/start` with the CLI tuple and `tools:false`. Absolute cwd, Workspace identity and State overlap use serve admission. Nonempty additional directories fail. Editor MCP servers are ignored with one fixed stderr notice per connection; no server is launched or contacted. Success commits Session creation before replying and counts toward serve's loaded-thread limit. |
-| `session/prompt` | `{sessionId,prompt:[{type:"text",text}\|{type:"resource_link",name,uri}]}` → `{stopReason}` | Requires available selection and a loaded Session. Concatenates blocks in order without separators; each resource link becomes the literal mention `[@name](uri)`. The URI is never fetched, opened or turned into authority. Maps to `turn/start`, starting one ordinary Goal. One prompt per process; a concurrent prompt fails `busy`, without queueing or execution. |
+| `session/new` | `{cwd,mcpServers,additionalDirectories?}` → `{sessionId}` | Maps to typed `thread/start` with the CLI tuple and CLI-pinned Tool opt-in. Absolute cwd, Workspace identity and State overlap use serve admission. Nonempty additional directories fail. Editor MCP servers are ignored with one fixed stderr notice per connection; no server is launched or contacted. Success commits Session creation before replying and counts toward serve's loaded-thread limit. |
+| `session/prompt` | `{sessionId,prompt:ContentBlock[]}` → `{stopReason}` | Requires available selection and a loaded Session. Converts bounded rich content as below. No URI is fetched, opened or turned into authority. Maps to `turn/start`, starting one ordinary Goal. One prompt per process; a concurrent prompt fails `busy`, without queueing or execution. |
 | `session/cancel` | Notification `{sessionId}` | Cancels that Session's active prompt through `turn/interrupt`. Before the turn ID arrives, cancellation is latched and forwarded once. Repeated/unknown cancellations do nothing. |
 | `$/cancel_request` | Notification `{requestId}` | Same cancellation when the ID names the active prompt; unknown IDs do nothing. |
 
-Capabilities declare `loadSession:false`, image/audio/embeddedContext false,
+Capabilities declare `loadSession:false`, image/embeddedContext true and audio false,
 MCP HTTP/SSE false, and empty session capabilities. Client filesystem and
 terminal offers are ignored. Arany never sends `fs/*`, `terminal/*` or
 `elicitation/*`, and never connects editor-supplied MCP servers.
+
+Text blocks concatenate in order without separators. A `resource_link` becomes
+`[@name](uri)`. An embedded `resource` must contain `uri` and `text`; blob resources
+reject. It becomes `<context ref="ESCAPED_URI">BODY</context>`, escaping `&`, `<`,
+`>` and `"` in the URI and replacing the `<` of every ASCII case-insensitive
+`</context` prefix in the body with `&lt;`, regardless of what follows the prefix
+(including whitespace before `>`). These wrappers remain user data, never
+instructions or trust.
+PNG images require `mimeType:"image/png"` and base64 `data`; an image `uri` is
+ignored. Image-only prompts are accepted. Conversion reuses serve's text,
+base64, count and aggregate-byte admission; serve's existing image path checks
+PNG structure and bounds under the [terminal image contract](./terminal.md#paste-and-attachments).
+Other content types and overflow reject the whole prompt with invalid-params.
+
+### Tool updates and permissions
+
+Only committed serve items produce Tool updates. `item/started` becomes
+`tool_call` with the immutable intent ID, compiled title plus bounded escaped
+intent fields, kind, pending status and locations. Command calls are `execute`,
+file changes `edit` (delete-only sets are `delete`), Read/Skill/typed Git reads
+`read`, List/Search `search`, and MCP/other calls `other`. Available journaled
+call fields form `rawInput`; file-change items expose paths without invented
+content or diff bytes. Locations join the client's original cwd spelling with
+Workspace-relative paths for display only; they are never re-resolved or used
+for access.
+
+`item/completed` becomes `tool_call_update`: success is `completed`; declined
+and failed dispositions are `failed`, with the disposition named in fenced
+content. An uncertain outcome is `failed` with `_meta["arany.status"]:"uncertain"`
+and the text: "Outcome unknown: Arany could not confirm whether this effect
+happened. It was not retried; inspect the Workspace before continuing." A first
+observed terminal item is a self-contained `tool_call` with its final status;
+reconciliation never replaces a terminal status with pending. Tool output is
+escaped and placed inside a code fence longer than every backtick run in it.
+There are no client terminals and no diff contents.
+
+A serve approval request becomes `session/request_permission` with the Session
+ID, a self-contained pending `toolCall` update, its exact committed EffectIntent
+in `rawInput`, escaped and fenced approval lines, and exactly these ordered options:
+
+| optionId | kind | name |
+|---|---|---|
+| `deny` | `reject_once` | Deny |
+| `allow_once` | `allow_once` | Allow once |
+
+A selected `allow_once` maps to serve `accept`; `deny`, an unknown option,
+malformed result or client error maps to `decline`. A cancelled outcome maps to
+`cancel` (deny, then interrupt the turn). The reply can resolve only its one
+outstanding, already sent request before the pinned expiry; unknown, duplicate,
+late and cancelled IDs change nothing. ACP request IDs are independent of both
+client request IDs and internal serve IDs. `allow_always` is never offered.
+Ordinary client decisions are user-configured verdicts; ACP cannot attest a
+human gesture, so human-only requests follow the
+[Tools contract](./tools.md#modes-and-approval-decisions). All normal Policy,
+one-use grant, journal and Guard checks still apply.
+
+Expiry, cancellation, Tool completion or serve withdrawal retire the pending
+permission and queue `$/cancel_request` for its ACP ID if it was sent. Serve
+owns denial and expiry independently of outbound capacity; a slow client may
+receive an already expired request or delayed withdrawal, and cannot authorize
+it. An oversized permission is denied without sending or truncating its intent
+or approval lines. No transport configuration widens the private grant.
 
 A committed serve `item/completed` agentMessage produces exactly one
 `session/update` with `update.sessionUpdate:"agent_message_chunk"` and
@@ -68,10 +130,10 @@ all its queued updates. Text passes through as model markdown; the editor owns
 inert rendering. This transport makes no claim about editor auto-fetching.
 
 On a tap gap, or a completed turn missing its answer, the translator reconciles
-committed `MessageCommitted` facts through serve `events/subscribe`, paging
-from the last reconciled Session sequence and filtering by the active Run.
-Already sent answers are suppressed. Event paging preserves the loaded thread's
-pinned settings, whereas `thread/resume` would re-admit and replace them.
+committed `MessageCommitted`, `ToolStarted` and `ToolFinished` facts through
+serve `events/subscribe`, paging from the last reconciled Session sequence and filtering by the active Run.
+Already sent answers and Tool phases are suppressed. Event paging preserves the
+loaded thread's pinned settings, whereas `thread/resume` would re-admit and replace them.
 A replay refusal produces one fixed diagnostic and
 `result._meta["arany.incompleteUpdates"]:true`. During EOF/stop shutdown no new
 replay work is started; missing updates carry the same marker. If serve closes
@@ -81,8 +143,8 @@ response with this marker. A new process never resumes or retries a Goal implici
 | Committed outcome | Prompt result |
 |---|---|
 | Run finished and Goal completed | `stopReason:"end_turn"` |
-| Client cancellation or process stop | `stopReason:"cancelled"`, including a teardown error after cancellation |
-| Failed Run or hook stop | `-32603` with compiled recovery guidance and `data.reason:"turnFailed"` or `"stoppedByHook"` |
+| Client cancellation or process stop | `stopReason:"cancelled"`, including a teardown error after cancellation; `_meta["arany.uncertainEffects"]` reports observed uncertain Tools when nonzero |
+| Failed Run, uncertain effect or hook stop | `-32603` with compiled recovery guidance and `data.reason:"turnFailed"`, `"effectUncertain"` or `"stoppedByHook"` |
 | Budget stop | `-32603 goalBudgetExhausted`; token/action stop reasons await a closed serve reason in the remaining slices |
 
 Failure is never `end_turn`; `refusal` is unused because journal context is
@@ -132,9 +194,12 @@ Shared bounds and their Engine behavior belong to [serve limits](./serve.md#limi
 | Serve outbound / ACP outbound | 256 messages each. Projection waits for ACP capacity independently of input/cancel. If immediate replies fill ACP output, input fails closed and starts shutdown rather than holding cancellation behind stdout. |
 | Pending translations | 64, with 62 available to client requests and two reserved for control/reconciliation; excess requests fail `busy`. Integer internal IDs are checked and never reused. |
 | Sessions / active prompt | Serve's 64 / 1, with `threadLimit` / `busy`, no eviction. Restart is needed after capacity is exhausted until session closure ships. |
-| Prompt blocks / aggregate text after resource-link conversion | 64 / 64 KiB UTF-8, including mention syntax; excess, empty or whitespace-only prompts fail `invalidParams`. |
+| Prompt blocks / aggregate text after rich-content conversion | 64 / 64 KiB UTF-8, including mention/context syntax; excess or empty/whitespace-only text without images fails `invalidParams`. |
+| Images | [Serve](./serve.md#limits-and-compatibility) and [terminal](./terminal.md#paste-and-attachments) image limits; reject overflow without truncation. |
+| Tool content / title | 64 KiB / 256 bytes of escaped text plus a Session-history truncation marker. Fences are longer than every contained backtick run. If the full line still exceeds the cap, optional raw input/output and locations are omitted and content becomes a history marker. |
+| Pending permissions | One, with serve's immutable intent deadline; oversize denies unsent. |
 | Oversized answer projection | Cut at a UTF-8 boundary to at most 128 KiB text plus `[truncated; see arany show SESSION_ID]`; worst-case JSON escaping still fits the line cap. Other oversized projections fail closed. |
-| Reconciliation | Serve's bounded Event pages and Session Event cap; no retained history beyond the current page, one active answer and one cursor per Session. |
+| Reconciliation | Serve's bounded Event pages and Session Event cap; no retained history beyond the current page, one active answer, at most 10,000 deduplication entries for Tool phases per prompt, and one cursor plus original cwd per Session; deduplication overflow suppresses further Tool projections and marks incompleteUpdates. |
 | Shutdown | Serve's total three-second grace includes both output queues and cancellation/Engine closure. Timeout reports `Run may be interrupted; check Session history`. |
 
 Linux and macOS share the same Unix pipes, descriptor cloning and signal path;
@@ -153,5 +218,15 @@ State storage and all per-action resource limits remain unchanged.
 | Negotiation and unavailable auth | Integer version negotiation, malformed versions, duplicate init, unknown auth method, unauthenticated prompt, unknown Session and unsupported method refusals | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Cancellation and capacity | Busy refusal runs no second prompt; session and request cancellation, pre-accept latch, EOF and stalled output produce bounded interruption without invented success | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Hostile input and recovery | Oversized/malformed lines recover; resource links remain literal mentions within block/UTF-8 bounds; relative cwd, additional directories, unsupported/oversized prompts and ambiguous envelopes refuse; offered fs/terminal and editor MCP never execute; EOF during recovery preserves the committed completion with incompleteUpdates | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
-| Shipped command | TTY refusal exits 2 and unknown `--tools` exits 1 before State; cleared credentials initialize successfully, auth/new fail auth_required, no Session, EOF exits 0 with empty stderr and schema-valid stdout | [Session process corpus](../../crates/arany-cli/tests/session_run.rs) |
+| Shipped command | TTY refusal, including with `--tools`, exits 2 before State; cleared credentials initialize successfully, auth/new fail auth_required, no Session, EOF exits 0 with empty stderr and schema-valid stdout | [Session process corpus](../../crates/arany-cli/tests/session_run.rs) |
 | Editor launch directory | A launch directory containing State still permits initialize, profile authentication and Session creation for a different cwd; a session cwd containing State refuses without creating a Session | [Session process corpus](../../crates/arany-cli/tests/session_run.rs) |
+| Admitted Tool permission round trip | Allow dispatches once; reject denies; reopened intent, verdict and observation equal the permission payload and committed projections | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
+| Permission correlation and withdrawal | Only allow_once/reject_once offered; unknown, duplicate, late, invalid/error replies deny or do nothing; timeout, client cancellation and server withdrawal cannot authorize a Tool | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
+| Rich prompt and inert Tool data | Oversized resources, blobs, image MIME/base64/count/byte overflow reject; context closing tags neutralized; PNG and image-only conversion, original cwd spelling, uncertain metadata, escaped titles, longer fences and truncation markers validate against the pinned schema | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
+| Human-only Asks unavailable | Hook Ask under Auto and unguarded proposals, even with exact project rules, make no client request, dispatch nothing and replay unavailable_approval | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs), [Guard permission corpus](../../crates/arany-cli/tests/guard_runs/permissions.rs), [unguarded corpus](../../crates/arany-cli/tests/guard_runs/unguarded.rs) |
+
+The ACP corpus also owns `guarded_acp_permissions_publish_once_and_refuse_hook_asks`,
+a CI native gate using Cargo's built Guard executable. It checks one allowed edit,
+Workspace bytes and the reopened Guard receipt through the full adapter, plus a
+hook Ask that sends no permission request and replays `unavailable_approval`.
+Local private-State and native restrictions do not count as passing this gate.

@@ -52,7 +52,7 @@ The same settings restrict children; a child cannot select its own settings or e
 
 ### Modes and approval decisions
 
-The [serve approval transport](./serve.md#server-requests) is another human client of the same one-use approval channel.
+The [serve approval transport](./serve.md#server-requests) is another human client of the same one-use approval channel. The [ACP adapter](./acp.md#tool-updates-and-permissions) permits ordinary one-use client verdicts, including user-configured client policy. ACP v1 cannot attest a human gesture, so its approval channel disables human-only requests: unguarded commands (also when an exact project rule exists) and hook Asks dispatch nothing, send no permission request and journal source `unavailable_approval`. AI review, mode changes and client capabilities cannot resolve those requests.
 
 The peer contract is [Claude Code permission modes](https://code.claude.com/docs/en/permissions#permission-modes). The five accepted spellings are case-sensitive; aliases and bypass modes reject. The parser's omitted `defaultMode` is `default`; it does not change Arany's existing interactive default.
 
