@@ -1180,7 +1180,14 @@ impl RunLoop<'_> {
             .run_subagent_stop(child, "editor", &finish.result, turn, deadline)
             .await;
         match stop {
-            Ok(Some(())) => Ok(ChildStop::Reprompt),
+            Ok(Some(()))
+                if child.turns_remaining > 0
+                    && Instant::now() < deadline
+                    && self.ledger().can_start_provider_call() =>
+            {
+                Ok(ChildStop::Reprompt)
+            }
+            Ok(Some(())) => Ok(ChildStop::End(AgentDisposition::Failed)),
             Ok(None) if !self.actor_hook_requested_stop(child.agent_run_id)? => {
                 Ok(ChildStop::Proceed)
             }
