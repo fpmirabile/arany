@@ -1199,6 +1199,9 @@ async fn apply_tapped(
             if event.session_id != view.id || event.sequence <= view.last_sequence {
                 return Ok(());
             }
+            if event.sequence != view.last_sequence + 1 {
+                return catch_up(state_dir, view).await;
+            }
             match arany::reduce_into(view, &event) {
                 Ok(()) => Ok(()),
                 Err(_) => catch_up(state_dir, view).await,
