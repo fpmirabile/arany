@@ -188,11 +188,17 @@ pub(super) fn apply(
             agent_run_id,
             hook,
         } => {
+            if !matches!(hook.event, HookEvent::PreToolUse | HookEvent::PostToolUse) {
+                return start_lifecycle(current, *run_id, *agent_run_id, hook, prior);
+            }
             let previous = current.last_sequence;
             let run = active_run(current, *run_id)?;
             if !permissions_pinned(run)
                 || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
             {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if hook.active_ceiling_ms.is_some() {
                 return Err(ReplayError::InvalidTransition);
             }
             let post = hook.event == HookEvent::PostToolUse;
@@ -247,11 +253,72 @@ pub(super) fn apply(
             agent_run_id,
             outcome,
         } => {
+            if current
+                .runs
+                .iter()
+                .find(|run| run.id == *run_id)
+                .is_some_and(|run| {
+                    run.lifecycle_hooks
+                        .last()
+                        .is_some_and(|hook| hook.outcome.is_none())
+                })
+            {
+                let run = current
+                    .runs
+                    .iter_mut()
+                    .find(|run| run.id == *run_id)
+                    .ok_or(ReplayError::InvalidTransition)?;
+                let hook = run
+                    .lifecycle_hooks
+                    .last_mut()
+                    .ok_or(ReplayError::InvalidTransition)?;
+                if hook.invocation.intent != outcome.observation.intent
+                    || hook.invocation.intent.agent_run_id != *agent_run_id
+                    || outcome.result
+                        != HookResult::for_event(hook.invocation.event, &outcome.observation)
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                let ceiling = if run.status == crate::session::RunStatus::Active {
+                    None
+                } else {
+                    hook.invocation.active_ceiling_ms
+                };
+                if outcome.boundary_active_ms.is_some() != ceiling.is_some()
+                    || outcome
+                        .boundary_active_ms
+                        .zip(ceiling)
+                        .is_some_and(|(active, ceiling)| active > ceiling)
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                hook.outcome = Some(outcome.clone());
+                run.lifecycle_hook_sequence = Some(prior);
+                if let Some(active) = outcome.boundary_active_ms {
+                    let goal = current
+                        .goals
+                        .iter_mut()
+                        .find(|goal| {
+                            goal.status == crate::session::GoalStatus::Running
+                                && goal.run_ids.last() == Some(run_id)
+                        })
+                        .ok_or(ReplayError::InvalidTransition)?;
+                    goal.active_ms = goal
+                        .active_ms
+                        .checked_add(active)
+                        .ok_or(ReplayError::InvalidTransition)?;
+                    goal.active_ceiling_ms = 0;
+                }
+                return Ok(());
+            }
             let previous = current.last_sequence;
             let run = active_run(current, *run_id)?;
             if !permissions_pinned(run)
                 || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
             {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if outcome.boundary_active_ms.is_some() {
                 return Err(ReplayError::InvalidTransition);
             }
             let count = run.tools.len();
@@ -643,5 +710,206 @@ fn record_run_ceiling(
         .ok_or(ReplayError::InvalidTransition)?
         .id;
     super::goal::record_active_ceiling(current_goal_mut(current, goal_id)?, ceiling_ms);
+    Ok(())
+}
+
+fn start_lifecycle(
+    current: &mut SessionView,
+    run_id: crate::session::RunId,
+    agent_id: crate::session::AgentRunId,
+    hook: &crate::tools::permissions::HookInvocation,
+    sequence: u64,
+) -> Result<(), ReplayError> {
+    use crate::session::{AgentRole, ChildGrant, RunStatus};
+    use crate::tools::permissions::{MAX_STOP_CONTINUATIONS, compact_subject, stop_subject};
+    let previous = current.last_sequence;
+    let run = current
+        .runs
+        .last_mut()
+        .filter(|run| run.id == run_id)
+        .ok_or(ReplayError::InvalidTransition)?;
+    let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
+    let agent = run
+        .agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or(ReplayError::InvalidTransition)?;
+    if !permissions_pinned(run)
+        || !run.hooks_settled()
+        || hook.intent.policy_digest
+            != config
+                .tool_policy
+                .as_ref()
+                .ok_or(ReplayError::InvalidTransition)?
+                .config_digest
+        || hook.intent.workspace_device != config.workspace_device
+        || hook.intent.workspace_inode != config.workspace_inode
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let count = agent.provider_calls.len();
+    let same: Vec<_> = run
+        .lifecycle_hooks
+        .iter()
+        .filter(|view| {
+            view.invocation.event == hook.event
+                && view.invocation.subject_digest == hook.subject_digest
+                && view.invocation.intent.agent_run_id == agent_id
+        })
+        .collect();
+    if same.len() >= MAX_HOOKS_PER_OCCURRENCE
+        || same.iter().any(|hook| {
+            hook.outcome
+                .as_ref()
+                .is_some_and(|outcome| matches!(outcome.result, HookResult::Blocked { .. }))
+        })
+        || run
+            .lifecycle_hooks
+            .iter()
+            .any(|view| view.invocation.intent.id == hook.intent.id)
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let adjacent = if same.is_empty() {
+        run.provider_sequences.get(&agent_id).copied()
+    } else {
+        run.lifecycle_hook_sequence
+    } == Some(previous);
+    match hook.event {
+        HookEvent::Stop | HookEvent::SubagentStop => {
+            let role_matches = if hook.event == HookEvent::Stop {
+                agent.role == AgentRole::Primary
+            } else {
+                agent.role == AgentRole::Child
+                    && agent.grant == Some(ChildGrant::ReadOnly)
+                    && agent.assignment.is_none()
+            };
+            if run.status != RunStatus::Active
+                || agent.status != AgentStatus::Active
+                || !role_matches
+                || !adjacent
+                || count == 0
+                || hook.subject_digest != stop_subject(agent_id, count - 1)
+                || agent.provider_calls.last().is_none_or(|call| {
+                    call.disposition != ProviderCallDisposition::Finished
+                        || call.phase == AgentPhase::ToolReview
+                })
+                || run.stop_continuations(agent_id) >= MAX_STOP_CONTINUATIONS
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+        HookEvent::PreCompact => {
+            let pending = current
+                .goals
+                .iter()
+                .find(|goal| goal.run_ids.last() == Some(&run_id))
+                .is_some_and(|goal| {
+                    !goal.unobserved_provider_calls.is_empty()
+                        || goal.compaction_call_reserved.is_some()
+                });
+            if pending
+                || run.tools.iter().any(|tool| tool.observation.is_none())
+                || agent.role != AgentRole::Primary
+                || !matches!(
+                    run.status,
+                    RunStatus::Active
+                        | RunStatus::Finished
+                        | RunStatus::Failed
+                        | RunStatus::Cancelled
+                )
+                || !["manual", "auto"]
+                    .iter()
+                    .any(|trigger| hook.subject_digest == compact_subject(trigger, count))
+                || !same.is_empty() && run.lifecycle_hook_sequence != Some(previous)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+        _ => return Err(ReplayError::InvalidTransition),
+    }
+    let boundary = run.status != RunStatus::Active;
+    let goal = current.goals.iter_mut().find(|goal| {
+        goal.status == crate::session::GoalStatus::Running && goal.run_ids.last() == Some(&run_id)
+    });
+    if hook.active_ceiling_ms.is_some() != goal.is_some() {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if let Some(ceiling) = hook.active_ceiling_ms {
+        let goal = goal.ok_or(ReplayError::InvalidTransition)?;
+        if ceiling == 0
+            || goal
+                .effective_budget()
+                .max_active_ms
+                .is_some_and(|limit| goal.active_ms.saturating_add(ceiling) > limit)
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+        if boundary && goal.active_run.is_some() {
+            return Err(ReplayError::InvalidTransition);
+        }
+        super::goal::record_active_ceiling(goal, ceiling);
+    }
+    run.lifecycle_hooks.push(HookView {
+        invocation: hook.clone(),
+        outcome: None,
+    });
+    run.lifecycle_hook_sequence = Some(sequence);
+    Ok(())
+}
+
+pub(super) fn before_lifecycle_event(
+    current: &SessionView,
+    event: &Event,
+) -> Result<(), ReplayError> {
+    let Some(run) = current.runs.last() else {
+        return Ok(());
+    };
+    if run
+        .lifecycle_hooks
+        .last()
+        .is_some_and(|hook| hook.outcome.is_none())
+        && !matches!(
+            event,
+            Event::HookFinished { .. } | Event::GoalStarted { .. } | Event::GoalResumed { .. }
+        )
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if run.lifecycle_hooks.iter().any(|hook| {
+        hook.outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.observation.stops_run())
+    }) && matches!(
+        event,
+        Event::GoalProviderCallReserved { .. }
+            | Event::ToolStarted { .. }
+            | Event::HookStarted { .. }
+            | Event::AgentSpawned { .. }
+    ) {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if matches!(
+        event,
+        Event::GoalCompactionCallReserved { .. } | Event::ContextCompacted { .. }
+    ) {
+        if !run.hooks_settled() {
+            return Err(ReplayError::InvalidTransition);
+        }
+        let count = run.primary().map_or(0, |agent| agent.provider_calls.len());
+        if run.lifecycle_hooks.iter().any(|hook| {
+            hook.invocation.event == HookEvent::PreCompact
+                && ["manual", "auto"].iter().any(|trigger| {
+                    hook.invocation.subject_digest
+                        == crate::tools::permissions::compact_subject(trigger, count)
+                })
+                && hook
+                    .outcome
+                    .as_ref()
+                    .is_some_and(|outcome| matches!(outcome.result, HookResult::Blocked { .. }))
+        }) {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
     Ok(())
 }

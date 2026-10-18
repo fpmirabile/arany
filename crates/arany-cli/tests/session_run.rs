@@ -286,6 +286,9 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         definitions: Default::default(),
                         display: Vec::new(),
                         steering_notes: Vec::new(),
+                        lifecycle_hooks: Vec::new(),
+                        lifecycle_hook_sequence: None,
+                        provider_sequences: Default::default(),
                         provider_fallbacks: Vec::new(),
                     });
                     terminal.record_user_run(&view.runs[0]).unwrap();

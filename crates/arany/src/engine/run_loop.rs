@@ -199,7 +199,13 @@ impl<'a> RunLoop<'a> {
             let other_agents_closed = run.agents.iter().all(|agent| {
                 agent.id == self.primary_id || agent.status != crate::session::AgentStatus::Active
             });
-            let has_uncertain_tool = run.tools.iter().any(|tool| {
+            let has_uncertain_tool = run.lifecycle_hooks.iter().any(|hook| {
+                hook.outcome.as_ref().is_some_and(|outcome| {
+                    outcome.observation.stops_run()
+                        && outcome.observation.disposition
+                            != crate::tools::ToolDisposition::Cancelled
+                })
+            }) || run.tools.iter().any(|tool| {
                 tool.observation
                     .iter()
                     .chain(tool.hooks.iter().filter_map(|hook| {
@@ -209,7 +215,11 @@ impl<'a> RunLoop<'a> {
                         observation.disposition == crate::tools::ToolDisposition::Uncertain
                     })
             });
-            let action_cancelled = run.tools.iter().any(|tool| {
+            let action_cancelled = run.lifecycle_hooks.iter().any(|hook| {
+                hook.outcome.as_ref().is_some_and(|outcome| {
+                    outcome.observation.disposition == crate::tools::ToolDisposition::Cancelled
+                })
+            }) || run.tools.iter().any(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == crate::tools::ToolDisposition::Cancelled
                 })
@@ -490,8 +500,18 @@ impl<'a> RunLoop<'a> {
             match first {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
+                    turn,
                     ..
-                }) if valid_response => return self.finish_primary(finish).await,
+                }) if valid_response => {
+                    match self.stop_primary(root_request, &finish, turn).await {
+                        Ok(true) => continue,
+                        Ok(false) => return self.finish_primary(finish).await,
+                        Err(EngineError::GoalBudgetExhausted) => {
+                            return self.settle_stopped_primary().await;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Delegate(delegation),
                     turn,
@@ -539,6 +559,49 @@ impl<'a> RunLoop<'a> {
                 _ => return self.fail_primary().await,
             }
         }
+    }
+
+    async fn stop_primary(
+        &self,
+        root: &mut ProviderRequest,
+        finish: &Finish,
+        turn: crate::provider::ProviderTurn,
+    ) -> Result<bool, EngineError> {
+        let Some(feedback) = self
+            .lifecycle_hooks(
+                self.primary_id,
+                crate::tools::permissions::HookEvent::Stop,
+                "",
+                &finish.result,
+                None,
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+        if root
+            .input
+            .stop_hook_feedback
+            .iter()
+            .map(|feedback| feedback.text.len())
+            .sum::<usize>()
+            + feedback.len()
+            > crate::tools::permissions::MAX_STOP_FEEDBACK_BYTES
+        {
+            return Err(EngineError::ContextTooLarge);
+        }
+        root.input
+            .stop_hook_feedback
+            .push(crate::provider::StopHookFeedback {
+                after_step: root
+                    .input
+                    .tools
+                    .as_ref()
+                    .map_or(0, |tools| tools.steps.len()),
+                turn,
+                text: feedback,
+            });
+        Ok(true)
     }
 
     async fn invoke_primary(

@@ -2835,3 +2835,189 @@ async fn hook_identity_update_proceeds_unchanged() {
     assert!(SessionView::replay(case.session, &case.events).is_ok());
     assert!(SessionView::replay(case.session, &case.events).is_ok());
 }
+
+mod lifecycle_hooks {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_hook_blocks_at_most_eight_times_and_is_journaled() {
+        for calls in [3_u32, 16] {
+            let settings = json!({"version":1,"hooks":{"Stop":[{"hooks":[shell_hook("echo finish-the-check >&2; exit 2")]}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            let expected = usize::try_from(calls.min(9)).unwrap();
+            let (result, requests, _) = fixture
+                .run_budgeted(
+                    (0..expected).map(|_| finish("candidate")).collect(),
+                    None,
+                    false,
+                    arany::GoalBudget {
+                        max_provider_calls: Some(calls),
+                        ..budget()
+                    },
+                )
+                .await;
+            assert_eq!(requests.len(), expected);
+            assert!(requests[0].input.stop_hook_feedback.is_empty());
+            for (index, request) in requests.iter().enumerate().skip(1) {
+                assert_eq!(request.input.stop_hook_feedback.len(), index);
+                assert_eq!(
+                    request.input.stop_hook_feedback.last().unwrap().text,
+                    "finish-the-check"
+                );
+            }
+            private_file(&fixture.state.join("permissions.json"), br#"{"version":1}"#);
+            let (events, view) = fixture.reopen(result.session_id).await;
+            assert_eq!(
+                view.runs[0].lifecycle_hooks.len(),
+                if calls == 3 { 3 } else { 8 }
+            );
+            assert_eq!(
+                view.runs[0].status,
+                if calls == 3 {
+                    RunStatus::Failed
+                } else {
+                    RunStatus::Finished
+                }
+            );
+            for hook in &view.runs[0].lifecycle_hooks {
+                assert_eq!(hook.invocation.event, arany::permissions::HookEvent::Stop);
+                assert!(
+                    hook.outcome
+                        .as_ref()
+                        .unwrap()
+                        .observation
+                        .attestation
+                        .is_some()
+                );
+                assert!(matches!(
+                    hook.outcome.as_ref().unwrap().result,
+                    arany::permissions::HookResult::Blocked { .. }
+                ));
+            }
+            assert_eq!(
+                SessionView::replay(result.session_id, &events)
+                    .unwrap()
+                    .unwrap(),
+                view
+            );
+            assert_action_bounds(&events, false, false);
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_stop_reprompts_child_within_deadline() {
+        let settings = json!({"version":1,"hooks":{"SubagentStop":[{"matcher":"researcher","hooks":[shell_hook("echo verify-child >&2; exit 2")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let mut outcomes = vec![ProviderOutcome::Delegate(arany::Delegate {
+            children: vec![arany::ChildAssignment {
+                objective: "Research the task".into(),
+                profile: None,
+            }],
+            agent: None,
+        })];
+        outcomes.extend((0..9).map(|_| finish("child candidate")));
+        outcomes.push(finish("synthesis"));
+        let (result, requests, _) = fixture.run(outcomes, None, true).await;
+        assert_eq!(result.run.status, RunStatus::Finished);
+        let child: Vec<_> = requests
+            .iter()
+            .filter(|request| request.phase == AgentPhase::ChildWork)
+            .collect();
+        assert_eq!(child.len(), 9);
+        assert!(child[0].input.stop_hook_feedback.is_empty());
+        assert_eq!(child[8].input.stop_hook_feedback.len(), 8);
+        let (events, view) = fixture.reopen(result.session_id).await;
+        assert_eq!(view.runs[0].lifecycle_hooks.len(), 8);
+        assert!(
+            view.runs[0]
+                .lifecycle_hooks
+                .iter()
+                .all(|hook| hook.invocation.event == arany::permissions::HookEvent::SubagentStop)
+        );
+        assert_action_bounds(&events, false, false);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_admission_overflow_and_unpinned_program_block_without_execution() {
+        for hooks in [
+            vec![shell_hook("printf forbidden > notes/x"); 9],
+            vec![json!({"type":"command","command":"unconfigured","args":[]})],
+        ] {
+            let settings = json!({"version":1,"hooks":{"Stop":[{"hooks":hooks}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            let (result, requests, _) = fixture
+                .run_budgeted(
+                    vec![finish("candidate")],
+                    None,
+                    false,
+                    arany::GoalBudget {
+                        max_provider_calls: Some(1),
+                        ..budget()
+                    },
+                )
+                .await;
+            assert_eq!(requests.len(), 1);
+            assert!(!fixture.workspace.join("notes/x").exists());
+            let (_, view) = fixture.reopen(result.session_id).await;
+            let hook = &view.runs[0].lifecycle_hooks[0];
+            assert!(
+                hook.outcome
+                    .as_ref()
+                    .unwrap()
+                    .observation
+                    .attestation
+                    .is_none()
+            );
+            assert!(matches!(
+                hook.outcome.as_ref().unwrap().result,
+                arany::permissions::HookResult::Blocked { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_compact_block_skips_compaction_once() {
+        for trigger in ["manual", "auto"] {
+            let settings = json!({"version":1,"hooks":{"PreCompact":[{"matcher":trigger,"hooks":[shell_hook("echo keep-context >&2; exit 2")]}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            let (result, _, _) = fixture.run(vec![finish("done")], None, false).await;
+            let provider = Arc::new(ScriptedProvider::new(vec![]));
+            let providers = arany::AdmittedProviders::single(provider);
+            for _ in 0..2 {
+                if trigger == "manual" {
+                    assert!(matches!(
+                        fixture
+                            .engine
+                            .compact_session(
+                                &providers,
+                                result.session_id,
+                                fixture.workspace.clone()
+                            )
+                            .await,
+                        Err(arany::EngineError::CompactionInputEmpty)
+                    ));
+                } else {
+                    assert!(
+                        fixture
+                            .engine
+                            .auto_compact_session(
+                                &providers,
+                                result.session_id,
+                                fixture.workspace.clone(),
+                                result.run.id
+                            )
+                            .await
+                            .unwrap()
+                            .is_none()
+                    );
+                }
+            }
+            let (events, view) = fixture.reopen(result.session_id).await;
+            assert_eq!(view.runs[0].lifecycle_hooks.len(), 1);
+            assert!(!events.iter().any(|event| matches!(
+                event.event,
+                Event::ContextCompacted { .. } | Event::GoalCompactionCallReserved { .. }
+            )));
+        }
+    }
+}

@@ -30,6 +30,7 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
         .as_ref()
         .is_some_and(|tools| tools.steps.iter().any(|step| step.requests.is_empty()));
     messages.push(current_message(request, catalog.as_ref(), delegate_step));
+    append_stop_feedback(&mut messages, request, 0);
     if let Some(tools) = &input.tools {
         append_steps(&mut messages, tools, request)?;
     }
@@ -39,6 +40,24 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
         messages,
         outcome: restrict_outcome_schema(outcome_schema(), request),
     })
+}
+
+fn append_stop_feedback(messages: &mut Vec<Message>, request: &ProviderRequest, boundary: usize) {
+    for feedback in request
+        .input
+        .stop_hook_feedback
+        .iter()
+        .filter(|feedback| feedback.after_step == boundary)
+    {
+        messages.push(Message {
+            role: Role::Assistant,
+            blocks: vec![Block::AssistantTurn(feedback.turn.clone())],
+        });
+        messages.push(user(vec![data_block(
+            "stop_hook_feedback",
+            json!(feedback.text),
+        )]));
+    }
 }
 
 fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
@@ -178,12 +197,13 @@ fn append_steps(
             json!(summary),
         )]));
     }
-    for step in &tools.steps {
+    for (index, step) in tools.steps.iter().enumerate() {
         messages.push(Message {
             role: Role::Assistant,
             blocks: vec![Block::AssistantTurn(step.turn.clone())],
         });
         messages.push(user(step_results(step, request)?));
+        append_stop_feedback(messages, request, index + 1);
     }
     Ok(())
 }

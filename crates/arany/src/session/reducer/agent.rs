@@ -459,7 +459,14 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             let tool_continuation = tools_enabled && is_tool_continuation(run, agent, record);
             let delegated = tools_enabled && is_delegated_synthesis(run, agent, record);
             let tool_review = tools_enabled && is_tool_review(run, agent, record);
-            let valid = tool_continuation
+            let stop_continuation = run.stop_blocked(*agent_run_id)
+                && agent
+                    .provider_calls
+                    .last()
+                    .is_some_and(|call| call.phase == record.phase)
+                && run.hooks_settled();
+            let valid = stop_continuation
+                || tool_continuation
                 || tool_review
                 || delegated
                 || match (agent.role, agent.provider_calls.as_slice(), record.phase) {
@@ -644,6 +651,11 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                     call.disposition != ProviderCallDisposition::Finished
                         || call.phase == crate::provider::AgentPhase::ToolReview
                 })
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if *disposition == AgentDisposition::Finished
+                && (!run.hooks_settled() || run.stop_blocked(*agent_run_id))
             {
                 return Err(ReplayError::InvalidTransition);
             }

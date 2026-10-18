@@ -223,11 +223,9 @@ impl Event {
                 agent_run_id,
                 hook,
             } => {
-                if matches!(
-                    hook.event,
-                    crate::tools::permissions::HookEvent::PreToolUse
-                        | crate::tools::permissions::HookEvent::PostToolUse
-                ) && hook.intent.valid()
+                if hook.group < 64
+                    && hook.handler < 128
+                    && hook.intent.valid()
                     && matches!(hook.intent.call, crate::tools::ToolCall::Command { .. })
                     && hook.intent.run_id == *run_id
                     && hook.intent.agent_run_id == *agent_run_id

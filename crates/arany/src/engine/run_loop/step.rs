@@ -23,7 +23,7 @@ use crate::tools::{
 use std::time::Duration;
 use tokio::time::Instant;
 
-mod hooks;
+pub(super) mod hooks;
 
 use hooks::{HookFold, HookStop};
 

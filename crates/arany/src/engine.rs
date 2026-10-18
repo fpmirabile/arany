@@ -1564,18 +1564,18 @@ impl Engine {
             ensure_session_workspace(view, root_identity)?;
         }
         let context_started = SystemTime::now();
-        let steering_reserved = if submission.steering.is_some() {
-            MAX_STEERING_CONTEXT_BYTES
-        } else {
-            0
-        };
+        let feedback_reserved = usize::from(submission.steering.is_some())
+            * MAX_STEERING_CONTEXT_BYTES
+            + tools
+                .as_ref()
+                .map_or(0, crate::tools::ToolRuntime::stop_feedback_reserve);
         let goal_metadata_reserved = goal_context_metadata_reservation(
             goal.plan_contract
                 .as_ref()
                 .map_or(&goal.budget, |plan| &plan.budget),
             goal.plan_contract.as_ref(),
         )?
-        .checked_add(steering_reserved)
+        .checked_add(feedback_reserved)
         .ok_or(EngineError::ContextTooLarge)?;
         let context = CompiledContext::compile(
             history.as_ref(),

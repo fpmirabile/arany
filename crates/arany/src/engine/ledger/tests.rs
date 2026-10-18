@@ -290,14 +290,14 @@ fn carried_acknowledgment_time_counts_toward_active_exhaustion() {
 }
 
 #[test]
-fn default_provider_action_retains_its_original_event_admission() {
+fn lifecycle_hook_actions_reserve_event_headroom() {
     assert_eq!(
         Action::ProviderCall {
             previews: false,
             steering: false
         }
         .max_events(),
-        6
+        22
     );
     assert_eq!(
         Action::Child {
@@ -313,12 +313,12 @@ fn default_provider_action_retains_its_original_event_admission() {
             research: true
         }
         .max_events(),
-        18
+        34
     );
     assert_eq!(Action::Tool.max_events(), 8);
     assert_eq!(Action::Review.max_events(), 8);
-    assert_eq!(Action::Compaction.max_events(), 6);
-    assert_eq!(Action::BoundaryCompaction { goal: true }.max_events(), 2);
+    assert_eq!(Action::Compaction.max_events(), 22);
+    assert_eq!(Action::BoundaryCompaction { goal: true }.max_events(), 18);
 }
 
 #[test]
@@ -446,7 +446,7 @@ fn staged_bounds_never_exceed_the_first_admission() {
         previews: true,
         steering: true,
     };
-    assert_eq!(call.max_events(), 6 + 1 + MAX_DISPLAY_CHUNKS);
+    assert_eq!(call.max_events(), 22 + 1 + MAX_DISPLAY_CHUNKS);
     let providers = Providers::all(vec![()]);
     assert_eq!(call.remaining(1, &providers), call.max_events() - 1);
     assert_eq!(Action::Tool.remaining(0, &providers), 8);

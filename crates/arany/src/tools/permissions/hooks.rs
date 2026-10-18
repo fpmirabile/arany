@@ -17,6 +17,8 @@ pub const MAX_HOOK_INPUT_BYTES: usize = 32 * 1024;
 pub const MAX_HOOK_REASON_BYTES: usize = 1024;
 pub const HOOK_RESULT_BYTES: u32 = 32 * 1024;
 pub const MAX_HOOK_FEEDBACK_BYTES: usize = 4 * 1024;
+pub const MAX_STOP_CONTINUATIONS: usize = 8;
+pub const MAX_STOP_FEEDBACK_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum HookEvent {
@@ -246,11 +248,15 @@ pub struct HookInvocation {
     pub subject_digest: [u8; 32],
     pub intent: EffectIntent,
     pub input_digest: [u8; 32],
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub active_ceiling_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookOutcome {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub boundary_active_ms: Option<u64>,
     pub observation: ToolObservation,
     pub result: HookResult,
 }
@@ -262,6 +268,9 @@ pub enum HookResult {
     Restricted {
         decision: Decision,
         #[serde(deserialize_with = "Option::deserialize")]
+        reason: Option<String>,
+    },
+    Blocked {
         reason: Option<String>,
     },
     Feedback {
@@ -291,17 +300,26 @@ impl HookResult {
             Self::Restricted { decision, .. } => *decision,
             Self::Narrowed { call: updated } if updated != call => Decision::Deny,
             Self::Narrowed { .. } => Decision::Allow,
+            Self::Blocked { .. } => Decision::Deny,
             Self::Passed | Self::Feedback { .. } | Self::Ignored { .. } => Decision::Allow,
         }
     }
 
     pub(crate) fn valid_for(&self, observation: &ToolObservation) -> bool {
         // The parse is deterministic and bounded, so a recorded result must equal it.
-        [HookEvent::PreToolUse, HookEvent::PostToolUse]
-            .into_iter()
-            .any(|event| *self == Self::for_event(event, observation))
+        [
+            HookEvent::PreToolUse,
+            HookEvent::PostToolUse,
+            HookEvent::Stop,
+            HookEvent::SubagentStop,
+            HookEvent::PreCompact,
+        ]
+        .into_iter()
+        .any(|event| *self == Self::for_event(event, observation))
             && match self {
-                Self::Restricted { reason, .. } => reason.as_deref().is_none_or(valid_reason),
+                Self::Restricted { reason, .. } | Self::Blocked { reason } => {
+                    reason.as_deref().is_none_or(valid_reason)
+                }
                 Self::Feedback { lines } => lines.iter().all(|line| valid_reason(line)),
                 _ => true,
             }
@@ -312,20 +330,40 @@ impl HookResult {
         let not_completed = Self::Ignored {
             why: HookIgnoreReason::NotCompleted,
         };
+        if !matches!(event, HookEvent::PreToolUse | HookEvent::PostToolUse)
+            && observation.disposition == crate::tools::ToolDisposition::Denied
+            && [
+                "hook limit",
+                "hook program is not pinned",
+                "hook input exceeds the Guard task limit",
+            ]
+            .contains(&observation.output.as_str())
+        {
+            return Self::Blocked {
+                reason: Some(observation.output.clone()),
+            };
+        }
         match observation.disposition {
-            Succeeded | Failed if observation.attestation.is_some() => {
-                serde_json::from_str::<crate::tools::types::CommandResult>(&observation.output)
-                    .map_or(not_completed, |result| {
-                        if event == HookEvent::PostToolUse {
-                            parse_post_output(result.exit_code, &result.stdout, &result.stderr)
-                        } else {
-                            parse_output(result.exit_code, &result.stdout, &result.stderr)
-                        }
-                    })
-            }
+            Succeeded | Failed if observation.attestation.is_some() => serde_json::from_str::<
+                crate::tools::types::CommandResult,
+            >(
+                &observation.output
+            )
+            .map_or(not_completed, |result| {
+                if event == HookEvent::PostToolUse {
+                    parse_post_output(result.exit_code, &result.stdout, &result.stderr)
+                } else if event == HookEvent::PreToolUse {
+                    parse_output(result.exit_code, &result.stdout, &result.stderr)
+                } else {
+                    parse_lifecycle_output(event, result.exit_code, &result.stdout, &result.stderr)
+                }
+            }),
             // A cut-off hook cannot be told from a hostile one, so it fails closed.
             Limit if event == HookEvent::PostToolUse => Self::Feedback {
                 lines: vec!["hook limit reached".into()],
+            },
+            Limit if event != HookEvent::PreToolUse => Self::Blocked {
+                reason: Some("hook limit reached".into()),
             },
             Limit => Self::Restricted {
                 decision: Decision::Deny,
@@ -563,5 +601,115 @@ pub(crate) fn parse_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -
             why: HookIgnoreReason::AllowIsNoOp,
         },
         None => HookResult::Passed,
+    }
+}
+
+pub(crate) fn stop_subject(agent: crate::session::AgentRunId, call_index: usize) -> [u8; 32] {
+    crate::tools::types::digest(
+        &serde_json::to_vec(&(agent, call_index)).expect("hook subject serializes"),
+    )
+}
+
+pub(crate) fn compact_subject(trigger: &str, call_index: usize) -> [u8; 32] {
+    crate::tools::types::digest(
+        &serde_json::to_vec(&(trigger, call_index)).expect("hook subject serializes"),
+    )
+}
+
+pub(crate) fn lifecycle_input(
+    session_id: impl std::fmt::Display,
+    mode: PermissionMode,
+    event: HookEvent,
+    active: bool,
+    message: &str,
+    trigger: &str,
+    budget: usize,
+) -> String {
+    let mut input = serde_json::json!({
+        "session_id": session_id.to_string(), "cwd": "/workspace",
+        "permission_mode": mode, "hook_event_name": event,
+    });
+    if event == HookEvent::PreCompact {
+        input["trigger"] = Value::String(trigger.into());
+        input["custom_instructions"] = Value::String(String::new());
+    } else {
+        input["stop_hook_active"] = Value::Bool(active);
+        input["last_assistant_message"] = Value::String(String::new());
+        let room = budget
+            .min(MAX_HOOK_INPUT_BYTES)
+            .saturating_sub(input.to_string().len());
+        let mut bytes = 0;
+        let text: String = message
+            .chars()
+            .take_while(|ch| {
+                bytes += serde_json::to_string(&ch.to_string())
+                    .expect("character serializes")
+                    .len()
+                    - 2;
+                bytes <= room
+            })
+            .collect();
+        input["last_assistant_message"] = Value::String(text);
+    }
+    input.to_string()
+}
+
+pub(crate) fn stop_feedback<'a>(results: impl IntoIterator<Item = &'a HookResult>) -> String {
+    let mut feedback = String::new();
+    for result in results {
+        if let HookResult::Blocked { reason } = result {
+            let reason = reason.as_deref().unwrap_or("blocked without a reason");
+            if !feedback.is_empty() && feedback.len() < MAX_STOP_FEEDBACK_BYTES {
+                feedback.push(' ');
+            }
+            for ch in reason.chars() {
+                if feedback.len() + ch.len_utf8() > MAX_STOP_FEEDBACK_BYTES {
+                    break;
+                }
+                feedback.push(ch);
+            }
+        }
+    }
+    feedback
+}
+
+pub(super) fn parse_lifecycle_output(
+    event: HookEvent,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> HookResult {
+    if exit_code == Some(2) {
+        return HookResult::Blocked {
+            reason: bounded_reason(stderr),
+        };
+    }
+    if exit_code != Some(0) {
+        return HookResult::Ignored {
+            why: HookIgnoreReason::NonZeroExit,
+        };
+    }
+    let Ok(Value::Object(output)) =
+        super::super::parse_json(stdout.trim().as_bytes(), HOOK_RESULT_BYTES as usize)
+    else {
+        return HookResult::Passed;
+    };
+    if output.get("decision").and_then(Value::as_str) == Some("block") {
+        HookResult::Blocked {
+            reason: output
+                .get("reason")
+                .and_then(Value::as_str)
+                .and_then(bounded_reason),
+        }
+    } else if event != HookEvent::PreCompact && output.get("continue") == Some(&Value::Bool(false))
+    {
+        HookResult::Blocked {
+            reason: output
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .and_then(bounded_reason),
+        }
+    } else {
+        HookResult::Passed
     }
 }

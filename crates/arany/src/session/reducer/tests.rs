@@ -77,6 +77,9 @@ mod goal_recovery_tests {
                 definitions: Default::default(),
                 display: Vec::new(),
                 steering_notes: Vec::new(),
+                lifecycle_hooks: Vec::new(),
+                lifecycle_hook_sequence: None,
+                provider_sequences: Default::default(),
                 provider_fallbacks: Vec::new(),
             }],
             compactions: Vec::new(),
@@ -2636,6 +2639,9 @@ mod goal_replay_tests {
                 definitions: Default::default(),
                 display: Vec::new(),
                 steering_notes: Vec::new(),
+                lifecycle_hooks: Vec::new(),
+                lifecycle_hook_sequence: None,
+                provider_sequences: Default::default(),
                 provider_fallbacks: Vec::new(),
             }],
             compactions: Vec::new(),
@@ -3277,6 +3283,9 @@ mod goal_replay_tests {
                 definitions: Default::default(),
                 display: Vec::new(),
                 steering_notes: Vec::new(),
+                lifecycle_hooks: Vec::new(),
+                lifecycle_hook_sequence: None,
+                provider_sequences: Default::default(),
                 provider_fallbacks: Vec::new(),
             }],
             compactions: Vec::new(),
@@ -3398,6 +3407,9 @@ mod goal_replay_tests {
                     definitions: Default::default(),
                     display: Vec::new(),
                     steering_notes: Vec::new(),
+                    lifecycle_hooks: Vec::new(),
+                    lifecycle_hook_sequence: None,
+                    provider_sequences: Default::default(),
                     provider_fallbacks: Vec::new(),
                 },
                 RunView {
@@ -3435,6 +3447,9 @@ mod goal_replay_tests {
                     definitions: Default::default(),
                     display: Vec::new(),
                     steering_notes: Vec::new(),
+                    lifecycle_hooks: Vec::new(),
+                    lifecycle_hook_sequence: None,
+                    provider_sequences: Default::default(),
                     provider_fallbacks: Vec::new(),
                 },
             ],
@@ -3652,6 +3667,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: agent,
             hook: HookInvocation {
+                active_ceiling_ms: None,
                 event: HookEvent::PreToolUse,
                 group: 0,
                 handler: 0,
@@ -3664,6 +3680,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: agent,
             outcome: HookOutcome {
+                boundary_active_ms: None,
                 observation,
                 result,
             },
@@ -3765,6 +3782,7 @@ mod goal_replay_tests {
         }
         let mut forged = view.clone();
         forged.runs[0].tools[0].hooks[0].outcome = Some(HookOutcome {
+            boundary_active_ms: None,
             observation: hook_observation.clone(),
             result: HookResult::Passed,
         });
@@ -3852,6 +3870,7 @@ mod goal_replay_tests {
         assert!(!after_uncertain.runs[0].tools[0].settled_without_stop());
         let mut stopped = view.clone();
         stopped.runs[0].tools[0].hooks[0].outcome = Some(HookOutcome {
+            boundary_active_ms: None,
             observation: uncertain,
             result: not_completed,
         });
@@ -3889,6 +3908,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: agent,
             hook: HookInvocation {
+                active_ceiling_ms: None,
                 event,
                 group: 0,
                 handler: 0,
@@ -3901,6 +3921,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: agent,
             outcome: HookOutcome {
+                boundary_active_ms: None,
                 observation,
                 result,
             },
@@ -4065,6 +4086,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: agent,
                 hook: HookInvocation {
+                    active_ceiling_ms: None,
                     event: HookEvent::PostToolUse,
                     group: 0,
                     handler: 0,
@@ -5088,5 +5110,241 @@ mod goal_replay_tests {
                 "no egress: {case}"
             );
         }
+    }
+    #[test]
+    fn lifecycle_hooks_replay_bind_call_subject_order_block_and_continuation() {
+        use crate::tools::permissions::{
+            HookEvent, HookInvocation, HookOutcome, HookResult, compact_subject, stop_subject,
+        };
+        for event in [
+            HookEvent::Stop,
+            HookEvent::SubagentStop,
+            HookEvent::PreCompact,
+        ] {
+            let (mut view, goal, run, actor) = if event == HookEvent::SubagentStop {
+                research_session()
+            } else {
+                primary_tool_session(true)
+            };
+            view.runs[0]
+                .config
+                .as_mut()
+                .unwrap()
+                .tool_policy
+                .as_mut()
+                .unwrap()
+                .permissions_digest = Some([3; 32]);
+            let phase = if event == HookEvent::SubagentStop {
+                AgentPhase::ChildWork
+            } else {
+                AgentPhase::RootPlan
+            };
+            let index = view.runs[0]
+                .agents
+                .iter()
+                .find(|agent| agent.id == actor)
+                .unwrap()
+                .provider_calls
+                .len();
+            let intent = child_intent(
+                run,
+                actor,
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), "exit 2".into()],
+                    cwd: String::new(),
+                },
+            );
+            let subject = if event == HookEvent::PreCompact {
+                compact_subject("auto", index + 1)
+            } else {
+                stop_subject(actor, index)
+            };
+            let started = Event::HookStarted {
+                run_id: run,
+                agent_run_id: actor,
+                hook: HookInvocation {
+                    event,
+                    group: 0,
+                    handler: 0,
+                    subject_digest: subject,
+                    intent: intent.clone(),
+                    input_digest: [9; 32],
+                    active_ceiling_ms: Some(1),
+                },
+            };
+            if event != HookEvent::PreCompact {
+                assert!(rejected(&view, started.clone()));
+            }
+            apply(&mut view, reserve_child_call(goal, run, actor)).unwrap();
+            apply(
+                &mut view,
+                Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: actor,
+                    record: record(phase, ProviderCallDisposition::Finished, Some(0)),
+                },
+            )
+            .unwrap();
+            let mut foreign = started.clone();
+            if let Event::HookStarted { hook, .. } = &mut foreign {
+                hook.subject_digest = [8; 32];
+            }
+            assert!(rejected(&view, foreign));
+            let mut late = view.clone();
+            late.last_sequence += 1;
+            if event != HookEvent::PreCompact {
+                assert!(rejected(&late, started.clone()));
+            }
+            apply(&mut view, started.clone()).unwrap();
+            assert!(rejected(&view, started.clone()));
+            assert!(rejected(&view, reserve_child_call(goal, run, actor)));
+            let mut observation = observation_for(intent, b"");
+            observation.disposition = ToolDisposition::Failed;
+            observation.output = serde_json::json!({"exit_code":2,"stdout":"","stderr":"verify","changeset":{"files":[]}}).to_string();
+            let finished = Event::HookFinished {
+                run_id: run,
+                agent_run_id: actor,
+                outcome: HookOutcome {
+                    observation,
+                    result: HookResult::Blocked {
+                        reason: Some("verify".into()),
+                    },
+                    boundary_active_ms: None,
+                },
+            };
+            let mut forged = finished.clone();
+            if let Event::HookFinished { outcome, .. } = &mut forged {
+                outcome.result = HookResult::Passed;
+            }
+            assert!(forged.payload().is_err());
+            let mut uncertain_view = view.clone();
+            let mut uncertain = finished.clone();
+            if let Event::HookFinished { outcome, .. } = &mut uncertain {
+                outcome.observation.disposition = ToolDisposition::Uncertain;
+                outcome.observation.attestation = None;
+                outcome.observation.output = "Hook outcome unknown".into();
+                outcome.result = HookResult::Ignored {
+                    why: crate::tools::permissions::HookIgnoreReason::NotCompleted,
+                };
+            }
+            apply(&mut uncertain_view, uncertain).unwrap();
+            assert!(!uncertain_view.runs[0].hooks_settled());
+            assert!(rejected(
+                &uncertain_view,
+                reserve_child_call(goal, run, actor)
+            ));
+            apply(&mut view, finished.clone()).unwrap();
+            assert!(rejected(&view, finished));
+            if event == HookEvent::PreCompact {
+                assert!(rejected(
+                    &view,
+                    Event::GoalCompactionCallReserved {
+                        goal_id: goal,
+                        run_id: run,
+                        active_ceiling_ms: 1
+                    }
+                ));
+            } else {
+                assert!(rejected(
+                    &view,
+                    Event::AgentFinished {
+                        worker: None,
+                        run_id: run,
+                        agent_run_id: actor,
+                        disposition: AgentDisposition::Finished,
+                        summary: Some("done".into()),
+                        result: Some("done".into())
+                    }
+                ));
+                apply(&mut view, reserve_child_call(goal, run, actor)).unwrap();
+                apply(
+                    &mut view,
+                    Event::ProviderCallRecorded {
+                        run_id: run,
+                        agent_run_id: actor,
+                        record: record(phase, ProviderCallDisposition::Finished, Some(0)),
+                    },
+                )
+                .unwrap();
+                assert!(!view.runs[0].stop_blocked(actor));
+            }
+        }
+    }
+    #[test]
+    fn lifecycle_hook_precompact_between_runs_preserves_budget_and_crash_ceiling() {
+        use crate::tools::permissions::{
+            HookEvent, HookInvocation, HookOutcome, HookResult, compact_subject,
+        };
+        let (mut view, _, run, actor) = primary_tool_session(true);
+        let current = &mut view.runs[0];
+        current.status = RunStatus::Finished;
+        current.agents[0].status = AgentStatus::Finished;
+        current.agents[0].provider_calls.push(record(
+            AgentPhase::RootPlan,
+            ProviderCallDisposition::Finished,
+            Some(0),
+        ));
+        current
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        view.goals[0].active_run = None;
+        view.goals[0].active_deadline = None;
+        let intent = child_intent(
+            run,
+            actor,
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 2".into()],
+                cwd: String::new(),
+            },
+        );
+        apply(
+            &mut view,
+            Event::HookStarted {
+                run_id: run,
+                agent_run_id: actor,
+                hook: HookInvocation {
+                    event: HookEvent::PreCompact,
+                    group: 0,
+                    handler: 0,
+                    subject_digest: compact_subject("manual", 1),
+                    input_digest: [9; 32],
+                    intent: intent.clone(),
+                    active_ceiling_ms: Some(1000),
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(view.goals[0].resume_usage(&view).active_ms, 1000);
+        assert!(!view.runs[0].hooks_settled());
+        let mut observation = observation_for(intent, b"");
+        observation.disposition = ToolDisposition::Denied;
+        observation.attestation = None;
+        observation.output = "hook limit".into();
+        let finished = Event::HookFinished {
+            run_id: run,
+            agent_run_id: actor,
+            outcome: HookOutcome {
+                observation,
+                result: HookResult::Blocked {
+                    reason: Some("hook limit".into()),
+                },
+                boundary_active_ms: Some(7),
+            },
+        };
+        let mut excessive = finished.clone();
+        if let Event::HookFinished { outcome, .. } = &mut excessive {
+            outcome.boundary_active_ms = Some(1001);
+        }
+        assert!(rejected(&view, excessive));
+        apply(&mut view, finished).unwrap();
+        assert_eq!(view.goals[0].active_ms, 7);
+        assert_eq!(view.goals[0].active_ceiling_ms, 0);
     }
 }
