@@ -567,9 +567,12 @@ impl RunLoop<'_> {
                     child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
                     return Ok(None);
                 }
-                let disposition = if self.hook_requested_stop()? {
+                let disposition = if self.actor_hook_requested_stop(agent_run_id)? {
                     AgentDisposition::StoppedByHook
-                } else if skipped || self.controls.cancellation.is_cancelled() {
+                } else if skipped
+                    || self.controls.cancellation.is_cancelled()
+                    || self.hook_requested_stop()?
+                {
                     AgentDisposition::Cancelled
                 } else {
                     AgentDisposition::Failed
@@ -601,36 +604,13 @@ impl RunLoop<'_> {
         deadline: Instant,
     ) -> Result<ChildStop, EngineError> {
         let agent_run_id = child.agent_run_id;
-        let subject = child
-            .definition
-            .as_ref()
-            .map_or("researcher", |definition| definition.name.as_str());
-        let fits = self
-            .controls
-            .tools
-            .zip(child.tools.as_ref())
-            .is_none_or(|(runtime, tools)| {
-                tools.has_stop_room(&turn, runtime.context_limit_bytes())
-            });
         let stop = self
-            .lifecycle_hooks(
-                agent_run_id,
-                crate::tools::permissions::HookEvent::SubagentStop,
-                subject,
-                &finish.result,
-                Some(deadline),
-                fits,
-            )
+            .run_subagent_stop(child, "researcher", &finish.result, turn, deadline)
             .await;
-        let feedback = match stop {
-            Ok(Some(feedback)) => feedback,
+        match stop {
+            Ok(Some(())) => {}
             Ok(None) => {
-                let stopped = self.ledger().view(|view| {
-                    view.runs
-                        .iter()
-                        .any(|run| run.id == self.run_id && run.actor_stopped_by_hook(agent_run_id))
-                })?;
-                if stopped {
+                if self.actor_hook_requested_stop(agent_run_id)? {
                     self.finish_child(agent_run_id, AgentDisposition::StoppedByHook, None, true)
                         .await?;
                     return Ok(ChildStop::End(AgentDisposition::StoppedByHook));
@@ -659,6 +639,51 @@ impl RunLoop<'_> {
             }
             Err(error) => return Err(error),
         };
+        self.ledger().child_call_finished()?;
+        if child.turns_remaining > 0
+            && tokio::time::Instant::now() < deadline
+            && self.ledger().can_start_provider_call()
+        {
+            return Ok(ChildStop::Reprompt);
+        }
+        self.finish_child(agent_run_id, AgentDisposition::Failed, None, false)
+            .await?;
+        Ok(ChildStop::End(AgentDisposition::Failed))
+    }
+
+    pub(super) async fn run_subagent_stop(
+        &self,
+        child: &mut ChildWork,
+        default_subject: &str,
+        message: &str,
+        turn: ProviderTurn,
+        deadline: Instant,
+    ) -> Result<Option<()>, EngineError> {
+        let subject = child
+            .definition
+            .as_ref()
+            .map_or(default_subject, |definition| definition.name.as_str())
+            .to_owned();
+        let fits = self
+            .controls
+            .tools
+            .zip(child.tools.as_ref())
+            .is_none_or(|(runtime, tools)| {
+                tools.has_stop_room(&turn, runtime.context_limit_bytes())
+            });
+        let Some(feedback) = self
+            .lifecycle_hooks(
+                child.agent_run_id,
+                crate::tools::permissions::HookEvent::SubagentStop,
+                &subject,
+                message,
+                Some(deadline),
+                fits,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
         if let Some(tools) = child.tools.as_mut() {
             tools.add_stop_feedback(&turn, &feedback);
         }
@@ -671,16 +696,7 @@ impl RunLoop<'_> {
                 facts: None,
                 steering_notes: Vec::new(),
             });
-        self.ledger().child_call_finished()?;
-        if child.turns_remaining > 0
-            && tokio::time::Instant::now() < deadline
-            && self.ledger().can_start_provider_call()
-        {
-            return Ok(ChildStop::Reprompt);
-        }
-        self.finish_child(agent_run_id, AgentDisposition::Failed, None, false)
-            .await?;
-        Ok(ChildStop::End(AgentDisposition::Failed))
+        Ok(Some(()))
     }
 
     pub(super) async fn synthesize(
@@ -698,7 +714,22 @@ impl RunLoop<'_> {
             .collect::<Option<Vec<_>>>()
             .ok_or(EngineError::CoordinatorFailed)?;
         if let Some(tools) = root_request.input.tools.as_mut() {
-            let integrations = self.ledger().view(|view| view.runs.last().into_iter().flat_map(|run| &run.tools).filter(|tool| matches!(tool.intent.call, ToolCall::ApplyChangeset { source: crate::session::worker::ChangesetSource::WorkerHandover { .. } })).cloned().collect::<Vec<_>>())?;
+            let integrations = self.ledger().view(|view| {
+                view.runs
+                    .last()
+                    .into_iter()
+                    .flat_map(|run| &run.tools)
+                    .filter(|tool| {
+                        matches!(
+                            tool.intent.call,
+                            ToolCall::ApplyChangeset {
+                                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                            }
+                        ) && tool.observation.is_some()
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })?;
             tools.steps.push(ToolStep {
                 turn: delegate_turn,
                 requests: Vec::new(),

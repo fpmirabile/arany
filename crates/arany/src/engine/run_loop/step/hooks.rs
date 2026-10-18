@@ -260,6 +260,15 @@ impl RunLoop<'_> {
         (pre.len() + post.len(), active_ms(&pre), active_ms(&post))
     }
 
+    pub(in crate::engine::run_loop) fn hook_time(
+        &self,
+        runtime: &ToolRuntime,
+        call: &ToolCall,
+    ) -> std::time::Duration {
+        let (_, pre, post) = self.hook_admission(runtime, call, call);
+        std::time::Duration::from_millis(pre.saturating_add(post))
+    }
+
     // Room the next request keeps for the feedback lines PostToolUse hooks may add.
     pub(super) fn feedback_reserve(&self, runtime: &ToolRuntime, call: &ToolCall) -> usize {
         let Some(config) = runtime.permissions() else {
@@ -378,7 +387,14 @@ impl RunLoop<'_> {
                 HookResult::Narrowed { call } => {
                     fold.restriction = Some(Decision::Deny);
                     if !narrowable {
-                        fold.reason = Some("hook narrowing limit".into());
+                        fold.reason = Some(
+                            if grant.deadline().is_some() {
+                                "delegated Tool input cannot be rewritten"
+                            } else {
+                                "hook narrowing limit"
+                            }
+                            .into(),
+                        );
                     } else if narrowing_holds(&runtime, config, &intent.call, &call) {
                         fold.narrowed = Some(call);
                     } else {

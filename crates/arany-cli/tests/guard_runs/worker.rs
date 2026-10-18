@@ -111,6 +111,22 @@ async fn worker_case(case: &'static str) {
             "hook_write_stop" => {
                 serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
             }
+            "hook_write_update" => {
+                let rewritten = serde_json::to_string(&arany::ToolCall::Write {
+                    path: "notes/a".into(),
+                    expected_digest: None,
+                    content: "rewritten".into(),
+                })
+                .unwrap();
+                let output = serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":serde_json::from_str::<serde_json::Value>(&rewritten).unwrap()}});
+                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command(&format!("printf '%s' '{output}'"))]}]})
+            }
+            "hook_uncertain" => {
+                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("kill -9 $PPID; sleep 5")]}]})
+            }
+            "hook_post_stop" => {
+                serde_json::json!({"PostToolUse":[{"matcher":"Edit","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
+            }
             "hook_handover_post" => {
                 serde_json::json!({"PostToolUse":[{"matcher":"Edit","hooks":[command("echo published >&2; exit 2")]}]})
             }
@@ -228,6 +244,18 @@ async fn worker_case(case: &'static str) {
         .iter()
         .filter(|r| r.phase == AgentPhase::RootSynthesis)
         .count();
+    if case == "hook_uncertain" {
+        assert!(
+            matches!(
+                result,
+                Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+            ),
+            "an unknown worker hook stops the Run as Uncertain: {result:?}"
+        );
+        assert_eq!(synthesis_calls, 0);
+        assert_eq!(child_calls, 1);
+        return;
+    }
     assert_eq!(std::fs::read(workspace.join(".git/config")).unwrap(), git);
     for bytes in [
         bundle.stdout,
@@ -258,6 +286,28 @@ async fn worker_case(case: &'static str) {
         );
     } else {
         let result = result.expect(case);
+        if case == "hook_write_update" {
+            let tools = &run.agents[1].tools;
+            assert!(tools.iter().all(|tool| {
+                tool.observation.as_ref().unwrap().disposition == arany::ToolDisposition::Denied
+            }));
+            assert!(tools.iter().all(|tool| tool.hooks.len() == 1));
+            assert_eq!(
+                std::fs::read(workspace.join("notes/a")).unwrap(),
+                b"original a"
+            );
+            return;
+        }
+        if case == "hook_post_stop" {
+            assert_eq!(run.status, RunStatus::StoppedByHook);
+            assert_eq!(synthesis_calls, 0);
+            assert_eq!(
+                std::fs::read(workspace.join("notes/a")).unwrap(),
+                b"edited a"
+            );
+            assert_eq!(run.hook_stop_reason(), Some(Some("halt")));
+            return;
+        }
         assert!(result.stopped.is_none(), "{case}");
         assert!(worker.released.is_some(), "{case}");
         if matches!(
@@ -400,9 +450,33 @@ async fn foreground_worker_hook_journey_bounds_stop_blocks_and_denies_sealed_han
         "hook_handover_post",
         "hook_stop",
         "hook_write_stop",
+        "hook_write_update",
+        "hook_post_stop",
     ] {
         worker_case(case).await;
     }
+}
+
+#[test]
+fn foreground_worker_handover_hook_fits_a_two_mebibyte_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(worker_case("hook_handover_deny"));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn foreground_worker_unknown_hook_outcome_stops_the_run_as_uncertain() {
+    worker_case("hook_uncertain").await;
 }
 
 // The case advances the paused clock by an hour; its own runtime keeps that offset from later cases.

@@ -344,20 +344,18 @@ impl HookResult {
             };
         }
         match observation.disposition {
-            Succeeded | Failed if observation.attestation.is_some() => serde_json::from_str::<
-                crate::tools::types::CommandResult,
-            >(
-                &observation.output
-            )
-            .map_or(not_completed, |result| {
-                if event == HookEvent::PostToolUse {
-                    parse_post_output(result.exit_code, &result.stdout, &result.stderr)
-                } else if event == HookEvent::PreToolUse {
-                    parse_output(result.exit_code, &result.stdout, &result.stderr)
-                } else {
-                    parse_lifecycle_output(event, result.exit_code, &result.stdout, &result.stderr)
-                }
-            }),
+            Succeeded | Failed if observation.attestation.is_some() => {
+                serde_json::from_str::<crate::tools::types::CommandResult>(&observation.output)
+                    .map_or(not_completed, |result| {
+                        if event == HookEvent::PostToolUse {
+                            parse_post_output(result.exit_code, &result.stdout, &result.stderr)
+                        } else if event == HookEvent::PreToolUse {
+                            parse_output(result.exit_code, &result.stdout, &result.stderr)
+                        } else {
+                            parse_lifecycle_output(result.exit_code, &result.stdout, &result.stderr)
+                        }
+                    })
+            }
             // A cut-off hook cannot be told from a hostile one, so it fails closed.
             Limit if event == HookEvent::PostToolUse => Self::Feedback {
                 lines: vec!["hook limit reached".into()],
@@ -681,7 +679,6 @@ pub(crate) fn stop_feedback<'a>(results: impl IntoIterator<Item = &'a HookResult
 }
 
 pub(super) fn parse_lifecycle_output(
-    _event: HookEvent,
     exit_code: Option<i32>,
     stdout: &str,
     stderr: &str,

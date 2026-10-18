@@ -1656,10 +1656,7 @@ fn lifecycle_hook_inputs_and_results_are_bounded_and_fail_closed() {
             },
         ),
     ] {
-        assert_eq!(
-            parse_lifecycle_output(HookEvent::Stop, Some(exit), stdout, stderr),
-            expected
-        );
+        assert_eq!(parse_lifecycle_output(Some(exit), stdout, stderr), expected);
     }
     let result = HookResult::Blocked {
         reason: Some("é".repeat(MAX_HOOK_REASON_BYTES / 2)),

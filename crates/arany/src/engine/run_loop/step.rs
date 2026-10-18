@@ -355,7 +355,8 @@ impl RunLoop<'_> {
                             duration_ms(remaining.saturating_sub(
                                 runtime.reservation_overhead(&intent.call)
                                     + TOOL_CLEANUP_OVERHEAD
-                                    + STORE_ACTION_OVERHEAD,
+                                    + STORE_ACTION_OVERHEAD
+                                    + self.hook_time(runtime, &intent.call),
                             )) / 4,
                         )
                         .unwrap_or(u32::MAX),
@@ -496,7 +497,8 @@ impl RunLoop<'_> {
             .saturating_sub(
                 runtime.reservation_overhead(&intent.call)
                     + TOOL_CLEANUP_OVERHEAD
-                    + STORE_ACTION_OVERHEAD,
+                    + STORE_ACTION_OVERHEAD
+                    + self.hook_time(runtime, &intent.call),
             );
         // Half for the Guard capacity wait (it ends at `expires_at_ms`), half for the run itself.
         let runtime_ms = intent
@@ -582,6 +584,7 @@ impl RunLoop<'_> {
                 Grant::Researcher { child, deadline } => {
                     let cancellation = RunCancellation::new();
                     let mut parent = self.controls.cancellation.clone();
+                    let mut timed_out = false;
                     let execution = async {
                         if child.editor {
                             let (observation, pending) = self
@@ -594,11 +597,14 @@ impl RunLoop<'_> {
                         }
                     };
                     tokio::pin!(execution);
-                    let observation = tokio::select! {
+                    let mut observation = tokio::select! {
                         result = &mut execution => result?,
-                        () = tokio::time::sleep_until(*deadline) => { cancellation.cancel(); execution.await? },
+                        () = tokio::time::sleep_until(*deadline) => { timed_out = true; cancellation.cancel(); execution.await? },
                         () = parent.cancelled() => { cancellation.cancel(); execution.await? },
                     };
+                    if timed_out && observation.disposition == ToolDisposition::Cancelled {
+                        observation.disposition = ToolDisposition::Limit;
+                    }
                     Answer {
                         observation,
                         refused: false,

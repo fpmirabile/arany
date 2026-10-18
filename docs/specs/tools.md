@@ -139,7 +139,7 @@ A Guarded Command that is not a hook reads an empty stdin (immediate EOF), like 
 |---|---|---|
 | Hooks execute with full user permissions and real working-directory paths. | Guarded, offline, pinned shell/program and explicit environment; stdin `cwd` is `/workspace`; hook changes are discarded. | Per-effect isolation; untrusted output cannot select trust. |
 | `allow` can skip permission prompts. | Journal `allow_is_no_op`; never resolve Ask or erase Deny. A hook Ask requires the human even in Auto mode. | Hooks only narrow; static user rules and configured resolvers own approval. |
-| `updatedInput` replaces input. | Only the provable narrowing below is accepted, under a new intent. | Preserve immutable intent and pinned authority. |
+| `updatedInput` replaces input. | Only the provable narrowing below is accepted, under a new intent, for primary Tools; a delegated or handover `updatedInput` denies (Claude Code rewrites subagent input). | Preserve immutable intent and pinned authority. |
 | Matching hooks run in parallel. | Sequential configuration order, bounded matches, stop at a terminal restriction. | Journal-first ordering, finite Guard capacity and deterministic replay. |
 | Nonzero errors and timeouts are normally non-blocking. | Other exits add no restriction. Timeout/output overflow fails closed: PreToolUse denies, PostToolUse adds limit feedback, lifecycle hooks block. Unknown outcomes stop continuation without retry. | A model-steered timeout or overflow must not disable a restrictor; honest uncertainty. |
 | PostToolUse can provide feedback and replace some Tool output. | Bounded feedback only; attested observations and completed effects are retained. | Hook text cannot forge effect evidence. |

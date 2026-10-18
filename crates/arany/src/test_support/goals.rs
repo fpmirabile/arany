@@ -470,10 +470,11 @@ impl crate::Provider for ForegroundWorkerProvider {
             (AgentPhase::ChildWork, 3) => {
                 let tools = request.input.tools.as_ref().unwrap();
                 self.check(
-                    tools
-                        .observations()
-                        .last()
-                        .is_some_and(|o| o.output.contains("edited a")),
+                    self.case == "hook_write_update"
+                        || tools
+                            .observations()
+                            .last()
+                            .is_some_and(|o| o.output.contains("edited a")),
                     "Read did not see acknowledged private edit",
                 );
                 if self.case == "conflict" {

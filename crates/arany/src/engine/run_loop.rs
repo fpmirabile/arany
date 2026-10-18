@@ -235,15 +235,11 @@ impl<'a> RunLoop<'a> {
                 hook.outcome.as_ref().is_some_and(|outcome| {
                     outcome.observation.disposition == crate::tools::ToolDisposition::Cancelled
                 })
-            }) || run
-                .tools
-                .iter()
-                .chain(run.agents.iter().flat_map(|agent| &agent.tools))
-                .any(|tool| {
-                    tool.observation.as_ref().is_some_and(|observation| {
-                        observation.disposition == crate::tools::ToolDisposition::Cancelled
-                    })
-                });
+            }) || run.tools.iter().any(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Cancelled
+                })
+            });
             let actions_acknowledged = run
                 .tools
                 .iter()
@@ -1005,6 +1001,32 @@ impl<'a> RunLoop<'a> {
         self.ledger().view(|view| {
             view.runs.iter().any(|run| {
                 run.id == self.run_id && run.hooks_settled() && run.hook_stop_reason().is_some()
+            })
+        })
+    }
+
+    fn uncertain_hook(&self) -> Result<bool, EngineError> {
+        self.ledger().view(|view| {
+            view.runs.last().is_some_and(|run| {
+                run.tools
+                    .iter()
+                    .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+                    .flat_map(|tool| &tool.hooks)
+                    .chain(&run.lifecycle_hooks)
+                    .any(|hook| {
+                        hook.outcome.as_ref().is_some_and(|outcome| {
+                            outcome.observation.disposition
+                                == crate::tools::ToolDisposition::Uncertain
+                        })
+                    })
+            })
+        })
+    }
+
+    fn actor_hook_requested_stop(&self, agent: AgentRunId) -> Result<bool, EngineError> {
+        self.ledger().view(|view| {
+            view.runs.iter().any(|run| {
+                run.id == self.run_id && run.hooks_settled() && run.actor_stopped_by_hook(agent)
             })
         })
     }

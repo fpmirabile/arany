@@ -2661,6 +2661,56 @@ async fn hook_post_tool_use_sets_that_cannot_run_deny_the_tool_before_dispatch()
     }
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn hook_researcher_uncertain_outcome_stops_the_run_without_a_synthesis() {
+    let fixture = Fixture::new(
+        Some(&hook_settings(
+            json!({}),
+            vec![shell_hook("kill -9 $PPID; sleep 5")],
+        )),
+        false,
+    );
+    let (result, requests, _) = fixture
+        .run(
+            vec![
+                ProviderOutcome::Delegate(Delegate {
+                    agent: None,
+                    children: vec![arany::ChildAssignment {
+                        editor: None,
+                        objective: "Inspect facts".into(),
+                        profile: None,
+                    }],
+                }),
+                tool_outcome(call("read"), None),
+            ],
+            None,
+            true,
+        )
+        .await;
+    assert_ne!(result.run.status, RunStatus::Finished);
+    assert_eq!(
+        requests.len(),
+        2,
+        "no Provider call follows an unknown hook"
+    );
+    let child = result
+        .run
+        .agents
+        .iter()
+        .find(|agent| agent.role == arany::AgentRole::Child)
+        .unwrap();
+    assert_eq!(
+        child.tools[0].hooks[0]
+            .outcome
+            .as_ref()
+            .unwrap()
+            .observation
+            .disposition,
+        arany::ToolDisposition::Uncertain
+    );
+}
+
 #[tokio::test]
 async fn hook_researcher_tools_use_the_parent_hooks_and_child_journal_identity() {
     for deny in [true, false] {

@@ -3070,25 +3070,25 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
         .unwrap();
         assert!(view.runs[0].hooks_settled(), "{site}");
         if event == HookEvent::PreToolUse {
-            append(
-                &mut view,
-                Event::ToolPermissionDecided {
-                    run_id: f.run,
-                    agent_run_id: actor,
-                    verdict: PermissionVerdict {
-                        intent_digest: pending.digest(),
-                        mode: Some(PermissionMode::Default),
-                        decision: Decision::Deny,
-                        basis: PermissionSource::Hook,
-                        source: PermissionSource::Hook,
-                        approved: false,
-                        hook_restriction: Some(Decision::Deny),
-                        hooks: 1,
-                        narrowed: false,
-                    },
+            let verdict = |narrowed| Event::ToolPermissionDecided {
+                run_id: f.run,
+                agent_run_id: actor,
+                verdict: PermissionVerdict {
+                    intent_digest: pending.digest(),
+                    mode: Some(PermissionMode::Default),
+                    decision: Decision::Deny,
+                    basis: PermissionSource::Hook,
+                    source: PermissionSource::Hook,
+                    approved: false,
+                    hook_restriction: Some(Decision::Deny),
+                    hooks: 1,
+                    narrowed,
                 },
-            )
-            .unwrap();
+            };
+            if actor != f.primary {
+                assert!(append(&mut view.clone(), verdict(true)).is_err(), "{site}");
+            }
+            append(&mut view, verdict(false)).unwrap();
             append(
                 &mut view,
                 Event::ToolFinished {

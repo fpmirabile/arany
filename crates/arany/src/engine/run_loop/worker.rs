@@ -638,7 +638,7 @@ impl RunLoop<'_> {
             .dispose()?;
         let no_change = bytes.as_ref().is_some_and(|b| matches!(decode_data(b, WorkerDataPurpose::Handover), Ok(WorkerDataFacts::Changes(files)) if files.is_empty()));
         let success = data.is_some();
-        let hook_stopped = self.hook_requested_stop()?;
+        let hook_stopped = self.actor_hook_requested_stop(id)?;
         let (disposition, cause) = if private_uncertain {
             (
                 WorkerDisposition::PrivateUncertain,
@@ -655,7 +655,7 @@ impl RunLoop<'_> {
             )
         } else if hook_stopped {
             (WorkerDisposition::Failed, WorkerCause::StoppedByHook)
-        } else if self.controls.cancellation.is_cancelled() {
+        } else if self.controls.cancellation.is_cancelled() || self.hook_requested_stop()? {
             (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
         } else {
             (
@@ -810,6 +810,9 @@ impl RunLoop<'_> {
                 ))
                 .await;
             }
+        }
+        if self.uncertain_hook()? {
+            return self.settle_stopped_primary().await;
         }
         if self.hook_requested_stop()? {
             return self.finish_hook_stop().await;
@@ -1005,49 +1008,18 @@ impl RunLoop<'_> {
         deadline: tokio::time::Instant,
     ) -> Result<super::children::ChildStop, EngineError> {
         use super::children::ChildStop;
-        let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        let subject = child
-            .definition
-            .as_ref()
-            .map_or("editor", |definition| definition.name.as_str());
-        let fits = child
-            .tools
-            .as_ref()
-            .is_none_or(|tools| tools.has_stop_room(&turn, runtime.context_limit_bytes()));
         let stop = self
-            .lifecycle_hooks(
-                child.agent_run_id,
-                crate::tools::permissions::HookEvent::SubagentStop,
-                subject,
-                &finish.result,
-                Some(deadline),
-                fits,
-            )
+            .run_subagent_stop(child, "editor", &finish.result, turn, deadline)
             .await;
         self.ledger().child_call_finished()?;
         match stop {
-            Ok(Some(feedback)) => {
-                if let Some(tools) = child.tools.as_mut() {
-                    tools.add_stop_feedback(&turn, &feedback);
-                }
-                child
-                    .stop_hook_feedback
-                    .push(crate::provider::StopHookFeedback {
-                        after_step: child.tools.as_ref().map_or(0, |tools| tools.steps.len()),
-                        turn,
-                        text: feedback,
-                        facts: None,
-                        steering_notes: Vec::new(),
-                    });
-                Ok(ChildStop::Reprompt)
+            Ok(Some(())) => Ok(ChildStop::Reprompt),
+            Ok(None) if !self.actor_hook_requested_stop(child.agent_run_id)? => {
+                Ok(ChildStop::Proceed)
             }
-            Ok(None) if !self.hook_requested_stop()? => Ok(ChildStop::Proceed),
-            Ok(None)
-            | Err(
-                EngineError::GoalBudgetExhausted
-                | EngineError::ContextTooLarge
-                | EngineError::Tool(crate::tools::ToolError::Uncertain),
-            ) => Ok(ChildStop::End(AgentDisposition::Failed)),
+            Ok(None) | Err(EngineError::GoalBudgetExhausted | EngineError::ContextTooLarge) => {
+                Ok(ChildStop::End(AgentDisposition::Failed))
+            }
             Err(error) => Err(error),
         }
     }
