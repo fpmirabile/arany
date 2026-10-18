@@ -52,34 +52,25 @@ impl ClipboardWorker {
 pub(super) fn shutdown() -> std::io::Result<()> {
     WORKER.shutdown(CLEANUP_TIMEOUT).map_err(|message| {
         #[cfg(unix)]
-        {
-            static OUTPUT: LazyLock<Mutex<std::io::Stderr>> =
-                LazyLock::new(|| Mutex::new(std::io::stderr()));
-            let _ = warn_cleanup_unconfirmed(&OUTPUT);
-        }
+        warn_cleanup_unconfirmed();
         std::io::Error::other(message)
     })
 }
 
 #[cfg(unix)]
-fn warn_cleanup_unconfirmed(output: &Mutex<impl std::os::fd::AsFd>) -> rustix::io::Result<()> {
-    use rustix::fs::{FileType, OFlags, fcntl_getfl, fcntl_setfl, fstat};
+fn warn_cleanup_unconfirmed() {
+    use std::io::Write;
 
-    let output = output.try_lock().map_err(|_| rustix::io::Errno::AGAIN)?;
-    let fd = output.as_fd();
-    if !matches!(
-        FileType::from_raw_mode(fstat(fd)?.st_mode),
-        FileType::Fifo | FileType::Socket
-    ) && !rustix::termios::isatty(fd)
-    {
-        return Err(rustix::io::Errno::NOTSUP);
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if WARNED.swap(true, Ordering::Relaxed) {
+        return;
     }
-    let flags = fcntl_getfl(fd)?;
-    fcntl_setfl(fd, flags | OFlags::NONBLOCK)?;
-    // Bypass the stderr lock and never retry a partial or unavailable write.
-    let result = rustix::io::write(fd, format!("{CLEANUP_UNCONFIRMED}\n").as_bytes());
-    let restored = fcntl_setfl(fd, flags);
-    result.and(restored)
+    // Detach the single best-effort warning so stderr cannot delay teardown or exit.
+    let _ = std::thread::Builder::new()
+        .name("arany-clipboard-warning".into())
+        .spawn(|| {
+            let _ = writeln!(std::io::stderr(), "{CLEANUP_UNCONFIRMED}");
+        });
 }
 
 static WORKER: LazyLock<Arc<ClipboardWorker>> =
@@ -583,47 +574,89 @@ mod cleanup_tests {
     #[cfg(unix)]
     #[test]
     fn clipboard_cleanup_warning_never_waits_for_a_lock_or_full_pipe() {
+        use arany::test_support::process::capture;
         use nix::unistd::pipe;
         use rustix::{
             fs::{OFlags, fcntl_getfl, fcntl_setfl},
-            io::{Errno, read, write},
+            io::{Errno, write},
         };
+        use std::process::{Command, Stdio};
 
-        let (reader, writer) = pipe().unwrap();
-        let output = Arc::new(Mutex::new(writer));
-        let locked = output.lock().unwrap();
-        assert_eq!(warn_cleanup_unconfirmed(&output), Err(Errno::AGAIN));
-        let flags = fcntl_getfl(&*locked).unwrap();
-        drop(locked);
-        warn_cleanup_unconfirmed(&output).unwrap();
-        let mut bytes = [0; 256];
-        let length = read(&reader, &mut bytes).unwrap();
-        assert_eq!(
-            &bytes[..length],
-            format!("{CLEANUP_UNCONFIRMED}\n").as_bytes()
-        );
-        let locked = output.lock().unwrap();
-        assert_eq!(fcntl_getfl(&*locked).unwrap(), flags);
-        fcntl_setfl(&*locked, flags | OFlags::NONBLOCK).unwrap();
-        loop {
-            match write(&*locked, &[0; 4096]) {
-                Ok(_) => {}
-                Err(Errno::AGAIN) => break,
-                Err(error) => panic!("fill warning pipe: {error}"),
+        for case in ["locked", "full"] {
+            let (reader, writer) = pipe().unwrap();
+            if case == "full" {
+                let flags = fcntl_getfl(&writer).unwrap();
+                fcntl_setfl(&writer, flags | OFlags::NONBLOCK).unwrap();
+                let mut filled = 0;
+                let mut chunk: &[u8] = &[0; 4096];
+                loop {
+                    match write(&writer, chunk) {
+                        Ok(length) => filled += length,
+                        Err(Errno::AGAIN) if chunk.len() > 1 => chunk = &[0],
+                        Err(Errno::AGAIN) => break,
+                        Err(error) => panic!("fill warning pipe: {error}"),
+                    }
+                    assert!(filled <= 1024 * 1024, "warning pipe capacity exceeded");
+                }
+                fcntl_setfl(&writer, flags).unwrap();
             }
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .current_dir("/")
+                .env_clear()
+                .env("ARANY_CLIPBOARD_WARNING_TEST", case)
+                .args([
+                    "--exact",
+                    "terminal::clipboard::cleanup_tests::clipboard_warning_fixture",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::from(writer))
+                .spawn()
+                .unwrap();
+            let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                capture(&mut child, Duration::from_secs(5), 16 * 1024)
+            }));
+            let _ = child.kill();
+            child.wait().unwrap();
+            drop(reader);
+            let output = output.expect(case);
+            assert!(output.status.success(), "{case}: {:?}", output.status);
+            assert!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+                "{case}: warning fixture did not complete"
+            );
         }
-        fcntl_setfl(&*locked, flags).unwrap();
-        drop(locked);
-        let (sent, received) = mpsc::sync_channel(1);
-        let warning = std::thread::spawn(move || {
-            let result = warn_cleanup_unconfirmed(&output);
-            let restored = fcntl_getfl(&*output.lock().unwrap()).unwrap();
-            sent.send((result, restored)).unwrap();
-        });
-        let result = received.recv_timeout(Duration::from_secs(1));
-        drop(reader);
-        warning.join().unwrap();
-        assert_eq!(result.unwrap(), (Err(Errno::AGAIN), flags));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "blocked stderr fixture for the clipboard cleanup owner"]
+    fn clipboard_warning_fixture() {
+        let case = std::env::var("ARANY_CLIPBOARD_WARNING_TEST").unwrap();
+        if case == "locked" {
+            let (ready, locked) = mpsc::sync_channel(1);
+            std::thread::spawn(move || {
+                let _lock = std::io::stderr().lock();
+                ready.send(()).unwrap();
+                loop {
+                    std::thread::park();
+                }
+            });
+            locked.recv_timeout(Duration::from_secs(1)).unwrap();
+        } else {
+            assert_eq!(case, "full");
+        }
+        let _worker_lock = WORKER.task.lock().unwrap();
+        let start = Instant::now();
+        assert_eq!(shutdown().unwrap_err().to_string(), CLEANUP_UNCONFIRMED);
+        assert!(
+            start.elapsed() < CLEANUP_TIMEOUT,
+            "warning blocked teardown"
+        );
     }
 
     #[test]
