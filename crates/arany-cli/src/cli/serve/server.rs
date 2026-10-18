@@ -15,6 +15,13 @@ use serde_json::{Value, json};
 use std::{future::Future, path::PathBuf, sync::Arc, task::Poll};
 use tokio::sync::{mpsc, watch};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(in crate::cli) enum ApprovalChannel {
+    #[default]
+    Human,
+    Restricted,
+}
+
 pub(in crate::cli) enum ClientMessage {
     Message(Message),
     Eof,
@@ -107,26 +114,12 @@ pub(in crate::cli) async fn run(
     outbound: mpsc::Sender<ServerMessage>,
     shutdown: watch::Sender<bool>,
 ) -> Result<(), String> {
-    run_configured(engine, state, inbound, outbound, shutdown, None).await
-}
-
-pub(in crate::cli) async fn run_configured(
-    engine: Engine,
-    state: PathBuf,
-    inbound: mpsc::Receiver<ClientMessage>,
-    outbound: mpsc::Sender<ServerMessage>,
-    shutdown: watch::Sender<bool>,
-    roster: Option<crate::cli::provider::roster::SelectedRoster>,
-) -> Result<(), String> {
-    run_inner(
+    run_configured(
         engine,
         state,
         inbound,
         outbound,
-        Threads {
-            roster,
-            ..Default::default()
-        },
+        Threads::default(),
         shutdown,
     )
     .await
@@ -143,12 +136,12 @@ pub(in crate::cli) async fn run_with_threads(
     let (shutdown, receiver) = watch::channel(false);
     super::shutdown_grace(
         receiver,
-        run_inner(engine, state, inbound, outbound, threads, shutdown),
+        run_configured(engine, state, inbound, outbound, threads, shutdown),
     )
     .await
 }
 
-async fn run_inner(
+pub(in crate::cli) async fn run_configured(
     engine: Engine,
     state: PathBuf,
     mut inbound: mpsc::Receiver<ClientMessage>,
@@ -287,6 +280,12 @@ async fn run_inner(
                                 let view = threads::load_view(&state, input.thread_id).await?;
                                 let goal = input.goal(loaded, &view)?;
                                 let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
+                                let approvals =
+                                    if threads.approval_channel == ApprovalChannel::Restricted {
+                                        approvals.without_human_only()
+                                    } else {
+                                        approvals
+                                    };
                                 let first_sequence = view
                                     .last_sequence
                                     .checked_add(1)
@@ -345,8 +344,12 @@ async fn run_inner(
                                     inbox,
                                     cancel.clone(),
                                     input.thread_id,
-                                    outbound.clone(),
-                                    next_server_id.clone(),
+                                    super::approvals::Channel {
+                                        outbound: outbound.clone(),
+                                        next_id: next_server_id.clone(),
+                                        withdrawals: threads.approval_channel
+                                            == ApprovalChannel::Restricted,
+                                    },
                                     approval_end,
                                     {
                                         let state = state.clone();

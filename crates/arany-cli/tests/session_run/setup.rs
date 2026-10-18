@@ -3689,6 +3689,16 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
                 b"\x1b[10;18H"
             },
         );
+        if linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                continuation_start,
+                b"Input:\r\n",
+            );
+        }
         let cleared_start = transcript.len();
         kill_process(product_pid, Signal::INT).expect("clear retained draft while idle");
         wait_for_after(

@@ -1,14 +1,18 @@
-use super::{Config, wire};
+use super::{Config, tools, wire};
 use crate::cli::serve::server::ClientMessage;
-use arany::{RunId, SessionId};
+use arany::{RunId, SessionId, now_ms};
 use arany_cli::protocol::{methods::*, rpc::*};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
+    time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::{
+    sync::{Notify, mpsc},
+    time::Instant,
+};
 
 pub(super) type Shared = Arc<Mutex<State>>;
 
@@ -19,8 +23,25 @@ pub(super) struct State {
     mcp_notice: bool,
     next_id: i64,
     pending: BTreeMap<i64, Pending>,
-    sessions: BTreeMap<SessionId, u64>,
+    sessions: BTreeMap<SessionId, Session>,
+    next_permission: i64,
+    permission: Option<Permission>,
+    changed: Arc<Notify>,
     active: Option<Active>,
+}
+
+struct Session {
+    sequence: u64,
+    cwd: String,
+}
+
+struct Permission {
+    id: RequestId,
+    serve_id: RequestId,
+    deadline: Instant,
+    expires_at_ms: u64,
+    item_id: String,
+    sent: bool,
 }
 
 struct Active {
@@ -31,11 +52,14 @@ struct Active {
     answered: bool,
     completion: Option<Turn>,
     resync: bool,
+    projected: BTreeSet<(String, bool)>,
+    uncertain: usize,
+    incomplete: bool,
 }
 
 enum Pending {
     Initialize(RequestId),
-    New(RequestId),
+    New(RequestId, String),
     Start,
     Interrupt,
     Recover,
@@ -127,13 +151,21 @@ pub(super) async fn input(
                     None
                 }
             };
+            state.lock().expect("translator state").changed.notify_one();
             if let Some(cancel) = cancel {
                 send_request(state, serve, "turn/interrupt", cancel, Pending::Interrupt).await?;
             }
             return Ok(());
         }
-        wire::Input::Response(_reply) => return Ok(()),
-        wire::Input::Error(_reply) => return Ok(()),
+        wire::Input::Response(reply) => {
+            return permission_reply(reply.id, Some(reply.result), state, serve).await;
+        }
+        wire::Input::Error(reply) => {
+            if let Some(id) = reply.id {
+                permission_reply(id, None, state, serve).await?;
+            }
+            return Ok(());
+        }
     };
     let id = request.id;
     if matches!(&id, RequestId::String(value) if value.len() > 256) {
@@ -237,21 +269,23 @@ pub(super) async fn input(
                     state.mcp_notice = true;
                 }
             }
-            let params = config.thread(params.cwd);
-            send_request(state, serve, "thread/start", params, Pending::New(id)).await
+            let cwd = params.cwd;
+            let params = config.thread(cwd.clone());
+            send_request(state, serve, "thread/start", params, Pending::New(id, cwd)).await
         }
         "session/prompt" => {
             let Ok(params) = parse::<wire::Prompt>(request.params) else {
                 return immediate(output, invalid());
             };
-            let Ok(text) = params.text() else {
+            let session_id = params.session_id;
+            let Ok(input) = params.input() else {
                 return immediate(output, invalid());
             };
             let refusal = {
                 let mut state = state.lock().expect("translator state");
                 if !state.authenticated {
                     Some(wire::auth_required(id.clone()))
-                } else if !state.sessions.contains_key(&params.session_id) {
+                } else if !state.sessions.contains_key(&session_id) {
                     Some(wire::error(
                         Some(id.clone()),
                         -32002,
@@ -263,12 +297,15 @@ pub(super) async fn input(
                 } else {
                     state.active = Some(Active {
                         id: id.clone(),
-                        session: params.session_id,
+                        session: session_id,
                         turn: None,
                         cancelled: false,
                         answered: false,
                         completion: None,
                         resync: false,
+                        projected: BTreeSet::new(),
+                        uncertain: 0,
+                        incomplete: false,
                     });
                     None
                 }
@@ -281,8 +318,8 @@ pub(super) async fn input(
                 serve,
                 "turn/start",
                 TurnStartParams {
-                    thread_id: params.session_id,
-                    input: vec![UserInput::Text { text }],
+                    thread_id: session_id,
+                    input,
                     goal: None,
                 },
                 Pending::Start,
@@ -303,7 +340,23 @@ pub(super) async fn output(
     state: Shared,
     stopping: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
-    while let Some(message) = inbound.recv().await {
+    loop {
+        if let Some(withdrawal) = withdraw_permission(&state, None, false) {
+            emit(&outbound, withdrawal).await?;
+        }
+        let (deadline, changed) = {
+            let state = state.lock().expect("translator state");
+            (
+                state.permission.as_ref().map(|p| p.deadline),
+                state.changed.clone(),
+            )
+        };
+        let message = tokio::select! { biased;
+            () = changed.notified() => continue,
+            () = async { tokio::time::sleep_until(deadline.expect("permission deadline")).await }, if deadline.is_some() => continue,
+            message = inbound.recv() => message,
+        };
+        let Some(message) = message else { break };
         match message {
             Message::Response(reply) => {
                 let RequestId::Integer(id) = reply.id else {
@@ -314,12 +367,14 @@ pub(super) async fn output(
                     Some(Pending::Initialize(id)) => {
                         emit(&outbound, wire::response(id, wire::initialized())).await?
                     }
-                    Some(Pending::New(id)) => {
+                    Some(Pending::New(id, cwd)) => {
                         let result: ThreadResult = serde_json::from_value(reply.result)
                             .map_err(|_| "invalid serve thread")?;
                         {
                             let mut state = state.lock().expect("translator state");
-                            state.sessions.insert(result.thread.id, 0);
+                            state
+                                .sessions
+                                .insert(result.thread.id, Session { sequence: 0, cwd });
                             state.authenticated = true;
                         }
                         emit(
@@ -356,31 +411,67 @@ pub(super) async fn output(
                     Some(Pending::Recover) => {
                         let page: EventsSubscribeResult = serde_json::from_value(reply.result)
                             .map_err(|_| "invalid serve events")?;
-                        let mut answer = None;
-                        let session = {
-                            let mut state = state.lock().expect("translator state");
-                            let active = state.active.as_mut().ok_or("no active ACP prompt")?;
-                            for event in &page.events {
-                                if event.kind == "MessageCommitted"
-                                    && event.run_id.as_deref()
-                                        == active.turn.as_ref().map(|id| id.to_string()).as_deref()
-                                    && !active.answered
-                                {
-                                    let text = event.payload["text"]
-                                        .as_str()
-                                        .ok_or("invalid committed answer")?;
-                                    active.answered = true;
-                                    answer = Some(wire::answer(active.session, text));
-                                }
-                            }
-                            let session = active.session;
-                            if let Some(last) = page.events.last() {
-                                state.sessions.insert(session, last.sequence);
-                            }
-                            session
+                        let (session, run) = {
+                            let state = state.lock().expect("translator state");
+                            let active = state.active.as_ref().ok_or("no active ACP prompt")?;
+                            (active.session, active.turn.ok_or("no active Run")?)
                         };
-                        if let Some(answer) = answer {
-                            emit_answer(&outbound, answer).await?;
+                        for event in &page.events {
+                            if event.run_id.as_deref() != Some(run.to_string().as_str()) {
+                                continue;
+                            }
+                            let item = match event.kind.as_str() {
+                                "MessageCommitted" => Some((
+                                    Item::AgentMessage {
+                                        id: format!("{run}:answer"),
+                                        text: event.payload["text"]
+                                            .as_str()
+                                            .ok_or("invalid committed answer")?
+                                            .into(),
+                                        phase: AgentMessagePhase::FinalAnswer,
+                                    },
+                                    false,
+                                )),
+                                "ToolStarted" => {
+                                    let intent: arany::EffectIntent =
+                                        serde_json::from_value(event.payload["intent"].clone())
+                                            .map_err(|_| "invalid committed Tool intent")?;
+                                    Some((
+                                        crate::cli::serve::items::tool_item(&intent, None, false),
+                                        true,
+                                    ))
+                                }
+                                "ToolFinished" => {
+                                    let observation: arany::ToolObservation =
+                                        serde_json::from_value(
+                                            event.payload["observation"].clone(),
+                                        )
+                                        .map_err(|_| "invalid committed Tool observation")?;
+                                    Some((
+                                        crate::cli::serve::items::tool_item(
+                                            &observation.intent,
+                                            Some(&observation),
+                                            false,
+                                        ),
+                                        false,
+                                    ))
+                                }
+                                _ => None,
+                            };
+                            if let Some((item, started)) = item
+                                && let Some(update) = project(&state, session, run, item, started)
+                            {
+                                emit_answer(&outbound, update).await?;
+                            }
+                        }
+                        if let Some(last) = page.events.last() {
+                            state
+                                .lock()
+                                .expect("translator state")
+                                .sessions
+                                .get_mut(&session)
+                                .expect("loaded Session")
+                                .sequence = last.sequence;
                         }
                         if let Some(since) = page.next_since.filter(|_| !*stopping.borrow()) {
                             recover(
@@ -406,7 +497,7 @@ pub(super) async fn output(
                 };
                 let pending = state.lock().expect("translator state").pending.remove(&id);
                 match pending {
-                    Some(Pending::Initialize(id) | Pending::New(id)) => {
+                    Some(Pending::Initialize(id) | Pending::New(id, _)) => {
                         emit(&outbound, remap(id, reply.error)).await?
                     }
                     Some(Pending::Start) => {
@@ -432,31 +523,38 @@ pub(super) async fn output(
                     _ => (),
                 }
             }
-            Message::Notification(note) if note.method == "item/completed" => {
-                let item: ItemCompletedNotification =
-                    serde_json::from_value(note.params.unwrap_or(Value::Null))
-                        .map_err(|_| "invalid serve item")?;
-                let answer = {
-                    let mut state = state.lock().expect("translator state");
-                    state
-                        .active
-                        .as_mut()
-                        .filter(|a| {
-                            a.session == item.thread_id
-                                && a.turn == Some(item.turn_id)
-                                && !a.answered
-                        })
-                        .and_then(|active| {
-                            if let Item::AgentMessage { text, .. } = item.item {
-                                active.answered = true;
-                                Some(wire::answer(active.session, &text))
-                            } else {
-                                None
-                            }
-                        })
+            Message::Notification(note)
+                if matches!(note.method.as_str(), "item/started" | "item/completed") =>
+            {
+                let started = note.method == "item/started";
+                let (thread, turn, item) = if started {
+                    let item: ItemStartedNotification =
+                        serde_json::from_value(note.params.unwrap_or(Value::Null))
+                            .map_err(|_| "invalid serve item")?;
+                    (item.thread_id, item.turn_id, item.item)
+                } else {
+                    let item: ItemCompletedNotification =
+                        serde_json::from_value(note.params.unwrap_or(Value::Null))
+                            .map_err(|_| "invalid serve item")?;
+                    (item.thread_id, item.turn_id, item.item)
                 };
-                if let Some(answer) = answer {
-                    emit_answer(&outbound, answer).await?;
+                if !started {
+                    let withdrawal_id = {
+                        let state = state.lock().expect("translator state");
+                        state
+                            .permission
+                            .as_ref()
+                            .filter(|p| item.id() == p.item_id)
+                            .map(|p| p.serve_id.clone())
+                    };
+                    if let Some(id) = withdrawal_id
+                        && let Some(note) = withdraw_permission(&state, Some(&id), true)
+                    {
+                        emit(&outbound, note).await?;
+                    }
+                }
+                if let Some(update) = project(&state, thread, turn, item, started) {
+                    emit_answer(&outbound, update).await?;
                 }
             }
             Message::Notification(note) if note.method == "turn/completed" => {
@@ -472,11 +570,19 @@ pub(super) async fn output(
                         let recover = active.resync
                             || (!active.answered && result.turn.status == TurnStatus::Completed);
                         active.completion = Some(result.turn);
-                        recover.then_some(*state.sessions.get(&result.thread_id).unwrap_or(&0))
+                        recover.then_some(
+                            state
+                                .sessions
+                                .get(&result.thread_id)
+                                .map_or(0, |s| s.sequence),
+                        )
                     } else {
                         None
                     }
                 };
+                if let Some(withdrawal) = withdraw_permission(&state, None, true) {
+                    emit(&outbound, withdrawal).await?;
+                }
                 if let Some(since) = since.filter(|_| !*stopping.borrow()) {
                     recover(
                         &state,
@@ -497,9 +603,16 @@ pub(super) async fn output(
                     active.resync = true;
                 }
             }
-            Message::Request(_) => {
-                let _ = serve.send(ClientMessage::Eof).await;
-                return Err("approvals unavailable in ACP core text adapter".into());
+            Message::Notification(note) if note.method == "$/cancel_request" => {
+                if let Ok(params) = parse::<wire::CancelRequest>(note.params)
+                    && let Some(withdrawal) =
+                        withdraw_permission(&state, Some(&params.request_id), true)
+                {
+                    emit(&outbound, withdrawal).await?;
+                }
+            }
+            Message::Request(request) => {
+                permission_request(&state, &serve, &outbound, request).await?
             }
             _ => (),
         }
@@ -559,7 +672,9 @@ async fn finish(
         .take()
         .ok_or("no active ACP prompt")?;
     let turn = active.completion.ok_or("no committed turn completion")?;
-    let incomplete = incomplete || (turn.status == TurnStatus::Completed && !active.answered);
+    let incomplete = incomplete
+        || active.incomplete
+        || (turn.status == TurnStatus::Completed && !active.answered);
     let mut response = if active.cancelled
         || turn.status == TurnStatus::Interrupted
             && turn.error.is_none()
@@ -574,7 +689,9 @@ async fn finish(
     {
         wire::response(active.id, json!({"stopReason":"end_turn"}))
     } else {
-        let reason = if turn.goal.as_ref().and_then(|g| g.stopped.as_deref())
+        let reason = if active.uncertain > 0 {
+            "effectUncertain"
+        } else if turn.goal.as_ref().and_then(|g| g.stopped.as_deref())
             == Some(arany::EngineError::GoalBudgetExhausted.to_string().as_str())
         {
             "goalBudgetExhausted"
@@ -586,12 +703,19 @@ async fn finish(
         wire::error(
             Some(active.id),
             -32603,
-            turn.error
-                .as_ref()
-                .map_or("Run stopped; check Session history", |e| e.message.as_str()),
+            if active.uncertain > 0 {
+                tools::UNKNOWN
+            } else {
+                turn.error
+                    .as_ref()
+                    .map_or("Run stopped; check Session history", |e| e.message.as_str())
+            },
             reason,
         )
     };
+    if active.uncertain > 0 && response.get("result").is_some() {
+        response["result"]["_meta"]["arany.uncertainEffects"] = json!(active.uncertain);
+    }
     if incomplete && response.get("result").is_some() {
         response["result"]["_meta"]["arany.incompleteUpdates"] = json!(true);
     }
@@ -618,7 +742,207 @@ fn remap(id: RequestId, error: ErrorObject) -> Value {
 }
 
 pub(super) fn cancel_active(state: &Shared) {
-    if let Some(active) = &mut state.lock().expect("translator state").active {
+    let mut state = state.lock().expect("translator state");
+    if let Some(active) = &mut state.active {
         active.cancelled = true;
+    }
+    state.changed.notify_one();
+}
+
+fn project(
+    state: &Shared,
+    session: SessionId,
+    run: RunId,
+    item: Item,
+    started: bool,
+) -> Option<Value> {
+    let mut state = state.lock().expect("translator state");
+    let cwd = &state.sessions.get(&session)?.cwd.clone();
+    let active = state
+        .active
+        .as_mut()
+        .filter(|a| a.session == session && a.turn == Some(run))?;
+    if let Item::AgentMessage { text, .. } = item {
+        if active.answered {
+            return None;
+        }
+        active.answered = true;
+        return Some(wire::answer(session, &text));
+    }
+    let mut update = tools::project(&item, cwd, session, started)?;
+    let id = update["toolCallId"].as_str()?.to_owned();
+    if !started && !active.projected.contains(&(id.clone(), true)) {
+        update["sessionUpdate"] = json!("tool_call");
+    }
+    if started && active.projected.contains(&(id.clone(), false)) {
+        return None;
+    }
+    if active.projected.contains(&(id.clone(), started)) {
+        return None;
+    }
+    if active.projected.len() >= 10_000 {
+        active.incomplete = true;
+        return None;
+    }
+    active.projected.insert((id, started));
+    if update["_meta"]["arany.status"] == "uncertain" {
+        active.uncertain += 1;
+    }
+    Some(tools::notification(session, update, run))
+}
+
+async fn approval_response(
+    serve: &mpsc::Sender<ClientMessage>,
+    id: RequestId,
+    decision: &str,
+) -> Result<(), String> {
+    serve
+        .send(ClientMessage::Message(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id,
+            result: json!({"decision":decision}),
+        })))
+        .await
+        .map_err(|_| "serve input closed".into())
+}
+
+async fn permission_reply(
+    id: RequestId,
+    result: Option<Value>,
+    state: &Shared,
+    serve: &mpsc::Sender<ClientMessage>,
+) -> Result<(), String> {
+    let decision = match result.as_ref().map(|r| &r["outcome"]) {
+        Some(outcome)
+            if outcome["outcome"] == "selected" && outcome["optionId"] == "allow_once" =>
+        {
+            "accept"
+        }
+        Some(outcome) if outcome["outcome"] == "cancelled" => "cancel",
+        _ => "decline",
+    };
+    let pending = {
+        let mut state = state.lock().expect("translator state");
+        if state.active.as_ref().is_some_and(|a| a.cancelled) {
+            return Ok(());
+        }
+        let pending = state.permission.take_if(|p| {
+            p.id == id && p.sent && Instant::now() < p.deadline && now_ms() < p.expires_at_ms
+        });
+        if decision == "cancel"
+            && pending.is_some()
+            && let Some(active) = &mut state.active
+        {
+            active.cancelled = true;
+        }
+        pending
+    };
+    if let Some(pending) = pending {
+        approval_response(serve, pending.serve_id, decision).await?;
+    }
+    Ok(())
+}
+
+fn withdraw_permission(state: &Shared, id: Option<&RequestId>, force: bool) -> Option<Value> {
+    let mut state = state.lock().expect("translator state");
+    let cancelled = state.active.as_ref().is_none_or(|a| a.cancelled);
+    let pending = state.permission.take_if(|p| {
+        id.is_none_or(|id| *id == p.serve_id)
+            && (force || cancelled || Instant::now() >= p.deadline || now_ms() >= p.expires_at_ms)
+    })?;
+    pending.sent.then(
+        || json!({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":pending.id}}),
+    )
+}
+
+async fn permission_request(
+    state: &Shared,
+    serve: &mpsc::Sender<ClientMessage>,
+    output: &mpsc::Sender<Value>,
+    request: Request,
+) -> Result<(), String> {
+    let Ok(params) = parse::<ApprovalParams>(request.params) else {
+        return approval_response(serve, request.id, "decline").await;
+    };
+    let Ok(expires_at_ms) = u64::try_from(params.expires_at_ms) else {
+        return approval_response(serve, request.id, "decline").await;
+    };
+    let intent: arany::EffectIntent = serde_json::from_value(params.intent.clone())
+        .map_err(|_| "invalid serve approval intent")?;
+    let prepared = {
+        let mut state = state.lock().expect("translator state");
+        let valid = state.active.as_ref().is_some_and(|a| {
+            a.session == params.thread_id
+                && a.turn.is_none_or(|run| run == params.turn_id)
+                && !a.cancelled
+                && a.completion.is_none()
+        });
+        let remaining = expires_at_ms.saturating_sub(now_ms());
+        if !valid || state.permission.is_some() || remaining == 0 || intent.call.is_unguarded() {
+            None
+        } else {
+            let cwd = &state
+                .sessions
+                .get(&params.thread_id)
+                .ok_or("missing Session")?
+                .cwd;
+            let item = crate::cli::serve::items::tool_item(&intent, None, false);
+            let mut tool = tools::project(&item, cwd, params.thread_id, true)
+                .ok_or("invalid approval Tool")?;
+            tool.as_object_mut()
+                .expect("Tool update")
+                .remove("sessionUpdate");
+            tool["rawInput"] = params.intent;
+            tool["content"] = tools::approval_content(&params.lines);
+            state.next_permission = state
+                .next_permission
+                .checked_add(1)
+                .ok_or("ACP permission IDs exhausted")?;
+            let id = RequestId::Integer(state.next_permission);
+            let message = json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission","params":{
+                "sessionId":params.thread_id,"toolCall":tool,"options":[
+                    {"optionId":"deny","kind":"reject_once","name":"Deny"},
+                    {"optionId":"allow_once","kind":"allow_once","name":"Allow once"}
+                ]
+            }});
+            if encode_line(&message).is_err() {
+                None
+            } else {
+                let deadline = Instant::now() + Duration::from_millis(remaining);
+                state.permission = Some(Permission {
+                    id,
+                    serve_id: request.id.clone(),
+                    deadline,
+                    expires_at_ms,
+                    item_id: params.item_id.clone(),
+                    sent: false,
+                });
+                Some((message, deadline, state.changed.clone()))
+            }
+        }
+    };
+    let Some((message, deadline, changed)) = prepared else {
+        return approval_response(serve, request.id, "decline").await;
+    };
+    loop {
+        let permit = tokio::select! { biased;
+            () = changed.notified() => None,
+            () = tokio::time::sleep_until(deadline) => None,
+            permit = output.reserve() => Some(permit.map_err(|_| "ACP output closed")?),
+        };
+        let mut state = state.lock().expect("translator state");
+        let cancelled = state.active.as_ref().is_none_or(|a| a.cancelled);
+        let live = state
+            .permission
+            .as_ref()
+            .is_some_and(|p| Instant::now() < p.deadline && now_ms() < p.expires_at_ms);
+        if cancelled || !live {
+            return Ok(());
+        }
+        if let Some(permit) = permit {
+            state.permission.as_mut().expect("live permission").sent = true;
+            permit.send(message);
+            return Ok(());
+        }
     }
 }

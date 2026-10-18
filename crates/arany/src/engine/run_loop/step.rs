@@ -897,7 +897,9 @@ impl RunLoop<'_> {
         let permission =
             permission.narrow_hooks(hooks.restriction, config.map(|config| config.mode()));
         let Permission {
-            decision, basis, ..
+            mut decision,
+            basis,
+            ..
         } = permission;
         let digest = intent.digest();
         let source = if decision == Decision::Ask {
@@ -945,6 +947,11 @@ impl RunLoop<'_> {
                 },
                 source,
             )
+        } else if self.controls.approvals.is_some_and(|approvals| {
+            !approvals.admits_human_only(&intent.call, hooks.restriction == Some(Decision::Ask))
+        }) {
+            decision = Decision::Ask;
+            unavailable_human_approval(intent)
         } else {
             match grant {
                 Grant::Primary {
@@ -977,15 +984,7 @@ impl RunLoop<'_> {
                 }
             }
         };
-        let mode = config
-            .map(crate::tools::permissions::PermissionConfig::mode)
-            .or_else(|| match grant {
-                Grant::Researcher { child, .. } => child
-                    .definition
-                    .as_ref()
-                    .and_then(|definition| definition.permission_mode),
-                Grant::Primary { .. } => None,
-            });
+        let mode = effective_permission_mode(config, grant);
         if mode.is_some() || unguarded {
             let approved = matches!(&verdict, Verdict::Dispatch { .. });
             // An approving review that did not lead to dispatch is not an AI approval.
@@ -1730,6 +1729,21 @@ fn not_dispatched(
     }
 }
 
+fn unavailable_human_approval(intent: EffectIntent) -> (Verdict, PermissionSource) {
+    (
+        Verdict::Deny(Answer {
+            observation: not_dispatched(
+                intent,
+                ToolDisposition::Denied,
+                "Human-only approval is unavailable on this channel; no operation was dispatched",
+            ),
+            refused: true,
+            active_time: None,
+        }),
+        PermissionSource::UnavailableApproval,
+    )
+}
+
 fn unguarded_gate(
     runtime: &ToolRuntime,
     request: &ProviderRequest,
@@ -1900,6 +1914,20 @@ impl RunLoop<'_> {
     }
 }
 
+fn effective_permission_mode(
+    config: Option<&crate::tools::permissions::PermissionConfig>,
+    grant: &Grant<'_>,
+) -> Option<crate::tools::permissions::PermissionMode> {
+    config
+        .map(crate::tools::permissions::PermissionConfig::mode)
+        .or_else(|| match grant {
+            Grant::Researcher { child, .. } => child
+                .definition
+                .as_ref()
+                .and_then(|definition| definition.permission_mode),
+            Grant::Primary { .. } => None,
+        })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
