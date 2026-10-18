@@ -2,9 +2,9 @@ use crate::engine_support::run_with;
 use crate::process::BoundedOutput;
 use crate::{hash, private_file};
 use arany::{
-    CollaborationPolicy, CompactionRequest, CompactionResponse, Engine, Finish, Provider,
-    ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, RunRequest, RunStatus,
-    SessionView, StateRoot, Store, ToolCall, ToolDisposition, ToolResourceProfile,
+    CollaborationPolicy, CompactionRequest, CompactionResponse, Finish, Provider, ProviderError,
+    ProviderOutcome, ProviderRequest, ProviderResponse, RunRequest, RunStatus, SessionView,
+    StateRoot, Store, ToolCall, ToolDisposition, ToolResourceProfile,
 };
 use arany::{EngineConfig, RunControls, ToolGrant};
 use serde_json::json;
@@ -531,7 +531,7 @@ async fn native_file_journey_helper() {
         calls: calls.clone(),
         linked_file: Some((root.join("outside.txt"), workspace.join("src/linked.txt"))),
     });
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         state,
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -718,7 +718,7 @@ async fn native_file_journey_helper() {
             }],
             linked_file: None,
         });
-    let fresh = Engine::open(
+    let fresh = arany::test_support::engine::open(
         StateRoot::open_existing(&state_path).unwrap(),
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1060,7 +1060,7 @@ async fn native_runtime_mount_journey_helper() {
         calls: vec![runtime_call.clone()],
         resource_class: arany::ToolResourceClass::Default,
     });
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         StateRoot::admit(&refused_state).unwrap(),
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1179,7 +1179,7 @@ async fn native_runtime_mount_journey_helper() {
         calls: vec![cache_seed.clone()],
         resource_class: arany::ToolResourceClass::Default,
     });
-    let seed_engine = Engine::open(
+    let seed_engine = arany::test_support::engine::open(
         StateRoot::admit(&state_success).unwrap(),
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1328,7 +1328,7 @@ async fn native_runtime_mount_journey_helper() {
         calls: accepted_calls.clone(),
         resource_class: arany::ToolResourceClass::Build,
     });
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         StateRoot::open_existing(&state_success).unwrap(),
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1602,7 +1602,7 @@ async fn native_runtime_mount_journey_helper() {
         calls: vec![verify_cache.clone()],
         resource_class: arany::ToolResourceClass::Default,
     });
-    let verify_engine = Engine::open(
+    let verify_engine = arany::test_support::engine::open(
         StateRoot::open_existing(&state_success).unwrap(),
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1767,7 +1767,7 @@ int main(void) {
             calls: vec![call.clone()],
             linked_file: None,
         });
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             state,
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),

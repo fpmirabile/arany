@@ -67,6 +67,9 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ),
         None => format!("Tool · {} · {state}", safe_truncate(&operation, 160)),
     };
+    if tool.ran_unguarded() {
+        summary.push_str(" · UNGUARDED");
+    }
     if let Some(cause) = tool
         .observation
         .as_ref()
@@ -206,6 +209,68 @@ pub(crate) fn display_commentary(run: &RunView) -> Vec<(u32, u8, String)> {
         }
     }
     items
+}
+
+pub(crate) fn unguarded_approval_lines(
+    intent: &arany::EffectIntent,
+    prompt: &arany::UnguardedPrompt,
+) -> Vec<String> {
+    let arany::ToolCall::CommandUnguarded {
+        program,
+        args,
+        cwd,
+        justification,
+    } = &intent.call
+    else {
+        return tool_approval_lines(intent);
+    };
+    let mut lines = vec![
+        "Run outside the Guard? (unguarded)".to_owned(),
+        "This command failed inside the Guard. The model asks to run it again on this machine with no sandbox.".into(),
+        format!(
+            "Program: {} → {}",
+            escape_terminal(program),
+            escape_terminal(&prompt.executable)
+        ),
+    ];
+    if args.is_empty() {
+        lines.push("Args: none".into());
+    } else {
+        lines.push("Args:".into());
+        lines.extend(
+            args.iter()
+                .map(|argument| format!("  {}", escape_terminal(argument))),
+        );
+    }
+    lines.push(if cwd.is_empty() {
+        "Directory: ./ (the real project folder)".into()
+    } else {
+        format!(
+            "Directory: ./{} (inside the real project folder)",
+            escape_terminal(cwd)
+        )
+    });
+    lines.push(format!(
+        "Model's reason: {}",
+        escape_terminal(justification)
+    ));
+    lines.push(match prompt.attribution {
+        Some(cause) => format!("Guard attribution: {}", cause.diagnostic()),
+        None => {
+            "Guard attribution: none. Arany could not verify that the Guard caused the failure."
+                .into()
+        }
+    });
+    lines.extend(
+        [
+            "Risk: it runs as you, with your home directory, network and every file you can reach.",
+            "Changes land directly in the project without changeset validation, and Arany cannot",
+            "guarantee that processes it leaves behind are stopped. This run is recorded as unguarded.",
+            "Allow only if you would type this exact command yourself.",
+        ]
+        .map(String::from),
+    );
+    lines
 }
 
 pub(crate) fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
@@ -566,6 +631,15 @@ pub fn goal_status(view: &SessionView) -> String {
             .max_active_ms
             .map_or_else(|| "unlimited".to_owned(), goal_clock),
     );
+    let unguarded: usize = view
+        .runs
+        .iter()
+        .filter(|run| goal.run_ids.contains(&run.id))
+        .map(RunView::unguarded_tools)
+        .sum();
+    if unguarded > 0 {
+        text.push_str(&format!(" · unguarded effects: {unguarded}"));
+    }
     if goal.status == arany::GoalStatus::Interrupted {
         text.push_str(if goal.admits_resume(view) {
             " · Use /goal resume to continue"
@@ -863,7 +937,11 @@ pub(crate) fn render_answer(run: &RunView, heading: &str) -> String {
     let Some(message) = &run.assistant_message else {
         return String::new();
     };
-    let mut rendered = format!("{heading}\n");
+    let unguarded = run.unguarded_tools();
+    let mut rendered = match heading.strip_suffix(':') {
+        Some(base) if unguarded > 0 => format!("{base} (unguarded effects: {unguarded}):\n"),
+        _ => format!("{heading}\n"),
+    };
     for line in message.split('\n') {
         rendered.push_str("  ");
         rendered.push_str(&escape_terminal(line));
@@ -1409,3 +1487,138 @@ mod enforcement_tests {
 
 #[cfg(test)]
 mod committed_tests;
+
+#[cfg(test)]
+mod unguarded_tests {
+    use super::{render_answer, tool_summary, unguarded_approval_lines};
+    use arany::{
+        AgentRunId, Attestation, CacheUpdate, EffectIntent, RunId, ToolCall, ToolDisposition,
+        ToolLimits, ToolObservation, ToolView, UnguardedPrompt,
+    };
+
+    fn intent(args: &[&str], cwd: &str) -> EffectIntent {
+        EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: RunId::new(),
+            agent_run_id: AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::CommandUnguarded {
+                program: "sh".into(),
+                args: args.iter().map(|arg| (*arg).into()).collect(),
+                cwd: cwd.into(),
+                justification: "It needs the network\u{1b}[31m".into(),
+            },
+            limits: ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        }
+    }
+
+    #[test]
+    fn the_unguarded_prompt_carries_the_plan_copy_and_escapes_model_text() {
+        let prompt = UnguardedPrompt {
+            executable: "/usr/bin/bash".into(),
+            attribution: None,
+        };
+        let lines = unguarded_approval_lines(&intent(&["-c", "cargo test"], ""), &prompt);
+        assert_eq!(
+            lines,
+            [
+                "Run outside the Guard? (unguarded)",
+                "This command failed inside the Guard. The model asks to run it again on this machine with no sandbox.",
+                "Program: sh → /usr/bin/bash",
+                "Args:",
+                "  -c",
+                "  cargo test",
+                "Directory: ./ (the real project folder)",
+                "Model's reason: It needs the network\\u{001b}[31m",
+                "Guard attribution: none. Arany could not verify that the Guard caused the failure.",
+                "Risk: it runs as you, with your home directory, network and every file you can reach.",
+                "Changes land directly in the project without changeset validation, and Arany cannot",
+                "guarantee that processes it leaves behind are stopped. This run is recorded as unguarded.",
+                "Allow only if you would type this exact command yourself.",
+            ]
+        );
+        assert!(lines.iter().all(|line| !line.contains('\u{1b}')));
+        let nested = unguarded_approval_lines(&intent(&[], "sub"), &prompt);
+        assert!(nested.contains(&"Args: none".to_owned()));
+        assert!(nested.contains(&"Directory: ./sub (inside the real project folder)".to_owned()));
+    }
+
+    fn host_tool(disposition: ToolDisposition, attested: bool) -> ToolView {
+        let intent = intent(&["-c", "exit 0"], "");
+        ToolView {
+            observation: Some(ToolObservation {
+                enforcement_cause: None,
+                attestation: attested.then(|| {
+                    Attestation::Unguarded(arany::UnguardedReceipt {
+                        contract_version: 1,
+                        intent_digest: [0; 32],
+                        executable_sha256: "0".repeat(64),
+                        pid: 1,
+                        exit_code: Some(0),
+                        descendants_confirmed_stopped: true,
+                    })
+                }),
+                intent: intent.clone(),
+                disposition,
+                output: String::new(),
+                cache_update: CacheUpdate::NotApplicable,
+            }),
+            intent,
+            review_call_index: None,
+            permission_verdict: None,
+            finished_sequence: None,
+        }
+    }
+
+    #[test]
+    fn host_runs_are_marked_unguarded_everywhere_they_are_summarized() {
+        assert_eq!(
+            tool_summary(&host_tool(ToolDisposition::Succeeded, true)),
+            "Tool · Unguarded command sh · succeeded · UNGUARDED"
+        );
+        assert_eq!(
+            tool_summary(&host_tool(ToolDisposition::Uncertain, false)),
+            "Tool · Unguarded command sh · uncertain · UNGUARDED"
+        );
+        assert_eq!(
+            tool_summary(&host_tool(ToolDisposition::Denied, false)),
+            "Tool · Unguarded command sh · denied"
+        );
+    }
+
+    #[test]
+    fn answer_headings_count_unguarded_effects() {
+        let mut run = arany::RunView {
+            id: RunId::new(),
+            objective: "Run".into(),
+            images: Vec::new(),
+            config: None,
+            provider_fallbacks: Vec::new(),
+            agents: Vec::new(),
+            assistant_message: Some("Done".into()),
+            status: arany::RunStatus::Finished,
+            accepted_sequence: 1,
+            finished_sequence: Some(2),
+            tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
+            display: Vec::new(),
+            steering_notes: Vec::new(),
+        };
+        assert_eq!(render_answer(&run, "Answer:"), "Answer:\n  Done\n");
+        run.tools.push(host_tool(ToolDisposition::Succeeded, true));
+        assert_eq!(
+            render_answer(&run, "Arany · Answer:"),
+            "Arany · Answer (unguarded effects: 1):\n  Done\n"
+        );
+        assert_eq!(
+            render_answer(&run, "Answer:"),
+            "Answer (unguarded effects: 1):\n  Done\n"
+        );
+    }
+}

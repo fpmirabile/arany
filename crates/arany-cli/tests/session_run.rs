@@ -2592,7 +2592,7 @@ impl arany::Provider for HeldProvider {
 #[test]
 #[ignore = "supervised process helper"]
 fn process_lock_holder() {
-    use arany::{CollaborationPolicy, Engine, EngineConfig, RunRequest};
+    use arany::{CollaborationPolicy, EngineConfig, RunRequest};
     use engine_support::run_to_end;
     use std::sync::Arc;
 
@@ -2611,7 +2611,7 @@ fn process_lock_holder() {
         let provider = Arc::new(HeldProvider {
             ready_path: ready_path.into(),
         });
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             StateRoot::admit(std::path::Path::new(&state_path)).expect("state admission"),
             EngineConfig::default(),
         )

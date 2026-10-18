@@ -18,7 +18,7 @@ mod journey {
     use crate::{hash, private_file};
     use arany::{
         AgentPhase, Attestation, ChildGrant, CollaborationPolicy, CompactionRequest,
-        CompactionResponse, Engine, Event, Finish, Provider, ProviderError, ProviderOutcome,
+        CompactionResponse, Event, Finish, Provider, ProviderError, ProviderOutcome,
         ProviderRequest, ProviderResponse, RunRequest, RunStatus, SessionView, StateRoot, Store,
         ToolCall, ToolDisposition, ToolResourceProfile,
     };
@@ -250,7 +250,7 @@ done
                 requests: requests.clone(),
                 outcomes,
             });
-            let engine = Engine::open(
+            let engine = arany::test_support::engine::open(
                 state,
                 EngineConfig {
                     guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),

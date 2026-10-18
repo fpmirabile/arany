@@ -38,6 +38,42 @@ pub use arany::test_support::process;
 use arany::test_support::engine as engine_support;
 use engine_support::{run_to_end, run_with};
 
+#[test]
+fn account_path_uses_the_private_binary_fixture() {
+    let root = arany::test_support::isolate_account_root();
+    assert_eq!(StateRoot::account_path().unwrap(), root);
+    #[cfg(all(unix, debug_assertions))]
+    {
+        use process::BoundedOutput;
+
+        const CHILD: &str = "ARANY_TEST_INHERITED_ACCOUNT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(
+                root,
+                Path::new(&std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").unwrap())
+            );
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env_clear()
+            .env(CHILD, "1")
+            .env("ARANY_TEST_ACCOUNT_ROOT", root)
+            .env("TMPDIR", root.join("missing-temp"))
+            .args(["--exact", "account_path_uses_the_private_binary_fixture"])
+            .bounded_output_for(Duration::from_secs(10), 4096)
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "inherited account root: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        process::assert_single_test_completed(&output.stdout, "inherited account root");
+    }
+    if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_none() {
+        assert!(root.starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()));
+    }
+}
+
 #[cfg(unix)]
 #[path = "engine_run/workspace_security.rs"]
 mod workspace_security;
@@ -129,7 +165,7 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
             ),
         })]);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -229,7 +265,7 @@ fn a_tampered_compaction_reference_fails_load() {
             wire_provenance: None,
         })]);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -321,7 +357,7 @@ fn a_fork_before_the_snapshot_event_recompiles_from_canonical_history() {
         })]);
         let observed = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -404,7 +440,7 @@ fn invalid_compaction_snapshot_corpus_fails_before_provider_disclosure() {
                 wire_provenance: None,
             })]);
             let provider = Arc::new(provider);
-            let engine = Engine::open(
+            let engine = engine_support::open(
                 StateRoot::admit(&state_path).expect("private state"),
                 EngineConfig::default(),
             )
@@ -470,7 +506,7 @@ fn invalid_compaction_snapshot_corpus_fails_before_provider_disclosure() {
             let provider = ScriptedProvider::new(Vec::new());
             let calls = Arc::clone(&provider.requests);
             let provider = Arc::new(provider);
-            let engine = Engine::open(
+            let engine = engine_support::open(
                 StateRoot::admit(&state_path).expect("state readmission"),
                 EngineConfig::default(),
             )
@@ -512,7 +548,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
         ]);
         let compact_requests = Arc::clone(&provider.compact_requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -600,7 +636,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
         let requests = Arc::clone(&provider.requests);
         let compactions = Arc::clone(&provider.compact_requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&maintained_path).unwrap(),
             EngineConfig::default(),
         )
@@ -782,7 +818,7 @@ fn oversized_compaction_output_is_recorded_as_failure_without_a_snapshot() {
         ]);
         let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -880,7 +916,7 @@ fn compaction_preserves_unanswered_accepted_objectives_as_untrusted_data() {
         })]);
         let compact_requests = Arc::clone(&provider.compact_requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -1000,7 +1036,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
         })]);
         let compact_requests = Arc::clone(&provider.compact_requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state readmission"),
             EngineConfig::default(),
         )
@@ -1075,7 +1111,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
             let provider = Arc::new(ScriptedProvider::new(vec![finish()]));
-            let engine = Engine::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
+            let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
             let id = run_to_end(&engine, &provider, request(&workspace, "Initial")).await.unwrap().session_id;
             engine.close().await.unwrap();
             let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
@@ -1096,7 +1132,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let provider = ScriptedProvider::new(responses);
             let requests = provider.requests.clone();
             let provider = Arc::new(provider);
-            let engine = Engine::open(StateRoot::admit(&path).unwrap(), EngineConfig { guard_executable: Some(std::env::current_exe().expect("test executable")), ..Default::default() }).unwrap();
+            let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig { guard_executable: Some(std::env::current_exe().expect("test executable")), ..Default::default() }).unwrap();
             let id = if branch { engine.fork_session(id, workspace.clone(), None).await.unwrap() } else { id };
             if tools {
                 use std::os::unix::fs::PermissionsExt;
@@ -1182,7 +1218,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let path = temp.path().join(format!("two-child-{prefix}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
             let provider = Arc::new(ScriptedProvider::new(vec![finish()]));
-            let engine = Engine::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
+            let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
             let id = run_to_end(&engine, &provider, request(&workspace, "Initial")).await.unwrap().session_id;
             engine.close().await.unwrap();
             let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
@@ -1203,7 +1239,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             ]);
             let requests = provider.requests.clone();
             let provider = Arc::new(provider);
-            let engine = Engine::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
+            let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
             let mut next = request(&workspace, "Next");
             next.session_id = Some(id);
             next.title = None;
@@ -1243,7 +1279,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("fork-admission-{index}"));
             let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() })]));
-            let engine = Engine::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
+            let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
             let root = run_to_end(&engine, &provider, request(&workspace, "Fork source")).await.unwrap().session_id;
             engine.close().await.unwrap();
             let mut connection = rusqlite::Connection::open(path.join("events.sqlite3")).unwrap();
@@ -1261,7 +1297,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let event_count_before_forks = prefix.unwrap_or(first_padding_sequence - 1);
             transaction.commit().unwrap();
             drop(connection);
-            let engine = Engine::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
+            let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
             let mut source = root;
             for _ in 0..prior_forks {
                 source = engine.fork_session(source, workspace.clone(), None).await.unwrap();
@@ -1296,7 +1332,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             .with_compactions((0..66).map(|_| Err(ProviderError::RemoteHttp(403))).collect());
         let calls = provider.compact_requests.clone();
         let provider = Arc::new(provider);
-        let engine = Engine::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
+        let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
         let id = run_to_end(&engine, &provider, request(&workspace, "Source")).await.unwrap().session_id;
         for _ in 0..65 {
             assert!(matches!(engine.compact_session(&AdmittedProviders::single(provider.clone()), id, workspace.clone()).await.unwrap().status, CompactionStatus::Failed { .. }));
@@ -1338,7 +1374,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
                 summary: "source".into(),
                 result: "answer".into(),
             })]));
-        let engine = Engine::open(StateRoot::admit(&state_path).unwrap(), EngineConfig::default())
+        let engine = engine_support::open(StateRoot::admit(&state_path).unwrap(), EngineConfig::default())
         .unwrap();
         let id = run_to_end(&engine, &provider, request(&workspace, "Source")).await.unwrap().session_id;
         engine.close().await.unwrap();
@@ -1378,7 +1414,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
         let calls = provider.requests.clone();
         let compactions = provider.compact_requests.clone();
         let provider = Arc::new(provider);
-        let engine = Engine::open(StateRoot::admit(&state_path).unwrap(), EngineConfig { guard_executable: Some(std::env::current_exe().expect("test executable")), ..Default::default() }).unwrap();
+        let engine = engine_support::open(StateRoot::admit(&state_path).unwrap(), EngineConfig { guard_executable: Some(std::env::current_exe().expect("test executable")), ..Default::default() }).unwrap();
         let next = || {
             let mut value = request(&workspace, "Recovered");
             value.session_id = Some(id);
@@ -1443,7 +1479,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
         let calls = provider.requests.clone();
         let compactions = provider.compact_requests.clone();
         let provider = Arc::new(provider);
-        let engine = Engine::open(StateRoot::admit(&state_path).unwrap(), EngineConfig::default()).unwrap();
+        let engine = engine_support::open(StateRoot::admit(&state_path).unwrap(), EngineConfig::default()).unwrap();
         let recovered = run_to_end(&engine, &provider, next()).await.unwrap();
         assert_eq!(recovered.run.status, RunStatus::Finished);
         engine.compact_session(&AdmittedProviders::single(provider.clone()), id, workspace.clone()).await.unwrap();
@@ -1561,7 +1597,8 @@ fn bounded_finish_output_must_fit_canonical_json() {
             let requests = provider.requests.clone();
             let provider = Arc::new(provider);
             let engine =
-                Engine::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
+                engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default())
+                    .unwrap();
             let mut next = request(&workspace, "Question");
             if child {
                 next.policy = CollaborationPolicy::Team {
@@ -1629,7 +1666,7 @@ fn inconsistent_cache_usage_closes_as_invalid_response() {
             ..Default::default()
         });
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -1673,7 +1710,7 @@ fn invalid_delegation_fails_the_run_without_committing_an_answer() {
         let requests = provider.requests.clone();
         let state_path = temp.path().join("state");
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -1740,7 +1777,7 @@ fn team_policy_rejects_a_direct_primary_finish() {
         let requests = provider.requests.clone();
         let state_path = temp.path().join("state");
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -1825,7 +1862,7 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
         let recorded_requests = Arc::clone(&provider.requests);
         let state_path = temp.path().join("state");
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -2014,7 +2051,7 @@ fn provider_concurrency_ceiling_serializes_admitted_children() {
             identity: gated_identity(1),
         };
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&temp.path().join("state")).expect("private state"),
             EngineConfig::default(),
         )
@@ -2089,7 +2126,7 @@ fn same_session_operation_is_excluded_while_other_sessions_continue() {
                         result: "initial answer".into(),
                     },
                 )]));
-            let initial_engine = Engine::open(
+            let initial_engine = engine_support::open(
                 StateRoot::admit(&state_path).expect("private state"),
                 EngineConfig::default(),
             )
@@ -2120,7 +2157,7 @@ fn same_session_operation_is_excluded_while_other_sessions_continue() {
                 requests: Arc::clone(&held_calls),
                 identity: waiting_identity(Duration::from_secs(120)),
             });
-            let held_engine = Engine::open(
+            let held_engine = engine_support::open(
                 StateRoot::admit(&state_path).expect("state readmission"),
                 EngineConfig::default(),
             )
@@ -2165,7 +2202,7 @@ fn same_session_operation_is_excluded_while_other_sessions_continue() {
             })]);
             let contender_calls = Arc::clone(&contender_provider.requests);
             let contender_provider = Arc::new(contender_provider);
-            let contender = Engine::open(
+            let contender = engine_support::open(
                 StateRoot::admit(&state_path).expect("contender state"),
                 EngineConfig::default(),
             )
@@ -2261,7 +2298,7 @@ fn same_session_operation_is_excluded_while_other_sessions_continue() {
                         result: "independent answer".into(),
                     },
                 )]));
-            let independent = Engine::open(
+            let independent = engine_support::open(
                 StateRoot::admit(&state_path).expect("independent state"),
                 EngineConfig::default(),
             )
@@ -2353,7 +2390,7 @@ fn cancellation_before_admission_creates_no_run_or_provider_call() {
             identity: waiting_identity(Duration::from_secs(120)),
         };
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -2413,7 +2450,7 @@ fn team_cancellation_drains_active_and_queued_children() {
                 identity: gated_identity(capacity),
             };
             let provider = Arc::new(provider);
-            let engine = Engine::open(
+            let engine = engine_support::open(
                 StateRoot::admit(&state_path).expect("private state"),
                 EngineConfig::default(),
             )
@@ -2562,7 +2599,7 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
         .with_max_output_tokens(16_384);
         let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&temp.path().join("state")).expect("private state"),
             EngineConfig::default(),
         )
@@ -2602,7 +2639,7 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
 
         let oversized_provider =
             Arc::new(ScriptedProvider::new(Vec::new()).with_max_output_tokens(16_385));
-        let oversized = Engine::open(
+        let oversized = engine_support::open(
             StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
             EngineConfig::default(),
         )
@@ -2625,7 +2662,7 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
                 .with_max_output_tokens(cap)
         };
         let local_over_provider = Arc::new(chatgpt(4097, Vec::new()));
-        let local_over = Engine::open(
+        let local_over = engine_support::open(
             StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
             EngineConfig::default(),
         )
@@ -2648,7 +2685,7 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
                 result: "ok".into(),
             })],
         ));
-        let local_cap = Engine::open(
+        let local_cap = engine_support::open(
             StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
             EngineConfig::default(),
         )
@@ -2690,7 +2727,7 @@ fn provider_call_timeout_fails_without_a_final_message() {
             identity: waiting_identity(Duration::from_secs(300)),
         };
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&temp.path().join("state")).expect("private state"),
             EngineConfig::default(),
         )
@@ -2768,7 +2805,7 @@ fn provider_declared_call_deadline_times_out_and_settles_its_active_reservation(
             identity: waiting_identity(Duration::from_millis(50)),
         };
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -2835,7 +2872,7 @@ fn compaction_timeout_drops_the_call_and_records_failure() {
             compact_requests: Arc::clone(&compact_requests),
         };
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -2949,7 +2986,7 @@ fn eight_children_use_the_same_ordered_loop() {
         let provider = ScriptedProvider::new(responses);
         let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&temp.path().join("state")).expect("private state"),
             EngineConfig::default(),
         )
@@ -3027,7 +3064,7 @@ fn collaboration_capacity_corpus_rejects_invalid_delegation() {
             })]);
             let requests = provider.requests.clone();
             let provider = Arc::new(provider);
-            let engine = Engine::open(
+            let engine = engine_support::open(
                 StateRoot::admit(&temp.path().join(format!("state-{index}")))
                     .expect("private state"),
                 EngineConfig::default(),
@@ -3080,7 +3117,7 @@ fn collaboration_capacity_corpus_rejects_invalid_delegation() {
             let provider = ScriptedProvider::new(vec![]);
             let requests = Arc::clone(&provider.requests);
             let provider = Arc::new(provider);
-            let engine = Engine::open(
+            let engine = engine_support::open(
                 StateRoot::admit(&temp.path().join(format!("invalid-{index}")))
                     .expect("private state"),
                 EngineConfig::default(),
@@ -3128,7 +3165,7 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
         ]);
         let requests = provider.requests.clone();
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&temp.path().join("state")).expect("private state"),
             EngineConfig::default(),
         )
@@ -3183,7 +3220,7 @@ fn workspace_paths_fail_closed_before_a_run_is_accepted() {
         let requests = Arc::clone(&provider.requests);
         let state_path = temp.path().join("state");
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -3227,7 +3264,7 @@ fn workspace_paths_fail_closed_before_a_run_is_accepted() {
 
         let forged_custom_provider =
             Arc::new(ScriptedProvider::new(vec![]).with_profile("custom:local", "test-model"));
-        let forged_custom = Engine::open(
+        let forged_custom = engine_support::open(
             StateRoot::open_existing(&state_path).expect("existing state"),
             EngineConfig::default(),
         )
@@ -3242,7 +3279,7 @@ fn workspace_paths_fail_closed_before_a_run_is_accepted() {
 
         let forged_chatgpt_provider =
             Arc::new(ScriptedProvider::new(vec![]).with_profile("chatgpt", "test-model"));
-        let forged_chatgpt = Engine::open(
+        let forged_chatgpt = engine_support::open(
             StateRoot::open_existing(&state_path).expect("existing state"),
             EngineConfig::default(),
         )
@@ -3279,7 +3316,7 @@ fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
         let provider = ScriptedProvider::new(vec![]);
         let recorded_requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&temp.path().join("state")).expect("private state"),
             EngineConfig::default(),
         )
@@ -3332,7 +3369,7 @@ fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
         let provider = ScriptedProvider::new(vec![]);
         let state_inside_workspace = workspace.join("state");
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_inside_workspace).expect("private state"),
             EngineConfig::default(),
         )
@@ -3367,7 +3404,7 @@ async fn provisional_text_is_reconciled_before_an_answer_can_commit() {
             })),
         };
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&temp.path().join("state")).unwrap(),
             EngineConfig::default(),
         )
@@ -3450,7 +3487,7 @@ fn preview_checkpoint_survives_abrupt_process_death() {
                 completion: None,
             };
             let provider = Arc::new(provider);
-            let engine = Engine::open(
+            let engine = engine_support::open(
                 StateRoot::admit(&root.join("state")).unwrap(),
                 EngineConfig::default(),
             )
@@ -3506,11 +3543,19 @@ fn preview_checkpoint_survives_abrupt_process_death() {
     command
         .env_clear()
         .env(CASE, temp.path())
-        .env("TMPDIR", "/private/tmp")
+        .env(
+            "TMPDIR",
+            std::fs::canonicalize(std::env::temp_dir()).unwrap(),
+        )
         .args(["--exact", TEST, "--nocapture", "--test-threads", "1"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
+    #[cfg(debug_assertions)]
+    command.env(
+        "ARANY_TEST_ACCOUNT_ROOT",
+        arany::test_support::isolate_account_root(),
+    );
     let mut child = Child(command.spawn().unwrap());
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let id = loop {
@@ -3523,10 +3568,23 @@ fn preview_checkpoint_survives_abrupt_process_death() {
             std::time::Instant::now() < deadline,
             "durable checkpoint gate"
         );
-        assert!(
-            child.0.try_wait().unwrap().is_none(),
-            "child must reach its committed checkpoint"
-        );
+        if let Some(status) = child.0.try_wait().unwrap() {
+            use std::io::Read;
+
+            let mut stderr = Vec::new();
+            child
+                .0
+                .stderr
+                .take()
+                .unwrap()
+                .take(4096)
+                .read_to_end(&mut stderr)
+                .unwrap();
+            panic!(
+                "child must reach its committed checkpoint: exit={status}; stderr={:?}",
+                String::from_utf8_lossy(&stderr)
+            );
+        }
         std::thread::yield_now();
     };
     child.0.kill().unwrap();
@@ -3554,7 +3612,7 @@ fn preview_checkpoint_survives_abrupt_process_death() {
         })]);
         let requests = provider.requests.clone();
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::open_existing(&temp.path().join("state")).unwrap(),
             EngineConfig::default(),
         )
@@ -3597,7 +3655,7 @@ async fn display_limits_preserve_a_maximal_answer_and_record_omitted_commentary(
         })),
     };
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&temp.path().join("state")).unwrap(),
         EngineConfig::default(),
     )
@@ -3651,7 +3709,7 @@ fn maximal_escaped_objective_with_the_largest_image_fits_its_events() {
             result: "ok".into(),
         })]);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -3705,7 +3763,7 @@ fn escape_heavy_session_over_the_compaction_bound_fails_closed_and_keeps_its_jou
             result: "ok".into(),
         })]);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -3733,7 +3791,7 @@ fn escape_heavy_session_over_the_compaction_bound_fails_closed_and_keeps_its_jou
         let provider = ScriptedProvider::new(Vec::new());
         let compact_requests = Arc::clone(&provider.compact_requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state readmission"),
             EngineConfig::default(),
         )
@@ -3770,7 +3828,7 @@ async fn one_engine_refuses_a_concurrent_submission_and_takes_a_provider_per_sub
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
     let state_path = temp.path().join("state");
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("private state"),
         EngineConfig::default(),
     )
@@ -3890,7 +3948,7 @@ async fn a_handle_dropped_inside_a_provider_call_frees_the_engine_for_the_same_s
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
     let state_path = temp.path().join("state");
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("private state"),
         EngineConfig::default(),
     )
@@ -4005,7 +4063,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         ]);
         let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
+        let engine = engine_support::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
         .expect("engine");
         let first = run_to_end(&engine, &provider, request(&workspace, "First question"))
             .await
@@ -4162,7 +4220,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         let provider = ScriptedProvider::new(Vec::new());
         let attempted_calls = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(StateRoot::admit(&state_path).expect("state readmission"), EngineConfig::default())
+        let engine = engine_support::open(StateRoot::admit(&state_path).expect("state readmission"), EngineConfig::default())
         .expect("engine after drift");
         let mut rejected = request(&workspace, "Must not disclose");
         rejected.session_id = Some(fork_id);
@@ -4197,7 +4255,7 @@ fn failed_child_cancels_and_drains_siblings_without_a_final_message() {
             identity: gated_identity(3),
         };
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -4342,7 +4400,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
             identity: waiting_identity(Duration::from_secs(120)),
         };
         let provider = Arc::new(provider);
-        let engine = Engine::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
+        let engine = engine_support::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
         .expect("engine");
         let cancellation = RunCancellation::new();
         let run_cancellation = cancellation.clone();
@@ -4469,7 +4527,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     provider.responses = Mutex::new(responses);
                     let calls = Arc::clone(&provider.requests);
                     let provider = Arc::new(provider);
-                    let engine = Engine::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
+                    let engine = engine_support::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
                     .expect("Engine");
                     let mut progress = RunProgress::new();
                     let outcome = tokio::time::timeout(
@@ -4624,7 +4682,8 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
         completion: None,
     };
     let provider = Arc::new(provider);
-    let engine = Engine::open(StateRoot::admit(&state).unwrap(), EngineConfig::default()).unwrap();
+    let engine =
+        engine_support::open(StateRoot::admit(&state).unwrap(), EngineConfig::default()).unwrap();
     let mut objective = request(&workspace, "question");
     objective.include_paths.clear();
     let cancel = RunCancellation::new();
@@ -4704,7 +4763,7 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
     let compact_requests = provider.compact_requests.clone();
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::open_existing(&state).unwrap(),
         EngineConfig::default(),
     )

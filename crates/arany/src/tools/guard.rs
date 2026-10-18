@@ -1983,4 +1983,76 @@ mod tests {
         assert_eq!(length, bytes.len() as u64);
         assert_eq!(bytes, empty_archive(&identity));
     }
+
+    #[test]
+    fn guard_helper_refuses_an_unguarded_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = dir.path().join("sh");
+        std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &shell).unwrap();
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "workspace_paths": ["src"],
+            "write": false,
+            "commands": [{
+                "name": "sh",
+                "executable": shell.to_str().unwrap(),
+                "sha256": super::super::types::hex_digest(&std::fs::read(&shell).unwrap()),
+                "interpreter": true,
+                "inputs": []
+            }],
+            "skills": [],
+            "mcp": []
+        }))
+        .unwrap();
+        let task = |call: ToolCall| {
+            let probe = Task {
+                definition: None,
+                config: config.clone(),
+                intent: EffectIntent {
+                    id: uuid::Uuid::now_v7(),
+                    run_id: crate::session::RunId::new(),
+                    agent_run_id: crate::session::AgentRunId::new(),
+                    policy_digest: config.digest(),
+                    enforcement_digest: [0; 32],
+                    workspace_device: 1,
+                    workspace_inode: 2,
+                    call,
+                    limits: ToolLimits::default(),
+                    expires_at_ms: now_ms() + 60_000,
+                    use_count: 1,
+                },
+                cache: None,
+                #[cfg(target_os = "linux")]
+                parent_namespaces: profile::Namespaces::read().unwrap(),
+                #[cfg(target_os = "macos")]
+                workspace: std::path::PathBuf::new(),
+                #[cfg(target_os = "macos")]
+                guard_executable: std::path::PathBuf::new(),
+                #[cfg(target_os = "macos")]
+                system_programs: None,
+            };
+            let digest = probe.enforcement_digest().unwrap();
+            let mut task = probe;
+            task.intent.enforcement_digest = digest;
+            task
+        };
+        let args = vec!["-c".to_owned(), "exit 7".to_owned()];
+        assert!(
+            validate_task(&task(ToolCall::Command {
+                program: "sh".into(),
+                args: args.clone(),
+                cwd: String::new(),
+            }))
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_task(&task(ToolCall::CommandUnguarded {
+                program: "sh".into(),
+                args,
+                cwd: String::new(),
+                justification: "Run the failed command once".into(),
+            })),
+            Err(ToolError::Configuration)
+        ));
+    }
 }

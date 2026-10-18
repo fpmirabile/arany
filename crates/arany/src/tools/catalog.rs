@@ -20,9 +20,6 @@ pub enum Site {
     Unguarded,
 }
 
-// Flips to true when the approved host run is wired end to end (plan slice 4).
-const OFFER_UNGUARDED: bool = false;
-
 #[derive(Debug)]
 pub(crate) struct OperationFacts {
     pub(crate) name: &'static str,
@@ -246,9 +243,9 @@ pub(crate) fn git_operations() -> Vec<&'static str> {
 pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..65536, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)";
 pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..65536, whole-file sha256), search (literal UTF-8 content in a file or directory)";
 pub(crate) const COMMAND_CONTRACT: &str = if cfg!(target_os = "macos") {
-    "Explicit argv only. Private selected-project cwd; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication."
+    "Explicit argv only. Private selected-project cwd; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. command_unguarded re-runs an identical failed command on the host only after the user approves it."
 } else {
-    "Explicit argv only. Private writable selected-project snapshot at /workspace; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME."
+    "Explicit argv only. Private writable selected-project snapshot at /workspace; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME. command_unguarded re-runs an identical failed command on the host only after the user approves it."
 };
 pub(crate) const MCP_PROTOCOL: &str = "2025-11-25 stdio; use mcp_list before mcp_call";
 pub(crate) const RESEARCH_MCP_PROTOCOL: &str =
@@ -276,12 +273,8 @@ pub(crate) fn nullable() -> Value {
     json!({"type": ["string", "null"]})
 }
 
-fn offered(facts: &OperationFacts) -> bool {
-    facts.family != Family::Preparation && (OFFER_UNGUARDED || facts.site != Site::Unguarded)
-}
-
 pub(crate) fn call_schemas() -> Vec<Value> {
-    let mut offered: Vec<_> = ALL.iter().filter(|facts| offered(facts)).collect();
+    let mut offered: Vec<_> = ALL.iter().collect();
     offered.sort_by_key(|facts| facts.order);
     offered
         .into_iter()
@@ -548,20 +541,11 @@ mod tests {
     }
 
     #[test]
-    fn the_unguarded_operation_is_not_offered_before_its_slice_lands() {
-        assert!(
-            !call_schemas()
-                .iter()
-                .any(|call| { facts_of(call).is_some_and(|facts| facts.site == Site::Unguarded) })
-        );
-    }
-
-    #[test]
     fn every_offered_operation_has_one_schema_and_one_description() {
         let schemas = call_schemas();
         let offered: Vec<_> = ALL
             .iter()
-            .filter(|facts| !facts.description.is_empty() && super::offered(facts))
+            .filter(|facts| !facts.description.is_empty())
             .collect();
         assert_eq!(schemas.len(), offered.len());
         for call in &schemas {

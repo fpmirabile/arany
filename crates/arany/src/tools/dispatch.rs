@@ -29,7 +29,9 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
 pub(super) fn failed(call: &ToolCall, output: &str) -> bool {
     let value = || serde_json::from_str::<serde_json::Value>(output);
     match call {
-        ToolCall::Command { .. } => value().map_or(true, |value| value["exit_code"] != 0),
+        ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. } => {
+            value().map_or(true, |value| value["exit_code"] != 0)
+        }
         ToolCall::McpCall { .. } => value().map_or(true, |value| value["is_error"] == true),
         _ if call.is_git_read() => value().map_or(true, |value| value.get("failed").is_some()),
         _ => false,

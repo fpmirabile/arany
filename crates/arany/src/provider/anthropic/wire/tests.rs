@@ -119,7 +119,8 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
             "arany_write",
             "arany_edit",
             "arany_command",
-            "arany_mcp_call"
+            "arany_mcp_call",
+            "arany_command_unguarded"
         ]
     );
     assert!(body["tools"].as_array().unwrap().iter().all(|tool| {

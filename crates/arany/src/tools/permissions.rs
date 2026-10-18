@@ -176,7 +176,10 @@ impl PermissionConfig {
     ) -> (Decision, PermissionSource, Option<ApprovalMode>) {
         let (decision, source) = self.decision_with_source(call);
         let approval = (decision == Decision::Ask).then_some(
-            if self.mode == PermissionMode::Auto && source != PermissionSource::Rule {
+            if self.mode == PermissionMode::Auto
+                && source != PermissionSource::Rule
+                && !call.is_unguarded()
+            {
                 ApprovalMode::Auto
             } else {
                 ApprovalMode::Request

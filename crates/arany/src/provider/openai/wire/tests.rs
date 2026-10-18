@@ -457,7 +457,7 @@ fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_
         encoded.contains(&format!("{reasoning_text},{call_text}")),
         "the raw items are adjacent in the request bytes"
     );
-    assert_eq!(rendered["tools"].as_array().unwrap().len(), 14);
+    assert_eq!(rendered["tools"].as_array().unwrap().len(), 15);
 }
 
 #[test]

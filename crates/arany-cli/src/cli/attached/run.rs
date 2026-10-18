@@ -1218,7 +1218,7 @@ mod tests {
             let state = root.join(profile);
             let account_id = Uuid::now_v7();
             let observed = Arc::new(Mutex::new(Vec::new()));
-            let engine = Engine::open(
+            let engine = arany::test_support::engine::open(
                 StateRoot::admit(&state).unwrap(),
                 arany::EngineConfig {
                     guard_executable: std::env::current_exe().ok(),
