@@ -17,6 +17,7 @@ use tokio::{
     sync::{mpsc, watch},
 };
 
+mod tools;
 mod translate;
 mod wire;
 
@@ -36,6 +37,8 @@ pub(crate) struct AcpArgs {
     pub collaboration: CollaborationArg,
     #[arg(long)]
     pub max_active_children: Option<u8>,
+    #[arg(long)]
+    pub tools: bool,
 }
 
 pub(crate) fn admit(args: &AcpArgs) -> Result<(), &'static str> {
@@ -60,6 +63,7 @@ struct Config {
     collaboration: Collaboration,
     max_active_children: Option<u8>,
     roster: Option<super::provider::roster::SelectedRoster>,
+    tools: bool,
     #[cfg(test)]
     authenticated: Option<bool>,
 }
@@ -74,7 +78,7 @@ impl Config {
             title: None,
             collaboration: Some(self.collaboration.clone()),
             max_active_children: self.max_active_children,
-            tools: Some(false),
+            tools: Some(self.tools),
             permission_mode: None,
             include_paths: None,
         }
@@ -147,6 +151,7 @@ pub(crate) async fn run(
         },
         max_active_children: args.max_active_children,
         roster: roster.clone(),
+        tools: args.tools,
         #[cfg(test)]
         authenticated: None,
     };
@@ -194,13 +199,13 @@ pub(crate) async fn run(
     let translation_output = outbound.clone();
     let stopping = shutdown.clone();
     let serving = async move {
-        let server = serve::server::run_configured(
+        let server = run_server(
             engine,
             state_dir,
             receiver,
             events,
             stopping.clone(),
-            roster,
+            serve::threads::Threads::with_roster(roster),
         );
         let translator = translate::output(
             event_rx,
@@ -230,6 +235,18 @@ pub(crate) async fn run(
         stderr: String::new(),
         success: true,
     })
+}
+
+async fn run_server(
+    engine: Engine,
+    state: PathBuf,
+    inbound: mpsc::Receiver<serve::server::ClientMessage>,
+    outbound: mpsc::Sender<serve::server::ServerMessage>,
+    shutdown: watch::Sender<bool>,
+    mut threads: serve::threads::Threads,
+) -> Result<(), String> {
+    threads.approval_channel = serve::server::ApprovalChannel::Restricted;
+    serve::server::run_configured(engine, state, inbound, outbound, threads, shutdown).await
 }
 
 async fn read_messages(

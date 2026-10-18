@@ -423,6 +423,7 @@ pub enum WorkerDisposition {
 #[serde(rename_all = "snake_case")]
 pub enum WorkerCause {
     Finished,
+    StoppedByHook,
     InvalidOutcome,
     ToolFailed,
     TurnLimit,
@@ -870,7 +871,8 @@ impl WorkerOutcome {
                 WorkerCause::Finished
             ) | (
                 WorkerDisposition::Failed,
-                WorkerCause::InvalidOutcome
+                WorkerCause::StoppedByHook
+                    | WorkerCause::InvalidOutcome
                     | WorkerCause::ToolFailed
                     | WorkerCause::TurnLimit
                     | WorkerCause::Budget

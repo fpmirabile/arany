@@ -391,6 +391,7 @@ impl RunLoop<'_> {
         &self,
         runtime: &ToolRuntime,
         intent: EffectIntent,
+        cancellation: crate::engine::RunCancellation,
     ) -> Result<
         (
             ToolObservation,
@@ -420,9 +421,7 @@ impl RunLoop<'_> {
             return Ok((view.read(intent), None));
         }
         let runtime = runtime.with_queue_accounting();
-        let result = view
-            .edit(&runtime, intent.clone(), self.controls.cancellation.clone())
-            .await;
+        let result = view.edit(&runtime, intent.clone(), cancellation).await;
         if self.ledger().in_flight_children() == 0 {
             self.ledger()
                 .exclude_idle_approval(runtime.queued_duration()?)?;
@@ -738,6 +737,7 @@ impl RunLoop<'_> {
         let criterion_unverified = data.is_some() && criterion_evidence.is_empty();
         let data = data.filter(|_| !criterion_unverified);
         let success = data.is_some();
+        let hook_stopped = self.actor_hook_requested_stop(id)?;
         let (disposition, cause) = if private_uncertain {
             (
                 WorkerDisposition::PrivateUncertain,
@@ -752,7 +752,13 @@ impl RunLoop<'_> {
                 },
                 WorkerCause::Finished,
             )
-        } else if cancelled || self.controls.cancellation.is_cancelled() || self.pause_requested() {
+        } else if hook_stopped {
+            (WorkerDisposition::Failed, WorkerCause::StoppedByHook)
+        } else if cancelled
+            || self.controls.cancellation.is_cancelled()
+            || self.pause_requested()
+            || self.hook_requested_stop()?
+        {
             (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
         } else {
             (
@@ -769,7 +775,9 @@ impl RunLoop<'_> {
         self.append(Event::AgentFinished {
             run_id: self.run_id,
             agent_run_id: id,
-            disposition: if success {
+            disposition: if hook_stopped {
+                AgentDisposition::StoppedByHook
+            } else if success {
                 AgentDisposition::Finished
             } else if disposition == WorkerDisposition::Cancelled {
                 AgentDisposition::Cancelled
@@ -952,7 +960,7 @@ impl RunLoop<'_> {
                 data,
             },
         };
-        let Some(intent) = self.primary_intent(runtime, call.clone())? else {
+        let Some(mut intent) = self.primary_intent(runtime, call.clone())? else {
             self.record_capacity_stop().await?;
             self.discard_worker(
                 id,
@@ -963,6 +971,9 @@ impl RunLoop<'_> {
             .await?;
             return Ok(false);
         };
+        intent.expires_at_ms = intent
+            .expires_at_ms
+            .saturating_add(self.hook_admission(runtime, &call, &call).1);
         let tool_id = intent.id;
         let result = self
             .run_intent(
@@ -998,6 +1009,20 @@ impl RunLoop<'_> {
             .await?;
             return Ok(false);
         }
+        let observation = tool
+            .observation
+            .as_ref()
+            .ok_or(EngineError::InvalidHistory)?;
+        let post_exhausted = if observation.disposition == ToolDisposition::Succeeded
+            && let Some(config) = runtime.permissions()
+        {
+            Box::pin(self.post_tool_use_hooks(runtime, config, observation, None))
+                .await?
+                .stop
+                == super::step::hooks::HookStop::ActiveTime
+        } else {
+            false
+        };
         self.observe_worker_stop().await?;
         let observation = tool.observation.ok_or(EngineError::InvalidHistory)?;
         let outcome = match observation.disposition {
@@ -1052,6 +1077,9 @@ impl RunLoop<'_> {
                 .await?;
                 return Ok(false);
             }
+        }
+        if post_exhausted {
+            return Err(EngineError::GoalBudgetExhausted);
         }
         Ok(true)
     }

@@ -198,7 +198,7 @@ fn answer(id: RunId, text: &str) -> Item {
     }
 }
 
-pub(super) fn tool_item(
+pub(in crate::cli) fn tool_item(
     intent: &EffectIntent,
     observation: Option<&ToolObservation>,
     history: bool,

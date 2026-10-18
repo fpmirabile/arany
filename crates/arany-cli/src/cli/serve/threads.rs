@@ -23,6 +23,7 @@ pub(super) const MAX_THREADS: usize = 64;
 pub(in crate::cli) struct Threads {
     pub(super) map: HashMap<SessionId, LoadedThread>,
     pub(super) roster: Option<crate::cli::provider::roster::SelectedRoster>,
+    pub(in crate::cli) approval_channel: super::server::ApprovalChannel,
     #[cfg(test)]
     pub(super) provider: Option<std::sync::Arc<dyn arany::Provider>>,
 }
@@ -40,6 +41,15 @@ pub(super) struct LoadedThread {
 }
 
 impl Threads {
+    pub(in crate::cli) fn with_roster(
+        roster: Option<crate::cli::provider::roster::SelectedRoster>,
+    ) -> Self {
+        Self {
+            roster,
+            ..Default::default()
+        }
+    }
+
     #[cfg(test)]
     pub(in crate::cli) fn with_provider(provider: std::sync::Arc<dyn arany::Provider>) -> Self {
         Self {

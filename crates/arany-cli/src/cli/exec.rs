@@ -1205,7 +1205,8 @@ mod tests {
             let version = match line["kind"].as_str() {
                 Some("RunStarted") => 14,
                 Some("AgentSpawned") => 10,
-                Some("AgentFinished" | "ProviderCallRecorded") => 9,
+                Some("AgentFinished") => 10,
+                Some("ProviderCallRecorded") => 9,
                 Some("RunFinished") => 8,
                 Some("GoalProviderCallReserved") => 7,
                 _ => 6,

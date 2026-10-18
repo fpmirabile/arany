@@ -110,6 +110,9 @@ impl RunLoop<'_> {
         {
             return Ok(());
         }
+        if self.hook_requested_stop()? {
+            return Ok(());
+        }
         let reservation = match self.ledger().reserve(Action::Compaction).await {
             Ok(reservation) => reservation,
             Err(EngineError::GoalBudgetExhausted) => return Ok(()),

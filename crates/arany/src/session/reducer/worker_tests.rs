@@ -1460,7 +1460,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         ("RunStarted", 14),
         ("AgentSpawned", 10),
         ("ProviderCallRecorded", 9),
-        ("AgentFinished", 9),
+        ("AgentFinished", 10),
         ("ToolStarted", 11),
         ("ToolFinished", 12),
         ("WorkerStopObserved", 1),
@@ -3055,6 +3055,273 @@ fn worker_protocol_unverified_synthesis_is_recorded_but_cannot_finish() {
         },
         "finish without fresh verification",
     );
+}
+
+#[test]
+fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
+    use crate::tools::permissions::{
+        Decision, HookEvent, HookInvocation, HookOutcome, HookResult, PermissionMode,
+        PermissionSource, PermissionVerdict, stop_subject,
+    };
+    for site in [
+        "private",
+        "stop",
+        "stopped",
+        "handover_pre",
+        "handover_post",
+    ] {
+        let mut f = fixture();
+        f.mutation();
+        let event = if matches!(site, "stop" | "stopped") {
+            HookEvent::SubagentStop
+        } else if site == "handover_post" {
+            HookEvent::PostToolUse
+        } else {
+            HookEvent::PreToolUse
+        };
+        let actor = if site.starts_with("handover") {
+            f.primary
+        } else {
+            f.child
+        };
+        if matches!(site, "stop" | "stopped") {
+            f.call(
+                f.child,
+                AgentPhase::ChildWork,
+                ProviderCallDisposition::Finished,
+                None,
+            );
+        } else if site.starts_with("handover") {
+            let data = f.finish_worker();
+            let sequence = f.handover(data.clone());
+            f.integrate(sequence, data, ToolDisposition::Succeeded);
+            f.events.pop();
+            if site == "handover_pre" {
+                f.events.pop();
+            }
+        } else {
+            let start = f
+                .events
+                .iter()
+                .rposition(|event| matches!(event, Event::ToolStarted { .. }))
+                .unwrap();
+            f.events.truncate(start + 1);
+        }
+        let mut view = f.view();
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([9; 32]);
+        let tool = if actor == f.primary {
+            view.runs[0].tools.last().unwrap()
+        } else {
+            view.runs[0].agents[1].tools.last().unwrap()
+        };
+        let pending = tool.intent.clone();
+        let subject = if matches!(site, "stop" | "stopped") {
+            stop_subject(actor, view.runs[0].agents[1].provider_calls.len() - 1)
+        } else {
+            pending.digest()
+        };
+        let intent = f.intent(
+            actor,
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 2".into()],
+                cwd: String::new(),
+            },
+            EffectTarget::Workspace,
+        );
+        let started = Event::HookStarted {
+            run_id: f.run,
+            agent_run_id: actor,
+            hook: HookInvocation {
+                event,
+                group: 0,
+                handler: 0,
+                subject_digest: subject,
+                input_digest: [8; 32],
+                intent: intent.clone(),
+                active_ceiling_ms: (matches!(site, "stop" | "stopped")).then_some(1),
+            },
+        };
+        let append = |view: &mut SessionView, event: Event| {
+            let sequence = view.last_sequence + 1;
+            view.apply_committed(&f.envelope(event, sequence))
+        };
+        let mut foreign = started.clone();
+        if let Event::HookStarted { agent_run_id, .. } = &mut foreign {
+            *agent_run_id = if actor == f.primary {
+                f.child
+            } else {
+                f.primary
+            };
+        }
+        assert!(append(&mut view.clone(), foreign).is_err(), "{site}");
+        append(&mut view, started).unwrap();
+        assert!(!view.runs[0].hooks_settled(), "{site}");
+        let result = if site == "stopped" {
+            HookResult::Stopped {
+                reason: Some("halt".into()),
+            }
+        } else if site == "stop" {
+            HookResult::Blocked {
+                reason: Some("blocked".into()),
+            }
+        } else if site == "handover_post" {
+            HookResult::Feedback {
+                lines: vec!["blocked".into()],
+            }
+        } else {
+            HookResult::Restricted {
+                decision: Decision::Deny,
+                reason: Some("blocked".into()),
+            }
+        };
+        let observation = ToolObservation {
+            attestation: Some(Attestation::Guard(receipt(&intent))),
+            intent,
+            disposition: if site == "stopped" {
+                ToolDisposition::Succeeded
+            } else {
+                ToolDisposition::Failed
+            },
+            output: if site == "stopped" {
+                serde_json::json!({"exit_code":0,"stdout":r#"{"continue":false,"stopReason":"halt"}"#,"stderr":"","changeset":{"files":[]}}).to_string()
+            } else {
+                serde_json::json!({"exit_code":2,"stdout":"","stderr":"blocked","changeset":{"files":[]}}).to_string()
+            },
+            cache_update: CacheUpdate::NotApplicable,
+            enforcement_cause: None,
+        };
+        append(
+            &mut view,
+            Event::HookFinished {
+                run_id: f.run,
+                agent_run_id: actor,
+                outcome: HookOutcome {
+                    observation,
+                    result,
+                    boundary_active_ms: None,
+                },
+            },
+        )
+        .unwrap();
+        assert!(view.runs[0].hooks_settled(), "{site}");
+        if event == HookEvent::PreToolUse {
+            let verdict = |narrowed| Event::ToolPermissionDecided {
+                run_id: f.run,
+                agent_run_id: actor,
+                verdict: PermissionVerdict {
+                    intent_digest: pending.digest(),
+                    mode: Some(PermissionMode::Default),
+                    decision: Decision::Deny,
+                    basis: PermissionSource::Hook,
+                    source: PermissionSource::Hook,
+                    approved: false,
+                    hook_restriction: Some(Decision::Deny),
+                    hooks: 1,
+                    narrowed,
+                },
+            };
+            if actor != f.primary {
+                assert!(append(&mut view.clone(), verdict(true)).is_err(), "{site}");
+            }
+            append(&mut view, verdict(false)).unwrap();
+            append(
+                &mut view,
+                Event::ToolFinished {
+                    run_id: f.run,
+                    agent_run_id: actor,
+                    observation: ToolObservation {
+                        intent: pending,
+                        disposition: ToolDisposition::Denied,
+                        output: "Hook denied this Tool: blocked".into(),
+                        attestation: None,
+                        cache_update: CacheUpdate::NotApplicable,
+                        enforcement_cause: None,
+                    },
+                },
+            )
+            .unwrap();
+        } else if site == "stopped" {
+            assert!(view.runs[0].actor_stopped_by_hook(actor));
+            let finished = |disposition, cause| Event::AgentFinished {
+                run_id: f.run,
+                agent_run_id: actor,
+                disposition,
+                summary: None,
+                result: None,
+                worker: Some(WorkerOutcome {
+                    disposition: WorkerDisposition::Failed,
+                    cause,
+                    data: None,
+                    cleanup: Some(WorkerCleanupReceipt {
+                        assignment_id: actor,
+                        base_digest: f.base.sha256,
+                        revision: 1,
+                        enforcement_digest: pending.enforcement_digest,
+                        last_intent_digest: Some(pending.digest()),
+                    }),
+                }),
+            };
+            for (disposition, cause) in [
+                (AgentDisposition::Failed, WorkerCause::StoppedByHook),
+                (AgentDisposition::StoppedByHook, WorkerCause::ToolFailed),
+            ] {
+                assert!(append(&mut view.clone(), finished(disposition, cause)).is_err());
+            }
+            append(
+                &mut view,
+                Event::AgentFinished {
+                    run_id: f.run,
+                    agent_run_id: actor,
+                    disposition: AgentDisposition::StoppedByHook,
+                    summary: None,
+                    result: None,
+                    worker: Some(WorkerOutcome {
+                        disposition: WorkerDisposition::Failed,
+                        cause: WorkerCause::StoppedByHook,
+                        data: None,
+                        cleanup: Some(WorkerCleanupReceipt {
+                            assignment_id: actor,
+                            base_digest: f.base.sha256,
+                            revision: 1,
+                            enforcement_digest: pending.enforcement_digest,
+                            last_intent_digest: Some(pending.digest()),
+                        }),
+                    }),
+                },
+            )
+            .unwrap();
+        } else if site == "stop" {
+            assert!(view.runs[0].stop_blocked(actor));
+            let unstopped = Event::AgentFinished {
+                run_id: f.run,
+                agent_run_id: actor,
+                disposition: AgentDisposition::StoppedByHook,
+                summary: None,
+                result: None,
+                worker: Some(WorkerOutcome {
+                    disposition: WorkerDisposition::Failed,
+                    cause: WorkerCause::StoppedByHook,
+                    data: None,
+                    cleanup: Some(WorkerCleanupReceipt {
+                        assignment_id: actor,
+                        base_digest: f.base.sha256,
+                        revision: 1,
+                        enforcement_digest: pending.enforcement_digest,
+                        last_intent_digest: Some(pending.digest()),
+                    }),
+                }),
+            };
+            assert!(append(&mut view.clone(), unstopped).is_err());
+        }
+    }
 }
 
 #[test]
