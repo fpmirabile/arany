@@ -62,6 +62,7 @@ pub struct PermissionVerdict {
     #[serde(deserialize_with = "Option::deserialize")]
     pub hook_restriction: Option<Decision>,
     pub hooks: u8,
+    pub narrowed: bool,
 }
 
 impl Decision {

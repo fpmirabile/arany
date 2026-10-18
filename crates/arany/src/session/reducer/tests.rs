@@ -3563,12 +3563,13 @@ mod goal_replay_tests {
                     approved: false,
                     hook_restriction: None,
                     hooks: 0,
+                    narrowed: false,
                 },
             };
             assert_eq!(
                 Event::decode(
                     "ToolPermissionDecided",
-                    3,
+                    4,
                     &verdict.payload().unwrap(),
                     Some(run),
                     Some(agent)
@@ -3683,6 +3684,7 @@ mod goal_replay_tests {
                 approved: false,
                 hook_restriction: restriction,
                 hooks,
+                narrowed: false,
             },
         };
         assert!(rejected(&view, started(intent.digest(), &hook_intent)));
@@ -3724,6 +3726,7 @@ mod goal_replay_tests {
                 approved: true,
                 hook_restriction: Some(Decision::Ask),
                 hooks: 1,
+                narrowed: false,
             },
         };
         assert!(ask_verdict(PermissionSource::Human).payload().is_ok());
@@ -3921,6 +3924,7 @@ mod goal_replay_tests {
                     approved: true,
                     hook_restriction: None,
                     hooks: 0,
+                    narrowed: false,
                 },
             },
         )
@@ -4047,6 +4051,7 @@ mod goal_replay_tests {
                     approved: true,
                     hook_restriction: None,
                     hooks: 0,
+                    narrowed: false,
                 },
             },
         )
@@ -4261,6 +4266,7 @@ mod goal_replay_tests {
                 approved,
                 hook_restriction: None,
                 hooks: 0,
+                narrowed: false,
             },
         }
     }
@@ -4512,6 +4518,7 @@ mod goal_replay_tests {
                 approved,
                 hook_restriction: None,
                 hooks: 0,
+                narrowed: false,
             },
         };
         let exact = |approved| {

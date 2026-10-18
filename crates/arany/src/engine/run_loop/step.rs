@@ -788,6 +788,7 @@ impl RunLoop<'_> {
                     approved,
                     hook_restriction: hooks.restriction,
                     hooks: hooks.count,
+                    narrowed: matches!(verdict, Verdict::Narrow(..)),
                 },
             })
             .await?;

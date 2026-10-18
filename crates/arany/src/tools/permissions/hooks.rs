@@ -285,10 +285,12 @@ pub enum HookIgnoreReason {
 }
 
 impl HookResult {
-    pub fn restriction(&self) -> Decision {
+    // A replacement identical to the call changes nothing, so it restricts nothing.
+    pub fn restriction(&self, call: &ToolCall) -> Decision {
         match self {
             Self::Restricted { decision, .. } => *decision,
-            Self::Narrowed { .. } => Decision::Deny,
+            Self::Narrowed { call: updated } if updated != call => Decision::Deny,
+            Self::Narrowed { .. } => Decision::Allow,
             Self::Passed | Self::Feedback { .. } | Self::Ignored { .. } => Decision::Allow,
         }
     }
@@ -534,6 +536,13 @@ pub(crate) fn parse_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -
     let reason = text(specific.get("permissionDecisionReason"));
     if decision == Some(Decision::Deny) {
         return deny(reason);
+    }
+    // The human decides on the original input; an update never drops the hook's ask.
+    if decision == Some(Decision::Ask) {
+        return HookResult::Restricted {
+            decision: Decision::Ask,
+            reason,
+        };
     }
     if let Some(updated) = specific
         .get("updatedInput")

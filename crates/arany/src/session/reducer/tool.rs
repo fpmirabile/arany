@@ -132,8 +132,23 @@ pub(super) fn apply(
                     return Err(ReplayError::InvalidTransition);
                 }
             }
+            let chained = run
+                .tools
+                .len()
+                .checked_sub(2)
+                .is_some_and(|index| run.tools[index].narrowed_call().is_some());
             let tool = pending_tool(run, *agent_run_id)?;
-            if tool.intent.digest() != verdict.intent_digest
+            let narrowing_holds = !verdict.narrowed
+                || !chained
+                    && match tool.hooks.last().and_then(|hook| hook.outcome.as_ref()) {
+                        Some(crate::tools::permissions::HookOutcome {
+                            result: HookResult::Narrowed { call },
+                            ..
+                        }) => crate::tools::permissions::narrows(&tool.intent.call, call),
+                        _ => false,
+                    };
+            if !narrowing_holds
+                || tool.intent.digest() != verdict.intent_digest
                 || tool.permission_verdict.is_some()
                 || tool.observation.is_some()
             {
@@ -151,7 +166,7 @@ pub(super) fn apply(
                 .iter()
                 .filter_map(|hook| hook.outcome.as_ref())
                 .fold(Decision::Allow, |folded, outcome| {
-                    folded.narrow(outcome.result.restriction())
+                    folded.narrow(outcome.result.restriction(&tool.intent.call))
                 });
             let stopped = tool.hooks.iter().any(|hook| {
                 hook.outcome
@@ -194,7 +209,7 @@ pub(super) fn apply(
             };
             let finished_restriction = tool.hooks.iter().any(|view| {
                 view.outcome.as_ref().is_none_or(|outcome| {
-                    outcome.result.restriction() == Decision::Deny
+                    outcome.result.restriction(&tool.intent.call) == Decision::Deny
                         || outcome.observation.stops_run()
                 })
             });
@@ -282,19 +297,12 @@ pub(super) fn apply(
             active_ceiling_ms,
         } => {
             let goal = active_run_goal(current, *run_id).ok_or(ReplayError::InvalidTransition)?;
-            // The narrowed call stays inside the original, which the plan already admitted.
-            let narrowing = current
-                .runs
-                .iter()
-                .find(|run| run.id == *run_id)
-                .is_some_and(|run| valid_narrowing_source(run, intent));
             let phase_allows_call =
                 goal.phase == GoalPhase::Implementation || intent.call.is_goal_plan_prelude();
-            let plan_allows_call = if narrowing
-                || matches!(
-                    intent.call,
-                    crate::tools::ToolCall::ParseAgentDefinition { .. }
-                ) {
+            let plan_allows_call = if matches!(
+                intent.call,
+                crate::tools::ToolCall::ParseAgentDefinition { .. }
+            ) {
                 true
             } else if let Some(contract) = &goal.plan_contract {
                 !goal.awaiting_plan_contract
@@ -342,8 +350,8 @@ pub(super) fn apply(
                 } else {
                     primary.provider_calls.last().is_some_and(|call| {
                         call.disposition == ProviderCallDisposition::ToolRequested
-                    }) && (pending_tool_requests(run).is_some_and(|pending| pending >= 1)
-                        || valid_narrowing_source(run, intent))
+                    }) && pending_tool_requests(run).is_some_and(|pending| pending >= 1)
+                        && valid_narrowing_source(run, intent)
                         && run
                             .tools
                             .last()
@@ -581,18 +589,12 @@ fn pending_tool(
     .ok_or(ReplayError::InvalidTransition)
 }
 
-// The intent is exactly the call the last denied Tool's hook narrowed it to, at most once per request.
+// A narrowed Tool answers nothing itself: the next Tool must be exactly its replacement.
 fn valid_narrowing_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
-    let Some(last) = run.tools.len().checked_sub(1) else {
-        return false;
-    };
-    let tool = &run.tools[last];
-    super::narrowed_call(tool) == Some(&intent.call)
-        && crate::tools::permissions::narrows(&tool.intent.call, &intent.call)
-        && tool.permission_verdict.as_ref().is_some_and(|verdict| {
-            verdict.source == crate::tools::permissions::PermissionSource::Hook && !verdict.approved
-        })
-        && (last == 0 || !super::narrowing_source(run, last - 1))
+    run.tools
+        .last()
+        .and_then(ToolView::narrowed_call)
+        .is_none_or(|call| *call == intent.call)
 }
 
 fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {

@@ -2658,13 +2658,20 @@ struct NarrowCase {
 }
 
 async fn narrow_case(script: String) -> NarrowCase {
+    narrow_run(script, Vec::new()).await
+}
+
+async fn narrow_run(script: String, later: Vec<arany::ToolCall>) -> NarrowCase {
     let fixture = Fixture::new(
         Some(&hook_settings(json!({}), vec![shell_hook(&script)])),
         true,
     );
     let (result, requests, _) = fixture
         .run(
-            vec![tool_outcome(call("read"), None), finish("answer")],
+            std::iter::once(tool_outcome(call("read"), None))
+                .chain(later.into_iter().map(|call| tool_outcome(call, None)))
+                .chain([finish("answer")])
+                .collect(),
             None,
             false,
         )
@@ -2783,8 +2790,18 @@ async fn hook_widening_or_repeated_updates_deny_without_a_second_dispatch() {
     let case = narrow_case(narrowing_script(&other, "\"limit\"")).await;
     assert_eq!(case.tools.len(), 1);
 
-    let narrowed = json!({"operation": "read", "path": "notes/facts.txt", "offset": 0, "limit": 8});
-    let case = narrow_case(narrowing_script(&narrowed, "\"limit\"")).await;
+    let read = |limit: u32| arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: 0,
+        limit,
+    };
+    // 32 narrows to 8, 8 narrows to 4: the replacement's own narrowing is the second one in the step.
+    let chain = format!(
+        "in=$(cat); {}; {}",
+        narrowing_script(&json!(read(8)), "\"limit\":32,").replace("$(cat)", "$in"),
+        narrowing_script(&json!(read(4)), "\"limit\":8,").replace("$(cat)", "$in"),
+    );
+    let case = narrow_case(chain.clone()).await;
     assert_eq!(case.tools.len(), 2);
     assert_eq!(
         case.tools[1].observation.as_ref().unwrap().disposition,
@@ -2797,5 +2814,24 @@ async fn hook_widening_or_repeated_updates_deny_without_a_second_dispatch() {
             "Hook denied this Tool: hook narrowing limit".to_owned()
         ]
     );
+    assert!(SessionView::replay(case.session, &case.events).is_ok());
+
+    // A later step may request the very call an earlier replacement was denied for.
+    let case = narrow_run(chain, vec![read(8)]).await;
+    assert!(SessionView::replay(case.session, &case.events).is_ok());
+    assert_eq!(case.tools.len(), 4);
+}
+
+#[tokio::test]
+async fn hook_identity_update_proceeds_unchanged() {
+    let same = json!({"operation": "read", "path": "notes/facts.txt", "offset": 0, "limit": 32});
+    let case = narrow_case(narrowing_script(&same, "\"limit\"")).await;
+    assert_eq!(case.tools.len(), 1);
+    assert!(case.tools[0].permission_verdict.as_ref().unwrap().approved);
+    assert_eq!(
+        case.tools[0].observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Succeeded
+    );
+    assert!(SessionView::replay(case.session, &case.events).is_ok());
     assert!(SessionView::replay(case.session, &case.events).is_ok());
 }

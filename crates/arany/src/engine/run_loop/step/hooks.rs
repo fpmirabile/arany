@@ -337,6 +337,7 @@ impl RunLoop<'_> {
                     fold.reason = reason;
                     return Ok(fold);
                 }
+                HookResult::Narrowed { call } if call == intent.call => {}
                 HookResult::Narrowed { call } => {
                     fold.restriction = Some(Decision::Deny);
                     if !narrowable {

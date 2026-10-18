@@ -1150,6 +1150,15 @@ fn hook_output_parsing_copies_peer_exit_codes_and_json_precedence() {
         ),
         (
             Some(0),
+            specific(json!({"permissionDecision": "ask", "updatedInput": {"operation": "read", "path": "a", "offset": 0, "limit": 1}})),
+            "",
+            HookResult::Restricted {
+                decision: Decision::Ask,
+                reason: None,
+            },
+        ),
+        (
+            Some(0),
             specific(json!({"permissionDecision": "deny", "updatedInput": {}})),
             "",
             deny_with(None),
@@ -1189,12 +1198,15 @@ fn hook_output_parsing_copies_peer_exit_codes_and_json_precedence() {
 
 #[test]
 fn hook_results_only_narrow_and_validate_against_their_observation() {
-    assert_eq!(HookResult::Passed.restriction(), Decision::Allow);
+    assert_eq!(HookResult::Passed.restriction(&read("a")), Decision::Allow);
+    let narrowed = HookResult::Narrowed { call: read("a") };
+    assert_eq!(narrowed.restriction(&read("a")), Decision::Allow);
+    assert_eq!(narrowed.restriction(&read("b")), Decision::Deny);
     assert_eq!(
-        ignored(HookIgnoreReason::AllowIsNoOp).restriction(),
+        ignored(HookIgnoreReason::AllowIsNoOp).restriction(&read("a")),
         Decision::Allow
     );
-    assert_eq!(deny_with(None).restriction(), Decision::Deny);
+    assert_eq!(deny_with(None).restriction(&read("a")), Decision::Deny);
     let allow = HookResult::Restricted {
         decision: Decision::Allow,
         reason: None,

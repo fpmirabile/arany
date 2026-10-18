@@ -944,6 +944,18 @@ impl ToolStep {
         self.hook_feedback.get(&index).map_or(&[], Vec::as_slice)
     }
 
+    // A Tool a hook narrowed is denied and directly followed by its replacement, which answers the request.
+    pub(crate) fn narrowed(&self, index: usize) -> bool {
+        let (Some(denied), Some(next)) = (
+            self.observations.get(index),
+            self.observations.get(index + 1),
+        ) else {
+            return false;
+        };
+        denied.disposition == ToolDisposition::Denied
+            && super::permissions::narrows(&denied.intent.call, &next.intent.call)
+    }
+
     fn rendered_len(&self) -> usize {
         self.turn.len()
             + self

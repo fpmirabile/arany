@@ -312,32 +312,25 @@ fn all_children_finished(run: &RunView) -> bool {
     run.agents.len() > 1 && run.agents.iter().skip(1).all(worker::child_terminal)
 }
 
-// The call a Hook narrowed this denied Tool to.
-fn narrowed_call(tool: &ToolView) -> Option<&crate::tools::ToolCall> {
-    let denied = tool.observation.as_ref().is_some_and(|observation| {
-        observation.disposition == crate::tools::ToolDisposition::Denied
-    });
-    match tool.hooks.last()?.outcome.as_ref()?.result {
-        crate::tools::permissions::HookResult::Narrowed { ref call } if denied => Some(call),
-        _ => None,
+impl ToolView {
+    // The journaled acceptance: the verdict says the Engine narrowed this Tool and the hook result names the call.
+    pub(crate) fn narrowed_call(&self) -> Option<&crate::tools::ToolCall> {
+        if !self.permission_verdict.as_ref()?.narrowed {
+            return None;
+        }
+        match self.hooks.last()?.outcome.as_ref()?.result {
+            crate::tools::permissions::HookResult::Narrowed { ref call } => Some(call),
+            _ => None,
+        }
     }
-}
-
-// A narrowed Tool answers the request its successor carries out.
-fn narrowing_source(run: &RunView, index: usize) -> bool {
-    narrowed_call(&run.tools[index])
-        .zip(run.tools.get(index + 1))
-        .is_some_and(|(call, next)| *call == next.intent.call)
 }
 
 fn model_tool_count(run: &RunView) -> usize {
     run.tools
         .iter()
-        .enumerate()
-        .filter(|(index, _)| !narrowing_source(run, *index))
-        .map(|(_, tool)| tool)
         .filter(|tool| {
-            !is_integration_tool(tool)
+            tool.narrowed_call().is_none()
+                && !is_integration_tool(tool)
                 && !matches!(
                     tool.intent.call,
                     crate::tools::ToolCall::ParseAgentDefinition { .. }

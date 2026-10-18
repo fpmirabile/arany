@@ -287,6 +287,10 @@ impl Event {
                         }
                         Some(Decision::Deny) => verdict.decision == Decision::Deny,
                     }
+                    && (!verdict.narrowed
+                        || verdict.decision == Decision::Deny
+                            && verdict.source == PermissionSource::Hook
+                            && verdict.hook_restriction == Some(Decision::Deny))
                     && (verdict.source != PermissionSource::Hook
                         || verdict.decision == Decision::Deny)
                     && (verdict.decision != Decision::Deny || !verdict.approved)

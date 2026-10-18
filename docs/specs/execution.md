@@ -134,7 +134,7 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 | `ToolStarted` | 10 |
 | `AgentSpawned` | 9 |
 | `AgentFinished`, `ProviderCallRecorded`, `GoalStarted`, `GoalFinished`, `RunFinished`, `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
-| `ToolPermissionDecided` | 3 |
+| `ToolPermissionDecided` | 4 |
 | `ProviderFallbackUsed`, `HookStarted`, `HookFinished`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerHandoverRecorded`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
 | All other supported Event kinds | 6 |
 

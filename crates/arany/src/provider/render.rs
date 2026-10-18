@@ -193,12 +193,7 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
     let mut results = Vec::new();
     let mut integrations = Vec::new();
     for (index, observation) in step.observations.iter().enumerate() {
-        // A Tool answers its one request; a denied Tool followed by another non-integration
-        // observation was narrowed by a hook and carries no request of its own.
-        let narrowed = step.observations.get(index + 1).is_some_and(|next| {
-            observation.disposition == ToolDisposition::Denied
-                && !matches!(next.intent.call, ToolCall::ApplyChangeset { .. })
-        });
+        let narrowed = step.narrowed(index);
         if narrowed {
             integrations.push(data_block(
                 "hook_narrowing (untrusted result data)",
