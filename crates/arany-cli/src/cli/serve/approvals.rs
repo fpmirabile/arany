@@ -256,7 +256,7 @@ fn request(
     next_id: &AtomicI64,
 ) -> Option<Request> {
     let intent = &approval.intent;
-    Some(Request {
+    let request = Request {
         jsonrpc: Default::default(),
         id: RequestId::Integer(
             next_id
@@ -276,7 +276,9 @@ fn request(
             })
             .ok()?,
         ),
-    })
+    };
+    encode_line(&Message::Request(request.clone())).ok()?;
+    Some(request)
 }
 
 #[cfg(test)]
@@ -353,6 +355,30 @@ mod tests {
             Message::Request(request) => request,
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn an_oversized_request_denies_without_being_sent() {
+        let _deadline = crate::cli::serve::tests::deadline();
+        let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
+        let (outbound, mut output) = mpsc::channel(8);
+        let _owner = Approvals::start(
+            inbox,
+            RunCancellation::new(),
+            SessionId::new(),
+            outbound,
+            Arc::new(AtomicI64::new(1)),
+            RunCancellation::new(),
+            |_| async { Some(1) },
+        );
+        let big = ToolCall::CommandUnguarded {
+            program: "sh".into(),
+            args: vec![],
+            cwd: String::new(),
+            justification: "x".repeat(MAX_LINE_BYTES),
+        };
+        assert!(!arany::test_support::approval::ask(&approvals, &intent(big)).await);
+        assert!(output.try_recv().is_err());
     }
 
     #[tokio::test]
