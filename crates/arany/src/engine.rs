@@ -22,15 +22,17 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 mod compaction;
+mod hints;
 mod ledger;
 mod lifecycle;
-mod progress;
 mod report;
 mod routing;
 mod run_loop;
 #[cfg(test)]
 mod tests;
 pub use crate::tools::Cancellation as RunCancellation;
+use hints::HintPublisher;
+pub use hints::{DisplayUpdate, RunHints, RunPreview};
 pub use ledger::Action;
 use ledger::GoalLedger;
 pub use lifecycle::{
@@ -38,8 +40,6 @@ pub use lifecycle::{
     set_session_defaults,
 };
 use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
-use progress::ProgressPublisher;
-pub use progress::{DisplayUpdate, RunPreview, RunProgress, RunUpdate};
 use report::goal_report;
 use routing::CallScope;
 use run_loop::{LoopControls, RunIdentity, RunLoop};
@@ -287,7 +287,7 @@ pub struct RunControls {
     /// A pause request is sticky for the steering handle's lifetime, so each submission needs its own.
     pub steering: Option<RunSteering>,
     pub cancellation: RunCancellation,
-    pub progress: Option<RunProgress>,
+    pub hints: Option<RunHints>,
 }
 
 /// The last committed Run of a submission.
@@ -941,7 +941,7 @@ impl Engine {
             approvals,
             steering,
             cancellation,
-            progress,
+            hints,
         } = controls;
         let submission = AdmittedSubmission {
             providers,
@@ -955,7 +955,7 @@ impl Engine {
         let result = Box::pin(async move {
             let _slot = slot;
             let result = self
-                .run_inner(&submission, request, run_cancellation, progress)
+                .run_inner(&submission, request, run_cancellation, hints)
                 .await;
             match &result {
                 Ok(RunResult {
@@ -981,7 +981,7 @@ impl Engine {
         submission: &AdmittedSubmission,
         request: RunRequest,
         cancellation: RunCancellation,
-        progress: Option<RunProgress>,
+        hints: Option<RunHints>,
     ) -> Result<RunResult, EngineError> {
         let workspace = request.workspace.clone();
         let include_paths = request.include_paths.clone();
@@ -997,7 +997,7 @@ impl Engine {
             submission,
             request,
             cancellation.clone(),
-            progress.clone(),
+            hints.clone(),
             entry,
             &mut leases,
         ))
@@ -1018,7 +1018,7 @@ impl Engine {
                 submission,
                 next,
                 cancellation.clone(),
-                progress.clone(),
+                hints.clone(),
                 GoalEntry::Continue,
                 &mut leases,
             ))
@@ -1052,7 +1052,7 @@ impl Engine {
         submission: &AdmittedSubmission,
         request: RunRequest,
         cancellation: RunCancellation,
-        progress: Option<RunProgress>,
+        hints: Option<RunHints>,
         entry: GoalEntry,
         leases: &mut WorkspaceLeases,
     ) -> Result<RunTurn, EngineError> {
@@ -1069,7 +1069,7 @@ impl Engine {
                 &request,
                 identity,
                 entry,
-                progress.as_ref().is_some_and(RunProgress::previews_enabled),
+                hints.as_ref().is_some_and(RunHints::previews_enabled),
                 leases,
             )
             .await?;
@@ -1121,23 +1121,16 @@ impl Engine {
                 .trace_run(session_id, goal.id, (context_started, context_ended));
         // Reduces the open state that appends validate; the closed view would reject this Run's links.
         let ledger = self.open_ledger(session_id, goal.id).await?;
-        let publisher = progress.map(|progress| ProgressPublisher::new(progress, run_id));
+        let publisher = hints.map(|hints| HintPublisher::new(hints, run_id));
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
         // Subscribers follow the turn's Events and drain them when it ends; they never hold it back.
-        let progress_tap = publisher.as_ref().map(|_| self.journal.subscribe());
         let trace_tap = trace.as_ref().map(|_| self.journal.subscribe());
         let (end, _) = tokio::sync::watch::channel(());
         let ended = |mut ended: tokio::sync::watch::Receiver<()>| async move {
             let _ = ended.changed().await;
         };
-        let follow_progress = progress_follower(
-            publisher.as_ref(),
-            progress_tap,
-            ended(end.subscribe()),
-            &ledger,
-        );
         let trace = trace_follower(trace, trace_tap, ended(end.subscribe()), &ledger, goal.id);
         let started = StartedRun {
             session_id,
@@ -1216,7 +1209,7 @@ impl Engine {
             },
             end,
         );
-        tokio::join!(segment, follow_progress, trace).0
+        tokio::join!(segment, trace).0
     }
 
     async fn drive_turn(
@@ -1226,7 +1219,7 @@ impl Engine {
         controls: LoopControls<'_>,
         request: ProviderRequest,
         ledger: &GoalLedger,
-        publisher: Option<&ProgressPublisher>,
+        publisher: Option<&HintPublisher>,
     ) -> Result<(), EngineError> {
         // Boxed: the Run loop's future is large and would overflow a small caller stack.
         Box::pin(
@@ -1904,17 +1897,6 @@ async fn end_turn(
     let turn = turn.await;
     drop(end);
     turn
-}
-
-async fn progress_follower(
-    publisher: Option<&ProgressPublisher>,
-    tap: Option<Subscription>,
-    ended: impl Future<Output = ()>,
-    ledger: &GoalLedger,
-) {
-    if let (Some(publisher), Some(tap)) = (publisher, tap) {
-        publisher.follow(tap, ended, ledger).await;
-    }
 }
 
 async fn trace_follower(

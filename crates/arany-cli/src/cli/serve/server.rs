@@ -337,7 +337,7 @@ async fn run_inner(
                                     approvals: Some(approvals),
                                     steering: Some(steering.clone()),
                                     cancellation: RunCancellation::new(),
-                                    progress: None,
+                                    hints: None,
                                 };
                                 let (started, ready) = tokio::sync::oneshot::channel();
                                 let approval_end = RunCancellation::new();

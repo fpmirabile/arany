@@ -2410,7 +2410,7 @@ async fn plain_prompt_is_one_run_even_when_its_criterion_is_unsatisfied() {
     assert_eq!(goal.run_ids, [outcome.run.id]);
 }
 
-/// Action taken once a Run's Finish is committed and observed through progress.
+/// Action taken once a Run's Finish is committed and tapped.
 enum AfterFinish {
     Cancel(RunCancellation),
 }
@@ -2425,8 +2425,7 @@ async fn run_observing_finish(
     let cancellation = match &after {
         AfterFinish::Cancel(cancellation) => cancellation.clone(),
     };
-    let progress = RunProgress::new();
-    let mut observer = progress.clone();
+    let mut observer = engine.subscribe();
     let run = run_with(
         engine,
         provider,
@@ -2434,7 +2433,6 @@ async fn run_observing_finish(
         RunControls {
             tools: ToolGrant::Configured,
             cancellation,
-            progress: Some(progress),
             ..Default::default()
         },
     );
@@ -2443,8 +2441,8 @@ async fn run_observing_finish(
     loop {
         tokio::select! {
             result = &mut run => return result,
-            update = observer.changed() => {
-                if update.run.status == RunStatus::Finished && let Some(action) = after.take() {
+            event = observer.next() => {
+                if matches!(event, Some(arany::Tapped::Committed(event)) if matches!(event.event, Event::RunFinished { disposition: arany::RunDisposition::Finished, .. })) && let Some(action) = after.take() {
                     match action {
                         AfterFinish::Cancel(cancellation) => {
                             cancellation.cancel();
@@ -2727,55 +2725,135 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
 }
 
 #[tokio::test]
-async fn progress_snapshots_carry_the_goal_through_each_iteration() {
+async fn run_hints_carry_only_display_text_for_the_committed_run() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state_path = temp.path().join("state");
+    let provider = Arc::new(crate::PreviewProvider {
+        text: arany::PreviewText {
+            answer: "x".repeat(2300),
+            commentary: Vec::new(),
+            commentary_limited: false,
+        },
+        completion: None,
+    });
+    let engine = engine_support::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
+    let mut hints = RunHints::with_previews();
+    let mut previews = hints.previews();
+    let cancellation = RunCancellation::new();
+    let mut input = request(&workspace, "question");
+    input.include_paths.clear();
+    let (mut events, update, outcome) = {
+        let arany::RunHandle { events, result, .. } = engine
+            .submit(
+                AdmittedProviders::single(provider),
+                input,
+                RunControls {
+                    cancellation: cancellation.clone(),
+                    hints: Some(hints.clone()),
+                    ..Default::default()
+                },
+            )
+            .expect("submission");
+        let mut result = std::pin::pin!(tokio::time::timeout(Duration::from_secs(10), result));
+        let update = tokio::select! {
+            update = previews.changed() => update.expect("preview update"),
+            _ = &mut result => panic!("the Run ended before its preview"),
+        };
+        assert!(cancellation.cancel());
+        let outcome = result
+            .await
+            .expect("cancellation deadline")
+            .expect("cancelled Run")
+            .run;
+        (events, update, outcome)
+    };
+    engine.close().await.expect("engine shutdown");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    assert_eq!(update.run_id, outcome.run.id);
+    assert!(!update.text.answer.is_empty());
+    assert!(outcome.run.assistant_message.is_none());
+    tokio::select! {
+        biased;
+        _ = hints.waiting_changed() => panic!("no Tool waited for capacity"),
+        () = std::future::ready(()) => {}
+    }
+    let mut tapped = Vec::new();
+    while let Some(event) = events.next().await {
+        let arany::Tapped::Committed(event) = event else {
+            panic!("bounded Run cannot lag");
+        };
+        tapped.push((*event).clone());
+    }
+    let (journal, _) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(tapped, journal);
+}
+
+#[tokio::test]
+async fn live_reduction_of_an_autonomous_goal_equals_the_reloaded_view() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
+        finish_with("earlier turn"),
         crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
         finish_with("first pass"),
         crate::tool_outcome(facts_read(), None),
         finish_with("verified"),
     ])
-    .with_before_call(2, write_facts(&workspace, "v2"));
+    .with_before_call(3, write_facts(&workspace, "v2"));
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let progress = RunProgress::new();
-    let mut observer = progress.clone();
-    let mut observed_runs = Vec::new();
-    let outcome = {
-        let run = run_with(
-            &engine,
-            &provider,
-            autonomous_input(&workspace),
-            RunControls {
-                tools: ToolGrant::Configured,
-                cancellation: RunCancellation::new(),
-                progress: Some(progress),
-                ..Default::default()
-            },
-        );
-        tokio::pin!(run);
-        loop {
-            tokio::select! {
-                update = observer.changed() => {
-                    observed_runs.push(update.goal.as_ref().map(|goal| goal.run_ids.len()));
-                }
-                result = &mut run => break result.expect("autonomous Goal"),
-            }
-        }
+    let mut earlier = request(&workspace, "Earlier");
+    earlier.include_paths.clear();
+    let earlier = run_to_end(&engine, &provider, earlier)
+        .await
+        .expect("earlier Run");
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let mut live = store
+        .load_view(earlier.session_id)
+        .await
+        .expect("closed view")
+        .expect("Session");
+    let mut input = autonomous_input(&workspace);
+    input.session_id = Some(earlier.session_id);
+    input.title = None;
+    let mut events = {
+        let arany::RunHandle { events, result, .. } = engine
+            .submit(
+                AdmittedProviders::single(provider),
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            )
+            .expect("submission");
+        let outcome = result.await.expect("autonomous Goal").run;
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        events
     };
-    assert_eq!(outcome.run.status, RunStatus::Finished);
-    assert!(
-        observed_runs.contains(&Some(1)),
-        "the first iteration's snapshots name one Run: {observed_runs:?}"
-    );
-    assert_eq!(
-        observed_runs.last(),
-        Some(&Some(2)),
-        "the final snapshot counts both iterations, not the first: {observed_runs:?}"
-    );
     engine.close().await.expect("engine shutdown");
+    while let Some(event) = events.next().await {
+        let arany::Tapped::Committed(event) = event else {
+            panic!("bounded Run cannot lag");
+        };
+        arany::reduce_into(&mut live, &event).expect("incremental committed reduction");
+    }
+    let reloaded = store
+        .load_view(earlier.session_id)
+        .await
+        .expect("reloaded view")
+        .expect("Session");
+    store.close().await.expect("Store shutdown");
+    assert_eq!(live, reloaded);
+    assert_eq!(reloaded.goals.last().expect("Goal").run_ids.len(), 2);
 }
 
 #[tokio::test]
@@ -4992,7 +5070,7 @@ async fn previews_chunk_a_finishing_call_within_its_bound() {
         input,
         RunControls {
             cancellation: RunCancellation::new(),
-            progress: Some(RunProgress::with_previews()),
+            hints: Some(RunHints::with_previews()),
             ..Default::default()
         },
     )

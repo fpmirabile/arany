@@ -1785,7 +1785,8 @@ int main(void) {
                 action.decide(false);
             }
         };
-        let mut progress = arany::RunProgress::new();
+        let mut events = engine.subscribe();
+        let mut hints = arany::RunHints::new();
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(Duration::from_secs(30), async {
             tokio::join!(
@@ -1806,7 +1807,7 @@ int main(void) {
                         tools: ToolGrant::Configured,
                         approvals: granted,
                         cancellation,
-                        progress: Some(progress.clone()),
+                        hints: Some(hints.clone()),
                         ..Default::default()
                     }
                 ),
@@ -1817,22 +1818,22 @@ int main(void) {
         let (outcome, ()) = match result {
             Ok(outcome) => outcome,
             Err(_) => {
-                let update = tokio::time::timeout(Duration::from_millis(10), progress.changed())
+                let event = tokio::time::timeout(Duration::from_millis(10), events.next())
                     .await
                     .ok();
                 let waiting =
-                    tokio::time::timeout(Duration::from_millis(10), progress.waiting_changed())
+                    tokio::time::timeout(Duration::from_millis(10), hints.waiting_changed())
                         .await
                         .ok()
                         .flatten();
                 panic!(
                     "bounded stopped native command {case}: elapsed_ms={}, progress={:?}, queued={}, trace={}",
                     started.elapsed().as_millis(),
-                    update.map(|update| (
-                        update.sequence,
-                        update.run.status,
-                        update.run.tools.len()
-                    )),
+                    event.flatten().map(|event| match event {
+                        arany::Tapped::Committed(event) =>
+                            format!("{}:{}", event.sequence, event.event.kind()),
+                        arany::Tapped::Resync { missed } => format!("missed:{missed}"),
+                    }),
                     waiting.is_some(),
                     trace_snapshot(root)
                 );
