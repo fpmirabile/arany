@@ -10,18 +10,37 @@ fn record() -> serde_json::Value {
 }
 
 fn command(workspace: &Path, state: &Path, extra: &[&str]) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
-    command
-        .env_clear()
-        .current_dir(workspace)
-        .args(["exec", "--profile", "coding", "--state-dir"])
-        .arg(state)
-        .arg("--workspace")
-        .arg(workspace)
-        .args(extra)
-        .arg("answer")
-        .stdin(Stdio::null());
-    command.bounded_output().unwrap()
+    let run = |attached| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+        command.env_clear().current_dir(workspace);
+        if attached {
+            command.args(["--screen-reader"]);
+        } else {
+            command.arg("exec");
+        }
+        command
+            .arg("answer")
+            .args(["--profile", "coding", "--state-dir"])
+            .arg(state)
+            .arg("--workspace")
+            .arg(workspace)
+            .args(extra)
+            .stdin(Stdio::null())
+            .bounded_output()
+            .unwrap()
+    };
+    let output = run(false);
+    if !extra.contains(&"--output") {
+        let attached = run(true);
+        assert_eq!(
+            attached.status.code(),
+            output.status.code(),
+            "attached refusal exit"
+        );
+        assert_eq!(attached.stdout, output.stdout, "attached refusal stdout");
+        assert_eq!(attached.stderr, output.stderr, "attached refusal stderr");
+    }
+    output
 }
 
 #[test]
@@ -111,10 +130,17 @@ fn profile_refusals_precede_workspace_input_and_keep_stdout_empty() {
         missing.stderr,
         b"error: provider-roster.json is unavailable\n"
     );
-    assert!(
-        !state.join("events.sqlite3").exists(),
-        "refusal creates no journal"
+    assert_eq!(
+        std::fs::metadata(state.join("events.sqlite3"))
+            .unwrap()
+            .len(),
+        0,
+        "refusal opens no journal"
     );
+    let fresh = temp.path().join("fresh");
+    let absent = command(&workspace, &fresh, &[]);
+    assert_eq!(absent.status.code(), Some(1));
+    assert!(!fresh.exists(), "refusal creates no State");
 }
 
 #[cfg(all(target_os = "linux", debug_assertions))]
@@ -146,29 +172,36 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
             &state.join("provider-roster.json"),
             &serde_json::to_vec(&roster).unwrap(),
         );
-        let output = Command::new(env!("CARGO_BIN_EXE_arany"))
-            .env_clear()
-            .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
-            .env("HOME", temp.path().join("home"))
-            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
-            .current_dir(&workspace)
-            .args(["exec", "--profile", "coding", "--state-dir"])
-            .arg(&state)
-            .arg("answer")
-            .stdin(Stdio::null())
-            .bounded_output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(1));
-        assert_eq!(output.stdout, b"");
-        let error = if other {
-            "error: roster profile same route 0 refused: Provider role route openai/gpt-6-luna refused: invalid saved account; use arany --setup to choose or reset access\n"
-        } else {
-            "error: roster profile unused route 0 refused: Provider role route anthropic/claude-sonnet-5 refused: selected native API credentials or workspace configuration unavailable\n"
-        };
-        let expected = format!(
-            "Roster preset: coding\nRoles: primary=main, child=main, review=main, compaction=main\nEligible child profiles: main, same, unused\n  main[0]: openai/gpt-5.4 effort=low (native API)\n  same[0]: openai/gpt-6-luna effort=low (native API)\n  unused[0]: anthropic/claude-sonnet-5 effort=high (native API)\n{error}"
-        );
-        assert_eq!(output.stderr, expected.as_bytes());
-        assert!(!state.join("events.sqlite3").exists());
+        for entry in [vec!["exec", "answer"], vec!["--screen-reader", "answer"]] {
+            let output = Command::new(env!("CARGO_BIN_EXE_arany"))
+                .env_clear()
+                .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
+                .env("HOME", temp.path().join("home"))
+                .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+                .current_dir(&workspace)
+                .args(entry)
+                .args(["--profile", "coding", "--state-dir"])
+                .arg(&state)
+                .stdin(Stdio::null())
+                .bounded_output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            assert_eq!(output.stdout, b"");
+            let error = if other {
+                "error: roster profile same route 0 refused: Provider role route openai/gpt-6-luna refused: invalid saved account; use arany --setup to choose or reset access\n"
+            } else {
+                "error: roster profile unused route 0 refused: Provider role route anthropic/claude-sonnet-5 refused: selected native API credentials or workspace configuration unavailable\n"
+            };
+            let expected = format!(
+                "Roster preset: coding\nRoles: primary=main, child=main, review=main, compaction=main\nEligible child profiles: main, same, unused\n  main[0]: openai/gpt-5.4 effort=low (native API)\n  same[0]: openai/gpt-6-luna effort=low (native API)\n  unused[0]: anthropic/claude-sonnet-5 effort=high (native API)\n{error}"
+            );
+            assert_eq!(output.stderr, expected.as_bytes());
+            assert_eq!(
+                std::fs::metadata(state.join("events.sqlite3"))
+                    .unwrap()
+                    .len(),
+                0
+            );
+        }
     }
 }

@@ -181,7 +181,8 @@ pub(crate) fn load(
     workspace: &Path,
     name: &str,
 ) -> Result<SelectedRoster, String> {
-    let root = StateRoot::admit(state_dir).map_err(|_| "state directory unavailable or unsafe")?;
+    let root =
+        StateRoot::open_existing(state_dir).map_err(|_| "state directory unavailable or unsafe")?;
     super::super::admit_workspace(Some(workspace.to_path_buf()), Some(state_dir.to_path_buf()))
         .map_err(str::to_owned)?;
     if root

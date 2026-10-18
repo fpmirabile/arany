@@ -334,12 +334,19 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         None
     };
     let mut admission = args.admit(telemetry)?;
-    if let Some(selected) = selected {
-        admission.defaults.account_id = selected.primary().account_id;
-    }
     let goal_resume = admission.resume_goal;
     let restored_settings = controls::restore_settings(&admission).await;
     let mut saved_view = restored_settings.as_ref().copied().unwrap_or_default().view;
+    if let Some(selected) = selected {
+        admission.defaults.account_id = selected.primary().account_id;
+        let mut signals =
+            super::exec::StopSignals::install().map_err(|_| "signal handling unavailable")?;
+        tokio::select! {
+            biased;
+            _ = signals.next() => return Err("interrupted before a Run started; no Run was recorded".into()),
+            result = selected.admit(&admission.state_dir, &admission.workspace) => { result?; }
+        }
+    }
     let mut terminal = AttachedTerminal::acquire_with_mode(
         admission.screen_reader,
         if admission.classic {
