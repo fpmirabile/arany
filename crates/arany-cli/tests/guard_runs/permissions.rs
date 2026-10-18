@@ -58,6 +58,7 @@ struct Fixture {
     deny_humans: bool,
     command_maximum: Option<u32>,
     max_children: u8,
+    expected_unconsumed: usize,
     settings: Option<Value>,
 }
 
@@ -107,6 +108,7 @@ impl Fixture {
             deny_humans: false,
             command_maximum: None,
             max_children: 1,
+            expected_unconsumed: 0,
             settings: settings.cloned(),
         }
     }
@@ -175,7 +177,7 @@ impl Fixture {
         let requests = provider.requests.lock().unwrap().clone();
         let unconsumed = provider.responses.lock().unwrap().len();
         assert!(
-            unconsumed == 0,
+            unconsumed == self.expected_unconsumed,
             "all expected calls consumed: {unconsumed} left, fixture settings {:?}, run {:?}, tools (operation, attested, outcome, hook outcomes) {:?}",
             self.settings,
             result.run.status,
@@ -199,6 +201,30 @@ impl Fixture {
                 .collect::<Vec<_>>()
         );
         (result, requests, humans)
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn run_uncertain(&self, outcomes: Vec<ProviderOutcome>) -> usize {
+        let provider = Arc::new(ScriptedProvider::new(outcomes));
+        let mut input = request(&self.workspace, "Inspect and complete the task");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: self.max_children,
+        };
+        input.goal.budget = Some(budget());
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        };
+        let outcome = run_with(&self.engine, &provider, input, controls).await;
+        assert!(
+            matches!(
+                outcome,
+                Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+            ),
+            "{outcome:?}"
+        );
+        provider.requests.lock().unwrap().len()
     }
 
     async fn reopen(self, session: SessionId) -> (Vec<arany::EventEnvelope>, SessionView) {
@@ -2540,10 +2566,7 @@ async fn hook_post_tool_use_timeout_reports_the_limit_and_keeps_the_effect() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn hook_post_tool_use_uncertain_outcome_stops_the_run_after_the_effect() {
-    let fixture = Fixture::new(
-        Some(&post_settings(shell_hook("kill -9 $PPID; sleep 5"))),
-        true,
-    );
+    let fixture = Fixture::new(Some(&post_settings(shell_hook("kill -9 $PPID"))), true);
     let write = call("edit");
     let (result, requests, _) = fixture
         .run(
@@ -2704,9 +2727,36 @@ async fn hook_post_tool_use_sets_that_cannot_run_deny_the_tool_before_dispatch()
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
-async fn hook_post_tool_use_denies_a_researcher_tool_before_dispatch() {
-    let fixture = Fixture::new(Some(&read_post_settings(vec![shell_hook("exit 2")])), false);
+async fn hook_researcher_uncertain_outcome_stops_the_run_as_uncertain() {
+    let fixture = Fixture::new(
+        Some(&hook_settings(json!({}), vec![shell_hook("kill -9 $PPID")])),
+        false,
+    );
+    let requests = fixture
+        .run_uncertain(vec![
+            ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: vec![arany::ChildAssignment {
+                    editor: None,
+                    objective: "Inspect facts".into(),
+                    profile: None,
+                }],
+            }),
+            tool_outcome(call("read"), None),
+        ])
+        .await;
+    assert_eq!(requests, 2, "no Provider call follows an unknown hook");
+}
+
+#[tokio::test]
+async fn hook_researcher_tool_with_default_pre_and_post_timeouts_still_runs() {
+    let settings = json!({"hooks":{
+        "PreToolUse":[{"matcher":"Read","hooks":[shell_hook("exit 0")]}],
+        "PostToolUse":[{"matcher":"Read","hooks":[shell_hook("exit 0")]}],
+    },"permissions":{}});
+    let fixture = Fixture::new(Some(&settings), false);
     let (result, _, _) = fixture
         .run(
             vec![
@@ -2726,18 +2776,137 @@ async fn hook_post_tool_use_denies_a_researcher_tool_before_dispatch() {
             true,
         )
         .await;
-    let tool = result
+    assert_eq!(result.run.status, RunStatus::Finished);
+    let child = result
         .run
         .agents
         .iter()
-        .flat_map(|agent| &agent.tools)
-        .next()
+        .find(|agent| agent.role == arany::AgentRole::Child)
         .unwrap();
     assert_eq!(
-        tool.observation.as_ref().unwrap().output,
-        "Hook denied this Tool: hooks are unavailable to delegated research"
+        child.tools[0].observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Succeeded
     );
-    assert!(tool.hooks.is_empty());
+    assert_eq!(child.tools[0].hooks.len(), 2);
+}
+
+#[tokio::test]
+async fn hook_researcher_tools_use_the_parent_hooks_and_child_journal_identity() {
+    for deny in [true, false] {
+        let settings = if deny {
+            hook_settings(json!({}), vec![shell_hook("echo child-denied >&2; exit 2")])
+        } else {
+            read_post_settings(vec![shell_hook("echo child-feedback >&2; exit 2")])
+        };
+        let fixture = Fixture::new(Some(&settings), false);
+        let (result, requests, _) = fixture
+            .run(
+                vec![
+                    ProviderOutcome::Delegate(Delegate {
+                        agent: None,
+                        children: vec![arany::ChildAssignment {
+                            editor: None,
+                            objective: "Inspect facts".into(),
+                            profile: None,
+                        }],
+                    }),
+                    tool_outcome(call("read"), None),
+                    finish("report"),
+                    finish("answer"),
+                ],
+                None,
+                true,
+            )
+            .await;
+        assert_eq!(result.run.status, RunStatus::Finished);
+        let child = result
+            .run
+            .agents
+            .iter()
+            .find(|agent| agent.role == arany::AgentRole::Child)
+            .unwrap();
+        let tool = &child.tools[0];
+        assert_eq!(
+            tool.observation.as_ref().unwrap().disposition,
+            if deny {
+                arany::ToolDisposition::Denied
+            } else {
+                arany::ToolDisposition::Succeeded
+            }
+        );
+        assert_eq!(tool.hooks.len(), 1);
+        assert_eq!(tool.hooks[0].invocation.intent.agent_run_id, child.id);
+        assert!(
+            tool.hooks[0]
+                .outcome
+                .as_ref()
+                .unwrap()
+                .observation
+                .attestation
+                .is_some()
+        );
+        let context = requests
+            .iter()
+            .filter(|request| request.phase == AgentPhase::ChildWork)
+            .nth(1)
+            .unwrap()
+            .input
+            .tools
+            .as_ref()
+            .unwrap();
+        if deny {
+            assert_eq!(
+                context.steps[0].observations[0].output,
+                "Hook denied this Tool: child-denied"
+            );
+        } else {
+            assert_eq!(
+                context.steps[0].hook_feedback[&0],
+                vec!["hook feedback: child-feedback"]
+            );
+        }
+        let (events, view) = fixture.reopen(result.session_id).await;
+        assert_eq!(view.runs[0].agents[1].tools[0].hooks.len(), 1);
+        assert_action_bounds(&events, false, false);
+    }
+}
+
+#[tokio::test]
+async fn hook_pre_tool_use_continue_false_stops_before_primary_or_child_tool_dispatch() {
+    for child in [false, true] {
+        let fixture = Fixture::new(
+            Some(&hook_settings(
+                json!({}),
+                vec![shell_hook(
+                    r#"printf '%s' '{"continue":false,"stopReason":"halt","decision":"block","reason":"not feedback"}'"#,
+                )],
+            )),
+            false,
+        );
+        let mut outcomes = Vec::new();
+        if child {
+            outcomes.push(ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: vec![arany::ChildAssignment {
+                    editor: None,
+                    objective: "Inspect facts".into(),
+                    profile: None,
+                }],
+            }));
+        }
+        outcomes.push(tool_outcome(call("read"), None));
+        let (result, _, _) = fixture.run(outcomes, None, child).await;
+        assert_eq!(result.run.status, RunStatus::StoppedByHook);
+        assert_eq!(result.run.hook_stop_reason(), Some(Some("halt")));
+        assert!(result.run.assistant_message.is_none());
+        let (_, view) = fixture.reopen(result.session_id).await;
+        let tool = if child {
+            &view.runs[0].agents[1].tools[0]
+        } else {
+            &view.runs[0].tools[0]
+        };
+        assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+    }
 }
 
 fn narrowing_script(updated: &Value, only_when: &str) -> String {
@@ -3190,6 +3359,7 @@ mod lifecycle_hooks {
         use arany::test_support::{MAX_TOOL_CONTEXT_BYTES, tool_context_bytes};
 
         const THRESHOLD: usize = (MAX_TOOL_CONTEXT_BYTES * 2).div_ceil(3);
+        const STOPPED_UNCONSUMED: usize = 3;
         // Half-size pages leave room for shrinking result grants near the threshold.
         let page = arany::ToolLimits::default().result_bytes / 2;
         let reads = THRESHOLD.div_ceil(usize::try_from(page).unwrap()) + 2;
@@ -3205,14 +3375,20 @@ mod lifecycle_hooks {
             ),
             (
                 r#"printf '%s' '{"continue":false,"stopReason":"keep-context"}'"#,
-                HookResult::Blocked {
+                HookResult::Stopped {
                     reason: Some("keep-context".into()),
                 },
             ),
         ] {
             let settings =
                 json!({"hooks":{"PreCompact":[{"matcher":"auto","hooks":[shell_hook(script)]}]}});
-            let fixture = Fixture::new(Some(&settings), false);
+            let mut fixture = Fixture::new(Some(&settings), false);
+            // The stop lands at the first compaction pressure; every later scripted call stays unused.
+            fixture.expected_unconsumed = if matches!(expected, HookResult::Stopped { .. }) {
+                STOPPED_UNCONSUMED
+            } else {
+                0
+            };
             std::fs::write(
                 fixture.workspace.join("notes/data.txt"),
                 "x".repeat(usize::try_from(page).unwrap()),
@@ -3256,6 +3432,12 @@ mod lifecycle_hooks {
                     },
                 )
                 .await;
+            if matches!(expected, HookResult::Stopped { .. }) {
+                assert_eq!(result.run.status, RunStatus::StoppedByHook);
+                assert_eq!(provider.compact_requests.lock().unwrap().len(), 0);
+                assert_eq!(requests.len(), reads + 1 - STOPPED_UNCONSUMED);
+                continue;
+            }
             assert_eq!(result.run.status, RunStatus::Finished, "{expected:?}");
             assert_eq!(requests.len(), reads + 1);
             assert_eq!(humans, 0);

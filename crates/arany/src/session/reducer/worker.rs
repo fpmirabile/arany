@@ -1095,7 +1095,9 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
-                if w.outcome.is_some()
+                if (o.cause == WorkerCause::StoppedByHook)
+                    != (*disposition == AgentDisposition::StoppedByHook)
+                    || w.outcome.is_some()
                     || (*disposition == AgentDisposition::Finished)
                         != matches!(
                             o.disposition,

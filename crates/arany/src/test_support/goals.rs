@@ -465,10 +465,11 @@ impl crate::Provider for ForegroundWorkerProvider {
             (AgentPhase::ChildWork, 3) => {
                 let tools = request.input.tools.as_ref().unwrap();
                 self.check(
-                    tools
-                        .observations()
-                        .last()
-                        .is_some_and(|o| o.output.contains("edited a")),
+                    self.case == "hook_write_update"
+                        || tools
+                            .observations()
+                            .last()
+                            .is_some_and(|o| o.output.contains("edited a")),
                     "Read did not see acknowledged private edit",
                 );
                 if self.case == "conflict" {
@@ -480,7 +481,24 @@ impl crate::Provider for ForegroundWorkerProvider {
                 }
                 finish_with("Private changes ready")
             }
-            (AgentPhase::RootSynthesis, 0) if matches!(self.case, "success" | "unverified") => {
+            (AgentPhase::ChildWork, 4..=11) if self.case == "hook_stop_block" => {
+                self.check(
+                    request.input.stop_hook_feedback.len() == step - 3,
+                    "worker stop feedback was not retained",
+                );
+                finish_with("Private changes ready")
+            }
+            (AgentPhase::RootSynthesis, 0)
+                if matches!(
+                    self.case,
+                    "success"
+                        | "unverified"
+                        | "hook_write"
+                        | "hook_default_timeout"
+                        | "hook_stop_block"
+                        | "hook_handover_post"
+                ) =>
+            {
                 self.check(
                     std::fs::read(self.workspace.join("notes/a")).unwrap() == b"edited a",
                     "integration was not visible to primary",
