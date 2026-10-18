@@ -762,6 +762,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             observation: None,
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: None,
         }],
         tool_compaction_summary: None,
@@ -829,6 +830,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
     let mut child_tool = run.tools.pop().unwrap();
     child_tool.intent.id = uuid::Uuid::now_v7();
     run.agents.push(arany::AgentView {
+        profile: None,
         assignment: None,
         id: child_tool.intent.agent_run_id,
         role: arany::AgentRole::Child,

@@ -205,6 +205,7 @@ mod tests {
             config: None,
             agents: vec![
                 AgentView {
+                    profile: None,
                     assignment: None,
                     definition: None,
                     id: AgentRunId::new(),
@@ -219,6 +220,7 @@ mod tests {
                     status: AgentStatus::Finished,
                 },
                 AgentView {
+                    profile: None,
                     assignment: None,
                     definition: None,
                     id: AgentRunId::new(),

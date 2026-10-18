@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v13";
+const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v14";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -115,7 +115,7 @@ async fn probe(
         .run_streamed(&delegate, None, Some(preview))
         .await
         .map_err(|_| CustomProfileError::ConformanceFailed)?;
-    if !matches!(&delegate_response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].trim().is_empty() && observed.borrow().answer.is_empty())
+    if !matches!(&delegate_response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].objective.trim().is_empty() && value.children[0].profile.is_none() && observed.borrow().answer.is_empty())
     {
         return Err(CustomProfileError::ConformanceFailed);
     }
@@ -299,6 +299,21 @@ mod tests {
             assert_eq!(body["store"], false);
             assert_eq!(body["truncation"], "disabled");
             assert_eq!(body["text"]["format"]["strict"], true);
+            if let Some(delegate) =
+                body["text"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
+                    .as_array()
+                    .and_then(|branches| {
+                        branches
+                            .iter()
+                            .find(|branch| branch["properties"]["type"]["enum"][0] == "delegate")
+                    })
+            {
+                let assignment = &delegate["properties"]["children"]["items"];
+                assert_eq!(assignment["type"], "object");
+                assert_eq!(assignment["required"], json!(["objective", "profile"]));
+                assert_eq!(assignment["additionalProperties"], false);
+                assert_eq!(assignment["properties"]["profile"]["enum"], json!([null]));
+            }
             assert_eq!(
                 body.get("reasoning")
                     .map(|value| value["effort"].as_str().unwrap()),
@@ -359,7 +374,7 @@ mod tests {
                             json!({"outcome":{"type":"finish","summary":"ok","result":"test-key"}})
                         }
                         1 if streaming => {
-                            json!({"outcome":{"type":"delegate","children":["one read-only question"]}})
+                            json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                         }
                         _ if streaming && index != 0 => {
                             json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
@@ -368,7 +383,7 @@ mod tests {
                             json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
                         }
                         1 => {
-                            json!({"outcome":{"type":"delegate","children":["one read-only question"]}})
+                            json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                         }
                         _ => json!({"summary":"synthetic summary"}),
                     };

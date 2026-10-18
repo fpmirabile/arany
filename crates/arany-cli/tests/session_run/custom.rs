@@ -223,14 +223,14 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
             let text = match index {
                 0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
                 1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":["one read-only question"]}})
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
                 2 => serde_json::json!({"summary":"synthetic summary"}),
                 3 => {
                     serde_json::json!({"outcome":{"type":"finish","summary":"verified summary","result":"verified answer"}})
                 }
                 4 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":["one read-only question"]}})
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
                 5 => {
                     serde_json::json!({"outcome":{"type":"finish","summary":"child summary","result":"child result"}})
@@ -359,6 +359,58 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("pre-Run Event count");
     assert_eq!(event_count, 0);
+    drop(connection);
+
+    use sha2::Digest;
+    let mut old = sha2::Sha256::new();
+    let endpoint = format!("http://127.0.0.1:{port}/v1/responses");
+    for field in [
+        env!("CARGO_PKG_VERSION"),
+        "openai-responses-goal-contract-conformance-effort-stream-v13",
+        "local",
+        &endpoint,
+        "model-1",
+        "ARANY_PROVIDER_LOCAL_KEY",
+        "openai-responses",
+        "json_schema",
+        "user_authorized",
+        "4096",
+    ] {
+        old.update(u64::try_from(field.len()).unwrap().to_be_bytes());
+        old.update(field.as_bytes());
+    }
+    old.update(2_u32.to_be_bytes());
+    let old: [u8; 32] = old.finalize().into();
+    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
+    let current: Vec<u8> = connection
+        .query_row(
+            "SELECT profile_digest FROM provider_evidence WHERE profile_name='local'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(current, old);
+    connection
+        .execute(
+            "UPDATE provider_evidence SET profile_digest=?1 WHERE profile_name='local'",
+            [old.as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+    let stale_without_key = run_exec(&workspace, &state_path, None, "model-1");
+    assert!(!stale_without_key.status.success());
+    assert_eq!(stale_without_key.stdout, b"");
+    assert_eq!(
+        stale_without_key.stderr,
+        b"error: custom Provider evidence unavailable\n"
+    );
+    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE provider_evidence SET profile_digest=?1 WHERE profile_name='local'",
+            [current],
+        )
+        .unwrap();
     drop(connection);
 
     let wrong_model = run_exec(&workspace, &state_path, Some("test-key"), "model-2");
@@ -952,7 +1004,7 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
             );
             let outcome = match index {
                 1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":["read-only question"]}})
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"read-only question","profile":null}]}})
                 }
                 2 => serde_json::json!({"summary":"synthetic summary"}),
                 _ => {

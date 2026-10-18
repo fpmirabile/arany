@@ -221,7 +221,17 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 .min()
                 .unwrap_or(events.len())
         });
-        let observed = end - index;
+        // Admission reserves two Events per matched hook on top of the Tool's own.
+        let hook_events = events[*index..end]
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.event,
+                    Event::HookStarted { .. } | Event::HookFinished { .. }
+                )
+            })
+            .count();
+        let observed = end - index - hook_events;
         let providers = events[..=*index]
             .iter()
             .rev()
@@ -229,10 +239,25 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 Event::RunStarted { config, .. } => Some(config),
                 _ => None,
             })
-            .and_then(|config| config.providers.as_ref());
+            .map(|config| {
+                let mut routes = config
+                    .providers
+                    .clone()
+                    .unwrap_or_else(|| crate::Providers::all(vec![config.identity().unwrap()]));
+                if let Some(roster) = &config.roster
+                    && let Some(chain) = roster
+                        .child_profiles
+                        .iter()
+                        .filter_map(|name| roster.chain(name))
+                        .max_by_key(|chain| chain.len())
+                {
+                    routes.child = chain.to_vec();
+                }
+                routes
+            });
         let bound = providers.map_or_else(
             || action.max_events(),
-            |providers| action.max_events_for(providers),
+            |providers| action.max_events_for(&providers),
         );
         assert!(
             bound >= observed,

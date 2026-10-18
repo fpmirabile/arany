@@ -205,7 +205,7 @@ async fn probe_model_at(
         ..direct
     };
     let response = invoke_at(client, endpoint.clone(), access_token, &delegate, effort).await?;
-    if !matches!(&response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].trim().is_empty())
+    if !matches!(&response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].objective.trim().is_empty() && value.children[0].profile.is_none())
     {
         return Err(ProviderError::InvalidOutcome);
     }

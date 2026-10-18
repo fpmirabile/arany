@@ -246,7 +246,7 @@ pub(super) fn respond_after_catalog(
             "resp_check_delegate",
             "Synthetic conformance check: delegate exactly one",
             "arany_outcome",
-            serde_json::json!({"outcome": {"type": "delegate", "children": ["Explain two"]}}),
+            serde_json::json!({"outcome": {"type": "delegate", "children":[{"objective":"Explain two","profile":null}]}}),
         ),
         (
             "resp_check_compact",
@@ -302,7 +302,7 @@ pub(super) fn respond_after_catalog(
             "resp_team_plan",
             "root_plan",
             TEAM_OBJECTIVE,
-            serde_json::json!({"outcome": {"type": "delegate", "children": [TEAM_CHILD]}}),
+            serde_json::json!({"outcome": {"type": "delegate", "children": [{"objective": TEAM_CHILD, "profile": null}]}}),
         ),
         (
             "resp_team_child",

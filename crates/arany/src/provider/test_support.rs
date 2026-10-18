@@ -175,3 +175,26 @@ pub(crate) fn tool_surface_requests(model: &str) -> Vec<(&'static str, ProviderR
         ("researcher", researcher_request(model)),
     ]
 }
+
+pub(crate) fn assignment_shapes() -> Vec<(Value, bool)> {
+    vec![
+        (json!({"objective": "Inspect", "profile": null}), true),
+        (json!({"objective": "Inspect", "profile": "inspect"}), true),
+        (json!("Inspect"), false),
+        (json!({"objective": "Inspect"}), false),
+        (json!({"profile": null}), false),
+        (
+            json!({"objective": "Inspect", "profile": null, "model": "arbitrary"}),
+            false,
+        ),
+        (
+            json!({"objective": "Inspect", "profile": null, "provider": "arbitrary"}),
+            false,
+        ),
+        (json!({"objective": "Inspect", "profile": 1}), false),
+        (
+            json!({"objective": "Inspect", "profile": "../escape"}),
+            false,
+        ),
+    ]
+}

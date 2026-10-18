@@ -249,6 +249,11 @@ impl ToolCall {
         matches!(self, Self::CommandUnguarded { .. })
     }
 
+    // Engine preparation steps over snapshot-pinned input; never a model Tool, so no hook sees or narrows them.
+    pub(crate) fn is_internal(&self) -> bool {
+        matches!(self, Self::ParseAgentDefinition { .. })
+    }
+
     pub(crate) fn is_git_read(&self) -> bool {
         self.facts().family == Family::Git
     }

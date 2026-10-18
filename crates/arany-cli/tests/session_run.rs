@@ -2280,6 +2280,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                 },
                 Event::AgentSpawned {
+                    profile: None,
                     assignment: None,
                     definition: None,
                     run_id: interrupted_run,
@@ -2495,6 +2496,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 .append(
                     session_id,
                     Event::AgentSpawned {
+                        profile: None,
                         assignment: None,
                         definition: None,
                         run_id: next_run,

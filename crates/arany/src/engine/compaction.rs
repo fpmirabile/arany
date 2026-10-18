@@ -102,7 +102,7 @@ impl Engine {
                 Action::BoundaryCompaction {
                     goal: goal_id.is_some(),
                 }
-                .max_events_for(providers),
+                .max_events_for_admitted(providers),
                 0,
             )
             .await?;

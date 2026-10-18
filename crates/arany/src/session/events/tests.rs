@@ -1271,6 +1271,7 @@ mod child_grant_tests {
     fn child_grant_round_trips_and_rejects_missing_or_misplaced_pins() {
         let (run_id, agent_run_id) = (RunId::new(), AgentRunId::new());
         let spawned = |role, ordinal, objective: Option<&str>, grant| Event::AgentSpawned {
+            profile: None,
             assignment: None,
             definition: None,
             run_id,
@@ -1304,8 +1305,24 @@ mod child_grant_tests {
             Some("inspect"),
             Some(ChildGrant::ReadOnly),
         );
+        assert_eq!(payload_version(child.kind()), Some(9));
         let payload = child.payload().expect("child payload");
+        let mut named = child.clone();
+        if let Event::AgentSpawned { profile, .. } = &mut named {
+            *profile = Some("inspect".into());
+        }
+        assert_eq!(decode(&named, &named.payload().unwrap()).unwrap(), named);
         let mut value: serde_json::Value = serde_json::from_str(&payload).expect("JSON");
+        for profile in [
+            serde_json::json!("../inspect"),
+            serde_json::json!(""),
+            serde_json::json!("x".repeat(65)),
+            serde_json::json!(1),
+        ] {
+            let mut invalid = value.clone();
+            invalid["profile"] = profile;
+            assert!(decode(&child, &invalid.to_string()).is_err());
+        }
         assert!(
             Event::decode(
                 child.kind(),
@@ -1317,6 +1334,9 @@ mod child_grant_tests {
             .is_err_and(|error| matches!(error, ReplayError::UnknownEvent))
         );
         let mut missing = value.clone();
+        missing.as_object_mut().expect("object").remove("profile");
+        assert!(decode(&child, &missing.to_string()).is_err());
+        missing = value.clone();
         missing.as_object_mut().expect("object").remove("grant");
         assert!(decode(&child, &missing.to_string()).is_err());
         value["grant"] = serde_json::Value::Null;
@@ -1453,6 +1473,8 @@ mod payload_version_tests {
                 basis: crate::tools::permissions::PermissionSource::ExactCommandRule,
                 source: crate::tools::permissions::PermissionSource::ExactCommandRule,
                 approved: true,
+                hook_restriction: None,
+                hooks: 0,
             },
         };
         for event in [&started, &verdict] {
@@ -1469,7 +1491,7 @@ mod payload_version_tests {
             ));
         }
         assert_eq!(payload_version("ToolStarted"), Some(10));
-        assert_eq!(payload_version("ToolPermissionDecided"), Some(2));
+        assert_eq!(payload_version("ToolPermissionDecided"), Some(3));
     }
 
     #[test]

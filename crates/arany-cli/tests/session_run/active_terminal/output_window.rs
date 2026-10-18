@@ -16,11 +16,16 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
         &state,
         listener.local_addr().expect("Provider address").port(),
     );
+    listener.set_nonblocking(true).expect("bounded accept");
     let (request_sender, request_ready) = mpsc::channel();
     let (response_sender, response_ready) = mpsc::channel();
     let server = thread::spawn(move || {
         for index in 0..4 {
-            let (mut stream, _) = listener.accept().expect("Provider request");
+            let mut stream = crate::process::accept_with_deadline(
+                &listener,
+                Duration::from_secs(30),
+                "Provider request",
+            );
             let body = read_request(&mut stream);
             assert!(
                 !body
@@ -30,7 +35,7 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
             let text = match index {
                 0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
                 1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}})
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
                 2 => serde_json::json!({"summary":"synthetic summary"}),
                 _ => {

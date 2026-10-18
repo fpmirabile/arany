@@ -1233,6 +1233,7 @@ mod tests {
             images: Vec::new(),
             config: None,
             agents: vec![AgentView {
+                profile: None,
                 assignment: None,
                 definition: None,
                 id: AgentRunId::new(),

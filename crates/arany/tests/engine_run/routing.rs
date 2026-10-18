@@ -3,7 +3,7 @@ use super::*;
 use arany::test_support::routing::*;
 use arany::{ProviderRole, Providers};
 
-fn pin_roster(bindings: &mut arany::AdmittedProviders, spare: Option<Arc<dyn Provider>>) {
+fn pin_roster(bindings: &mut arany::AdmittedProviders, spare: Option<Vec<Arc<dyn Provider>>>) {
     let mut profiles = vec![
         ("child".to_owned(), bindings.roles.child.clone()),
         ("compaction".to_owned(), bindings.roles.compaction.clone()),
@@ -12,7 +12,7 @@ fn pin_roster(bindings: &mut arany::AdmittedProviders, spare: Option<Arc<dyn Pro
     ];
     let mut eligible = vec!["child".to_owned()];
     if let Some(spare) = spare {
-        profiles.push(("spare".into(), vec![spare]));
+        profiles.push(("spare".into(), spare));
         eligible.push("spare".into());
     }
     let mut snapshot = arany::RosterSnapshot {
@@ -52,7 +52,10 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
             ScriptedProvider::new(vec![
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
-                    children: vec!["Inspect".into()],
+                    children: vec![arany::ChildAssignment {
+                        objective: "Inspect".into(),
+                        profile: None,
+                    }],
                 }),
                 finish("done"),
             ])
@@ -77,7 +80,7 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
         bindings.roles.compaction = vec![compact.clone()];
         let spare = route(ScriptedProvider::new(vec![]).with_profile("scripted", "unused-model"));
         if named {
-            pin_roster(&mut bindings, Some(spare.clone()));
+            pin_roster(&mut bindings, Some(vec![spare.clone()]));
         }
         let engine = open(&state);
         let mut request = input(&workspace);
@@ -223,7 +226,16 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
         ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Inspect".into(), "Compare".into()],
+                children: vec![
+                    arany::ChildAssignment {
+                        objective: "Inspect".into(),
+                        profile: None,
+                    },
+                    arany::ChildAssignment {
+                        objective: "Compare".into(),
+                        profile: None,
+                    },
+                ],
             }),
             finish("done"),
         ])
@@ -833,5 +845,519 @@ async fn fallback_only_on_pre_output_call_failure_and_never_after_partial_output
                 assert!(SessionView::replay(result.session_id, &invalid).is_err());
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn assignment_profiles_keep_shared_first_routes_distinct_and_finish_in_assignment_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let primary = route(
+        ScriptedProvider::new(vec![
+            ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: vec![
+                    arany::ChildAssignment {
+                        objective: "A".into(),
+                        profile: None,
+                    },
+                    arany::ChildAssignment {
+                        objective: "B".into(),
+                        profile: Some("spare".into()),
+                    },
+                    arany::ChildAssignment {
+                        objective: "C".into(),
+                        profile: Some("spare".into()),
+                    },
+                ],
+            }),
+            finish("done"),
+        ])
+        .with_profile("scripted", "primary"),
+    );
+    let mut first = ScriptedProvider::new(vec![]).with_profile("scripted", "shared-first");
+    first.responses = Mutex::new(
+        vec![
+            Err(ProviderError::RemoteHttp(503)),
+            Err(ProviderError::RemoteHttp(503)),
+            Err(ProviderError::RemoteHttp(503)),
+        ]
+        .into(),
+    );
+    let first = route(first);
+    let (started, mut starts) = mpsc::unbounded_channel();
+    let fallback = |model: &str, cap| {
+        let mut identity = gated_identity(3);
+        identity.model = model.into();
+        identity.limits.max_output_tokens = cap;
+        Arc::new(GatedProvider {
+            started: started.clone(),
+            requests: Default::default(),
+            fail_child: None,
+            identity,
+        })
+    };
+    let default = fallback("default-fallback", 8);
+    let spare = fallback("spare-fallback", 11);
+    let mut bindings = routes(&primary);
+    bindings.roles.child = vec![first.clone(), default.clone()];
+    pin_roster(&mut bindings, Some(vec![first.clone(), spare.clone()]));
+    let engine = open(&state);
+    let mut request = input(&workspace);
+    request.policy = CollaborationPolicy::Team {
+        max_active_children: 3,
+    };
+    let mut progress = RunProgress::new();
+    let run = run_routed(
+        &engine,
+        bindings,
+        request,
+        RunControls {
+            progress: Some(progress.clone()),
+            ..Default::default()
+        },
+    );
+    let release = async {
+        let mut gates = HashMap::new();
+        for _ in 0..3 {
+            let (objective, release) = starts.recv().await.unwrap();
+            assert!(gates.insert(objective, release).is_none());
+        }
+        for objective in ["C", "B", "A"] {
+            gates.remove(objective).unwrap().send(()).unwrap();
+            loop {
+                let update = progress.changed().await;
+                if update.run.agents.iter().any(|agent| {
+                    agent.objective.as_deref() == Some(objective)
+                        && agent.status == AgentStatus::Finished
+                }) {
+                    break;
+                }
+            }
+        }
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(run, release)
+    })
+    .await
+    .unwrap();
+    let result = result.unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    engine.close().await.unwrap();
+    let (events, view) = reopen(&state, result.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(
+        run.agents
+            .iter()
+            .map(|agent| agent.profile.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("primary"), Some("child"), Some("spare"), Some("spare")]
+    );
+    let finished: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event.event {
+            Event::AgentFinished { agent_run_id, .. } => run
+                .agents
+                .iter()
+                .find(|agent| agent.id == agent_run_id)?
+                .objective
+                .as_deref(),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finished, ["C", "B", "A"]);
+    let primary_calls = primary.requests.lock().unwrap();
+    assert_eq!(primary_calls.len(), 2);
+    assert!(
+        primary_calls
+            .iter()
+            .all(|call| call.input.assignment_profiles == ["child", "spare"])
+    );
+    assert_eq!(
+        primary_calls[1]
+            .input
+            .child_results
+            .iter()
+            .map(|child| child.objective.as_str())
+            .collect::<Vec<_>>(),
+        ["A", "B", "C"]
+    );
+    let initial = first.requests.lock().unwrap();
+    assert_eq!(initial.len(), 3);
+    assert!(initial.iter().all(|call| call.model == "shared-first"
+        && call.phase == AgentPhase::ChildWork
+        && call.input.assignment_profiles.is_empty()));
+    for (provider, count, cap, objectives) in
+        [(&default, 1, 8, vec!["A"]), (&spare, 2, 11, vec!["B", "C"])]
+    {
+        let calls = provider.requests.lock().unwrap();
+        assert_eq!(calls.len(), count);
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.max_output_tokens == cap
+                    && call.input.assignment_profiles.is_empty())
+        );
+        let mut actual: Vec<_> = calls
+            .iter()
+            .map(|call| call.input.objective.as_str())
+            .collect();
+        actual.sort();
+        assert_eq!(actual, objectives);
+    }
+    assert_eq!(run.provider_fallbacks.len(), 3);
+    for change in 0..7 {
+        let mut invalid = events.clone();
+        let child_id = run.agents[1].id;
+        match change {
+            0..=3 => {
+                let profile = invalid
+                    .iter_mut()
+                    .find_map(|event| match &mut event.event {
+                        Event::AgentSpawned {
+                            agent_run_id,
+                            profile,
+                            ..
+                        } if *agent_run_id
+                            == if change == 3 {
+                                run.agents[0].id
+                            } else {
+                                child_id
+                            } =>
+                        {
+                            Some(profile)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                *profile = match change {
+                    0 => None,
+                    1 => Some("unknown".into()),
+                    2 => Some("review".into()),
+                    _ => Some("child".into()),
+                };
+            }
+            4 => {
+                let switch = invalid
+                    .iter_mut()
+                    .find_map(|event| match &mut event.event {
+                        Event::ProviderFallbackUsed {
+                            agent_run_id,
+                            fallback,
+                            ..
+                        } if *agent_run_id == child_id => Some(fallback),
+                        _ => None,
+                    })
+                    .unwrap();
+                switch.to = spare.identity.clone();
+            }
+            5 => {
+                let call = invalid
+                    .iter_mut()
+                    .find_map(|event| match &mut event.event {
+                        Event::ProviderCallRecorded {
+                            agent_run_id,
+                            record,
+                            ..
+                        } if *agent_run_id == child_id => Some(record),
+                        _ => None,
+                    })
+                    .unwrap();
+                call.output_tokens = Some(9);
+            }
+            _ => {
+                let spawn = invalid.iter().position(|event| matches!(event.event, Event::AgentSpawned { agent_run_id, .. } if agent_run_id == child_id)).unwrap();
+                let reserve = invalid.iter().position(|event| matches!(event.event, Event::GoalProviderCallReserved { agent_run_id, .. } if agent_run_id == child_id)).unwrap();
+                invalid.swap(spawn, reserve);
+                for (index, event) in invalid.iter_mut().enumerate() {
+                    event.sequence = u64::try_from(index + 1).unwrap();
+                }
+            }
+        }
+        assert!(
+            SessionView::replay(result.session_id, &invalid).is_err(),
+            "tampering {change}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_last_assignment_rejects_the_whole_plan_without_spawns_or_repair() {
+    for named in [false, true] {
+        for bad in [
+            arany::ChildAssignment {
+                objective: "Inspect".into(),
+                profile: Some("unknown".into()),
+            },
+            arany::ChildAssignment {
+                objective: "Inspect".into(),
+                profile: Some("review".into()),
+            },
+            arany::ChildAssignment {
+                objective: "Inspect".into(),
+                profile: Some("../escape".into()),
+            },
+            arany::ChildAssignment {
+                objective: " ".into(),
+                profile: None,
+            },
+            arany::ChildAssignment {
+                objective: "x".repeat(2049),
+                profile: None,
+            },
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let state = temp.path().join("state");
+            let primary = route(ScriptedProvider::new(vec![ProviderOutcome::Delegate(
+                Delegate {
+                    agent: None,
+                    children: vec![
+                        arany::ChildAssignment {
+                            objective: "Valid first".into(),
+                            profile: None,
+                        },
+                        bad,
+                    ],
+                },
+            )]));
+            let child = route(ScriptedProvider::new(vec![finish("forbidden dispatch")]));
+            let mut bindings = routes(&primary);
+            bindings.roles.child = vec![child.clone()];
+            if named {
+                pin_roster(&mut bindings, None);
+            }
+            let engine = open(&state);
+            let mut request = input(&workspace);
+            request.policy = CollaborationPolicy::Team {
+                max_active_children: 2,
+            };
+            let result = run_routed(&engine, bindings, request, RunControls::default())
+                .await
+                .unwrap();
+            assert_eq!(result.run.status, RunStatus::Failed);
+            engine.close().await.unwrap();
+            let (events, view) = reopen(&state, result.session_id).await;
+            assert_eq!(view.runs[0].agents.len(), 1);
+            assert_eq!(primary.requests.lock().unwrap().len(), 1);
+            assert!(child.requests.lock().unwrap().is_empty());
+            assert!(!events.iter().any(|event| matches!(
+                event.event,
+                Event::AgentSpawned {
+                    role: arany::AgentRole::Child,
+                    ..
+                }
+            )));
+            assert_eq!(
+                view.runs[0].agents[0].provider_calls[0].disposition,
+                ProviderCallDisposition::InvalidResponse
+            );
+        }
+    }
+}
+
+struct PreviewGate {
+    identity: arany::ProviderIdentity,
+    failing: bool,
+}
+
+impl PreviewGate {
+    fn route(model: &str, failing: bool) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            identity: arany::ProviderIdentity::new("gate", model, arany::Provenance::native()),
+            failing,
+        })
+    }
+
+    fn done() -> Result<arany::ProviderResponse, ProviderError> {
+        Ok(arany::ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
+            outcome: finish("child done"),
+            response_id: None,
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
+            wire_provenance: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for PreviewGate {
+    fn identity(&self) -> &arany::ProviderIdentity {
+        &self.identity
+    }
+
+    async fn invoke(
+        &self,
+        _: arany::ProviderRequest,
+    ) -> Result<arany::ProviderResponse, ProviderError> {
+        if self.failing {
+            return Err(ProviderError::RemoteHttp(503));
+        }
+        Self::done()
+    }
+
+    async fn invoke_with_preview(
+        &self,
+        _: arany::ProviderRequest,
+        preview: arany::ResponsePreview,
+    ) -> Result<arany::ProviderResponse, ProviderError> {
+        assert!(
+            self.failing,
+            "a single-route chain must not stream previews"
+        );
+        preview.publish(arany::PreviewText {
+            answer: "partial".into(),
+            ..Default::default()
+        })?;
+        Err(ProviderError::RemoteHttp(503))
+    }
+}
+
+#[tokio::test]
+async fn child_preview_follows_the_assigned_chain_not_the_default_child_chain() {
+    for assigned_routes in [1, 2] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let primary = route(
+            ScriptedProvider::new(vec![
+                ProviderOutcome::Delegate(Delegate {
+                    agent: None,
+                    children: vec![arany::ChildAssignment {
+                        objective: "Inspect".into(),
+                        profile: Some("spare".into()),
+                    }],
+                }),
+                finish("done"),
+            ])
+            .with_profile("scripted", "primary"),
+        );
+        let fallback = route(
+            ScriptedProvider::new(vec![finish("fallback")]).with_profile("scripted", "fallback"),
+        );
+        let assigned = if assigned_routes == 1 {
+            vec![PreviewGate::route("single", false)]
+        } else {
+            vec![PreviewGate::route("first", true), fallback.clone()]
+        };
+        let mut bindings = routes(&primary);
+        pin_roster(&mut bindings, Some(assigned));
+        let engine = open(&temp.path().join("state"));
+        let mut request = input(&workspace);
+        request.policy = CollaborationPolicy::Team {
+            max_active_children: 1,
+        };
+        let result = run_routed(&engine, bindings, request, RunControls::default())
+            .await
+            .unwrap();
+        if assigned_routes == 1 {
+            assert_eq!(result.run.status, RunStatus::Finished);
+        } else {
+            assert_eq!(result.run.status, RunStatus::Failed);
+            assert!(result.run.provider_fallbacks.is_empty());
+            assert!(fallback.requests.lock().unwrap().is_empty());
+        }
+        engine.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at_zero() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
+    let state = temp.path().join("state");
+    let mut primary = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            agent: None,
+            children: vec![
+                arany::ChildAssignment {
+                    objective: "A".into(),
+                    profile: None,
+                },
+                arany::ChildAssignment {
+                    objective: "B".into(),
+                    profile: Some("spare".into()),
+                },
+            ],
+        }),
+        finish("done"),
+    ])
+    .with_profile("scripted", "primary");
+    primary.identity.limits.concurrency = 1;
+    let primary = route(primary);
+    let mut first = ScriptedProvider::new(vec![]).with_profile("scripted", "shared-first");
+    first.responses = Mutex::new(
+        vec![
+            Err(ProviderError::RemoteHttp(503)),
+            Err(ProviderError::RemoteHttp(503)),
+        ]
+        .into(),
+    );
+    let first = route(first);
+    let fallback = |model| {
+        route(
+            ScriptedProvider::new(vec![
+                tool_outcome(
+                    arany::ToolCall::Read {
+                        path: "notes/facts.txt".into(),
+                        offset: 0,
+                        limit: 4096,
+                    },
+                    None,
+                ),
+                finish("read facts"),
+            ])
+            .with_profile("scripted", model),
+        )
+    };
+    let default = fallback("default-fallback");
+    let spare = fallback("spare-fallback");
+    let mut bindings = routes(&primary);
+    bindings.roles.child = vec![first.clone(), default.clone()];
+    pin_roster(&mut bindings, Some(vec![first.clone(), spare.clone()]));
+    let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
+    let mut request = input(&workspace);
+    request.policy = CollaborationPolicy::Team {
+        max_active_children: 2,
+    };
+    let result = run_routed(&engine, bindings, request, configured())
+        .await
+        .unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    engine.close().await.unwrap();
+    let (_, view) = reopen(&state, result.session_id).await;
+    assert_eq!(first.requests.lock().unwrap().len(), 2);
+    for provider in [&default, &spare] {
+        let calls = provider.requests.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].agent_run_id, calls[1].agent_run_id);
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.model == provider.identity.model
+                    && call.collaboration == CollaborationPolicy::Single
+                    && call.input.assignment_profiles.is_empty()
+                    && call.input.goal_context_facts.is_none())
+        );
+        assert_eq!(
+            calls[1].input.tools.as_ref().unwrap().observations().len(),
+            1
+        );
+    }
+    assert_eq!(view.runs[0].provider_fallbacks.len(), 2);
+    for child in view.runs[0].agents.iter().skip(1) {
+        assert_eq!(child.grant, Some(arany::ChildGrant::ReadOnly));
+        assert_eq!(child.tools.len(), 1);
+        assert_eq!(
+            child.tools[0].observation.as_ref().unwrap().disposition,
+            arany::ToolDisposition::Succeeded
+        );
     }
 }

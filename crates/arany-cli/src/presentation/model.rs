@@ -443,6 +443,7 @@ mod tests {
                 tool_policy: None,
             }),
             agents: std::iter::once(AgentView {
+                profile: None,
                 assignment: None,
                 definition: None,
                 id: AgentRunId::new(),
@@ -457,6 +458,7 @@ mod tests {
                 status: AgentStatus::Active,
             })
             .chain((1..=5).map(|ordinal| AgentView {
+                profile: None,
                 assignment: None,
                 definition: None,
                 id: AgentRunId::new(),
@@ -511,6 +513,7 @@ mod tests {
             observation: None,
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: None,
         });
         assert!(
@@ -695,6 +698,7 @@ mod tests {
             observation: None,
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: None,
         });
         let model = PresentationModel::from_session(&view, 80);

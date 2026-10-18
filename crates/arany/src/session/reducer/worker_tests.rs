@@ -559,6 +559,7 @@ pub(crate) fn fixture() -> Fixture {
         objective: None,
         grant: None,
         definition: None,
+        profile: None,
         assignment: None,
     });
     let parse = f.intent(
@@ -691,6 +692,7 @@ pub(crate) fn fixture() -> Fixture {
         objective: Some(pins.request.mission.clone()),
         grant: Some(ChildGrant::EditOnly),
         definition: Some("editor".into()),
+        profile: None,
         assignment: Some(pins),
     });
     f
@@ -802,6 +804,7 @@ fn worker_protocol_refuses_widened_stale_and_unsettled_transitions() {
     ] {
         let mut event = spawn.clone();
         let Event::AgentSpawned {
+            profile: None,
             assignment: Some(p),
             ..
         } = &mut event
@@ -1176,6 +1179,7 @@ fn worker_protocol_private_loss_is_local_and_c1_failure_remains_fatal() {
             objective: Some("Research".into()),
             grant: Some(ChildGrant::ReadOnly),
             definition: None,
+            profile: None,
             assignment: None,
         });
         f.call(
@@ -1335,7 +1339,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
     });
     let expected = [
         ("RunStarted", 13),
-        ("AgentSpawned", 8),
+        ("AgentSpawned", 9),
         ("ProviderCallRecorded", 7),
         ("AgentFinished", 7),
         ("ToolStarted", 10),
@@ -1529,6 +1533,7 @@ fn worker_protocol_nonoverlap_and_completion_order() {
     let mut f = fixture();
     let first = f.child;
     let Event::AgentSpawned {
+        profile: None,
         assignment: Some(mut pins),
         ..
     } = f.events.last().unwrap().clone()
@@ -1619,6 +1624,7 @@ fn worker_protocol_nonoverlap_and_completion_order() {
         objective: Some(pins.request.mission.clone()),
         grant: Some(ChildGrant::EditOnly),
         definition: Some("editor".into()),
+        profile: None,
         assignment: Some(pins),
     });
     f.changes.files[0].path = "src/b".into();
@@ -1670,6 +1676,7 @@ fn worker_protocol_escaped_assignment_bounds() {
     let mut f = fixture();
     let mut spawn = f.events.pop().unwrap();
     if let Event::AgentSpawned {
+        profile: None,
         assignment: Some(p),
         objective,
         ..
@@ -1869,6 +1876,7 @@ fn worker_protocol_sequence_ranges_allow_other_committed_facts() {
         e.sequence *= 2;
         match &mut e.event {
             Event::AgentSpawned {
+                profile: None,
                 assignment: Some(p),
                 ..
             } => {
@@ -1978,6 +1986,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
             .permission_mode = Some(PermissionMode::Default);
     }
     if let Event::AgentSpawned {
+        profile: None,
         assignment: Some(p),
         ..
     } = f.events.last_mut().unwrap()
@@ -2010,6 +2019,8 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
             basis: PermissionSource::Mode,
             source: PermissionSource::Mode,
             approved: true,
+            hook_restriction: None,
+            hooks: 0,
         },
     });
     let data = f.data(
@@ -2227,6 +2238,7 @@ fn worker_protocol_refused_base_capture_spends_its_slot_and_other_workers_procee
         objective: Some(second.mission.clone()),
         grant: Some(ChildGrant::EditOnly),
         definition: Some("editor".into()),
+        profile: None,
         assignment: Some(WorkerAssignment {
             request: second,
             grant,
@@ -2306,6 +2318,7 @@ fn worker_protocol_background_workers_let_the_primary_continue_before_release() 
                         }
                     }
                     Event::AgentSpawned {
+                        profile: None,
                         assignment: Some(pins),
                         ..
                     } => pins.request.mode = WorkerMode::Background,
@@ -2457,6 +2470,7 @@ fn worker_protocol_lineage_accepts_only_released_children_of_the_goal() {
             objective: Some(request.mission.clone()),
             grant: Some(ChildGrant::EditOnly),
             definition: Some("editor".into()),
+            profile: None,
             assignment: Some(WorkerAssignment {
                 request,
                 grant,
@@ -2468,6 +2482,48 @@ fn worker_protocol_lineage_accepts_only_released_children_of_the_goal() {
         });
         assert_eq!(f.view().runs[0].agents.len(), 3);
     }
+}
+
+#[test]
+fn worker_protocol_stop_after_publication_still_records_and_releases_as_integrated() {
+    let mut f = fixture();
+    f.mutation();
+    let data = f.finish_worker();
+    let h = f.handover(data.clone());
+    let intent = f.intent(
+        f.primary,
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::WorkerHandover {
+                assignment_id: f.child,
+                handover_sequence: h,
+                data,
+            },
+        },
+        EffectTarget::Workspace,
+    );
+    f.started(&intent);
+    let attestation = Some(Attestation::Guard(receipt(&intent)));
+    let finished = f.observed(&intent, ToolDisposition::Succeeded, attestation, "{}");
+    f.push(Event::WorkerStopObserved {
+        run_id: f.run,
+        agent_run_id: f.primary,
+        record: WorkerStopRecord {
+            reason: WorkerStopReason::Cancelled,
+        },
+    });
+    let recorded = f.push(Event::WorkerIntegrationRecorded {
+        run_id: f.run,
+        agent_run_id: f.primary,
+        record: WorkerIntegration {
+            assignment_id: f.child,
+            handover_sequence: h,
+            tool_id: intent.id,
+            finished_sequence: finished,
+            outcome: WorkerIntegrationOutcome::Integrated,
+        },
+    });
+    f.release(Some(h), recorded);
+    f.view();
 }
 
 #[test]
@@ -2494,6 +2550,7 @@ fn worker_protocol_command_criterion_requires_both_command_and_its_publication()
                 }
             }
             Event::AgentSpawned {
+                profile: None,
                 assignment: Some(p),
                 ..
             } => p.request.criterion = criterion.clone(),

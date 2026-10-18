@@ -510,12 +510,12 @@ fn inbound_end_turn_requires_exactly_one_text_block_as_finish_or_delegate() {
     let delegate = response(
         "end_turn",
         json!([text_block(
-            r#"{"outcome":{"type":"delegate","children":["a","b"]}}"#
+            r#"{"outcome":{"type":"delegate","children":[{"objective":"a","profile":null},{"objective":"b","profile":null}]}}"#
         )]),
     );
     assert!(matches!(
         decode(&request, &delegate).unwrap().outcome,
-        ProviderOutcome::Delegate(Delegate { children, agent: None }) if children == ["a", "b"]
+        ProviderOutcome::Delegate(Delegate { children, agent: None }) if children.iter().map(|child| child.objective.as_str()).collect::<Vec<_>>() == ["a", "b"]
     ));
 
     let compact = response("end_turn", json!([text_block(r#"{"summary":"short"}"#)]));
@@ -1408,7 +1408,7 @@ fn compaction_envelope_and_bound_fit_the_request_ceiling() {
 
 #[test]
 fn tool_surface_matches_the_checked_in_snapshot() {
-    let rendered: serde_json::Map<String, Value> =
+    let mut rendered: serde_json::Map<String, Value> =
         crate::provider::test_support::tool_surface_requests(MODEL)
             .into_iter()
             .map(|(label, request)| {
@@ -1418,6 +1418,15 @@ fn tool_surface_matches_the_checked_in_snapshot() {
                 )
             })
             .collect();
+    let mut assignment = primary_request(MODEL);
+    assignment.collaboration = CollaborationPolicy::Auto {
+        max_active_children: 3,
+    };
+    assignment.input.assignment_profiles = vec!["inspect".into(), "main".into()];
+    rendered.insert(
+        "assignment_outcome".into(),
+        crate::provider::run_outcome_schema(&assignment),
+    );
     let rendered = serde_json::to_string_pretty(&rendered).unwrap() + "\n";
     // Regenerate with ARANY_UPDATE_SNAPSHOTS=1, then review the diff.
     if std::env::var_os("ARANY_UPDATE_SNAPSHOTS").is_some() {
@@ -1434,4 +1443,39 @@ fn tool_surface_matches_the_checked_in_snapshot() {
         rendered == include_str!("../../snapshots/anthropic_tools.json"),
         "{rendered}"
     );
+}
+
+#[test]
+fn assignment_objects_pin_eligible_names_and_reject_malformed_or_reflected_fields() {
+    let mut request = read_only_request(MODEL);
+    request.phase = AgentPhase::RootPlan;
+    request.input.assignment_profiles = vec!["inspect".into()];
+    let schema = body(&request, Effort::High)["output_config"]["format"]["schema"].clone();
+    let delegate = schema["properties"]["outcome"]["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|branch| branch["properties"]["type"]["enum"][0] == "delegate")
+        .unwrap();
+    assert_eq!(
+        delegate["properties"]["children"]["items"]["properties"]["profile"]["enum"],
+        json!(["inspect", null])
+    );
+    for (child, valid) in crate::provider::test_support::assignment_shapes() {
+        let outcome = json!({"outcome": {"type": "delegate", "children": [child]}});
+        let fixture = response("end_turn", json!([text_block(&outcome.to_string())]));
+        assert_eq!(decode(&request, &fixture).is_ok(), valid);
+    }
+    for field in ["objective", "profile"] {
+        let mut child = json!({"objective": "Inspect", "profile": "inspect"});
+        child[field] = json!(KEY);
+        let outcome = json!({"outcome": {"type": "delegate", "children": [child]}});
+        assert!(
+            decode(
+                &request,
+                &response("end_turn", json!([text_block(&outcome.to_string())]))
+            )
+            .is_err()
+        );
+    }
 }

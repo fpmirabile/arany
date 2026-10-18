@@ -522,7 +522,7 @@ fn delegate_function_call_is_answered_by_a_fixed_output_before_the_child_results
         "completed",
         json!([function_call(
             "arany_delegate",
-            &json!({"children": ["inspect"]})
+            &json!({"children":[{"objective":"inspect","profile":null}]})
         )]),
     );
     let delegated = decode(&request, &reply).unwrap();
@@ -728,7 +728,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
             "completed",
             json!([function_call(
                 "arany_delegate",
-                &json!({"children": ["inspect"]})
+                &json!({"children":[{"objective":"inspect","profile":null}]})
             )]),
         );
         assert!(
@@ -886,7 +886,7 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
         ),
         (
             "arany_delegate",
-            json!({"children":["review supplied data"]}),
+            json!({"children":[{"objective":"review supplied data","profile":null}]}),
         ),
     ] {
         let fixture = response("completed", json!([function_call(name, &arguments)]));
@@ -954,7 +954,10 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
         ),
         (
             "unoffered outcome",
-            json!([function_call("arany_delegate", &json!({"children":["x"]}))]),
+            json!([function_call(
+                "arany_delegate",
+                &json!({"children":[{"objective":"x","profile":null}]})
+            )]),
         ),
     ] {
         let mut scoped = request.clone();
@@ -1256,8 +1259,8 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         assert!(decode(&request, &fixture).is_err());
     }
     assert!(matches!(
-        structured_outcome(r#"{"outcome":{"type":"delegate","children":["a","b"]}}"#).unwrap(),
-        ProviderOutcome::Delegate(Delegate { children, agent: None }) if children == ["a", "b"]
+        structured_outcome(r#"{"outcome":{"type":"delegate","children":[{"objective":"a","profile":null},{"objective":"b","profile":null}]}}"#).unwrap(),
+        ProviderOutcome::Delegate(Delegate { children, agent: None }) if children.iter().map(|child| child.objective.as_str()).collect::<Vec<_>>() == ["a", "b"]
     ));
     let bad_outputs = [
         response("incomplete", json!([message("{}")])),
@@ -1564,11 +1567,20 @@ fn compaction_envelope_and_bound_fit_the_request_ceiling() {
 
 #[test]
 fn tool_surface_matches_the_checked_in_snapshot() {
-    let rendered: serde_json::Map<String, Value> =
+    let mut rendered: serde_json::Map<String, Value> =
         crate::provider::test_support::tool_surface_requests(MODEL)
             .into_iter()
             .map(|(label, request)| (label.to_owned(), body(&request)["tools"].clone()))
             .collect();
+    let mut assignment = primary_request(MODEL);
+    assignment.collaboration = CollaborationPolicy::Auto {
+        max_active_children: 3,
+    };
+    assignment.input.assignment_profiles = vec!["inspect".into(), "main".into()];
+    rendered.insert(
+        "assignment_outcome".into(),
+        crate::provider::run_outcome_schema(&assignment),
+    );
     let rendered = serde_json::to_string_pretty(&rendered).unwrap() + "\n";
     // Regenerate with ARANY_UPDATE_SNAPSHOTS=1, then review the diff.
     if std::env::var_os("ARANY_UPDATE_SNAPSHOTS").is_some() {
@@ -1585,4 +1597,56 @@ fn tool_surface_matches_the_checked_in_snapshot() {
         rendered == include_str!("../../snapshots/openai_tools.json"),
         "{rendered}"
     );
+}
+
+#[test]
+fn assignment_objects_are_shared_by_structured_text_and_native_functions() {
+    let mut request = primary_request(MODEL);
+    request.collaboration = CollaborationPolicy::Team {
+        max_active_children: 2,
+    };
+    request.input.assignment_profiles = vec!["inspect".into(), "main".into()];
+    let planned = body(&request);
+    let delegate = planned["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "arany_delegate")
+        .unwrap();
+    let assignment = &delegate["parameters"]["properties"]["children"]["items"];
+    assert_eq!(assignment["required"], json!(["objective", "profile"]));
+    assert_eq!(assignment["additionalProperties"], false);
+    assert_eq!(
+        assignment["properties"]["profile"]["enum"],
+        json!(["inspect", "main", null])
+    );
+    request.phase = AgentPhase::RootSynthesis;
+    assert_eq!(planned["tools"], body(&request)["tools"]);
+    request.phase = AgentPhase::RootPlan;
+    for (child, valid) in crate::provider::test_support::assignment_shapes() {
+        let arguments = json!({"children": [child]});
+        let function = response(
+            "completed",
+            json!([function_call("arany_delegate", &arguments)]),
+        );
+        assert_eq!(decode(&request, &function).is_ok(), valid);
+        let mut text_request = request.clone();
+        text_request.input.role = crate::PromptRole::ReadOnly;
+        text_request.input.tools = None;
+        let outcome = json!({"outcome": {"type": "delegate", "children": arguments["children"]}});
+        let text = response("completed", json!([message(&outcome.to_string())]));
+        assert_eq!(decode(&text_request, &text).is_ok(), valid);
+    }
+    for field in ["objective", "profile"] {
+        let mut child = json!({"objective": "Inspect", "profile": "inspect"});
+        child[field] = json!(KEY);
+        let fixture = response(
+            "completed",
+            json!([function_call(
+                "arany_delegate",
+                &json!({"children": [child]})
+            )]),
+        );
+        assert!(decode(&request, &fixture).is_err());
+    }
 }

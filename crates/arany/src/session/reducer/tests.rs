@@ -29,6 +29,7 @@ mod goal_recovery_tests {
         };
         let tool = ToolView {
             permission_verdict: None,
+            hooks: Vec::new(),
             intent: intent.clone(),
             observation: disposition.map(|disposition| ToolObservation {
                 enforcement_cause: None,
@@ -285,6 +286,10 @@ mod goal_replay_tests {
         agent_run_id: AgentRunId,
         config: RunConfig,
     ) -> Vec<Event> {
+        let profile = config
+            .roster
+            .as_ref()
+            .map(|roster| roster.providers.primary.clone());
         vec![
             Event::GoalRunLinked {
                 goal_id,
@@ -302,6 +307,7 @@ mod goal_replay_tests {
                 active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
             },
             Event::AgentSpawned {
+                profile,
                 assignment: None,
                 definition: None,
                 run_id,
@@ -572,6 +578,173 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn assigned_profile_replay_checks_spawn_chain_and_exact_output_cap() {
+        use crate::provider::{
+            NamedProviderRoutes, ProviderFallback, ProviderRole, Providers, RosterSnapshot,
+        };
+        for inherited in [false, true] {
+            let (session, goal, run, primary, child) = (
+                SessionId::new(),
+                GoalId::new(),
+                RunId::new(),
+                AgentRunId::new(),
+                AgentRunId::new(),
+            );
+            let mut config = config(
+                CollaborationPolicy::Team {
+                    max_active_children: 2,
+                },
+                false,
+            );
+            let main = config.identity().unwrap();
+            let mut first = main.clone();
+            first.model = "shared-first".into();
+            let mut default = main.clone();
+            default.model = "default-fallback".into();
+            let mut spare = main.clone();
+            spare.model = "spare-fallback".into();
+            spare.limits.max_output_tokens = 16;
+            let mut snapshot = RosterSnapshot {
+                preset: "coding".into(),
+                selection_digest: [0; 32],
+                profiles: vec![
+                    NamedProviderRoutes {
+                        name: "child".into(),
+                        routes: if inherited {
+                            vec![main.clone()]
+                        } else {
+                            vec![first.clone(), default.clone()]
+                        },
+                    },
+                    NamedProviderRoutes {
+                        name: "main".into(),
+                        routes: vec![main],
+                    },
+                    NamedProviderRoutes {
+                        name: "spare".into(),
+                        routes: vec![first.clone(), spare.clone()],
+                    },
+                ],
+                providers: Providers {
+                    primary: "main".into(),
+                    child: "child".into(),
+                    review: "main".into(),
+                    compaction: "main".into(),
+                },
+                child_profiles: vec!["child".into(), "spare".into()],
+            };
+            snapshot.selection_digest = snapshot.digest().unwrap();
+            config.providers = if inherited {
+                None
+            } else {
+                snapshot.role_routes()
+            };
+            config.roster = Some(Box::new(snapshot));
+            let mut facts = vec![goal_started(goal, GoalBudget::default())];
+            facts.extend(start_run(goal, run, primary, config));
+            facts.extend([
+                Event::GoalProviderCallReserved {
+                    goal_id: goal,
+                    run_id: run,
+                    agent_run_id: primary,
+                    active_ceiling_ms: 0,
+                },
+                Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: primary,
+                    record: record(
+                        AgentPhase::RootPlan,
+                        ProviderCallDisposition::Delegated,
+                        Some(1),
+                    ),
+                },
+                Event::AgentSpawned {
+                    run_id: run,
+                    agent_run_id: child,
+                    role: AgentRole::Child,
+                    ordinal: 1,
+                    objective: Some("Inspect".into()),
+                    grant: Some(ChildGrant::NoTools),
+                    definition: None,
+                    profile: Some("spare".into()),
+                    assignment: None,
+                },
+                Event::GoalProviderCallReserved {
+                    goal_id: goal,
+                    run_id: run,
+                    agent_run_id: child,
+                    active_ceiling_ms: 0,
+                },
+                Event::ProviderFallbackUsed {
+                    run_id: run,
+                    agent_run_id: child,
+                    fallback: ProviderFallback {
+                        role: ProviderRole::Child,
+                        call_index: 0,
+                        failure: ProviderCallDisposition::Unavailable,
+                        from: first,
+                        to: spare,
+                    },
+                },
+                Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: child,
+                    record: record(
+                        AgentPhase::ChildWork,
+                        ProviderCallDisposition::Finished,
+                        Some(16),
+                    ),
+                },
+            ]);
+            let valid = session_with(session, facts);
+            let view = SessionView::replay_open(session, &valid).unwrap().unwrap();
+            assert_eq!(view.runs[0].agents[1].profile.as_deref(), Some("spare"));
+            assert_eq!(view.goals[0].provider_calls, 3);
+            assert!(view.goals[0].token_usage_unknown);
+            for change in 0..6 {
+                let mut invalid = valid.clone();
+                for event in &mut invalid {
+                    match &mut event.event {
+                        Event::AgentSpawned {
+                            agent_run_id,
+                            profile,
+                            ..
+                        } if *agent_run_id == child && change < 3 => {
+                            *profile = match change {
+                                0 => None,
+                                1 => Some("unknown".into()),
+                                _ => Some("main".into()),
+                            };
+                        }
+                        Event::AgentSpawned {
+                            agent_run_id,
+                            profile,
+                            ..
+                        } if *agent_run_id == primary && change == 3 => {
+                            *profile = Some("child".into())
+                        }
+                        Event::ProviderFallbackUsed { fallback, .. } if change == 4 => {
+                            fallback.to = default.clone()
+                        }
+                        Event::ProviderCallRecorded {
+                            agent_run_id,
+                            record,
+                            ..
+                        } if *agent_run_id == child && change == 5 => {
+                            record.output_tokens = Some(17)
+                        }
+                        _ => (),
+                    }
+                }
+                assert!(
+                    SessionView::replay_open(session, &invalid).is_err(),
+                    "tampering {change}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn provider_fallback_replay_requires_pinned_chain_reservation_role_and_budget() {
         use crate::provider::{ProviderFallback, ProviderRole, Providers};
         let (session, goal, run, actor) = (
@@ -776,6 +949,7 @@ mod goal_replay_tests {
             observation: None,
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: None,
         });
         apply(&mut elsewhere, reserve_child_call(goal, run, child)).expect("review reservation");
@@ -967,6 +1141,7 @@ mod goal_replay_tests {
                 ),
             });
             events.push(Event::AgentSpawned {
+                profile: None,
                 assignment: None,
                 definition: None,
                 run_id,
@@ -1069,6 +1244,7 @@ mod goal_replay_tests {
         };
         review.runs[0].tools.push(ToolView {
             permission_verdict: None,
+            hooks: Vec::new(),
             intent,
             observation: None,
             review_call_index: None,
@@ -1734,6 +1910,7 @@ mod goal_replay_tests {
                 }),
                 review_call_index: None,
                 permission_verdict: None,
+                hooks: Vec::new(),
                 finished_sequence: Some(2),
             });
             assert!(
@@ -1761,6 +1938,7 @@ mod goal_replay_tests {
             }),
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: Some(2),
         });
         newer.goals.push(newer_goal);
@@ -1784,6 +1962,7 @@ mod goal_replay_tests {
             }),
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: Some(2),
         });
         assert_eq!(
@@ -2420,6 +2599,7 @@ mod goal_replay_tests {
                     false,
                 )),
                 agents: vec![AgentView {
+                    profile: None,
                     assignment: None,
                     definition: None,
                     id: agent_run_id,
@@ -2491,6 +2671,7 @@ mod goal_replay_tests {
     fn apply_child_spawn(view: &mut SessionView, grant: ChildGrant) -> Result<(), ReplayError> {
         let run_id = view.runs[0].id;
         let event = Event::AgentSpawned {
+            profile: None,
             assignment: None,
             definition: None,
             run_id,
@@ -3044,6 +3225,7 @@ mod goal_replay_tests {
                 images: Vec::new(),
                 config: Some(config(CollaborationPolicy::Single, true)),
                 agents: vec![AgentView {
+                    profile: None,
                     assignment: None,
                     definition: None,
                     id: agent_run_id,
@@ -3074,6 +3256,7 @@ mod goal_replay_tests {
                 finished_sequence: None,
                 tools: vec![ToolView {
                     permission_verdict: None,
+                    hooks: Vec::new(),
                     intent: read_intent,
                     observation: Some(read),
                     review_call_index: None,
@@ -3193,6 +3376,7 @@ mod goal_replay_tests {
                     finished_sequence: Some(1),
                     tools: vec![ToolView {
                         permission_verdict: None,
+                        hooks: Vec::new(),
                         intent: write.intent.clone(),
                         observation: Some(write),
                         review_call_index: None,
@@ -3212,6 +3396,7 @@ mod goal_replay_tests {
                     images: Vec::new(),
                     config: Some(config(CollaborationPolicy::Single, true)),
                     agents: vec![AgentView {
+                        profile: None,
                         assignment: None,
                         definition: None,
                         id: agent_run_id,
@@ -3365,12 +3550,14 @@ mod goal_replay_tests {
                     basis: PermissionSource::Rule,
                     source: PermissionSource::Rule,
                     approved: false,
+                    hook_restriction: None,
+                    hooks: 0,
                 },
             };
             assert_eq!(
                 Event::decode(
                     "ToolPermissionDecided",
-                    2,
+                    3,
                     &verdict.payload().unwrap(),
                     Some(run),
                     Some(agent)
@@ -3420,6 +3607,241 @@ mod goal_replay_tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes() {
+        use crate::tools::permissions::{
+            Decision, HookEvent, HookIgnoreReason, HookInvocation, HookOutcome, HookResult,
+            PermissionMode, PermissionSource, PermissionVerdict,
+        };
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let intent = read_intent(run, agent, "src/lib.rs");
+        let hook_intent = child_intent(
+            run,
+            agent,
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 2".into()],
+                cwd: String::new(),
+            },
+        );
+        let started = |subject: [u8; 32], hook_intent: &EffectIntent| Event::HookStarted {
+            run_id: run,
+            agent_run_id: agent,
+            hook: HookInvocation {
+                event: HookEvent::PreToolUse,
+                group: 0,
+                handler: 0,
+                subject_digest: subject,
+                intent: hook_intent.clone(),
+                input_digest: [9; 32],
+            },
+        };
+        let finished = |observation: ToolObservation, result: HookResult| Event::HookFinished {
+            run_id: run,
+            agent_run_id: agent,
+            outcome: HookOutcome {
+                observation,
+                result,
+            },
+        };
+        let deny = HookResult::Restricted {
+            decision: Decision::Deny,
+            reason: Some("blocked".into()),
+        };
+        let verdict = |decision, restriction, hooks, basis| Event::ToolPermissionDecided {
+            run_id: run,
+            agent_run_id: agent,
+            verdict: PermissionVerdict {
+                intent_digest: intent.digest(),
+                decision,
+                mode: Some(PermissionMode::Default),
+                basis,
+                source: basis,
+                approved: false,
+                hook_restriction: restriction,
+                hooks,
+            },
+        };
+        assert!(rejected(&view, started(intent.digest(), &hook_intent)));
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        let mut hook_observation = observation_for(hook_intent.clone(), b"");
+        hook_observation.disposition = ToolDisposition::Failed;
+        hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "changeset": {"files": []}}).to_string();
+        assert!(rejected(
+            &view,
+            finished(hook_observation.clone(), deny.clone())
+        ));
+        assert!(rejected(&view, started([4; 32], &hook_intent)));
+        let mut foreign = hook_intent.clone();
+        foreign.policy_digest = [8; 32];
+        assert!(rejected(&view, started(intent.digest(), &foreign)));
+        apply(&mut view, started(intent.digest(), &hook_intent)).unwrap();
+        let second = child_intent(run, agent, hook_intent.call.clone());
+        assert!(rejected(&view, started(intent.digest(), &second)));
+        assert!(rejected(
+            &view,
+            verdict(
+                Decision::Deny,
+                Some(Decision::Deny),
+                1,
+                PermissionSource::Hook
+            )
+        ));
+        let other = observation_for(second.clone(), b"");
+        assert!(rejected(&view, finished(other, deny.clone())));
+        let ask_verdict = |source| Event::ToolPermissionDecided {
+            run_id: run,
+            agent_run_id: agent,
+            verdict: PermissionVerdict {
+                intent_digest: intent.digest(),
+                decision: Decision::Ask,
+                mode: Some(PermissionMode::Auto),
+                basis: PermissionSource::Mode,
+                source,
+                approved: true,
+                hook_restriction: Some(Decision::Ask),
+                hooks: 1,
+            },
+        };
+        assert!(ask_verdict(PermissionSource::Human).payload().is_ok());
+        assert!(ask_verdict(PermissionSource::AiReview).payload().is_err());
+        let forged_pass = finished(hook_observation.clone(), HookResult::Passed);
+        assert!(forged_pass.payload().is_err());
+        let mid = view.clone();
+        apply(&mut view, finished(hook_observation.clone(), deny.clone())).unwrap();
+        assert!(rejected(&view, started(intent.digest(), &second)));
+        for (decision, restriction, hooks, basis) in [
+            (
+                Decision::Deny,
+                Some(Decision::Deny),
+                0,
+                PermissionSource::Hook,
+            ),
+            (
+                Decision::Deny,
+                Some(Decision::Deny),
+                2,
+                PermissionSource::Hook,
+            ),
+            (Decision::Allow, None, 1, PermissionSource::Mode),
+            (Decision::Deny, None, 1, PermissionSource::Mode),
+            (
+                Decision::Ask,
+                Some(Decision::Ask),
+                1,
+                PermissionSource::Hook,
+            ),
+        ] {
+            assert!(
+                rejected(&view, verdict(decision, restriction, hooks, basis)),
+                "{decision:?} {restriction:?} {hooks}"
+            );
+        }
+        let mut forged = view.clone();
+        forged.runs[0].tools[0].hooks[0].outcome = Some(HookOutcome {
+            observation: hook_observation.clone(),
+            result: HookResult::Passed,
+        });
+        assert!(rejected(
+            &forged,
+            verdict(
+                Decision::Ask,
+                Some(Decision::Ask),
+                1,
+                PermissionSource::Hook
+            )
+        ));
+        assert!(rejected(
+            &forged,
+            verdict(
+                Decision::Deny,
+                Some(Decision::Deny),
+                1,
+                PermissionSource::Hook
+            )
+        ));
+        let accepted = verdict(
+            Decision::Deny,
+            Some(Decision::Deny),
+            1,
+            PermissionSource::Hook,
+        );
+        apply(&mut view, accepted.clone()).unwrap();
+        assert!(rejected(&view, accepted));
+
+        let allow_restriction = finished(
+            hook_observation.clone(),
+            HookResult::Restricted {
+                decision: Decision::Allow,
+                reason: None,
+            },
+        );
+        assert!(allow_restriction.payload().is_err());
+        let started_event = started(intent.digest(), &hook_intent);
+        assert!(started_event.payload().is_ok());
+        assert!(
+            started(
+                intent.digest(),
+                &child_intent(run, agent, read_intent(run, agent, "a").call)
+            )
+            .payload()
+            .is_err()
+        );
+        let payload = verdict(
+            Decision::Deny,
+            Some(Decision::Deny),
+            1,
+            PermissionSource::Hook,
+        )
+        .payload()
+        .unwrap();
+        assert!(matches!(
+            Event::decode("ToolPermissionDecided", 2, &payload, Some(run), Some(agent)),
+            Err(ReplayError::UnknownEvent)
+        ));
+
+        // An unknown hook outcome stops the Run exactly like an uncertain Tool.
+        let mut uncertain = observation_for(hook_intent.clone(), b"");
+        uncertain.disposition = ToolDisposition::Uncertain;
+        uncertain.attestation = None;
+        let not_completed = HookResult::Ignored {
+            why: HookIgnoreReason::NotCompleted,
+        };
+        // A Guard failure after dispatch carries the not-attempted cache outcome of any process.
+        uncertain.cache_update = CacheUpdate::NotAttempted;
+        let not_completed_event = finished(uncertain.clone(), not_completed.clone());
+        assert!(not_completed_event.payload().is_ok());
+        let mut after_uncertain = mid;
+        apply(&mut after_uncertain, not_completed_event).unwrap();
+        apply(
+            &mut after_uncertain,
+            verdict(
+                Decision::Deny,
+                Some(Decision::Deny),
+                1,
+                PermissionSource::Hook,
+            ),
+        )
+        .unwrap();
+        assert!(!after_uncertain.runs[0].tools[0].settled_without_stop());
+        let mut stopped = view.clone();
+        stopped.runs[0].tools[0].hooks[0].outcome = Some(HookOutcome {
+            observation: uncertain,
+            result: not_completed,
+        });
+        assert!(!stopped.runs[0].tools[0].settled_without_stop());
     }
 
     struct Unguarded {
@@ -3600,6 +4022,8 @@ mod goal_replay_tests {
                 basis,
                 source,
                 approved,
+                hook_restriction: None,
+                hooks: 0,
             },
         }
     }
@@ -3849,6 +4273,8 @@ mod goal_replay_tests {
                 basis,
                 source,
                 approved,
+                hook_restriction: None,
+                hooks: 0,
             },
         };
         let exact = |approved| {

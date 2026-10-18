@@ -11,7 +11,7 @@ use aws_lc_rs::hmac;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v14";
+const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v15";
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -226,7 +226,7 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         .invoke(delegate)
         .await
         .map_err(|_| NativeCheckError::ConformanceFailed)?;
-    if !matches!(&response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].trim().is_empty())
+    if !matches!(&response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].objective.trim().is_empty() && value.children[0].profile.is_none())
         || !valid_usage(response.usage.input_tokens, response.usage.output_tokens)
     {
         return Err(NativeCheckError::ConformanceFailed);
@@ -565,7 +565,10 @@ mod tests {
             } else {
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
-                    children: vec!["What is two?".into()],
+                    children: vec![crate::ChildAssignment {
+                        objective: "What is two?".into(),
+                        profile: None,
+                    }],
                 })
             };
             Ok(ProviderResponse {

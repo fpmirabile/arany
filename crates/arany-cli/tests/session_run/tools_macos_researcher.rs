@@ -229,7 +229,10 @@ done
             );
             let mut outcomes = vec![ProviderOutcome::Delegate(arany::Delegate {
                 agent: None,
-                children: vec!["Inspect native facts".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect native facts".into(),
+                    profile: None,
+                }],
             })];
             outcomes.extend(
                 calls

@@ -73,15 +73,28 @@ pub(super) fn read_request(stream: &mut TcpStream) -> Vec<u8> {
                 })
                 .expect("Content-Length");
             if request.len() >= header_end + body_len {
-                return request[header_end..header_end + body_len].to_vec();
+                let body = request[header_end..header_end + body_len].to_vec();
+                let streaming = serde_json::from_slice::<serde_json::Value>(&body)
+                    .is_ok_and(|value| value["stream"] == true);
+                LAST_REQUEST_STREAMING.set(Some(streaming));
+                return body;
             }
         }
     }
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+thread_local! {
+    static LAST_REQUEST_STREAMING: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+// The reply format follows the "stream" field of the request this thread read last.
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn send_response(stream: &mut TcpStream, index: usize, text: serde_json::Value) {
-    send_response_for(stream, index, text, index < 2);
+    let streaming = LAST_REQUEST_STREAMING
+        .get()
+        .expect("send_response needs a request read on this thread");
+    send_response_for(stream, index, text, streaming);
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]

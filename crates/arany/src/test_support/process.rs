@@ -274,10 +274,16 @@ pub fn accept_with_deadline(
     let deadline = Instant::now() + timeout;
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return stream,
+            Ok((stream, _)) => {
+                // BSD sockets inherit the listener's non-blocking mode; Linux sockets do not.
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking accepted stream");
+                return stream;
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 assert!(Instant::now() < deadline, "{context} missing");
-                std::thread::yield_now();
+                std::thread::sleep(Duration::from_millis(1));
             }
             Err(error) => panic!("{context} accept failed: {error}"),
         }

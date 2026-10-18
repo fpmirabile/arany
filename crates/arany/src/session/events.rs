@@ -144,7 +144,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "GoalSteeringNoteRecorded"
         | "AssistantDisplayRecorded"
         | "MessageCommitted" => Some(6),
-        "AgentSpawned" => Some(8),
+        "AgentSpawned" => Some(9),
         "AgentFinished" | "ProviderCallRecorded" => Some(7),
         "WorkerDataChunk"
         | "WorkerDataSealed"
@@ -156,7 +156,8 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "WorkerVerificationRecorded" => Some(1),
         "GoalStarted" | "GoalFinished" => Some(7),
         "ProviderFallbackUsed" => Some(1),
-        "ToolPermissionDecided" => Some(2),
+        "ToolPermissionDecided" => Some(3),
+        "HookStarted" | "HookFinished" => Some(1),
         "ToolFinished" => Some(11),
         "RunStarted" => Some(13),
         "RunFinished" => Some(7),
@@ -282,6 +283,7 @@ pub enum Event {
         objective: Option<String>,
         grant: Option<ChildGrant>,
         definition: Option<String>,
+        profile: Option<String>,
         assignment: Option<WorkerAssignment>,
     },
     ProviderFallbackUsed {
@@ -337,6 +339,16 @@ pub enum Event {
         run_id: RunId,
         agent_run_id: AgentRunId,
         verdict: crate::tools::permissions::PermissionVerdict,
+    },
+    HookStarted {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        hook: crate::tools::permissions::HookInvocation,
+    },
+    HookFinished {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        outcome: crate::tools::permissions::HookOutcome,
     },
     AgentFinished {
         run_id: RunId,
@@ -536,6 +548,8 @@ struct GoalSteeringNotePayload {
 #[serde(deny_unknown_fields)]
 struct SpawnPayload {
     #[serde(deserialize_with = "Option::deserialize")]
+    profile: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     assignment: Option<WorkerAssignment>,
     #[serde(deserialize_with = "Option::deserialize")]
     definition: Option<String>,
@@ -611,6 +625,8 @@ impl Event {
             Self::ToolStarted { .. } => "ToolStarted",
             Self::ToolFinished { .. } => "ToolFinished",
             Self::ToolPermissionDecided { .. } => "ToolPermissionDecided",
+            Self::HookStarted { .. } => "HookStarted",
+            Self::HookFinished { .. } => "HookFinished",
             Self::AgentFinished { .. } => "AgentFinished",
             Self::WorkerDataChunk { .. } => "WorkerDataChunk",
             Self::WorkerDataSealed { .. } => "WorkerDataSealed",
@@ -715,6 +731,16 @@ impl Event {
                 ..
             }
             | Self::ToolPermissionDecided {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::HookStarted {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::HookFinished {
                 run_id,
                 agent_run_id,
                 ..
@@ -835,9 +861,11 @@ impl Event {
                 objective,
                 grant,
                 definition,
+                profile,
                 assignment,
                 ..
             } => serialize(&SpawnPayload {
+                profile: profile.clone(),
                 assignment: assignment.clone(),
                 definition: definition.clone(),
                 role: *role,
@@ -887,6 +915,8 @@ impl Event {
             }),
             Self::ToolFinished { observation, .. } => serialize(observation),
             Self::ToolPermissionDecided { verdict, .. } => serialize(verdict),
+            Self::HookStarted { hook, .. } => serialize(hook),
+            Self::HookFinished { outcome, .. } => serialize(outcome),
             Self::AgentFinished {
                 disposition,
                 summary,
@@ -1078,6 +1108,7 @@ impl Event {
                     objective: data.objective,
                     grant: data.grant,
                     definition: data.definition,
+                    profile: data.profile,
                     assignment: data.assignment,
                 }
             }
@@ -1168,6 +1199,16 @@ impl Event {
                     verdict: parse(payload)?,
                 }
             }
+            "HookStarted" if run_id.is_some() && agent_run_id.is_some() => Self::HookStarted {
+                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                hook: parse(payload)?,
+            },
+            "HookFinished" if run_id.is_some() && agent_run_id.is_some() => Self::HookFinished {
+                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                outcome: parse(payload)?,
+            },
             "MessageCommitted" if run_id.is_some() && agent_run_id.is_none() => {
                 Self::MessageCommitted {
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
@@ -1204,6 +1245,8 @@ impl Event {
             | "ToolStarted"
             | "ToolFinished"
             | "ToolPermissionDecided"
+            | "HookStarted"
+            | "HookFinished"
             | "MessageCommitted"
             | "RunFinished" => {
                 return Err(ReplayError::InvalidPayload);

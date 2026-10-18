@@ -1,10 +1,11 @@
 use super::agent::names_child;
 use super::{
-    AgentStatus, RunView, SessionView, ToolView, active_run, active_run_goal, current_goal_mut,
-    observed_command_changeset, pending_tool_requests,
+    AgentStatus, HookView, RunView, SessionView, ToolView, active_run, active_run_goal,
+    current_goal_mut, observed_command_changeset, pending_tool_requests,
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{Event, GoalPhase, ProviderCallDisposition, ReplayError};
+use crate::tools::permissions::{Decision, MAX_HOOKS_PER_OCCURRENCE};
 
 pub(super) fn apply(
     current: &mut SessionView,
@@ -144,7 +145,92 @@ pub(super) fn apply(
             if exact_rule && !(rules_pinned && tool.intent.call.is_unguarded()) {
                 return Err(ReplayError::InvalidTransition);
             }
+            let hooks_open = tool.hooks.iter().any(|hook| hook.outcome.is_none());
+            let folded = tool
+                .hooks
+                .iter()
+                .filter_map(|hook| hook.outcome.as_ref())
+                .fold(Decision::Allow, |folded, outcome| {
+                    folded.narrow(outcome.result.restriction())
+                });
+            let stopped = tool.hooks.iter().any(|hook| {
+                hook.outcome
+                    .as_ref()
+                    .is_some_and(|outcome| outcome.observation.stops_run())
+            });
+            let hooks_explained = match verdict.hook_restriction {
+                None => folded == Decision::Allow && !stopped,
+                Some(Decision::Ask) => folded == Decision::Ask && !stopped,
+                Some(_) => folded == Decision::Deny || stopped || verdict.hooks == 0,
+            };
+            if hooks_open || usize::from(verdict.hooks) != tool.hooks.len() || !hooks_explained {
+                return Err(ReplayError::InvalidTransition);
+            }
             tool.permission_verdict = Some(verdict.clone());
+        }
+        Event::HookStarted {
+            run_id,
+            agent_run_id,
+            hook,
+        } => {
+            let run = active_run(current, *run_id)?;
+            if !permissions_pinned(run)
+                || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let tool = pending_tool(run, *agent_run_id)?;
+            let finished_restriction = tool.hooks.iter().any(|view| {
+                view.outcome.as_ref().is_none_or(|outcome| {
+                    outcome.result.restriction() == Decision::Deny
+                        || outcome.observation.stops_run()
+                })
+            });
+            if tool.permission_verdict.is_some()
+                || tool.observation.is_some()
+                || tool.intent.call.is_internal()
+                || hook.subject_digest != tool.intent.digest()
+                || hook.intent.policy_digest != tool.intent.policy_digest
+                || hook.intent.workspace_device != tool.intent.workspace_device
+                || hook.intent.workspace_inode != tool.intent.workspace_inode
+                || hook.intent.id == tool.intent.id
+                || tool.hooks.len() >= MAX_HOOKS_PER_OCCURRENCE
+                || finished_restriction
+                || tool
+                    .hooks
+                    .iter()
+                    .any(|view| view.invocation.intent.id == hook.intent.id)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            tool.hooks.push(HookView {
+                invocation: hook.clone(),
+                outcome: None,
+            });
+        }
+        Event::HookFinished {
+            run_id,
+            agent_run_id,
+            outcome,
+        } => {
+            let run = active_run(current, *run_id)?;
+            if !permissions_pinned(run)
+                || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let tool = pending_tool(run, *agent_run_id)?;
+            if tool.permission_verdict.is_some() || tool.observation.is_some() {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let view = tool
+                .hooks
+                .last_mut()
+                .filter(|view| {
+                    view.outcome.is_none() && view.invocation.intent == outcome.observation.intent
+                })
+                .ok_or(ReplayError::InvalidTransition)?;
+            view.outcome = Some(outcome.clone());
         }
         Event::ToolStarted {
             run_id,
@@ -243,6 +329,7 @@ pub(super) fn apply(
                 observation: None,
                 review_call_index: None,
                 permission_verdict: None,
+                hooks: Vec::new(),
                 finished_sequence: None,
             });
             record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
@@ -377,6 +464,13 @@ pub(super) fn apply(
         _ => return Err(ReplayError::InvalidTransition),
     }
     Ok(())
+}
+
+fn permissions_pinned(run: &RunView) -> bool {
+    run.config
+        .as_ref()
+        .and_then(|config| config.tool_policy.as_ref())
+        .is_some_and(|policy| policy.permissions_digest.is_some())
 }
 
 fn pending_tool(

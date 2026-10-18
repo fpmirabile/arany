@@ -875,7 +875,7 @@ pub(super) async fn execute_inner(
 }
 
 impl Task {
-    fn new(
+    pub(super) fn new(
         runtime: &ToolRuntime,
         intent: &EffectIntent,
         cache: Option<super::BuildCacheTransfer>,
@@ -884,6 +884,7 @@ impl Task {
             config: runtime.config.clone(),
             intent: intent.clone(),
             cache,
+            hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
             definition: runtime.definitions.payload(&intent.call)?,
             workspace: runtime.workspace.clone(),
             guard_executable: runtime.guard_executable.clone(),
@@ -908,6 +909,7 @@ impl Task {
             context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
             queue_progress: None,
             active_action_gate: None,
+            hook_stdin: self.hook_stdin.map(Into::into),
             cache_state: None,
             config: self.config,
             workspace: self.workspace,
@@ -1231,6 +1233,7 @@ mod tests {
             },
             config,
             cache: None,
+            hook_stdin: None,
             workspace,
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
@@ -1432,6 +1435,7 @@ mod tests {
             },
             config,
             cache: None,
+            hook_stdin: None,
             workspace: workspace.clone(),
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,

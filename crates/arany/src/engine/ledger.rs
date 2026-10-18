@@ -53,7 +53,30 @@ impl Action {
     }
 
     pub fn max_events_for<T>(self, providers: &Providers<Vec<T>>) -> usize {
-        let switches = |role| providers.get(role).len().saturating_sub(1);
+        self.max_events_with_lengths(Providers {
+            primary: providers.primary.len(),
+            child: providers.child.len(),
+            review: providers.review.len(),
+            compaction: providers.compaction.len(),
+        })
+    }
+
+    pub fn max_events_for_admitted(self, providers: &crate::AdmittedProviders) -> usize {
+        self.max_events_with_lengths(Providers {
+            primary: providers.primary.len(),
+            child: providers
+                .child_chains()
+                .into_iter()
+                .map(Vec::len)
+                .max()
+                .unwrap_or(1),
+            review: providers.review.len(),
+            compaction: providers.compaction.len(),
+        })
+    }
+
+    fn max_events_with_lengths(self, lengths: Providers<usize>) -> usize {
+        let switches = |role| lengths.get(role).saturating_sub(1);
         self.max_events().saturating_add(match self {
             Self::ProviderCall { .. } => switches(ProviderRole::Primary),
             Self::Child {

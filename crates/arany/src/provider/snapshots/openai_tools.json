@@ -1,4 +1,92 @@
 {
+  "assignment_outcome": {
+    "additionalProperties": false,
+    "properties": {
+      "outcome": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "result": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "finish"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "summary",
+              "result"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "agent": {
+                "description": "Admitted agent definition name, or null for the default researcher. Editors are unsupported.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "children": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "objective": {
+                      "type": "string"
+                    },
+                    "profile": {
+                      "description": "Eligible admitted profile, or null for the pinned child default.",
+                      "enum": [
+                        "inspect",
+                        "main",
+                        null
+                      ],
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "objective",
+                    "profile"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "type": {
+                "enum": [
+                  "delegate"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "children",
+              "agent"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "required": [
+      "outcome"
+    ],
+    "type": "object"
+  },
   "primary": [
     {
       "description": "List immediate directory entries. This does not read or edit file contents.",

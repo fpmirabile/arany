@@ -200,9 +200,14 @@ impl<'a> RunLoop<'a> {
                 agent.id == self.primary_id || agent.status != crate::session::AgentStatus::Active
             });
             let has_uncertain_tool = run.tools.iter().any(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.disposition == crate::tools::ToolDisposition::Uncertain
-                })
+                tool.observation
+                    .iter()
+                    .chain(tool.hooks.iter().filter_map(|hook| {
+                        hook.outcome.as_ref().map(|outcome| &outcome.observation)
+                    }))
+                    .any(|observation| {
+                        observation.disposition == crate::tools::ToolDisposition::Uncertain
+                    })
             });
             let action_cancelled = run.tools.iter().any(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
@@ -302,7 +307,7 @@ impl<'a> RunLoop<'a> {
             self.journal
                 .admit(
                     self.session_id,
-                    action.max_events_for(&self.routing.providers),
+                    action.max_events_for_admitted(&self.routing.providers),
                     action.tool_observations(),
                 )
                 .await?;
@@ -1010,8 +1015,8 @@ fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> 
                     d.children
                         .iter()
                         .map(
-                            |objective| crate::session::worker::ChildAssignment::Researcher {
-                                objective: objective.clone(),
+                            |child| crate::session::worker::ChildAssignment::Researcher {
+                                objective: child.objective.clone(),
                                 definition: d.agent.clone(),
                             },
                         )

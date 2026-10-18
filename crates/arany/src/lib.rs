@@ -41,8 +41,8 @@ pub use journal::{Subscription, Tapped};
 pub use provider::semantic;
 pub use provider::{
     AdmittedProviders, AdmittedRoster, AgentPhase, AnthropicProvider, CallLimits, ChatGptAdmission,
-    ChatGptProvenance, ChatGptProvider, ChildResult, CompactionItem, CompactionRequest,
-    CompactionResponse, CustomProfile, CustomProfileCheck, CustomProfileError,
+    ChatGptProvenance, ChatGptProvider, ChildAssignment, ChildResult, CompactionItem,
+    CompactionRequest, CompactionResponse, CustomProfile, CustomProfileCheck, CustomProfileError,
     CustomProfileProvenance, CustomProvider, Delegate, Effort, Finish, GoalContextFacts,
     HistoryTurn, ImageAttachment, ImageOrigin, MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_IMAGE_BYTES,
     MAX_MESSAGE_IMAGES, MAX_NATIVE_API_KEY_BYTES, MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_SWITCHES,

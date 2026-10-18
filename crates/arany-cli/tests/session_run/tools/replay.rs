@@ -154,6 +154,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
         },
         Event::AgentSpawned {
+            profile: None,
             assignment: None,
             definition: None,
             run_id: run,

@@ -375,6 +375,7 @@ struct AdmittedTurn {
 }
 
 struct RootInput<'a> {
+    assignment_profiles: Vec<String>,
     tool_context: Option<crate::tools::ToolContext>,
     inputs: &'a mut WorkspaceInputs,
     images: Vec<crate::provider::ProviderImage>,
@@ -1179,6 +1180,11 @@ impl Engine {
                     objective,
                     budget,
                     RootInput {
+                        assignment_profiles: submission
+                            .providers
+                            .roster
+                            .as_ref()
+                            .map_or_else(Vec::new, |roster| roster.snapshot.child_profiles.clone()),
                         tool_context,
                         inputs: &mut inputs,
                         images,
@@ -1323,6 +1329,10 @@ impl Engine {
             images,
         };
         ledger.append(&self.journal, session_id, accepted).await?;
+        let profile = config
+            .roster
+            .as_ref()
+            .map(|roster| roster.providers.primary.clone());
         let started = Event::RunStarted {
             run_id,
             config,
@@ -1330,6 +1340,7 @@ impl Engine {
         };
         ledger.append(&self.journal, session_id, started).await?;
         let spawned = Event::AgentSpawned {
+            profile,
             assignment: None,
             definition: None,
             run_id,
@@ -1462,7 +1473,7 @@ impl Engine {
             steering: submission.steering.is_some(),
         };
         let event_slots = RUN_START_EVENTS
-            + first_action.max_events_for(&submission.providers)
+            + first_action.max_events_for_admitted(&submission.providers)
             + usize::from(request.session_id.is_none());
         self.journal
             .admit_run_start(session_id, event_slots)
@@ -1865,6 +1876,7 @@ fn root_request(
         model: identity.model.clone(),
         max_output_tokens: identity.limits.max_output_tokens,
         input: RunInput {
+            assignment_profiles: input.assignment_profiles,
             images: input.images,
             goal_budget: Some(budget),
             goal_plan_contract: goal.plan_contract.clone(),

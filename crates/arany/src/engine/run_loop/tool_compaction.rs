@@ -108,7 +108,7 @@ impl RunLoop<'_> {
         self.journal
             .admit(
                 self.session_id,
-                Action::Compaction.max_events_for(&self.routing.providers),
+                Action::Compaction.max_events_for_admitted(&self.routing.providers),
                 0,
             )
             .await?;

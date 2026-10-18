@@ -148,6 +148,7 @@ pub(crate) struct ToolRuntime {
     context_limit_bytes: usize,
     queue_progress: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
     active_action_gate: Option<tokio::sync::mpsc::Sender<ActiveActionRequest>>,
+    hook_stdin: Option<std::sync::Arc<str>>,
     cache_state: Option<std::sync::Arc<StateRoot>>,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
@@ -183,6 +184,16 @@ impl ToolRuntime {
         let mut runtime = self.clone();
         runtime.active_action_gate = Some(sender);
         runtime
+    }
+
+    pub(crate) fn with_hook_stdin(&self, stdin: &str) -> Self {
+        let mut runtime = self.clone();
+        runtime.hook_stdin = Some(stdin.into());
+        runtime
+    }
+
+    pub(crate) fn hook_task_fits(&self, intent: &EffectIntent) -> bool {
+        guard::task_fits(self, intent)
     }
 
     pub(crate) async fn begin_active_action(
@@ -398,6 +409,7 @@ impl ToolRuntime {
             unguarded_rules,
             queue_progress: None,
             active_action_gate: None,
+            hook_stdin: None,
             cache_state: Some(std::sync::Arc::new(
                 state
                     .try_clone()

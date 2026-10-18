@@ -204,11 +204,11 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
             let text = match index {
                 0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
                 1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}})
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
                 2 => serde_json::json!({"summary":"synthetic summary"}),
                 4 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":["child one","child two"]}})
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child one","profile":null},{"objective":"child two","profile":null}]}})
                 }
                 _ => {
                     serde_json::json!({"outcome":{"type":"finish","summary":"SUMMARY_SECRET_CANARY","result":"RESULT_SECRET_CANARY"}})

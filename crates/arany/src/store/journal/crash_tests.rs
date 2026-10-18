@@ -116,6 +116,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
                 active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
             },
             Event::AgentSpawned {
+                profile: None,
                 assignment: None,
                 definition: None,
                 run_id,
