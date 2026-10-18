@@ -1,6 +1,6 @@
 use super::ToolError;
 use super::catalog::string;
-use super::guard::{GuardContext, capture, payload};
+use super::guard::{GuardContext, capture, payload, spawn_before};
 use super::types::{CommandResult, ToolCall, valid_name, valid_relative};
 use serde_json::{Value, json};
 
@@ -64,10 +64,11 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         &site.config.runtime_grants,
         site.intent.limits.cache_bytes > 0,
     )?;
+    let runtime = site.remaining_runtime();
     let (status, out, err) = capture(
-        command.spawn().map_err(|_| ToolError::Operation)?,
+        spawn_before(&mut command, tokio::time::Instant::now() + runtime)?,
         (site.intent.limits.result_bytes as usize / 2).saturating_sub(128),
-        site.remaining_runtime(),
+        runtime,
     )
     .await?;
     #[cfg(target_os = "linux")]

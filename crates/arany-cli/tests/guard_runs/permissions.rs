@@ -542,7 +542,7 @@ async fn permission_dispatch_over_maximum_command_timeout_limits_before_deny() {
 
 #[tokio::test]
 async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and_reaps_it() {
-    let marker = format!("{}", 30 + std::process::id() % 1000);
+    let marker = format!("30.{}", std::process::id());
     let survivors = || {
         let listing = std::process::Command::new("ps")
             .args(["-A", "-o", "command="])
@@ -550,18 +550,19 @@ async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and
             .expect("process listing");
         String::from_utf8_lossy(&listing.stdout)
             .lines()
-            .filter(|line| line.trim_start().starts_with(&format!("sleep {marker}")))
+            .filter(|line| line.trim() == format!("sleep {marker}"))
             .count()
     };
     let mut fixture = Fixture::new(None, true);
-    fixture.command_maximum = Some(1_000);
+    // The intent expires one runtime after issue, and macOS storage preparation must fit before it.
+    fixture.command_maximum = Some(10_000);
     let call = arany::ToolCall::Command {
         program: "sh".into(),
         args: vec!["-c".into(), format!("sleep {marker} & sleep {marker}")],
         cwd: "".into(),
     };
     let mut plan = plan(&call);
-    plan.command_timeout_ms = Some(1_000);
+    plan.command_timeout_ms = Some(10_000);
     let (result, _, _) = fixture
         .run(
             vec![tool_outcome(call, Some(Box::new(plan))), finish("answer")],

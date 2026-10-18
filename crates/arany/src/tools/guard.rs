@@ -821,6 +821,16 @@ pub(super) async fn reap_owned_child(
     child.wait().await
 }
 
+pub(super) fn spawn_before(
+    command: &mut Command,
+    deadline: tokio::time::Instant,
+) -> Result<Child, ToolError> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err(ToolError::Limit);
+    }
+    command.spawn().map_err(|_| ToolError::Operation)
+}
+
 pub(super) async fn capture(
     mut child: Child,
     cap: usize,
@@ -1375,6 +1385,22 @@ mod tests {
                 > supervisor_go + runtime + PAYLOAD_KILL_WAIT
         );
         assert!(payload_report_deadline(supervisor_go, u32::MAX) > supervisor_go);
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_runtime_is_a_limit_without_a_spawn() {
+        let mut missing = Command::new("/nonexistent/arany-test-program");
+        assert!(matches!(
+            spawn_before(&mut missing, tokio::time::Instant::now()),
+            Err(ToolError::Limit)
+        ));
+        assert!(matches!(
+            spawn_before(
+                &mut missing,
+                tokio::time::Instant::now() + Duration::from_secs(60)
+            ),
+            Err(ToolError::Operation)
+        ));
     }
 
     #[tokio::test]

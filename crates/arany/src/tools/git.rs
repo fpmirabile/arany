@@ -390,17 +390,18 @@ async fn spawn_git(
     workspace: &Path,
     deadline: tokio::time::Instant,
 ) -> Result<Captured, ToolError> {
-    let mut child = tokio::process::Command::new(git)
-        .args(argv)
-        .env_clear()
-        .envs(env.iter().map(|(key, value)| (key, value)))
-        .current_dir(workspace)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|_| ToolError::Operation)?;
+    let mut child = super::guard::spawn_before(
+        tokio::process::Command::new(git)
+            .args(argv)
+            .env_clear()
+            .envs(env.iter().map(|(key, value)| (key, value)))
+            .current_dir(workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true),
+        deadline,
+    )?;
     let stdout = child.stdout.take().ok_or(ToolError::Operation)?;
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
     let result = tokio::time::timeout_at(deadline, async {
