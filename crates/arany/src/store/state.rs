@@ -214,6 +214,20 @@ impl StateRoot {
     }
 
     pub fn account_path() -> Result<PathBuf, StoreError> {
+        #[cfg(not(debug_assertions))]
+        if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
+            return Err(StoreError::InvalidStateDirectory);
+        }
+        #[cfg(test)]
+        crate::test_support::isolate_account_root();
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(path) = crate::test_support::account_root() {
+            return Ok(path.to_path_buf());
+        }
+        Self::configured_account_path()
+    }
+
+    fn configured_account_path() -> Result<PathBuf, StoreError> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             use nix::unistd::{User, geteuid};
@@ -226,11 +240,6 @@ impl StateRoot {
                 }
                 return Ok(path);
             }
-            #[cfg(not(debug_assertions))]
-            if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
-                return Err(StoreError::InvalidStateDirectory);
-            }
-
             let user = User::from_uid(geteuid())
                 .map_err(|_| StoreError::InvalidStateDirectory)?
                 .ok_or(StoreError::InvalidStateDirectory)?;
@@ -558,6 +567,21 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, symlink};
 
     #[test]
+    fn account_path_uses_the_private_binary_fixture() {
+        let path = StateRoot::account_path().expect("isolated account path");
+        assert_eq!(path, crate::test_support::isolate_account_root());
+        if let Some(inherited) = std::env::var_os("ARANY_TEST_ACCOUNT_ROOT") {
+            assert_eq!(path, PathBuf::from(inherited));
+        } else {
+            assert!(path.starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()));
+            assert_ne!(path, StateRoot::configured_account_path().unwrap());
+        }
+        let metadata = std::fs::metadata(&path).expect("test account root");
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+    }
+
+    #[test]
     fn readmission_rejects_a_renamed_or_unsafe_state_directory() {
         let temp = tempfile::tempdir().expect("temporary root");
         let path = temp.path().join("state");
@@ -589,7 +613,10 @@ mod tests {
             match stage.to_str() {
                 Some("owner") => {
                     assert_eq!(nix::unistd::geteuid().as_raw(), 0);
-                    assert_eq!(StateRoot::account_path().unwrap(), Path::new(OWNER_ROOT));
+                    assert_eq!(
+                        StateRoot::configured_account_path().unwrap(),
+                        Path::new(OWNER_ROOT)
+                    );
                     let state =
                         StateRoot::admit(Path::new(OWNER_ROOT)).expect("owner account root");
                     state
@@ -654,7 +681,7 @@ mod tests {
                 Some("other") => {
                     assert_eq!(nix::unistd::geteuid().as_raw(), 1);
                     assert_eq!(
-                        StateRoot::account_path().unwrap(),
+                        StateRoot::configured_account_path().unwrap(),
                         Path::new("/other/.local/state/arany")
                     );
                     assert_eq!(

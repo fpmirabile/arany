@@ -54,6 +54,7 @@ pub(super) fn goal_report(
         );
     }
     push_cache_facts(&mut report, view, goal, &mut omitted_facts);
+    push_unguarded_facts(&mut report, view, goal, &mut omitted_facts);
     for (index, (_, fallback)) in view
         .runs
         .iter()
@@ -150,6 +151,31 @@ fn push_cache_facts(
             report,
             GoalReportSection::Unresolved,
             "One or more Commands have an uncertain build cache publication; inspect Session history before retrying.",
+            omitted_facts,
+        );
+    }
+}
+
+fn push_unguarded_facts(
+    report: &mut GoalReport,
+    view: &crate::session::SessionView,
+    goal: &crate::session::GoalView,
+    omitted_facts: &mut bool,
+) {
+    let count = view
+        .runs
+        .iter()
+        .filter(|task_run| goal.run_ids.contains(&task_run.id))
+        .flat_map(|task_run| &task_run.tools)
+        .filter(|tool| tool.ran_unguarded())
+        .count();
+    if count > 0 {
+        push_goal_report_item(
+            report,
+            GoalReportSection::Unresolved,
+            &format!(
+                "{count} unguarded host run(s) executed outside the Guard; their effects were not validated as a changeset."
+            ),
             omitted_facts,
         );
     }
@@ -309,14 +335,7 @@ fn push_success_facts(
             push_goal_report_item(
                 report,
                 GoalReportSection::Evidence,
-                &goal_report_evidence(
-                    call,
-                    &observation.output,
-                    matches!(
-                        observation.attestation,
-                        Some(crate::tools::Attestation::InProcess { .. })
-                    ),
-                ),
+                &goal_report_evidence(call, &observation.output, observation.attestation.as_ref()),
                 omitted_facts,
             );
         }
@@ -436,8 +455,16 @@ fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
     }
 }
 
-fn goal_report_evidence(call: &crate::tools::ToolCall, output: &str, in_process: bool) -> String {
-    let attester = if in_process { "The Engine" } else { "Guard" };
+fn goal_report_evidence(
+    call: &crate::tools::ToolCall,
+    output: &str,
+    attestation: Option<&crate::tools::Attestation>,
+) -> String {
+    let attester = match attestation {
+        Some(crate::tools::Attestation::InProcess { .. }) => "The Engine",
+        Some(crate::tools::Attestation::Unguarded(_)) => "An unguarded host run",
+        _ => "Guard",
+    };
     match call {
         crate::tools::ToolCall::Command { program, .. } => {
             serde_json::from_str::<crate::tools::types::CommandResult>(output)

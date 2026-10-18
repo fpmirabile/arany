@@ -649,7 +649,7 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
     let mut bindings = routes(&first);
     bindings.primary.push(next.clone());
     pin_roster(&mut bindings, None);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::open_existing(&recovered_state).unwrap(),
         EngineConfig::default(),
     )

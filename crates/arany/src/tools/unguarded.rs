@@ -35,6 +35,8 @@ pub(super) struct Outcome {
     pub(super) output: String,
     pub(super) spawned: bool,
     pub(super) descendants_stopped: bool,
+    pub(super) pid: u32,
+    pub(super) exit_code: Option<i32>,
 }
 
 impl Outcome {
@@ -44,6 +46,8 @@ impl Outcome {
             output: output.into(),
             spawned: false,
             descendants_stopped: false,
+            pid: 0,
+            exit_code: None,
         }
     }
 
@@ -53,6 +57,8 @@ impl Outcome {
             output: output.into(),
             spawned: true,
             descendants_stopped,
+            pid: 0,
+            exit_code: None,
         }
     }
 }
@@ -119,7 +125,9 @@ pub(super) async fn run(request: Request<'_>, mut cancellation: Cancellation) ->
         Some(group) => stop_group(group).await,
         None => false,
     };
-    settle(ended, reaped, stopped)
+    let mut outcome = settle(ended, reaped, stopped);
+    outcome.pid = group.map_or(0, |group| group.as_raw_nonzero().get().unsigned_abs());
+    outcome
 }
 
 fn settle(ended: Ended, reaped: bool, stopped: bool) -> Outcome {
@@ -173,6 +181,8 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
                 output,
                 spawned: true,
                 descendants_stopped: stopped,
+                pid: 0,
+                exit_code: result.exit_code,
             }
         }
     }

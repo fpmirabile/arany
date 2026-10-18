@@ -1,7 +1,13 @@
 use crate::{
-    AdmittedProviders, Engine, EngineError, Provider, RunControls, RunOutcome, RunRequest,
+    AdmittedProviders, Engine, EngineConfig, EngineError, Provider, RunControls, RunOutcome,
+    RunRequest, StateRoot,
 };
 use std::sync::Arc;
+
+pub fn open(state: StateRoot, config: EngineConfig) -> Result<Engine, EngineError> {
+    super::isolate_account_root();
+    Engine::open(state, config)
+}
 
 /// Drives one default submission to its result.
 pub async fn run_to_end<P: Provider + 'static>(

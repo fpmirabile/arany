@@ -310,6 +310,43 @@
                                   "arguments"
                                 ],
                                 "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
+                                ],
+                                "type": "object"
                               }
                             ]
                           },
@@ -724,6 +761,43 @@
                                   "arguments"
                                 ],
                                 "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
+                                ],
+                                "type": "object"
                               }
                             ]
                           },
@@ -1130,6 +1204,43 @@
                                   "tool",
                                   "schema_digest",
                                   "arguments"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
                                 ],
                                 "type": "object"
                               }
@@ -1541,6 +1652,43 @@
                                   "tool",
                                   "schema_digest",
                                   "arguments"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
                                 ],
                                 "type": "object"
                               }
@@ -1964,6 +2112,43 @@
                                   "arguments"
                                 ],
                                 "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
+                                ],
+                                "type": "object"
                               }
                             ]
                           },
@@ -2380,6 +2565,43 @@
                                   "tool",
                                   "schema_digest",
                                   "arguments"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
                                 ],
                                 "type": "object"
                               }
@@ -2800,6 +3022,43 @@
                                   "arguments"
                                 ],
                                 "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
+                                ],
+                                "type": "object"
                               }
                             ]
                           },
@@ -3208,6 +3467,43 @@
                                   "tool",
                                   "schema_digest",
                                   "arguments"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
                                 ],
                                 "type": "object"
                               }
@@ -3620,6 +3916,43 @@
                                   "tool",
                                   "schema_digest",
                                   "arguments"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
                                 ],
                                 "type": "object"
                               }
@@ -4035,6 +4368,43 @@
                                   "tool",
                                   "schema_digest",
                                   "arguments"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
                                 ],
                                 "type": "object"
                               }
@@ -4457,6 +4827,43 @@
                                   "arguments"
                                 ],
                                 "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
+                                ],
+                                "type": "object"
                               }
                             ]
                           },
@@ -4872,6 +5279,43 @@
                                   "arguments"
                                 ],
                                 "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
+                                ],
+                                "type": "object"
                               }
                             ]
                           },
@@ -4977,9 +5421,6 @@
       "name": "arany_command"
     },
     {
-      "cache_control": {
-        "type": "ephemeral"
-      },
       "description": "Invoke an admitted MCP tool in the disposable offline snapshot.",
       "input_schema": {
         "additionalProperties": false,
@@ -5289,6 +5730,43 @@
                                   "arguments"
                                 ],
                                 "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
+                                ],
+                                "type": "object"
                               }
                             ]
                           },
@@ -5399,6 +5877,470 @@
         "type": "object"
       },
       "name": "arany_mcp_call"
+    },
+    {
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "description": "Ask the user to run a command that already failed inside the Guard again on the host with no sandbox. Use only after a `command` with identical program, args and cwd failed in this Run; put a one-sentence question for the user in `justification`. The user may refuse; never retry on your own.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "justification": {
+            "type": "string"
+          },
+          "plan_contract": {
+            "anyOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "budget": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "max_active_ms": {
+                        "description": "Positive integer within goal_budget.max_active_ms; null only when the pinned Goal budget sets no active-time ceiling.",
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "max_provider_calls": {
+                        "description": "Positive integer within goal_budget.max_provider_calls; null only when the pinned Goal budget sets no provider-call ceiling.",
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      },
+                      "max_runs": {
+                        "description": "Integer 1 through goal_budget.max_runs inclusive.",
+                        "type": "integer"
+                      },
+                      "max_tokens": {
+                        "description": "Positive integer within goal_budget.max_tokens; null only when the pinned Goal budget sets no token ceiling.",
+                        "type": [
+                          "integer",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "max_provider_calls",
+                      "max_tokens",
+                      "max_active_ms",
+                      "max_runs"
+                    ],
+                    "type": "object"
+                  },
+                  "command_timeout_ms": {
+                    "description": "Integer 1000 through 600000 inclusive, or null for the pinned default.",
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "commands": {
+                    "description": "Up to 8 distinct admitted command names in ascending order; each uses lowercase letters, digits, '-' or '_', at most 64 bytes.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "mcp_tools": {
+                    "description": "Up to 64 distinct admitted MCP bindings in ascending server and tool order. Server names are at most 64 bytes and tool names at most 128 bytes, each using lowercase letters, digits, '-' or '_'.",
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "server": {
+                          "type": "string"
+                        },
+                        "tool": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "server",
+                        "tool"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "mission": {
+                    "description": "Non-empty UTF-8 Goal mission, at most 2048 bytes.",
+                    "type": "string"
+                  },
+                  "paths": {
+                    "description": "Up to 64 distinct Workspace-relative paths in ascending order, each at most 512 bytes. Use \".\" alone for the whole Workspace; nested paths are rejected.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "resource_class": {
+                    "enum": [
+                      "default",
+                      "build"
+                    ],
+                    "type": "string"
+                  },
+                  "skills": {
+                    "description": "Up to 64 distinct admitted Skill bindings in ascending name and resource order. Names use lowercase letters, digits, '-' or '_', at most 64 bytes; resource is null for SKILL.md or a relative path of at most 512 bytes.",
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "resource": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "resource"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "success_criterion": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "call": {
+                            "anyOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "name": {
+                                    "enum": [
+                                      "example"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "skill"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "resource": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "name",
+                                  "resource"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "operation": {
+                                    "enum": [
+                                      "mkdir"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "path"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "content": {
+                                    "type": "string"
+                                  },
+                                  "expected_digest": {
+                                    "type": [
+                                      "string",
+                                      "null"
+                                    ]
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "write"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "path",
+                                  "expected_digest",
+                                  "content"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "expected_digest": {
+                                    "description": "Exact lowercase 64-character SHA-256 from the file include or a successful Read. Never invent it.",
+                                    "type": "string"
+                                  },
+                                  "new": {
+                                    "description": "Replacement literal text. Combined old and new UTF-8 size must be at most 8192 bytes.",
+                                    "type": "string"
+                                  },
+                                  "old": {
+                                    "description": "Non-empty exact literal text occurring once in the current file. To append, select a unique ending and include that ending plus the appended text in new.",
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "edit"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "path",
+                                  "expected_digest",
+                                  "old",
+                                  "new"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "arguments": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "mcp_call"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "schema_digest": {
+                                    "type": "string"
+                                  },
+                                  "server": {
+                                    "enum": [
+                                      "example"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "tool": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "server",
+                                  "tool",
+                                  "schema_digest",
+                                  "arguments"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "args": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array"
+                                  },
+                                  "cwd": {
+                                    "type": "string"
+                                  },
+                                  "justification": {
+                                    "type": "string"
+                                  },
+                                  "operation": {
+                                    "enum": [
+                                      "command_unguarded"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "program": {
+                                    "enum": [
+                                      "bash"
+                                    ],
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "operation",
+                                  "program",
+                                  "args",
+                                  "cwd",
+                                  "justification"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          },
+                          "kind": {
+                            "enum": [
+                              "tool_call_succeeded"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "call"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "enum": [
+                              "workspace_file_digest"
+                            ],
+                            "type": "string"
+                          },
+                          "path": {
+                            "description": "Workspace-relative file path, at most 512 bytes; paths must cover it.",
+                            "type": "string"
+                          },
+                          "sha256": {
+                            "description": "Exact lowercase 64-character SHA-256.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "path",
+                          "sha256"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "content": {
+                            "description": "UTF-8 text, at most 8192 bytes; the whole plan contract must serialize within 8 KiB.",
+                            "type": "string"
+                          },
+                          "kind": {
+                            "enum": [
+                              "workspace_file_content"
+                            ],
+                            "type": "string"
+                          },
+                          "path": {
+                            "description": "Workspace-relative file path, at most 512 bytes; paths must cover it.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "path",
+                          "content"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "mission",
+                  "paths",
+                  "commands",
+                  "resource_class",
+                  "command_timeout_ms",
+                  "skills",
+                  "mcp_tools",
+                  "success_criterion",
+                  "budget"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "program": {
+            "enum": [
+              "bash"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "program",
+          "args",
+          "cwd",
+          "justification",
+          "plan_contract"
+        ],
+        "type": "object"
+      },
+      "name": "arany_command_unguarded"
     }
   ],
   "primary_read_only": [

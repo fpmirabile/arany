@@ -14,7 +14,7 @@ async fn goal_lifecycle_bounds_report_and_requires_goal_replay_linkage() {
         result: "accepted result".into(),
     })]);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -89,7 +89,7 @@ async fn goal_report_counts_cached_input_tokens() {
     })])
     .with_cached_input_tokens(7);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -126,7 +126,7 @@ async fn summary_within_the_serialized_report_budget_is_kept_whole() {
         result: "accepted result".into(),
     })]);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -238,7 +238,7 @@ async fn compact_read_only_goal_prefix(objective: &str) {
     let requests = Arc::clone(&provider.requests);
     let compaction_requests = Arc::clone(&provider.compact_requests);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("private state"),
         EngineConfig {
             guard_executable: Some(std::env::current_exe().expect("test executable")),
@@ -499,7 +499,7 @@ async fn goal_failure_and_cancellation_have_distinct_terminal_receipts() {
             provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
         }
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state"),
             EngineConfig::default(),
         )
@@ -573,7 +573,7 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
     let requests = Arc::clone(&provider.requests);
     let compact_requests = Arc::clone(&provider.compact_requests);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -726,7 +726,7 @@ async fn known_active_time_exhaustion_closes_without_provider_dispatch() {
     })]);
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -773,7 +773,7 @@ async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
         result: "continue later".into(),
     })]);
     let first_engine_provider = Arc::new(first_provider);
-    let first_engine = Engine::open(
+    let first_engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -796,7 +796,7 @@ async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
     let second_provider = ScriptedProvider::new(Vec::new());
     let second_requests = Arc::clone(&second_provider.requests);
     let second_engine_provider = Arc::new(second_provider);
-    let second_engine = Engine::open(
+    let second_engine = engine_support::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
         EngineConfig::default(),
     )
@@ -879,7 +879,7 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
             result: "continue later".into(),
         },
     )]));
-    let first_engine = Engine::open(
+    let first_engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -899,7 +899,7 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
         .expect("first Goal Run");
     first_engine.close().await.expect("first engine shutdown");
 
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
         EngineConfig::default(),
     )
@@ -1002,7 +1002,7 @@ async fn invalid_response_on_the_last_allowed_call_is_a_failure_not_a_budget_clo
             result: "invalid finish".into(),
         },
     )]));
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -1194,7 +1194,7 @@ async fn finite_goal_token_budget_observes_a_child_before_filling_another_slot()
     };
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -1257,7 +1257,7 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
     })]);
     let first_requests = Arc::clone(&first_provider.requests);
     let first_engine_provider = Arc::new(first_provider);
-    let first_engine = Engine::open(
+    let first_engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -1284,7 +1284,7 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
     })]);
     let second_requests = Arc::clone(&second_provider.requests);
     let second_engine_provider = Arc::new(second_provider);
-    let second_engine = Engine::open(
+    let second_engine = engine_support::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
         EngineConfig::default(),
     )
@@ -1424,7 +1424,7 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
         })]);
         let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::open_existing(&state_path).expect("reopened state"),
             EngineConfig::default(),
         )
@@ -1567,7 +1567,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
     let provider = ScriptedProvider::new(Vec::new());
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
         EngineConfig::default(),
     )
@@ -1680,7 +1680,7 @@ async fn store_failure_while_admitting_a_child_drains_active_calls_before_return
     let provider = Arc::new(PendingChildren {
         in_flight: Arc::clone(&in_flight),
     });
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -1723,7 +1723,7 @@ async fn resumed_goal_keeps_its_stored_phase() {
         result: "continue after review".into(),
     })]);
     let first_engine_provider = Arc::new(first_provider);
-    let first_engine = Engine::open(
+    let first_engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -1748,7 +1748,7 @@ async fn resumed_goal_keeps_its_stored_phase() {
         result: "the Goal is complete".into(),
     })]);
     let second_engine_provider = Arc::new(second_provider);
-    let second_engine = Engine::open(
+    let second_engine = engine_support::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
         EngineConfig::default(),
     )
@@ -1866,7 +1866,7 @@ fn facts_engine_with_telemetry(
     telemetry: arany::Telemetry,
 ) -> Engine {
     use std::os::unix::fs::PermissionsExt;
-    let engine = Engine::open(
+    let engine = engine_support::open(
         state,
         EngineConfig {
             telemetry,
@@ -2996,7 +2996,7 @@ async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_object
     })]);
     paused_provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
     let provider = Arc::new(paused_provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -3044,7 +3044,7 @@ async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_object
     ]);
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
         EngineConfig::default(),
     )
@@ -3117,7 +3117,7 @@ async fn older_paused_goal_is_refused_once_a_newer_goal_is_paused() {
         })]);
         provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state"),
             EngineConfig::default(),
         )
@@ -3152,7 +3152,7 @@ async fn older_paused_goal_is_refused_once_a_newer_goal_is_paused() {
     })]);
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
         EngineConfig::default(),
     )
@@ -4847,7 +4847,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
     let provider = ScriptedProvider::new(vec![finish_with("recovered")]);
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
         EngineConfig::default(),
     )
@@ -4891,7 +4891,7 @@ async fn previews_chunk_a_finishing_call_within_its_bound() {
         })),
     };
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -4940,7 +4940,7 @@ async fn between_run_goal_compaction_stays_within_its_bound() {
         },
     )]);
     let provider = Arc::new(provider);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -5197,7 +5197,7 @@ async fn reviewed_write_run(
         finish_with("ask"),
         finish_with("done"),
     ]));
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::open_existing(&state_path).expect("state"),
         EngineConfig {
             guard_executable: Some(std::env::current_exe().expect("test executable")),
