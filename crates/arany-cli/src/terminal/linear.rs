@@ -101,13 +101,19 @@ impl LinearState {
         writer: &mut impl Write,
         view: &SessionView,
     ) -> io::Result<()> {
+        const HEADING: &str = "Transcript details:";
+        const LIMIT_NOTICE: &str =
+            "Transcript detail limit reached; use show --output jsonl for the complete journal.";
+        let mut remaining = super::history::MAX_CLASSIC_HISTORY_BYTES
+            - (HEADING.len() + 1)
+            - (LIMIT_NOTICE.len() + 1);
         if self.newline_pending || self.line_open {
             writeln!(writer)?;
+            remaining -= 1;
             self.newline_pending = false;
             self.line_open = false;
         }
-        writeln!(writer, "Transcript details:")?;
-        let mut remaining = super::history::MAX_CLASSIC_HISTORY_BYTES;
+        writeln!(writer, "{HEADING}")?;
         for run in view
             .runs
             .iter()
@@ -140,10 +146,7 @@ impl LinearState {
             for text in parts {
                 let text = crate::presentation::escape_terminal(&text);
                 if text.len().saturating_add(1) > remaining {
-                    writeln!(
-                        writer,
-                        "Transcript detail limit reached; use show --output jsonl for the complete journal."
-                    )?;
+                    writeln!(writer, "{LIMIT_NOTICE}")?;
                     return Ok(());
                 }
                 remaining = remaining.saturating_sub(text.len() + 1);
@@ -151,10 +154,7 @@ impl LinearState {
             }
         }
         if view.runs.len() > super::history::MAX_CLASSIC_HISTORY_RUNS {
-            writeln!(
-                writer,
-                "Transcript detail limit reached; use show --output jsonl for the complete journal."
-            )?;
+            writeln!(writer, "{LIMIT_NOTICE}")?;
         }
         writer.flush()
     }
@@ -875,9 +875,51 @@ mod tests {
         assert!(output.ends_with(
             b"Transcript detail limit reached; use show --output jsonl for the complete journal.\n"
         ));
-        assert!(output.len() < 64 * 1024 + 256);
+        assert!(output.len() <= super::super::history::MAX_CLASSIC_HISTORY_BYTES);
         assert!(!output.contains(&0x1b));
         assert!(!output.contains(&b'\r'));
+
+        for (run_count, line_open, newline_pending) in
+            [(17, false, false), (3, true, false), (17, false, true)]
+        {
+            let mut run = view.runs[0].clone();
+            run.supervisor = Default::default();
+            run.display.clear();
+            view.runs = vec![run; run_count];
+            for (index, run) in view.runs.iter_mut().rev().take(16).rev().enumerate() {
+                let text = match index {
+                    0 | 1 => "x".repeat(32_700),
+                    2 if run_count == 3 => "x".repeat(100),
+                    _ => continue,
+                };
+                run.display = text
+                    .as_bytes()
+                    .chunks(2048)
+                    .enumerate()
+                    .map(|(index, bytes)| arany::DisplayChunk {
+                        call_index: 0,
+                        phase: arany::AgentPhase::RootPlan,
+                        category: arany::DisplayCategory::Commentary,
+                        item: 0,
+                        offset: u32::try_from(index * 2048).unwrap(),
+                        text: std::str::from_utf8(bytes).unwrap().to_owned(),
+                    })
+                    .collect();
+            }
+            linear.line_open = line_open;
+            linear.newline_pending = newline_pending;
+            output.clear();
+            linear.write_transcript(&mut output, &view).unwrap();
+            assert!(
+                output.len() <= super::super::history::MAX_CLASSIC_HISTORY_BYTES,
+                "transcript exceeded byte limit: runs={run_count}, line_open={line_open}, newline_pending={newline_pending}, bytes={}",
+                output.len()
+            );
+            assert!(output.ends_with(
+                b"Transcript detail limit reached; use show --output jsonl for the complete journal.\n"
+            ));
+            assert_eq!(output.starts_with(b"\n"), line_open || newline_pending);
+        }
 
         view.runs.clear();
         view.created_sequence = 0;
