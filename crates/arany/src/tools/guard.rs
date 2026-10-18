@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{ExitCode, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::{Child, Command};
@@ -140,7 +141,7 @@ impl BuildCacheTransfer {
 }
 
 pub(super) struct BuildCacheSession {
-    pub(super) lease: BuildCacheLease,
+    pub(super) lease: Arc<BuildCacheLease>,
     pub(super) transfer: BuildCacheTransfer,
 }
 
@@ -186,7 +187,7 @@ pub(super) fn build_cache_session(
     };
     let candidate_bytes = lease.candidate_limit();
     Ok(Some(BuildCacheSession {
-        lease,
+        lease: Arc::new(lease),
         transfer: BuildCacheTransfer {
             identity,
             exclusions,
@@ -248,24 +249,23 @@ pub(super) async fn publish_cache_candidate(
         (CacheCandidate::Received, None) => CacheUpdate::NotApplicable,
         (CacheCandidate::Received, Some(cache)) => {
             let publication = tokio::task::spawn_blocking(move || {
-                let mut cache = cache;
-                let mut candidate = match cache.lease.open_candidate() {
+                let Ok(mut lease) = Arc::try_unwrap(cache.lease) else {
+                    return CacheUpdate::Uncertain;
+                };
+                let mut candidate = match lease.open_candidate() {
                     Ok(candidate) => candidate,
-                    Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
+                    Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
                         return CacheUpdate::Rejected;
                     }
-                    Err(_) if cache.lease.publication_uncertain() => return CacheUpdate::Uncertain,
+                    Err(_) if lease.publication_uncertain() => return CacheUpdate::Uncertain,
                     Err(_) => return CacheUpdate::Failed,
                 };
-                match cache
-                    .lease
-                    .publish(&mut candidate, &cache.transfer.exclusions)
-                {
+                match lease.publish(&mut candidate, &cache.transfer.exclusions) {
                     Ok(()) => CacheUpdate::Published,
-                    Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
+                    Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
                         CacheUpdate::Rejected
                     }
-                    Err(_) if cache.lease.publication_uncertain() => CacheUpdate::Uncertain,
+                    Err(_) if lease.publication_uncertain() => CacheUpdate::Uncertain,
                     Err(_) => CacheUpdate::Failed,
                 }
             });
@@ -989,7 +989,7 @@ pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
 
 pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
-    lease: &BuildCacheLease,
+    lease: &Arc<BuildCacheLease>,
 ) -> Result<CacheCandidate, ToolError> {
     use tokio::io::AsyncReadExt;
 
@@ -1012,35 +1012,60 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     if length == 0 || length > lease.candidate_limit() {
         return Err(ToolError::Limit);
     }
-    let staged = lease
-        .candidate_writer()
-        .ok()
-        .map(|file| tokio::fs::File::from_std(file.into_std()));
+    let staged = lease.candidate_writer().ok().map(|file| CandidateStaging {
+        file,
+        _lease: Arc::clone(lease),
+    });
     let staged = drain_candidate(reader, length, staged).await?;
-    let Some(file) = staged else {
+    let Some(staged) = staged else {
         return Ok(CacheCandidate::Failed);
     };
-    #[cfg(any(test, feature = "test-support"))]
-    if crate::fault::FaultPlan::candidate_sync(lease.token())
-        .await
-        .is_err()
-    {
-        return Ok(CacheCandidate::Failed);
+    let synced = tokio::task::spawn_blocking(move || {
+        #[cfg(any(test, feature = "test-support"))]
+        let completion = crate::fault::FaultPlan::candidate_sync(staged._lease.token());
+        #[cfg(any(test, feature = "test-support"))]
+        let admitted = completion.is_ok();
+        #[cfg(not(any(test, feature = "test-support")))]
+        let admitted = true;
+        let synced = admitted && staged.file.sync_all().is_ok();
+        drop(staged);
+        #[cfg(any(test, feature = "test-support"))]
+        if let Ok(Some(finished)) = completion {
+            let _ = finished.send(());
+        }
+        synced
+    })
+    .await
+    .map_err(|_| ToolError::Operation)?;
+    Ok(if synced {
+        CacheCandidate::Received
+    } else {
+        CacheCandidate::Failed
+    })
+}
+
+// Drop the file before the lease can reclaim its reservation and identity lock.
+struct CandidateStaging {
+    file: cap_std::fs::File,
+    _lease: Arc<BuildCacheLease>,
+}
+
+impl Write for CandidateStaging {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.file.write(bytes)
     }
-    if file.sync_all().await.is_err() {
-        return Ok(CacheCandidate::Failed);
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
     }
-    Ok(CacheCandidate::Received)
 }
 
 // Keep draining after a staging write failure so the archive stream stays aligned.
-async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
+async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write + Send + 'static>(
     reader: &mut R,
     length: u64,
     mut staged: Option<W>,
 ) -> Result<Option<W>, ToolError> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     let mut buffer = vec![0u8; 32 * 1024];
     let mut remaining = length;
     while remaining > 0 {
@@ -1049,17 +1074,23 @@ async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWri
             .read_exact(&mut buffer[..wanted])
             .await
             .map_err(|_| ToolError::Operation)?;
-        if let Some(file) = staged.as_mut()
-            && file.write_all(&buffer[..wanted]).await.is_err()
-        {
-            staged = None;
+        if let Some(mut writer) = staged.take() {
+            (staged, buffer) = tokio::task::spawn_blocking(move || {
+                let written = writer.write_all(&buffer[..wanted]).is_ok();
+                (written.then_some(writer), buffer)
+            })
+            .await
+            .map_err(|_| ToolError::Operation)?;
         }
         remaining -= wanted as u64;
     }
-    if let Some(file) = staged.as_mut()
-        && file.flush().await.is_err()
-    {
-        staged = None;
+    if let Some(mut writer) = staged.take() {
+        staged = tokio::task::spawn_blocking(move || {
+            let flushed = writer.flush().is_ok();
+            flushed.then_some(writer)
+        })
+        .await
+        .map_err(|_| ToolError::Operation)?;
     }
     Ok(staged)
 }
@@ -2522,7 +2553,7 @@ mod tests {
         let lease = crate::store::begin_released(state, identity.clone()).unwrap();
         let candidate_bytes = lease.candidate_limit();
         BuildCacheSession {
-            lease,
+            lease: Arc::new(lease),
             transfer: BuildCacheTransfer {
                 identity: identity.clone(),
                 exclusions: Vec::new(),
@@ -2658,14 +2689,15 @@ mod tests {
         let candidate = captured_archive(temp.path(), &identity, b"candidate");
         publish_archive(&state, &identity, &prior).await;
 
-        for action in ["cancel", "fail", "publish"] {
+        for action in ["cancel", "timeout", "fail", "publish"] {
             let session = cache_session(&state, &identity);
             let mut stream = b"CACHE_CANDIDATE\n".to_vec();
             stream.extend((candidate.len() as u64).to_le_bytes());
             stream.extend(&candidate);
             stream.extend(b"CACHE_DONE\n");
             let mut reader = tokio::io::BufReader::new(stream.as_slice());
-            let (entered, release) = crate::fault::FaultPlan::gate_candidate_sync(&identity);
+            let (entered, release, finished) =
+                crate::fault::FaultPlan::gate_candidate_sync(&identity);
             if action == "fail" {
                 crate::fault::FaultPlan::fail_candidate_sync(&identity);
             }
@@ -2682,10 +2714,50 @@ mod tests {
             committed.read_to_end(&mut bytes).unwrap();
             assert_eq!(bytes, prior);
 
-            if action == "cancel" {
+            if matches!(action, "cancel" | "timeout") {
+                if action == "timeout" {
+                    assert!(
+                        tokio::time::timeout_at(tokio::time::Instant::now(), &mut receive)
+                            .await
+                            .is_err()
+                    );
+                }
                 drop(receive);
-                drop(release);
                 drop(session);
+                let reservation = state
+                    .path()
+                    .join("build-cache")
+                    .join(format!("reserve-{}.reserve", identity.token()));
+                let candidate_path = state
+                    .path()
+                    .join("build-cache")
+                    .join(format!("candidate-{}.arc", identity.token()));
+                assert!(reservation.exists(), "reservation released during {action}");
+                assert!(
+                    candidate_path.exists(),
+                    "candidate unlinked during {action}"
+                );
+                assert!(matches!(
+                    state.begin_build_cache(identity.clone()),
+                    Err(StoreError::BuildCacheBusy)
+                ));
+                let (_, held_capacity) = state
+                    .effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
+                    .unwrap();
+                release.send(()).unwrap();
+                tokio::time::timeout(Duration::from_secs(5), finished)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!reservation.exists(), "reservation retained after {action}");
+                assert!(
+                    !candidate_path.exists(),
+                    "candidate retained after {action}"
+                );
+                let (_, released_capacity) = state
+                    .effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
+                    .unwrap();
+                assert!(released_capacity > held_capacity);
                 assert_eq!(committed_archive(&state, &identity), prior);
                 continue;
             }
@@ -2729,33 +2801,19 @@ mod tests {
         flush_fails: bool,
     }
 
-    impl tokio::io::AsyncWrite for FailAfter {
-        fn poll_write(
-            mut self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            bytes: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
+    impl Write for FailAfter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             let accepted = bytes.len().min(self.remaining);
             self.remaining -= accepted;
-            std::task::Poll::Ready(Ok(accepted))
+            Ok(accepted)
         }
 
-        fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(if self.flush_fails {
+        fn flush(&mut self) -> std::io::Result<()> {
+            if self.flush_fails {
                 Err(std::io::Error::other("injected flush failure"))
             } else {
                 Ok(())
-            })
-        }
-
-        fn poll_shutdown(
-            self: std::pin::Pin<&mut Self>,
-            cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            self.poll_flush(cx)
+            }
         }
     }
 
@@ -2802,7 +2860,7 @@ mod tests {
         .await;
         assert_eq!(observation.cache_update, CacheUpdate::Published);
 
-        let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
+        let lease = Arc::new(crate::store::begin_released(&state, identity.clone()).unwrap());
         // Occupies the candidate name, so the create_new staging step fails.
         drop(lease.candidate_writer().unwrap());
 
