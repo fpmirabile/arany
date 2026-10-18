@@ -1248,6 +1248,30 @@ async fn translator_latches_cancel_reconciles_and_remaps_failures_without_privat
         panic!("reconcile missing committed answer")
     };
     assert_eq!(recover.method, "events/subscribe");
+    for method in ["session/load", "session/resume"] {
+        translate::input(
+            invoke(
+                90,
+                method,
+                json!({"sessionId":session,"cwd":"/workspace","mcpServers":[]}),
+            ),
+            &config,
+            &shared,
+            &serve_tx,
+            &outbound,
+        )
+        .await
+        .unwrap();
+        let busy = output.try_recv().expect("recovery keeps the Session busy");
+        validate(&busy);
+        assert_eq!(busy["id"], 90);
+        assert_eq!(busy["error"]["code"], -32600);
+        assert_eq!(busy["error"]["data"]["reason"], "busy");
+        assert!(
+            serve_rx.try_recv().is_err(),
+            "busy Session never reaches serve"
+        );
+    }
     events.send(reply(6, json!({"events":[{"sequence":20,"session_id":session.to_string(),"run_id":run.to_string(),"agent_run_id":null,"kind":"MessageCommitted","event_version":1,"payload":{"run_id":run,"text":"Recovered"},"created_at_ms":0}],"nextSince":null}))).await.unwrap();
     let recovered = output.recv().await.unwrap();
     validate(&recovered);

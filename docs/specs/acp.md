@@ -232,7 +232,7 @@ Shared bounds and their Engine behavior belong to [serve limits](./serve.md#limi
 | Pending permissions | One, with serve's immutable intent deadline; oversize denies unsent. |
 | Oversized answer projection | Cut at a UTF-8 boundary to at most 128 KiB text plus `[truncated; see arany show SESSION_ID]`; worst-case JSON escaping still fits the line cap. Other oversized projections fail closed. |
 | Reconciliation | Serve's bounded Event pages and Session Event cap; no retained history beyond the current page, one active answer, at most 10,000 deduplication entries for Tool phases per prompt, and one cursor plus original cwd per Session; deduplication overflow suppresses further Tool projections and marks incompleteUpdates. |
-| Load/resume history | Serve's 1 MiB resume result and Session Event cap. An oversized result fails `contextTooLarge` before any history update or thread insertion; at most one result is being projected and two updates per item are constructed. |
+| Load/resume history | [Stored history and continuation](#stored-history-and-continuation) and [serve's Session Event cap](./serve.md#limits-and-compatibility). |
 | Shutdown | Serve's total three-second grace includes both output queues and cancellation/Engine closure. Timeout reports `Run may be interrupted; check Session history`. |
 
 Linux and macOS share the same Unix pipes, descriptor cloning and signal path;

@@ -290,6 +290,15 @@ pub(super) async fn input(
             if !params.additional_directories.is_empty() {
                 return immediate(output, invalid());
             }
+            if state
+                .lock()
+                .expect("translator state")
+                .active
+                .as_ref()
+                .is_some_and(|active| active.session == params.session_id)
+            {
+                return immediate(output, wire::error(Some(id), -32600, "Server busy", "busy"));
+            }
             notice_mcp(state, &params.mcp_servers);
             let cwd = params.cwd;
             let selection = config.thread(cwd.clone());
