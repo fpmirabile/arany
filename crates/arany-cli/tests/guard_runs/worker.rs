@@ -537,7 +537,7 @@ fn pad_worker_session(state: &Path, id: SessionId) {
     let mut connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
     let transaction = connection.transaction().unwrap();
     let mut insert = transaction.prepare("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)").unwrap();
-    for sequence in 2..=9_920 {
+    for sequence in 2..=9_906 {
         insert
             .execute(rusqlite::params![sequence, id.to_string()])
             .unwrap();

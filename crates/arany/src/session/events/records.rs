@@ -115,6 +115,8 @@ impl ContextUsage {
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
     #[serde(deserialize_with = "Option::deserialize")]
+    pub supervisor: Option<crate::supervisor::SupervisorPolicy>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub worker_policy: Option<super::WorkerPolicy>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub agent_definitions: Option<crate::tools::DefinitionRegistryPin>,
@@ -191,12 +193,15 @@ impl RunConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
-        if self.worker_policy.as_ref().is_some_and(|p| {
-            !p.valid() || self.agent_definitions.is_none() || self.tool_policy.is_none()
-        }) || self
-            .agent_definitions
-            .as_ref()
-            .is_some_and(|pin| !pin.valid() || self.tool_policy.is_none())
+        if self.supervisor.is_some() != self.tool_policy.is_some()
+            || self.supervisor.as_ref().is_some_and(|p| !p.valid())
+            || self.worker_policy.as_ref().is_some_and(|p| {
+                !p.valid() || self.agent_definitions.is_none() || self.tool_policy.is_none()
+            })
+            || self
+                .agent_definitions
+                .as_ref()
+                .is_some_and(|pin| !pin.valid() || self.tool_policy.is_none())
             || self.roster.as_ref().is_some_and(|roster| {
                 !roster.valid()
                     || std::iter::once(&roster.providers.primary)

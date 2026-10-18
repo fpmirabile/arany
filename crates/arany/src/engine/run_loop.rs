@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 mod children;
-mod step;
+pub(super) mod step;
 mod tool_compaction;
 mod worker;
 
@@ -343,7 +343,8 @@ impl<'a> RunLoop<'a> {
             self.journal
                 .admit(
                     self.session_id,
-                    action.max_events_for_admitted(&self.routing.providers),
+                    action.max_events_for_admitted(&self.routing.providers)
+                        + self.ledger().verdicts(action),
                     action.tool_observations(),
                 )
                 .await?;

@@ -443,7 +443,8 @@ impl RunLoop<'_> {
         self.journal
             .admit(
                 self.session_id,
-                capacity.max_events_for_admitted(&self.routing.providers),
+                capacity.max_events_for_admitted(&self.routing.providers)
+                    + self.ledger().verdicts(capacity),
                 capacity.tool_observations(),
             )
             .await?;

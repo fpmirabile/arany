@@ -335,7 +335,7 @@ impl CallRouter<'_> {
             .journal
             .admit(
                 session_id,
-                action.max_events_for_admitted(&self.providers) + 1,
+                action.max_events_for_admitted(&self.providers) + self.ledger.verdicts(action) + 1,
                 action.tool_observations(),
             )
             .await

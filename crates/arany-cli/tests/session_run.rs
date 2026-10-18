@@ -272,6 +272,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         .join("\n");
                     let run_id = RunId::new();
                     view.runs.push(arany::RunView {
+                        supervisor: Default::default(),
                         workers: Default::default(),
                         id: run_id,
                         objective: "Synthetic long response".into(),
@@ -1626,6 +1627,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .await
             .expect("pending objective");
         let mut config = RunConfig {
+            supervisor: None,
             worker_policy: None,
             agent_definitions: None,
             roster: None,
@@ -2227,6 +2229,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
             let interrupted_run = RunId::new();
             let primary = AgentRunId::new();
             let config = RunConfig {
+                supervisor: None,
                 worker_policy: None,
                 agent_definitions: None,
                 roster: None,

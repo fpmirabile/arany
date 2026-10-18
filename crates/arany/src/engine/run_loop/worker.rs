@@ -222,7 +222,8 @@ impl RunLoop<'_> {
         self.journal
             .admit(
                 self.session_id,
-                action.max_events_for_admitted(&self.routing.providers),
+                action.max_events_for_admitted(&self.routing.providers)
+                    + self.ledger().verdicts(action),
                 action.tool_observations(),
             )
             .await
@@ -461,7 +462,8 @@ impl RunLoop<'_> {
                 .journal
                 .admit(
                     self.session_id,
-                    action.max_events_for_admitted(&self.routing.providers),
+                    action.max_events_for_admitted(&self.routing.providers)
+                        + self.ledger().verdicts(action),
                     2,
                 )
                 .await
@@ -842,7 +844,7 @@ impl RunLoop<'_> {
                 },
             })
             .await?;
-            let sequence = self.sequence()?;
+            let sequence = self.ledger().view(|v| v.previous_subject_sequence())?;
             if !Box::pin(self.integrate_worker(root, id, sequence, data)).await? {
                 self.handover
                     .lock()

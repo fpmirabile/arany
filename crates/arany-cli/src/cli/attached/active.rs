@@ -1395,6 +1395,7 @@ mod goal_request_tests {
         view.goals[0].status = arany::GoalStatus::Failed;
         view.goals[0].budget_closed = true;
         let run = arany::RunView {
+            supervisor: Default::default(),
             workers: Default::default(),
             id: arany::RunId::new(),
             objective: "Fix".into(),
