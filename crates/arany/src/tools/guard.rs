@@ -1966,8 +1966,7 @@ mod tests {
     #[ignore = "pipe-gated child of the_launcher_never_shares_the_supervisor_process_group"]
     fn launcher_group_child() {
         use std::io::Read;
-        let mut sink = Vec::new();
-        let _ = std::io::stdin().read_to_end(&mut sink);
+        let _ = std::io::stdin().read(&mut [0; 1]);
     }
 
     #[tokio::test]
