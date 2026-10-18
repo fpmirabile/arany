@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod engine;
 pub mod git;
 pub mod goals;
@@ -47,6 +48,41 @@ pub fn isolate_account_root() -> &'static std::path::Path {
 
 pub(crate) fn account_root() -> Option<&'static std::path::Path> {
     ACCOUNT_ROOT.get().map(std::path::PathBuf::as_path)
+}
+
+type ToolFailure = (uuid::Uuid, &'static str, &'static str, Option<&'static str>);
+
+const MAX_TOOL_FAILURES: usize = 256;
+static TOOL_FAILURES: std::sync::Mutex<std::collections::VecDeque<ToolFailure>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+// The development log is debug-only; release test binaries still need the closed stage and check.
+pub(crate) fn record_tool_failure(
+    intent: uuid::Uuid,
+    site: &'static str,
+    stage: &'static str,
+    check: Option<&'static str>,
+) {
+    let mut failures = TOOL_FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if failures.len() == MAX_TOOL_FAILURES {
+        failures.pop_front();
+    }
+    failures.push_back((intent, site, stage, check));
+}
+
+pub fn recorded_tool_failure(intent: uuid::Uuid) -> Option<String> {
+    TOOL_FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .rev()
+        .find(|failure| failure.0 == intent)
+        .map(|(_, site, stage, check)| {
+            let check = check.map(|check| format!(" check={check}"));
+            format!("{site} stage={stage}{}", check.unwrap_or_default())
+        })
 }
 
 #[cfg(unix)]

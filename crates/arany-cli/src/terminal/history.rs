@@ -1730,6 +1730,7 @@ mod tests {
                     Event::RunStarted {
                         run_id,
                         config: RunConfig {
+                            roster: None,
                             providers: None,
                             provider: "scripted".into(),
                             model: "test-model".into(),

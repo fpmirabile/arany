@@ -39,7 +39,7 @@ fn prepare_test_file_account(root: &Path) -> Uuid {
     prepare_test_file_account_at(&root.join("account-root"))
 }
 
-fn prepare_test_file_account_at(account_root: &Path) -> Uuid {
+pub(super) fn prepare_test_file_account_at(account_root: &Path) -> Uuid {
     let state = StateRoot::admit(account_root).expect("test account root");
     let account_id = Uuid::now_v7();
     let record = serde_json::json!({

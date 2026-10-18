@@ -50,24 +50,6 @@ fn call(kind: &str) -> arany::ToolCall {
     }
 }
 
-fn diagnostics_log() -> &'static Path {
-    static LOG: std::sync::OnceLock<(tempfile::TempDir, std::path::PathBuf)> =
-        std::sync::OnceLock::new();
-    &LOG.get_or_init(|| {
-        let temp = tempfile::tempdir().unwrap();
-        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
-        arany::enable_development_diagnostics(&root);
-        let log = root.path().join("development.log");
-        (temp, log)
-    })
-    .1
-}
-
-fn diagnostics_tail() -> String {
-    let bytes = std::fs::read(diagnostics_log()).unwrap_or_default();
-    String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(4096)..]).into_owned()
-}
-
 struct Fixture {
     _temp: tempfile::TempDir,
     workspace: std::path::PathBuf,
@@ -80,7 +62,6 @@ struct Fixture {
 
 impl Fixture {
     fn new(settings: Option<&Value>, write: bool) -> Self {
-        diagnostics_log();
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
@@ -183,7 +164,7 @@ impl Fixture {
         let unconsumed = provider.responses.lock().unwrap().len();
         assert!(
             unconsumed == 0,
-            "all expected calls consumed: {unconsumed} left, fixture settings {:?}, run {:?}, tools {:?}, diagnostics {}",
+            "all expected calls consumed: {unconsumed} left, fixture settings {:?}, run {:?}, tools {:?}",
             self.settings,
             result.run.status,
             result
@@ -193,14 +174,12 @@ impl Fixture {
                 .chain(result.run.agents.iter().flat_map(|agent| &agent.tools))
                 .map(|tool| (
                     serde_json::to_value(&tool.intent.call).unwrap()["operation"].clone(),
-                    tool.observation.as_ref().map(|observation| (
-                        observation.disposition,
-                        observation.attestation.is_some(),
-                        &observation.output
-                    ))
+                    tool.observation
+                        .as_ref()
+                        .map(|observation| observation.attestation.is_some()),
+                    tool_report(tool.observation.as_ref())
                 ))
-                .collect::<Vec<_>>(),
-            diagnostics_tail()
+                .collect::<Vec<_>>()
         );
         (result, requests, humans)
     }
@@ -562,6 +541,76 @@ async fn permission_dispatch_over_maximum_command_timeout_limits_before_deny() {
 }
 
 #[tokio::test]
+async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and_reaps_it() {
+    let marker = format!("30.{}", std::process::id());
+    let sleepers = || async {
+        let listing = tokio::process::Command::new("ps")
+            .args(["-A", "-o", "command="])
+            .output()
+            .await
+            .expect("process listing");
+        String::from_utf8_lossy(&listing.stdout)
+            .lines()
+            .filter(|line| line.trim() == format!("sleep {marker}"))
+            .count()
+    };
+    let mut fixture = Fixture::new(None, true);
+    // The intent expires one runtime after issue, and macOS storage preparation must fit before it.
+    fixture.command_maximum = Some(10_000);
+    let call = arany::ToolCall::Command {
+        program: "sh".into(),
+        args: vec!["-c".into(), format!("sleep {marker} & sleep {marker}")],
+        cwd: "".into(),
+    };
+    let mut plan = plan(&call);
+    plan.command_timeout_ms = Some(10_000);
+    let observe_both = async {
+        for _ in 0..300 {
+            if sleepers().await == 2 {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    };
+    let ((result, _, _), started) = tokio::join!(
+        fixture.run(
+            vec![tool_outcome(call, Some(Box::new(plan))), finish("answer")],
+            Some(arany::ApprovalMode::Request),
+            false,
+        ),
+        observe_both
+    );
+    assert!(
+        started,
+        "the foreground and background children both started"
+    );
+    let tool = &result.run.tools[0];
+    let observation = tool.observation.as_ref().unwrap();
+    assert_eq!(
+        (observation.disposition, observation.output.as_str()),
+        (
+            arany::ToolDisposition::Limit,
+            "Tool result or resource limit reached"
+        )
+    );
+    assert!(matches!(
+        observation.attestation,
+        Some(arany::Attestation::Guard(_))
+    ));
+    // An exited descendant may linger briefly before its new parent collects it.
+    let mut reaped = false;
+    for _ in 0..20 {
+        reaped = sleepers().await == 0;
+        if reaped {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(reaped, "the background child outlived the Guard teardown");
+}
+
+#[tokio::test]
 async fn permission_dispatch_missing_settings_preserves_existing_approval_flow() {
     for mode in [
         None,
@@ -758,8 +807,8 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
         ScriptedProvider::new(vec![finish("approve")]).with_profile("scripted", "review-fallback"),
     );
     let mut bindings = routes(&primary);
-    bindings.child = vec![child.clone()];
-    bindings.review = vec![review.clone(), fallback.clone()];
+    bindings.roles.child = vec![child.clone()];
+    bindings.roles.review = vec![review.clone(), fallback.clone()];
     let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
     let mut request = input(&fixture.workspace);
     request.policy = CollaborationPolicy::Auto {
@@ -1260,7 +1309,11 @@ async fn hook_failures_are_non_blocking_and_changes_are_discarded() {
         assert_eq!(case.hook_results(), vec![expected], "{script}");
         assert_eq!(case.verdict().hook_restriction, None, "{script}");
         assert_eq!(case.verdict().hooks, 1);
-        assert!(case.dispatched(), "{script}");
+        assert!(
+            case.dispatched(),
+            "{script}: {}",
+            tool_report(case.tool.observation.as_ref())
+        );
         assert!(!case.notes_x_exists, "{script}");
         if script.contains("hostile") {
             let output = &case.tool.hooks[0]

@@ -17,6 +17,18 @@ pub(super) const TASK_BYTES_CAP: usize = 96 * 1024;
 pub(super) const RUNTIME_ROOT: &str = "/usr";
 // Loaded CI hosts stall teardown for seconds; one shared bound only widens the wait for termination evidence.
 pub(super) const TEARDOWN_WAIT: Duration = Duration::from_secs(10);
+const PAYLOAD_KILL_WAIT: Duration = Duration::from_secs(1);
+// The launcher measures its runtime from GO, so the grace covers its kill wait, the report write and GO delivery.
+#[cfg(any(target_os = "macos", test))]
+const PAYLOAD_REPORT_GRACE: Duration = PAYLOAD_KILL_WAIT.saturating_add(Duration::from_secs(1));
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn payload_report_deadline(
+    go: tokio::time::Instant,
+    runtime_ms: u32,
+) -> tokio::time::Instant {
+    go + Duration::from_millis(u64::from(runtime_ms)) + PAYLOAD_REPORT_GRACE
+}
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -307,6 +319,7 @@ struct Ready {
 pub(super) enum CleanupCheck {
     Inspection,
     ListingUnavailable,
+    DeviceUnlisted,
     DetachFailed,
     ImageStillListed,
     MountStillPresent,
@@ -317,6 +330,7 @@ impl CleanupCheck {
         match self {
             Self::Inspection => "inspection",
             Self::ListingUnavailable => "listing unavailable",
+            Self::DeviceUnlisted => "device unlisted before detach",
             Self::DetachFailed => "detach failed",
             Self::ImageStillListed => "image still listed",
             Self::MountStillPresent => "mount still present",
@@ -613,6 +627,19 @@ pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<
     }
 }
 
+// A device gone at the re-check may still be detaching; never detach it, and let a fresh attempt confirm.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn require_listed<T: PartialEq>(
+    mut listed: impl Iterator<Item = T>,
+    device: T,
+) -> Result<(), ToolError> {
+    if listed.any(|candidate| candidate == device) {
+        Ok(())
+    } else {
+        Err(ToolError::ProtectionUnavailable)
+    }
+}
+
 pub(super) fn bootstrap_failure(stderr: &[u8]) -> Option<ToolError> {
     serde_json::from_slice::<BootstrapFailure>(stderr)
         .ok()
@@ -835,6 +862,16 @@ pub(super) async fn reap_owned_child(
     child.wait().await
 }
 
+pub(super) fn spawn_before(
+    command: &mut Command,
+    deadline: tokio::time::Instant,
+) -> Result<Child, ToolError> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err(ToolError::Limit);
+    }
+    command.spawn().map_err(|_| ToolError::Operation)
+}
+
 pub(super) async fn capture(
     mut child: Child,
     cap: usize,
@@ -860,7 +897,7 @@ pub(super) async fn capture(
         Err(_) => ToolError::Limit,
     };
     let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(1), reap_owned_child(&mut child)).await;
+    let _ = tokio::time::timeout(PAYLOAD_KILL_WAIT, reap_owned_child(&mut child)).await;
     Err(error)
 }
 
@@ -927,8 +964,35 @@ pub(super) struct GuardContext<'a> {
     pub(super) workspace: &'a Path,
     pub(super) skill: Option<Vec<u8>>,
     pub(super) hook_stdin: Option<&'a str>,
+    runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
+}
+
+impl GuardContext<'_> {
+    pub(super) fn remaining_runtime(&self) -> Duration {
+        runtime_after(
+            self.runtime_started,
+            self.intent.limits.runtime_ms,
+            std::time::Instant::now(),
+        )
+    }
+}
+
+// Only macOS has a supervisor deadline counted from GO; elsewhere the full runtime starts at spawn.
+fn runtime_start_at_go() -> Option<std::time::Instant> {
+    cfg!(target_os = "macos").then(std::time::Instant::now)
+}
+
+fn runtime_after(
+    started: Option<std::time::Instant>,
+    runtime_ms: u32,
+    now: std::time::Instant,
+) -> Duration {
+    let runtime = Duration::from_millis(u64::from(runtime_ms));
+    started.map_or(runtime, |started| {
+        (started + runtime).saturating_duration_since(now)
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1122,6 +1186,7 @@ pub(super) fn helper_main() -> ExitCode {
         stdin
             .read_exact(&mut go)
             .map_err(|_| ToolError::Operation)?;
+        let runtime_started = runtime_start_at_go();
         if go != *b"GO\n" || task.intent.expires_at_ms <= now_ms() {
             return Err(ToolError::Configuration);
         }
@@ -1149,6 +1214,7 @@ pub(super) fn helper_main() -> ExitCode {
             workspace,
             skill,
             hook_stdin: task.hook_stdin.as_deref(),
+            runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
@@ -1341,6 +1407,91 @@ mod tests {
             parse_observation(br#"{"stage":"made_up"}"#),
             Err(ToolError::Operation)
         ));
+    }
+
+    #[test]
+    fn launcher_runtime_ends_at_the_go_deadline_inside_the_supervisor_grace() {
+        let go = std::time::Instant::now();
+        let runtime = Duration::from_millis(5_000);
+        let setup = Duration::from_millis(1_500);
+        let launcher_end = go + setup + runtime_after(Some(go), 5_000, go + setup);
+        assert_eq!(launcher_end, go + runtime);
+        assert_eq!(
+            runtime_after(Some(go), 5_000, go + runtime + setup),
+            Duration::ZERO
+        );
+        assert_eq!(runtime_after(None, 5_000, go + runtime + setup), runtime);
+        assert_eq!(
+            runtime_start_at_go().is_some(),
+            cfg!(target_os = "macos"),
+            "Linux keeps the full runtime from spawn"
+        );
+        let supervisor_go = tokio::time::Instant::now();
+        assert!(
+            payload_report_deadline(supervisor_go, 5_000)
+                > supervisor_go + runtime + PAYLOAD_KILL_WAIT
+        );
+        assert!(payload_report_deadline(supervisor_go, u32::MAX) > supervisor_go);
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_runtime_is_a_limit_without_a_spawn() {
+        let mut missing = Command::new("/nonexistent/arany-test-program");
+        assert!(matches!(
+            spawn_before(&mut missing, tokio::time::Instant::now()),
+            Err(ToolError::Limit)
+        ));
+        assert!(matches!(
+            spawn_before(
+                &mut missing,
+                tokio::time::Instant::now() + Duration::from_secs(60)
+            ),
+            Err(ToolError::Operation)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_unlisted_device_is_refused_retryably_and_retried_within_the_bound() {
+        assert!(require_listed(["disk4", "disk5"].into_iter(), "disk4").is_ok());
+        assert!(matches!(
+            require_listed(["disk5"].into_iter(), "disk4"),
+            Err(ToolError::ProtectionUnavailable)
+        ));
+        let recheck = |listings: &'static [&'static [&'static str]]| {
+            let attempt = std::cell::Cell::new(0);
+            move || {
+                let listed = listings[attempt.get().min(listings.len() - 1)];
+                attempt.set(attempt.get() + 1);
+                std::future::ready(require_listed(listed.iter().copied(), "disk4"))
+            }
+        };
+        let far = tokio::time::Instant::now() + Duration::from_secs(60);
+        assert!(
+            retry_transient(8, Duration::ZERO, far, recheck(&[&[], &["disk4"]]))
+                .await
+                .is_ok(),
+            "a later attempt re-lists before acting"
+        );
+        let calls = std::cell::Cell::new(0);
+        let unlisted = recheck(&[&[]]);
+        let never_listed = retry_transient(8, Duration::ZERO, far, || {
+            calls.set(calls.get() + 1);
+            unlisted()
+        })
+        .await;
+        assert!(matches!(
+            never_listed,
+            Err(ToolError::ProtectionUnavailable)
+        ));
+        assert_eq!(calls.get(), 8);
+        let lapsed = retry_transient(
+            8,
+            Duration::ZERO,
+            tokio::time::Instant::now(),
+            recheck(&[&[]]),
+        )
+        .await;
+        assert!(matches!(lapsed, Err(ToolError::ProtectionUnavailable)));
     }
 
     #[tokio::test]
@@ -1553,6 +1704,10 @@ mod tests {
             serde_json::to_string(&failure).unwrap(),
             r#"{"stage":"storage_cleanup","check":"detach_failed"}"#
         );
+        let unlisted: BootstrapFailure =
+            serde_json::from_str(r#"{"stage":"storage_cleanup","check":"device_unlisted"}"#)
+                .unwrap();
+        assert_eq!(unlisted.check(), Some("device unlisted before detach"));
         let bare: BootstrapFailure = serde_json::from_str(r#"{"stage":"payload"}"#).unwrap();
         assert_eq!(bare.check(), None);
         assert_eq!(

@@ -1,9 +1,9 @@
 use crate::git::{host_git, tree_snapshot};
 use crate::{hash, private_file};
 use arany::{
-    AgentPhase, CollaborationPolicy, CompactionItem, CompactionRequest, CompactionResponse, Engine,
-    Finish, Provider, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
-    RunRequest, RunStatus, SessionView, StateRoot, Store, ToolCall, ToolDisposition,
+    AgentPhase, CollaborationPolicy, CompactionItem, CompactionRequest, CompactionResponse, Finish,
+    Provider, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, RunRequest,
+    RunStatus, SessionView, StateRoot, Store, ToolCall, ToolDisposition,
 };
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
@@ -285,7 +285,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
         requests: requests.clone(),
         compactions: compactions.clone(),
     });
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         state,
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -707,7 +707,7 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
     let provider = Arc::new(OverTimeoutCommand {
         requests: Arc::clone(&requests),
     });
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         state,
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -870,7 +870,7 @@ async fn in_process_reads_are_attested_and_replay_after_exit_or_a_crash() {
         br#"{"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     );
     let provider = Arc::new(InProcessReads);
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         state,
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1037,7 +1037,7 @@ async fn exact_goal_token_cap_fails_before_a_tool_request_is_journaled() {
     let provider = Arc::new(ExactTokenTool {
         requests: Arc::clone(&requests),
     });
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         state,
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1162,7 +1162,7 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
     let first_engine_provider = Arc::new(GoalWorkspaceLease {
         requests: Arc::clone(&first_requests),
     });
-    let first_engine = Engine::open(
+    let first_engine = arany::test_support::engine::open(
         StateRoot::open_existing(&first_state_path).unwrap(),
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1205,7 +1205,7 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
     let blocked_engine_provider = Arc::new(GoalWorkspaceLease {
         requests: Arc::clone(&blocked_requests),
     });
-    let blocked_engine = Engine::open(
+    let blocked_engine = arany::test_support::engine::open(
         StateRoot::open_existing(&second_state_path).unwrap(),
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1261,7 +1261,7 @@ async fn paused_implementation_goal_does_not_hold_the_workspace_writer() {
     let released_engine_provider = Arc::new(GoalWorkspaceLease {
         requests: Arc::clone(&released_requests),
     });
-    let released_engine = Engine::open(
+    let released_engine = arany::test_support::engine::open(
         StateRoot::open_existing(&second_state_path).unwrap(),
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1365,7 +1365,7 @@ async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
             plan_on_inspection: false,
             omit_plan: false,
         });
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             state,
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1597,7 +1597,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                 plan_on_inspection: false,
                 omit_plan: false,
             });
-            let failed = Engine::open(
+            let failed = arany::test_support::engine::open(
                 state,
                 EngineConfig {
                     guard_executable: Some("/usr/bin/false".into()),
@@ -1654,7 +1654,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
             requests: requests.clone(),
             team,
         });
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             state,
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -1846,7 +1846,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         plan_on_inspection: false,
         omit_plan: false,
     });
-    let runtime_engine = Engine::open(
+    let runtime_engine = arany::test_support::engine::open(
         runtime_state,
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2016,7 +2016,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             plan_on_inspection: name == "long-mkdir",
             omit_plan: name == "unplanned",
         });
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             state,
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2149,7 +2149,7 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             plan_on_inspection: false,
             omit_plan: false,
         });
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             state,
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2328,7 +2328,7 @@ async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
         plan_on_inspection: false,
         omit_plan: false,
     });
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         state,
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2444,7 +2444,7 @@ async fn command_descendants_cannot_reach_host_canaries_or_guard_memory() {
         plan_on_inspection: false,
         omit_plan: false,
     });
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         state,
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2524,7 +2524,7 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
             plan_on_inspection: false,
             omit_plan: false,
         });
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             state,
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2641,7 +2641,7 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
                 requests: fresh_requests.clone(),
                 team: true,
             });
-            let resumed = Engine::open(
+            let resumed = arany::test_support::engine::open(
                 StateRoot::open_existing(&state_path).unwrap(),
                 EngineConfig {
                     guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2845,7 +2845,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             call: call.clone(),
             review,
         });
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             state,
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -3222,7 +3222,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     let provider = Arc::new(GitJourney {
         requests: requests.clone(),
     });
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         state,
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),

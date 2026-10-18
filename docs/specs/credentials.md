@@ -21,6 +21,8 @@ Admission walks each path component through a no-follow directory handle. New co
 
 Debug builds only accept `ARANY_TEST_ACCOUNT_ROOT`, which must be an absolute path with explicit `HOME` and XDG settings beneath a non-root fixture parent. Optimized builds reject it, and Store admission rejects an environment-selected state root outside that parent. The macOS Keychain fixture likewise accepts `ARANY_TEST_KEYCHAIN_ROOT` only in debug builds, to select a fixed file inside an admitted private root; optimized builds reject it before any OS-store access.
 
+Decision O4 (credentials): roster admission reuses current selected-account loaders. Multiple models or efforts on the same admitted identity are supported; simultaneous unsupported saved native or ChatGPT account combinations refuse before Workspace content, including an unused candidate. There is no roster credential-slot enumeration or account-store expansion; that requires a separate security/account change. Environment-backed native and selected saved sources keep their distinct admission rules. [Provider presets](./provider.md#named-roster-presets) own route composition and all-candidate ordering.
+
 ## Backend selection and startup
 
 Setup prefers the OS keyring. An unavailable, unpinned store may offer a separately warned, explicitly selected private-file backend. A locked store reports a locked error. The checked backend marker pins keyring storage without a key, or file storage with the account. Read, write or authorization failure on a pinned keyring never silently downgrades storage.

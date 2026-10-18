@@ -1,9 +1,8 @@
 use super::ToolError;
 use super::catalog::string;
-use super::guard::{GuardContext, capture, payload};
+use super::guard::{GuardContext, capture, payload, spawn_before};
 use super::types::{CommandResult, ToolCall, valid_name, valid_relative};
 use serde_json::{Value, json};
-use std::time::Duration;
 
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
@@ -68,8 +67,9 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     if site.hook_stdin.is_some() {
         command.stdin(std::process::Stdio::piped());
     }
+    let deadline = tokio::time::Instant::now() + site.remaining_runtime();
+    let mut child = spawn_before(&mut command, deadline)?;
     let mut writer = None;
-    let mut child = command.spawn().map_err(|_| ToolError::Operation)?;
     if let (Some(input), Some(mut stdin)) = (site.hook_stdin, child.stdin.take()) {
         let input = input.to_owned();
         // Aborted below once capture ends, so a hook that never reads cannot outlive the deadline.
@@ -80,7 +80,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let captured = capture(
         child,
         (site.intent.limits.result_bytes as usize / 2).saturating_sub(128),
-        Duration::from_millis(u64::from(site.intent.limits.runtime_ms)),
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
     )
     .await;
     if let Some(writer) = writer {

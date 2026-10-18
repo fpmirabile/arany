@@ -151,7 +151,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         "ToolPermissionDecided" => Some(3),
         "HookStarted" | "HookFinished" => Some(1),
         "ToolFinished" => Some(9),
-        "RunStarted" => Some(10),
+        "RunStarted" => Some(11),
         "RunFinished" => Some(7),
         "GoalProviderCallReserved" => Some(7),
         "GoalCompactionCallReserved" => Some(7),

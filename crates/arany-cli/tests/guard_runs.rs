@@ -27,9 +27,30 @@ mod permissions;
 #[path = "guard_runs/unguarded.rs"]
 mod unguarded;
 
+fn tool_report(observation: Option<&arany::ToolObservation>) -> String {
+    observation.map_or_else(
+        || "no observation".to_owned(),
+        |observation| {
+            let failure = arany::test_support::recorded_tool_failure(observation.intent.id)
+                .unwrap_or_else(|| "no recorded failure".to_owned());
+            format!(
+                "{:?} {:?} [{failure}]",
+                observation.disposition, observation.output
+            )
+        },
+    )
+}
+
 #[test]
 fn account_path_uses_the_private_binary_fixture() {
     let root = arany::test_support::isolate_account_root();
+    if cfg!(not(debug_assertions)) && std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
+        assert!(matches!(
+            StateRoot::account_path(),
+            Err(arany::StoreError::InvalidStateDirectory)
+        ));
+        return;
+    }
     assert_eq!(StateRoot::account_path().unwrap(), root);
     if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_none() {
         assert!(root.starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()));
@@ -2511,7 +2532,7 @@ mod routing {
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
         let mut bindings = routes(&primary);
-        bindings.review = vec![review.clone(), fallback.clone()];
+        bindings.roles.review = vec![review.clone(), fallback.clone()];
         let result = run_routed(
             &engine,
             bindings,
@@ -2602,7 +2623,7 @@ mod routing {
         std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut bindings = routes(&primary);
-        bindings.compaction = vec![first.clone(), second.clone()];
+        bindings.roles.compaction = vec![first.clone(), second.clone()];
         let outcome = run_routed(&engine, bindings.clone(), input(&workspace), configured())
             .await
             .unwrap();
@@ -2678,7 +2699,7 @@ mod routing {
         std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut bindings = routes(&primary);
-        bindings.compaction = vec![first.clone(), second.clone()];
+        bindings.roles.compaction = vec![first.clone(), second.clone()];
         let outcome = run_routed(&engine, bindings.clone(), input(&workspace), configured())
             .await
             .unwrap();
