@@ -327,6 +327,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
         finished_sequence: None,
         tools: vec![
             ToolView {
+                checkpoint: None,
                 intent: observed.intent.clone(),
                 observation: Some(observed),
                 review_call_index: None,
@@ -336,6 +337,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 finished_sequence: Some(3),
             },
             ToolView {
+                checkpoint: None,
                 intent: observation(
                     ToolCall::ApplyChangeset {
                         source: crate::session::worker::ChangesetSource::CommandReceipt {
@@ -390,6 +392,7 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
     let view = |call: ToolCall, text: &str| {
         let observed = observation(call, text);
         ToolView {
+            checkpoint: None,
             intent: observed.intent.clone(),
             observation: Some(observed),
             review_call_index: None,

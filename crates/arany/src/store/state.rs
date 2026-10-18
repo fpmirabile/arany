@@ -6,6 +6,7 @@ use directories::ProjectDirs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 mod build_cache;
+pub(crate) mod checkpoints;
 mod lock;
 #[cfg(test)]
 pub(crate) use build_cache::capture_archive;

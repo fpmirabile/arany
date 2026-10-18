@@ -1451,17 +1451,37 @@ mod payload_version_tests {
         let run = RunId::new();
         let agent = AgentRunId::new();
         let finished = Event::ToolFinished {
+            checkpoint: None,
             run_id: run,
             agent_run_id: agent,
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(12));
+        assert_eq!(payload_version("ToolFinished"), Some(13));
         assert_eq!(
-            Event::decode("ToolFinished", 12, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 13, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
-        for previous in [11, 10, 9, 8, 7] {
+        let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        missing.as_object_mut().unwrap().remove("checkpoint");
+        assert!(
+            Event::decode(
+                "ToolFinished",
+                13,
+                &missing.to_string(),
+                Some(run),
+                Some(agent)
+            )
+            .is_err()
+        );
+        for invalid in [
+            payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"checkpoint\":null", 1),
+            payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
+            payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
+        ] {
+            assert!(Event::decode("ToolFinished", 13, &invalid, Some(run), Some(agent)).is_err());
+        }
+        for previous in [12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1544,6 +1564,7 @@ mod payload_version_tests {
         );
         assert!(matches!(
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: agent,
                 observation: write.clone(),

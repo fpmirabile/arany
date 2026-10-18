@@ -81,7 +81,38 @@ impl Fixture {
         attestation: Option<Attestation>,
         output: &str,
     ) -> u64 {
+        let checkpoint = if crate::session::checkpoint::publication(intent)
+            && (attestation.is_some() || disposition == ToolDisposition::Uncertain)
+        {
+            let view = self.view();
+            let needed = crate::session::checkpoint::before_versions(&view.runs[0], &intent.call)
+                .iter()
+                .any(|(path, before)| {
+                    before.as_ref().is_some_and(|digest| {
+                        crate::session::checkpoint::capture_needed(&view, self.run, path, digest)
+                    })
+                });
+            Some(
+                if needed
+                    && matches!(
+                        disposition,
+                        ToolDisposition::Succeeded | ToolDisposition::Uncertain
+                    )
+                {
+                    crate::Checkpoint {
+                        status: crate::CheckpointStatus::Captured,
+                        reason: None,
+                        pruned_before_run: None,
+                    }
+                } else {
+                    crate::Checkpoint::not_needed()
+                },
+            )
+        } else {
+            None
+        };
         self.push(Event::ToolFinished {
+            checkpoint,
             run_id: self.run,
             agent_run_id: intent.agent_run_id,
             observation: ToolObservation {
@@ -1446,7 +1477,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         ("ProviderCallRecorded", 8),
         ("AgentFinished", 9),
         ("ToolStarted", 10),
-        ("ToolFinished", 12),
+        ("ToolFinished", 13),
         ("WorkerStopObserved", 1),
         ("WorkerHandoverDiscarded", 1),
         ("WorkerDataChunk", 1),
@@ -2163,6 +2194,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
     refused(
         &f,
         Event::ToolFinished {
+            checkpoint: None,
             run_id: f.run,
             agent_run_id: f.child,
             observation: ToolObservation {
@@ -2414,6 +2446,7 @@ fn worker_protocol_private_reads_require_the_worker_read_attestation() {
     );
     f.started(&intent);
     let finished = |attestation| Event::ToolFinished {
+        checkpoint: None,
         run_id: f.run,
         agent_run_id: f.child,
         observation: ToolObservation {
@@ -3185,6 +3218,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
             append(
                 &mut view,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: f.run,
                     agent_run_id: actor,
                     observation: ToolObservation {

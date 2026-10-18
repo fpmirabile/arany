@@ -44,9 +44,9 @@ use input::TerminalReader;
 pub use input::{ShutdownSignal, TerminalInput};
 use linear::LinearState;
 use view::{
-    Palette, agent_detail_rows, agent_picker_index, bottom_area, completion_height,
-    composer_height, draw_agent_inspector_frame, draw_frame_with_history, draw_help_frame,
-    draw_model_catalog_frame, draw_quick_actions_frame, draw_session_picker_frame,
+    Palette, agent_detail_lines, agent_detail_rows, agent_picker_index, bottom_area,
+    completion_height, composer_height, draw_agent_inspector_frame, draw_frame_with_history,
+    draw_help_frame, draw_model_catalog_frame, draw_quick_actions_frame, draw_session_picker_frame,
     draw_setup_choices_frame, draw_setup_frame, draw_setup_text_frame, draw_setup_warning_frame,
     history_top_padding, screen_terminal, session_picker_index,
 };
@@ -944,51 +944,10 @@ impl AttachedTerminal {
 
     pub fn toggle_transcript(&mut self, view: &SessionView) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
-        if self.is_linear() {
-            writeln!(io::stderr(), "Transcript details:")?;
-            let mut remaining = history::MAX_CLASSIC_HISTORY_BYTES;
-            for run in view
-                .runs
-                .iter()
-                .rev()
-                .take(history::MAX_CLASSIC_HISTORY_RUNS)
-                .rev()
-            {
-                let mut parts = Vec::new();
-                if run.assistant_message.is_none()
-                    && let Some(answer) = crate::presentation::display_answer(run)
-                {
-                    parts.push(format!("Arany · incomplete:\n{answer}"));
-                }
-                parts.extend(
-                    crate::presentation::display_commentary(run)
-                        .into_iter()
-                        .map(|(_, _, text)| format!("Arany · public commentary:\n{text}")),
-                );
-                if run
-                    .display
-                    .iter()
-                    .any(|chunk| chunk.category == arany::DisplayCategory::Limit)
-                {
-                    parts.push(arany::DISPLAY_LIMIT_TEXT.to_owned());
-                }
-                let parts = parts
-                    .into_iter()
-                    .chain(run.tools.iter().map(crate::presentation::tool_detail_text));
-                for text in parts {
-                    let text = crate::presentation::escape_terminal(&text);
-                    if text.len() > remaining {
-                        writeln!(
-                            io::stderr(),
-                            "Transcript detail limit reached; use show --output jsonl for the complete journal."
-                        )?;
-                        return Ok(());
-                    }
-                    remaining = remaining.saturating_sub(text.len() + 1);
-                    writeln!(io::stderr(), "{text}")?;
-                }
-            }
-            return Ok(());
+        if let Some(linear) = &mut self.linear {
+            return linear
+                .write_transcript(&mut io::stderr(), view)
+                .map_err(Into::into);
         }
         if self.transcript_open {
             if self.parked_terminal.is_some() {
@@ -2035,10 +1994,8 @@ impl AttachedTerminal {
         let (_, screen_height) = size()?;
         let height = screen_height.clamp(1, 14);
         panel.scroll = panel.scroll.min(
-            model
-                .lines
+            agent_detail_lines(&model, width)
                 .len()
-                .saturating_sub(1)
                 .saturating_sub(agent_detail_rows(height, model.choices.len())),
         );
         let scroll = panel.scroll;

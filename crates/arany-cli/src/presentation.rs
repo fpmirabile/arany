@@ -20,6 +20,82 @@ pub enum Output {
     Jsonl,
 }
 
+pub(crate) fn supervisor_line(verdict: &arany::supervisor::SupervisorVerdict) -> String {
+    use arany::supervisor::SignalKind;
+    let signals = verdict
+        .signals
+        .iter()
+        .map(|signal| match signal.signal {
+            SignalKind::Loop => "possible loop",
+            SignalKind::Probing => "possible probing",
+            SignalKind::Disproportion => "possibly disproportionate changes",
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Supervisor (shadow): {signals}; no action taken{}",
+        if verdict.capped {
+            "; verdict limit reached"
+        } else {
+            ""
+        }
+    )
+}
+
+pub(crate) fn supervisor_lines(run: &RunView) -> impl Iterator<Item = String> + '_ {
+    run.supervisor
+        .verdicts()
+        .iter()
+        .map(|(_, verdict)| supervisor_line(verdict))
+}
+
+#[cfg(test)]
+pub(crate) fn supervisor_fixture(
+    actor: arany::AgentRunId,
+    count: usize,
+) -> arany::supervisor::SupervisorState {
+    use arany::supervisor::*;
+    SupervisorState::with_verdicts_for_test(
+        (0..count)
+            .map(|index| {
+                (
+                    actor,
+                    SupervisorVerdict {
+                        subject_sequence: 1,
+                        site: Site::ToolOutcome,
+                        evaluator: 1,
+                        mode: Mode::Shadow,
+                        signals: vec![
+                            Signal {
+                                signal: SignalKind::Loop,
+                                level: Level::Notice,
+                                would_response: None,
+                                features: Features::Loop(Default::default()),
+                                evidence: vec![1],
+                            },
+                            Signal {
+                                signal: SignalKind::Probing,
+                                level: Level::WouldNarrow,
+                                would_response: Some(Response::Revoke),
+                                features: Features::Probing(Default::default()),
+                                evidence: vec![1],
+                            },
+                            Signal {
+                                signal: SignalKind::Disproportion,
+                                level: Level::WouldNarrow,
+                                would_response: Some(Response::RequireApproval),
+                                features: Features::Disproportion(Default::default()),
+                                evidence: vec![1],
+                            },
+                        ],
+                        capped: index == 255,
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     use arany::{ToolCall, ToolDisposition};
     let operation = match &tool.intent.call {
@@ -73,6 +149,17 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ),
         None => format!("Tool · {} · {state}", safe_truncate(&operation, 160)),
     };
+    if let Some(checkpoint) = &tool.checkpoint {
+        if let Some(notice) = checkpoint.notice() {
+            summary.push_str(" · ");
+            summary.push_str(notice);
+        }
+        if let Some(run) = checkpoint.pruned_before_run {
+            summary.push_str(&format!(
+                " · Older checkpoints pruned; code restore unavailable before Run {run}"
+            ));
+        }
+    }
     if tool.ran_unguarded() {
         summary.push_str(" · UNGUARDED");
     }
@@ -449,6 +536,7 @@ pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> 
         "Arany can read this folder already. Trusting it also lets Arany edit project files, run commands and use project Skills.".into(),
         "Every edit and command runs in an isolated copy under native OS protection and publishes only reviewed changes; without that protection Tools stay disabled.".into(),
         "Commands run offline and ask first unless you change the approval mode later with Shift+Tab.".into(),
+        "Prior versions of files changed by Arany are saved unencrypted in private StateRoot storage.".into(),
         "Trust is remembered for this exact folder only. Read only keeps today's behavior.".into(),
     ]
 }
@@ -1230,6 +1318,11 @@ mod tests {
         assert_eq!(lines[1], escape_terminal("/projects/\u{1b}[31mred"));
         assert!(
             lines
+                .iter()
+                .any(|line| line.contains("saved unencrypted in private StateRoot storage"))
+        );
+        assert!(
+            lines
                 .join("\n")
                 .contains("Read only keeps today's behavior")
         );
@@ -1467,6 +1560,7 @@ mod git_summary_tests {
             ),
         ] {
             let tool = ToolView {
+                checkpoint: None,
                 intent: EffectIntent {
                     target: arany::worker::EffectTarget::Workspace,
                     id: Uuid::now_v7(),
@@ -1515,7 +1609,8 @@ mod enforcement_tests {
             expires_at_ms: 1,
             use_count: 1,
         };
-        let tool = arany::ToolView {
+        let mut tool = arany::ToolView {
+            checkpoint: None,
             intent: intent.clone(),
             observation: Some(arany::ToolObservation {
                 intent,
@@ -1534,6 +1629,35 @@ mod enforcement_tests {
         assert!(
             super::tool_summary(&tool)
                 .ends_with(" · Guard enforcement: protected path or set-ID entry refused")
+        );
+        use sha2::Digest as _;
+        if let arany::ToolCall::Write {
+            expected_digest, ..
+        } = &mut tool.intent.call
+        {
+            *expected_digest = Some("a".repeat(64));
+        }
+        let observation = tool.observation.as_mut().unwrap();
+        observation.intent = tool.intent.clone();
+        observation.disposition = arany::ToolDisposition::Succeeded;
+        observation.enforcement_cause = None;
+        observation.attestation = Some(arany::Attestation::Guard(arany::GuardReceipt {
+            contract_version: 1,
+            intent_digest: sha2::Sha256::digest(serde_json::to_vec(&tool.intent).unwrap()).into(),
+            enforcement_digest: tool.intent.enforcement_digest,
+            limits: tool.intent.limits.clone(),
+        }));
+        tool.checkpoint = Some(arany::Checkpoint {
+            status: arany::CheckpointStatus::Skipped,
+            reason: Some(arany::CheckpointReason::Quota),
+            pruned_before_run: Some(tool.intent.run_id),
+        });
+        assert_eq!(
+            super::tool_summary(&tool),
+            format!(
+                "Tool · Write file · succeeded · This change cannot be rewound (checkpoint storage full) · Older checkpoints pruned; code restore unavailable before Run {}",
+                tool.intent.run_id
+            )
         );
     }
 }
@@ -1606,6 +1730,7 @@ mod unguarded_tests {
     fn host_tool(disposition: ToolDisposition, attested: bool) -> ToolView {
         let intent = intent(&["-c", "exit 0"], "");
         ToolView {
+            checkpoint: None,
             observation: Some(ToolObservation {
                 enforcement_cause: None,
                 attestation: attested.then(|| {

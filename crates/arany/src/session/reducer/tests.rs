@@ -28,6 +28,7 @@ mod goal_recovery_tests {
             use_count: 1,
         };
         let tool = ToolView {
+            checkpoint: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -947,6 +948,7 @@ mod goal_replay_tests {
         .expect("child Tool request");
         let mut elsewhere = view.clone();
         elsewhere.runs[0].tools.push(ToolView {
+            checkpoint: None,
             intent: child_intent(
                 run,
                 primary_agent,
@@ -981,6 +983,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: child,
                 observation: observation_for(read, b"ok"),
@@ -1254,6 +1257,7 @@ mod goal_replay_tests {
             use_count: 1,
         };
         review.runs[0].tools.push(ToolView {
+            checkpoint: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -1911,6 +1915,7 @@ mod goal_replay_tests {
             let mut unknown = base.clone();
             let intent = read_intent(run_id, agent_run_id, "src/lib.rs");
             unknown.runs[0].tools.push(ToolView {
+                checkpoint: None,
                 intent: intent.clone(),
                 observation: Some(ToolObservation {
                     intent,
@@ -1940,6 +1945,7 @@ mod goal_replay_tests {
         newer_goal.run_ids = vec![newer_run.id];
         let intent = read_intent(newer_run.id, agent_run_id, "src/lib.rs");
         newer_run.tools.push(ToolView {
+            checkpoint: None,
             intent: intent.clone(),
             observation: Some(ToolObservation {
                 intent,
@@ -1965,6 +1971,7 @@ mod goal_replay_tests {
         let mut cancelled = base.clone();
         let intent = read_intent(run_id, agent_run_id, "src/lib.rs");
         cancelled.runs[0].tools.push(ToolView {
+            checkpoint: None,
             intent: intent.clone(),
             observation: Some(ToolObservation {
                 intent,
@@ -3005,12 +3012,18 @@ mod goal_replay_tests {
                 &mut view,
                 &mut envelopes,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: run,
                     agent_run_id: actor,
                     observation: observation_for(intent, b"ok"),
                 },
             );
             let pending = view.runs[0].supervisor.pending_event();
+            assert_eq!(
+                view.runs[0].supervisor.verdicts().len(),
+                verdict_count,
+                "pending verdicts are not display facts"
+            );
             if i == 0 {
                 let mut negative = view.clone();
                 let forged = Event::SupervisorVerdictRecorded {
@@ -3090,6 +3103,11 @@ mod goal_replay_tests {
                     assert_eq!(verdict.capped, verdict_count == 256);
                 }
                 append(&mut view, &mut envelopes, verdict.clone());
+                let (recorded_actor, recorded) = view.runs[0].supervisor.verdicts().last().unwrap();
+                assert_eq!(*recorded_actor, actor);
+                assert!(
+                    matches!(&verdict, Event::SupervisorVerdictRecorded { verdict, .. } if verdict == recorded)
+                );
                 assert!(
                     apply(&mut view.clone(), verdict).is_err(),
                     "duplicate verdict"
@@ -3097,6 +3115,7 @@ mod goal_replay_tests {
             }
         }
         assert_eq!(verdict_count, 256);
+        assert_eq!(view.runs[0].supervisor.verdicts().len(), 256);
         assert_eq!(
             SessionView::replay_open(session, &envelopes)
                 .unwrap()
@@ -3160,6 +3179,7 @@ mod goal_replay_tests {
             active_ceiling_ms: 0,
         };
         let finished = Event::ToolFinished {
+            checkpoint: None,
             run_id: run,
             agent_run_id: child,
             observation: observation_for(read.clone(), b"ok"),
@@ -3255,6 +3275,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: child,
                 observation: mismatched,
@@ -3317,6 +3338,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: child,
                 observation: observation_for(outside.clone(), b"x"),
@@ -3325,6 +3347,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: child,
                 observation: ToolObservation {
@@ -3374,6 +3397,7 @@ mod goal_replay_tests {
             apply(
                 &mut view,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: run,
                     agent_run_id: child,
                     observation: observation_for(read, b"ok"),
@@ -3435,6 +3459,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: child,
                 observation: observation_for(read, b"ok"),
@@ -3573,6 +3598,7 @@ mod goal_replay_tests {
                 accepted_sequence: 1,
                 finished_sequence: None,
                 tools: vec![ToolView {
+                    checkpoint: None,
                     permission_verdict: None,
                     hooks: Vec::new(),
                     hook_sequence: None,
@@ -3698,6 +3724,7 @@ mod goal_replay_tests {
                     accepted_sequence: 1,
                     finished_sequence: Some(1),
                     tools: vec![ToolView {
+                        checkpoint: None,
                         permission_verdict: None,
                         hooks: Vec::new(),
                         hook_sequence: None,
@@ -3931,6 +3958,7 @@ mod goal_replay_tests {
             apply(
                 &mut view,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: run,
                     agent_run_id: agent,
                     observation: denied,
@@ -4557,6 +4585,7 @@ mod goal_replay_tests {
             apply(
                 &mut view,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: run,
                     agent_run_id: agent,
                     observation,
@@ -4755,6 +4784,7 @@ mod goal_replay_tests {
             assert!(rejected(
                 &denied,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: run,
                     agent_run_id: agent,
                     observation: ran.clone()
@@ -4820,6 +4850,7 @@ mod goal_replay_tests {
             apply(
                 &mut view,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: run,
                     agent_run_id: agent,
                     observation: ran,
@@ -4963,6 +4994,7 @@ mod goal_replay_tests {
                 apply(
                     &mut denied,
                     Event::ToolFinished {
+                        checkpoint: None,
                         run_id: scenario.run,
                         agent_run_id: scenario.agent,
                         observation: refusal,
@@ -5034,6 +5066,7 @@ mod goal_replay_tests {
         )
         .unwrap();
         let finish = |observation: ToolObservation| Event::ToolFinished {
+            checkpoint: None,
             run_id: good.run,
             agent_run_id: good.agent,
             observation,
@@ -5211,6 +5244,19 @@ mod goal_replay_tests {
         content: &[u8],
     ) -> Event {
         Event::ToolFinished {
+            checkpoint: crate::session::checkpoint::publication(intent).then(|| {
+                if matches!(
+                    intent.call,
+                    ToolCall::Write {
+                        expected_digest: None,
+                        ..
+                    }
+                ) {
+                    crate::Checkpoint::not_needed()
+                } else {
+                    crate::Checkpoint::skipped(crate::CheckpointReason::StoreUnavailable)
+                }
+            }),
             run_id: run,
             agent_run_id: agent,
             observation: observation_for(intent.clone(), content),
@@ -5246,6 +5292,7 @@ mod goal_replay_tests {
             "File path is unavailable or outside the admitted regular-file boundary".into();
         observation.enforcement_cause = Some(EnforcementCause::FilesystemDenied);
         let finished = |observation| Event::ToolFinished {
+            checkpoint: None,
             run_id: run,
             agent_run_id: agent,
             observation,
@@ -5336,6 +5383,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: agent,
                 observation: read_attested,
@@ -5636,6 +5684,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: intent.run_id,
                 agent_run_id: intent.agent_run_id,
                 observation: in_process
@@ -5644,6 +5693,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: intent.run_id,
                 agent_run_id: intent.agent_run_id,
                 observation,
@@ -5705,6 +5755,7 @@ mod goal_replay_tests {
             apply(
                 &mut view,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: intent.run_id,
                     agent_run_id: intent.agent_run_id,
                     observation,
@@ -6190,5 +6241,83 @@ mod goal_replay_tests {
         assert_eq!(view.runs.len(), 2);
         assert!(!view.runs[0].hooks_settled());
         assert_eq!(view.goals[0].resume_usage(&view).active_ms, 1000);
+    }
+    #[test]
+    fn checkpoint_replay_requires_publication_status_and_tracks_first_touch_and_gaps() {
+        use crate::{Checkpoint, CheckpointReason, CheckpointStatus};
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        view.goals[0].plan_contract.as_mut().unwrap().paths = vec!["src".into()];
+        for (before, after, status) in [
+            ("original", "one", CheckpointStatus::Captured),
+            ("one", "two", CheckpointStatus::NotNeeded),
+            ("external", "three", CheckpointStatus::Captured),
+        ] {
+            let intent = child_intent(
+                run,
+                agent,
+                ToolCall::Write {
+                    path: "src/lib.rs".into(),
+                    expected_digest: Some(crate::tools::types::hex_digest(before.as_bytes())),
+                    content: after.into(),
+                },
+            );
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            let observation = observation_for(intent, after.as_bytes());
+            let finish = |checkpoint| Event::ToolFinished {
+                run_id: run,
+                agent_run_id: agent,
+                observation: observation.clone(),
+                checkpoint,
+            };
+            assert!(
+                rejected(&view, finish(None)),
+                "a GO publication requires checkpoint metadata"
+            );
+            let invalid = Checkpoint {
+                status: if status == CheckpointStatus::Captured {
+                    CheckpointStatus::NotNeeded
+                } else {
+                    CheckpointStatus::Captured
+                },
+                reason: None,
+                pruned_before_run: None,
+            };
+            assert!(rejected(&view, finish(Some(invalid))));
+            assert!(rejected(
+                &view,
+                finish(Some(Checkpoint {
+                    status,
+                    reason: Some(CheckpointReason::Quota),
+                    pruned_before_run: None
+                }))
+            ));
+            assert!(rejected(
+                &view,
+                finish(Some(Checkpoint {
+                    status,
+                    reason: None,
+                    pruned_before_run: Some(RunId::new()),
+                }))
+            ));
+            apply(
+                &mut view,
+                finish(Some(Checkpoint {
+                    status,
+                    reason: None,
+                    pruned_before_run: Some(run),
+                })),
+            )
+            .unwrap();
+        }
+        let last = view.runs[0]
+            .tools
+            .last()
+            .unwrap()
+            .checkpoint
+            .as_ref()
+            .unwrap();
+        assert_eq!(last.status, CheckpointStatus::Captured);
     }
 }

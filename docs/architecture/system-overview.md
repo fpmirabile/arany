@@ -273,7 +273,7 @@ Manual compaction runs only while idle and makes its Provider usage visible. Eac
 
 ## 7. Canonical persistence
 
-One strict SQLite Event journal remains product truth. Session, Run, AgentRun, SessionView, and RunView are reduced state rather than duplicate authoritative tables. SessionView retains canonical title text, explicit-title provenance and a bounded prefix-derived inherited title; its conversation-title projection is shared by status, resume feedback and human exports. These facts add no Event schema or persisted display cache.
+One strict SQLite Event journal remains product truth. Store owns the separate derived checkpoint SQLite store and pre-image durability; Guard owns Workspace publications and receives no StateRoot path or handle. Session, Run, AgentRun, SessionView, and RunView are reduced state rather than duplicate authoritative tables. SessionView retains canonical title text, explicit-title provenance and a bounded prefix-derived inherited title; its conversation-title projection is shared by status, resume feedback and human exports. These facts add no Event schema or persisted display cache.
 
 ```sql
 CREATE TABLE events (
