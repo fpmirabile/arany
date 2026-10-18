@@ -440,3 +440,17 @@ fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_sessio
         "foreign expiry is kept per Session, never attributed to this one"
     );
 }
+
+#[test]
+fn checkpoints_expiry_persists_even_when_the_capture_itself_fails() {
+    let (_temp, root) = fixture();
+    let (old, session, goal) = (SessionId::new(), SessionId::new(), GoalId::new());
+    assert_eq!(
+        capture(&root, batch(old, goal, RunId::new(), 1, b"old"), 1).status,
+        CheckpointStatus::Captured
+    );
+    let mut failing = batch(session, goal, RunId::new(), 2, b"new");
+    failing.files[0].0 = "../escape".into();
+    assert!(capture_inner(&root, &failing, RETENTION_MS * 2, LIMITS).is_err());
+    assert_eq!(count(&root, "SELECT COUNT(*) FROM refs"), 0);
+}

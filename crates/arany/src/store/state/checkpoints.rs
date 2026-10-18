@@ -544,8 +544,6 @@ fn in_time(deadline: Instant) -> Result<(), StoreError> {
     Ok(())
 }
 
-const EVICTION_ROUNDS: usize = 8;
-
 fn capture_inner(
     root: &StateRoot,
     capture: &Capture,
@@ -562,15 +560,17 @@ fn capture_inner(
         i64::try_from(capacity.f_bavail.saturating_mul(capacity.f_frsize)).unwrap_or(i64::MAX);
     let bytes: i64 = capture.files.iter().map(|(_, b)| b.len() as i64).sum();
     let files = capture.files.len() as i64;
-    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let incoming: BTreeSet<[u8; 32]> = capture
         .files
         .iter()
         .map(|(_, bytes)| Sha256::digest(bytes).into())
         .collect();
     let mut pruned = Pruned::new();
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     expire(&tx, now, &incoming, &mut pruned)?;
+    tx.commit()?;
     in_time(deadline)?;
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let session = capture.session.to_string();
     let goal = capture.goal.to_string();
     let run = capture.run.to_string();
@@ -665,32 +665,25 @@ fn capture_inner(
     }
     in_time(deadline)?;
     let needed = bytes + files * 16 * 4096;
-    for round in 0..=EVICTION_ROUNDS {
-        let used = (scalar(&tx, "PRAGMA page_count", [])?
-            - scalar(&tx, "PRAGMA freelist_count", [])?)
-            * 4096;
-        let over = used + needed - limits.bytes;
-        if over <= 0 {
-            break;
-        }
-        if round == EVICTION_ROUNDS {
+    let pages = |tx: &Connection| -> Result<(i64, i64), StoreError> {
+        let free = scalar(tx, "PRAGMA freelist_count", [])? * 4096;
+        Ok((scalar(tx, "PRAGMA page_count", [])? * 4096 - free, free))
+    };
+    let shortfall = |tx: &Connection| -> Result<i64, StoreError> {
+        let (used, free) = pages(tx)?;
+        let growth = (needed - free).max(0);
+        Ok((used + needed - limits.bytes).max(HEADROOM as i64 + needed + growth - available))
+    };
+    let short = shortfall(&tx)?;
+    if short > 0 {
+        if HEADROOM as i64 + needed > available {
             return Err(StoreError::StorageFull);
         }
-        evict_total(&tx, &incoming, &mut pruned, |freed, _| freed >= over)?;
+        evict_total(&tx, &incoming, &mut pruned, |freed, _| freed >= short)?;
         in_time(deadline)?;
-    }
-    for round in 0..=EVICTION_ROUNDS {
-        let free_pages = scalar(&tx, "PRAGMA freelist_count", [])? * 4096;
-        let growth = (needed - free_pages).max(0);
-        let short = HEADROOM as i64 + 2 * growth - available;
-        if short <= 0 {
-            break;
-        }
-        if growth == 0 || round == EVICTION_ROUNDS {
+        if shortfall(&tx)? > 0 {
             return Err(StoreError::StorageFull);
         }
-        evict_total(&tx, &incoming, &mut pruned, |freed, _| freed * 2 >= short)?;
-        in_time(deadline)?;
     }
     for (path, content) in &capture.files {
         let digest = Sha256::digest(content);
