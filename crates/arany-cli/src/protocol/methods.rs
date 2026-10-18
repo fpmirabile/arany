@@ -14,6 +14,8 @@ pub const CAPABILITIES: &[&str] = &[
     "events_subscribe_v1",
     "receipt_get_v1",
     "thread_fork_v1",
+    "turn_steer_v1",
+    "goal_pause_v1",
 ];
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -205,6 +207,26 @@ pub enum UserInput {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum TextInput {
+    Text {
+        #[schemars(length(max = 65536))]
+        text: String,
+    },
+}
+
+impl From<TextInput> for UserInput {
+    fn from(TextInput::Text { text }: TextInput) -> Self {
+        UserInput::Text { text }
+    }
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 pub enum ImageMediaType {
     #[serde(rename = "image/png")]
     Png,
@@ -226,6 +248,46 @@ pub struct TurnInterruptParams {
     pub thread_id: SessionId,
     #[schemars(with = "String")]
     pub turn_id: RunId,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TurnSteerParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[schemars(with = "String")]
+    pub turn_id: RunId,
+    #[serde(deserialize_with = "text_input")]
+    #[schemars(length(min = 1, max = 1))]
+    pub input: Vec<TextInput>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TurnSteerResult {
+    #[schemars(with = "String")]
+    pub turn_id: RunId,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalPauseParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[schemars(with = "String")]
+    pub goal_id: GoalId,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalResumeParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[schemars(with = "String")]
+    pub goal_id: GoalId,
+    #[serde(default, deserialize_with = "optional_text_input")]
+    #[schemars(length(min = 1, max = 1))]
+    pub input: Option<Vec<TextInput>>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -656,6 +718,25 @@ fn turn_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<UserInpu
         )));
     }
     Ok(input)
+}
+
+fn single_text<E: Error>(input: Vec<TextInput>) -> Result<Vec<TextInput>, E> {
+    match input.as_slice() {
+        [TextInput::Text { text }] if text.len() <= 64 * 1024 => Ok(input),
+        _ => Err(E::custom("exactly one text of at most 64 KiB")),
+    }
+}
+
+fn text_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<TextInput>, D::Error> {
+    single_text(Vec::deserialize(deserializer)?)
+}
+
+fn optional_text_input<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<TextInput>>, D::Error> {
+    Option::deserialize(deserializer)?
+        .map(single_text)
+        .transpose()
 }
 
 fn optional_effort_schema(_: &mut SchemaGenerator) -> Schema {
