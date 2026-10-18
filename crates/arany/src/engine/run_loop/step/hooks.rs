@@ -264,9 +264,10 @@ impl RunLoop<'_> {
         &self,
         runtime: &ToolRuntime,
         call: &ToolCall,
+        available: std::time::Duration,
     ) -> std::time::Duration {
         let (_, pre, post) = self.hook_admission(runtime, call, call);
-        std::time::Duration::from_millis(pre.saturating_add(post))
+        std::time::Duration::from_millis(pre.saturating_add(post)).min(available / 2)
     }
 
     // Room the next request keeps for the feedback lines PostToolUse hooks may add.

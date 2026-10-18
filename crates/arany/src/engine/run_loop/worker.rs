@@ -774,6 +774,9 @@ impl RunLoop<'_> {
             .await?;
             let sequence = self.sequence()?;
             if !Box::pin(self.integrate_worker(root, id, sequence, data)).await? {
+                if self.uncertain_hook()? {
+                    return self.settle_stopped_primary().await;
+                }
                 if self.hook_requested_stop()? {
                     return self.finish_hook_stop().await;
                 }
@@ -1017,9 +1020,12 @@ impl RunLoop<'_> {
             Ok(None) if !self.actor_hook_requested_stop(child.agent_run_id)? => {
                 Ok(ChildStop::Proceed)
             }
-            Ok(None) | Err(EngineError::GoalBudgetExhausted | EngineError::ContextTooLarge) => {
-                Ok(ChildStop::End(AgentDisposition::Failed))
-            }
+            Ok(None)
+            | Err(
+                EngineError::GoalBudgetExhausted
+                | EngineError::ContextTooLarge
+                | EngineError::Tool(crate::tools::ToolError::Uncertain),
+            ) => Ok(ChildStop::End(AgentDisposition::Failed)),
             Err(error) => Err(error),
         }
     }

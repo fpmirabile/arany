@@ -201,6 +201,29 @@ impl Fixture {
         (result, requests, humans)
     }
 
+    async fn run_uncertain(&self, outcomes: Vec<ProviderOutcome>) -> usize {
+        let provider = Arc::new(ScriptedProvider::new(outcomes));
+        let mut input = request(&self.workspace, "Inspect and complete the task");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: self.max_children,
+        };
+        input.goal.budget = Some(budget());
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        };
+        let outcome = run_with(&self.engine, &provider, input, controls).await;
+        assert!(
+            matches!(
+                outcome,
+                Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+            ),
+            "{outcome:?}"
+        );
+        provider.requests.lock().unwrap().len()
+    }
+
     async fn reopen(self, session: SessionId) -> (Vec<arany::EventEnvelope>, SessionView) {
         self.engine.close().await.unwrap();
         let store = Store::open_read_only(StateRoot::open_existing(&self.state).unwrap()).unwrap();
@@ -2663,7 +2686,7 @@ async fn hook_post_tool_use_sets_that_cannot_run_deny_the_tool_before_dispatch()
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn hook_researcher_uncertain_outcome_stops_the_run_without_a_synthesis() {
+async fn hook_researcher_uncertain_outcome_stops_the_run_as_uncertain() {
     let fixture = Fixture::new(
         Some(&hook_settings(
             json!({}),
@@ -2671,7 +2694,30 @@ async fn hook_researcher_uncertain_outcome_stops_the_run_without_a_synthesis() {
         )),
         false,
     );
-    let (result, requests, _) = fixture
+    let requests = fixture
+        .run_uncertain(vec![
+            ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: vec![arany::ChildAssignment {
+                    editor: None,
+                    objective: "Inspect facts".into(),
+                    profile: None,
+                }],
+            }),
+            tool_outcome(call("read"), None),
+        ])
+        .await;
+    assert_eq!(requests, 2, "no Provider call follows an unknown hook");
+}
+
+#[tokio::test]
+async fn hook_researcher_tool_with_default_pre_and_post_timeouts_still_runs() {
+    let settings = json!({"hooks":{
+        "PreToolUse":[{"matcher":"Read","hooks":[shell_hook("exit 0")]}],
+        "PostToolUse":[{"matcher":"Read","hooks":[shell_hook("exit 0")]}],
+    },"permissions":{}});
+    let fixture = Fixture::new(Some(&settings), false);
+    let (result, _, _) = fixture
         .run(
             vec![
                 ProviderOutcome::Delegate(Delegate {
@@ -2683,17 +2729,14 @@ async fn hook_researcher_uncertain_outcome_stops_the_run_without_a_synthesis() {
                     }],
                 }),
                 tool_outcome(call("read"), None),
+                finish("report"),
+                finish("answer"),
             ],
             None,
             true,
         )
         .await;
-    assert_ne!(result.run.status, RunStatus::Finished);
-    assert_eq!(
-        requests.len(),
-        2,
-        "no Provider call follows an unknown hook"
-    );
+    assert_eq!(result.run.status, RunStatus::Finished);
     let child = result
         .run
         .agents
@@ -2701,14 +2744,10 @@ async fn hook_researcher_uncertain_outcome_stops_the_run_without_a_synthesis() {
         .find(|agent| agent.role == arany::AgentRole::Child)
         .unwrap();
     assert_eq!(
-        child.tools[0].hooks[0]
-            .outcome
-            .as_ref()
-            .unwrap()
-            .observation
-            .disposition,
-        arany::ToolDisposition::Uncertain
+        child.tools[0].observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Succeeded
     );
+    assert_eq!(child.tools[0].hooks.len(), 2);
 }
 
 #[tokio::test]

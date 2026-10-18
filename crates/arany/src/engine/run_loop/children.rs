@@ -179,6 +179,9 @@ impl RunLoop<'_> {
                 )
                 .await?;
             }
+            if self.uncertain_hook()? {
+                return self.settle_stopped_primary().await;
+            }
             return match reason {
                 AbortReason::Failed if self.ledger().active_time_exhausted() => {
                     self.settle_stopped_primary().await

@@ -121,6 +121,16 @@ async fn worker_case(case: &'static str) {
                 let output = serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":serde_json::from_str::<serde_json::Value>(&rewritten).unwrap()}});
                 serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command(&format!("printf '%s' '{output}'"))]}]})
             }
+            "hook_default_timeout" => {
+                let plain = || serde_json::json!({"type":"command","command":"exit 0"});
+                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[plain()]}],"PostToolUse":[{"matcher":"Write","hooks":[plain()]}]})
+            }
+            "hook_stop_uncertain" => {
+                serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command("kill -9 $PPID; sleep 5")]}]})
+            }
+            "hook_handover_uncertain" => {
+                serde_json::json!({"PreToolUse":[{"matcher":"Edit","hooks":[command("kill -9 $PPID; sleep 5")]}]})
+            }
             "hook_uncertain" => {
                 serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("kill -9 $PPID; sleep 5")]}]})
             }
@@ -244,7 +254,10 @@ async fn worker_case(case: &'static str) {
         .iter()
         .filter(|r| r.phase == AgentPhase::RootSynthesis)
         .count();
-    if case == "hook_uncertain" {
+    if matches!(
+        case,
+        "hook_uncertain" | "hook_stop_uncertain" | "hook_handover_uncertain"
+    ) {
         assert!(
             matches!(
                 result,
@@ -253,7 +266,14 @@ async fn worker_case(case: &'static str) {
             "an unknown worker hook stops the Run as Uncertain: {result:?}"
         );
         assert_eq!(synthesis_calls, 0);
-        assert_eq!(child_calls, 1);
+        assert_eq!(child_calls, if case == "hook_uncertain" { 1 } else { 4 });
+        assert!(worker.released.is_some(), "{case}: private view disposed");
+        assert!(
+            run.agents
+                .iter()
+                .all(|agent| agent.status != arany::AgentStatus::Active),
+            "{case}"
+        );
         return;
     }
     assert_eq!(std::fs::read(workspace.join(".git/config")).unwrap(), git);
@@ -312,7 +332,11 @@ async fn worker_case(case: &'static str) {
         assert!(worker.released.is_some(), "{case}");
         if matches!(
             case,
-            "success" | "hook_write" | "hook_stop_block" | "hook_handover_post"
+            "success"
+                | "hook_write"
+                | "hook_default_timeout"
+                | "hook_stop_block"
+                | "hook_handover_post"
         ) {
             assert_eq!(run.status, RunStatus::Finished);
             assert_eq!(child_calls, if case == "hook_stop_block" { 12 } else { 4 });
@@ -473,10 +497,21 @@ fn foreground_worker_handover_hook_fits_a_two_mebibyte_stack() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn foreground_worker_default_hook_timeouts_leave_the_delegated_tool_runtime() {
+    worker_case("hook_default_timeout").await;
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn foreground_worker_unknown_hook_outcome_stops_the_run_as_uncertain() {
-    worker_case("hook_uncertain").await;
+    for case in [
+        "hook_uncertain",
+        "hook_stop_uncertain",
+        "hook_handover_uncertain",
+    ] {
+        worker_case(case).await;
+    }
 }
 
 // The case advances the paused clock by an hour; its own runtime keeps that offset from later cases.

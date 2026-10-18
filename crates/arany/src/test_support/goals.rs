@@ -499,6 +499,7 @@ impl crate::Provider for ForegroundWorkerProvider {
                     "success"
                         | "unverified"
                         | "hook_write"
+                        | "hook_default_timeout"
                         | "hook_stop_block"
                         | "hook_handover_post"
                 ) =>

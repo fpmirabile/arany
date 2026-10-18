@@ -349,18 +349,19 @@ impl RunLoop<'_> {
                     intent.limits.cache_requested_bytes = 0;
                     intent.limits.cache_bytes = 0;
                     intent.limits.cache_candidate_bytes = 0;
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    intent.limits.runtime_ms = intent.limits.runtime_ms.min(
-                        u32::try_from(
-                            duration_ms(remaining.saturating_sub(
-                                runtime.reservation_overhead(&intent.call)
-                                    + TOOL_CLEANUP_OVERHEAD
-                                    + STORE_ACTION_OVERHEAD
-                                    + self.hook_time(runtime, &intent.call),
-                            )) / 4,
-                        )
-                        .unwrap_or(u32::MAX),
-                    );
+                    let remaining = deadline
+                        .saturating_duration_since(Instant::now())
+                        .saturating_sub(
+                            runtime.reservation_overhead(&intent.call)
+                                + TOOL_CLEANUP_OVERHEAD
+                                + STORE_ACTION_OVERHEAD,
+                        );
+                    let remaining =
+                        remaining.saturating_sub(self.hook_time(runtime, &intent.call, remaining));
+                    intent.limits.runtime_ms = intent
+                        .limits
+                        .runtime_ms
+                        .min(u32::try_from(duration_ms(remaining) / 4).unwrap_or(u32::MAX));
                     if intent.limits.runtime_ms < 1_000 {
                         return Ok(None);
                     }
@@ -497,9 +498,9 @@ impl RunLoop<'_> {
             .saturating_sub(
                 runtime.reservation_overhead(&intent.call)
                     + TOOL_CLEANUP_OVERHEAD
-                    + STORE_ACTION_OVERHEAD
-                    + self.hook_time(runtime, &intent.call),
+                    + STORE_ACTION_OVERHEAD,
             );
+        let available = available.saturating_sub(self.hook_time(runtime, &intent.call, available));
         // Half for the Guard capacity wait (it ends at `expires_at_ms`), half for the run itself.
         let runtime_ms = intent
             .limits
