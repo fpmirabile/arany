@@ -60,6 +60,11 @@ struct Active {
 enum Pending {
     Initialize(RequestId),
     New(RequestId, String),
+    Load {
+        id: RequestId,
+        cwd: String,
+        replay: bool,
+    },
     Start,
     Interrupt,
     Recover,
@@ -262,16 +267,48 @@ pub(super) async fn input(
             if !params.additional_directories.is_empty() {
                 return immediate(output, invalid());
             }
-            if !params.mcp_servers.is_empty() {
-                let mut state = state.lock().expect("translator state");
-                if !state.mcp_notice {
-                    eprintln!("Arany ignores editor MCP servers.");
-                    state.mcp_notice = true;
-                }
-            }
+            notice_mcp(state, &params.mcp_servers);
             let cwd = params.cwd;
             let params = config.thread(cwd.clone());
             send_request(state, serve, "thread/start", params, Pending::New(id, cwd)).await
+        }
+        "session/load" | "session/resume" => {
+            let replay = request.method == "session/load";
+            let params = if replay {
+                parse::<wire::LoadSession>(request.params).map(|p| wire::ResumeSession {
+                    session_id: p.session_id,
+                    cwd: p.session.cwd,
+                    mcp_servers: p.session.mcp_servers,
+                    additional_directories: p.session.additional_directories,
+                })
+            } else {
+                parse::<wire::ResumeSession>(request.params)
+            };
+            let Ok(params) = params else {
+                return immediate(output, invalid());
+            };
+            if !params.additional_directories.is_empty() {
+                return immediate(output, invalid());
+            }
+            notice_mcp(state, &params.mcp_servers);
+            let cwd = params.cwd;
+            send_request(
+                state,
+                serve,
+                "thread/resume",
+                ThreadResumeParams {
+                    thread_id: params.session_id,
+                    cwd: cwd.clone(),
+                    provider: config.provider.profile_label(),
+                    model: config.model.clone(),
+                    effort: config.effort,
+                    tools: Some(config.tools),
+                    permission_mode: None,
+                    include_paths: None,
+                },
+                Pending::Load { id, cwd, replay },
+            )
+            .await
         }
         "session/prompt" => {
             let Ok(params) = parse::<wire::Prompt>(request.params) else {
@@ -333,6 +370,43 @@ pub(super) async fn input(
     }
 }
 
+fn notice_mcp(state: &Shared, servers: &[Value]) {
+    if !servers.is_empty() {
+        let mut state = state.lock().expect("translator state");
+        if !state.mcp_notice {
+            eprintln!("Arany ignores editor MCP servers.");
+            state.mcp_notice = true;
+        }
+    }
+}
+
+fn history_updates<'a>(
+    result: &'a ThreadResumeResult,
+    cwd: &'a str,
+) -> impl Iterator<Item = Value> + 'a {
+    let session = result.thread.id;
+    result.turns.iter().flat_map(move |turn| {
+        turn.items.iter().flat_map(move |item| match item {
+            Item::UserMessage { text, images, .. } => vec![json!({
+                "jsonrpc":"2.0", "method":"session/update", "params":{
+                    "sessionId":session, "update":{
+                        "sessionUpdate":"user_message_chunk",
+                        "content":{"type":"text", "text":text},
+                        "_meta":{"arany.turnId":turn.id, "arany.turnStatus":turn.status,
+                            "arany.images":images}
+                    }
+                }
+            })],
+            Item::AgentMessage { text, .. } => vec![wire::answer(session, text)],
+            _ => [true, false]
+                .into_iter()
+                .filter_map(|started| tools::project(item, cwd, session, started))
+                .map(|update| tools::notification(session, update, turn.id))
+                .collect(),
+        })
+    })
+}
+
 pub(super) async fn output(
     mut inbound: mpsc::Receiver<Message>,
     serve: mpsc::Sender<ClientMessage>,
@@ -382,6 +456,23 @@ pub(super) async fn output(
                             wire::response(id, json!({"sessionId": result.thread.id})),
                         )
                         .await?;
+                    }
+                    Some(Pending::Load { id, cwd, replay }) => {
+                        let result: ThreadResumeResult = serde_json::from_value(reply.result)
+                            .map_err(|_| "invalid serve history")?;
+                        if replay {
+                            for update in history_updates(&result, &cwd) {
+                                emit_answer(&outbound, update).await?;
+                            }
+                        }
+                        {
+                            let mut state = state.lock().expect("translator state");
+                            state
+                                .sessions
+                                .insert(result.thread.id, Session { sequence: 0, cwd });
+                            state.authenticated = true;
+                        }
+                        emit(&outbound, wire::response(id, json!({}))).await?;
                     }
                     Some(Pending::Start) => {
                         let result: TurnResult = serde_json::from_value(reply.result)
@@ -497,9 +588,9 @@ pub(super) async fn output(
                 };
                 let pending = state.lock().expect("translator state").pending.remove(&id);
                 match pending {
-                    Some(Pending::Initialize(id) | Pending::New(id, _)) => {
-                        emit(&outbound, remap(id, reply.error)).await?
-                    }
+                    Some(
+                        Pending::Initialize(id) | Pending::New(id, _) | Pending::Load { id, .. },
+                    ) => emit(&outbound, remap(id, reply.error)).await?,
                     Some(Pending::Start) => {
                         let active = state
                             .lock()
@@ -723,6 +814,13 @@ async fn finish(
 }
 
 fn remap(id: RequestId, error: ErrorObject) -> Value {
+    if error
+        .data
+        .as_ref()
+        .is_some_and(|d| d.reason == Reason::MissingSession)
+    {
+        return wire::error(Some(id), -32002, "Session not found", "resource_not_found");
+    }
     if error.code == -32001
         && error
             .data

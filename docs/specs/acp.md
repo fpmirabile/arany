@@ -3,7 +3,8 @@
 ## Scope and related contracts
 
 This contract owns `arany acp`, an ACP v1 subprocess on stdio. The current
-surface includes core turns, guarded Tools, one-use permissions and rich prompts.
+surface includes core turns, guarded Tools, one-use permissions, rich prompts
+and stored Session loading/resumption.
 [Serve](./serve.md) owns the shared Server loop, admission, committed projections, cancellation and shutdown;
 [Session](./session.md), [Goals](./goals.md), [execution](./execution.md) and
 [Tools](./tools.md) retain Engine policy. ACP translates the serve vocabulary;
@@ -16,7 +17,7 @@ journal-first truth and avoids chunks that cannot be retracted after a failed
 Provider validation. The hand-written wire subset is checked against the
 [pinned upstream v1 schema fixture](../../crates/arany-cli/tests/fixtures/acp/README.md).
 
-Audio, history loading, session discovery/closure, modes, model selection and
+Audio, session discovery/closure, modes, model selection and
 Goal commands are unavailable. Their remaining slices belong to
 [NEXT_STEPS item 13](../../NEXT_STEPS.md#pursue-in-order). Unadvertised requests
 fail with method-not-found; unsupported prompt blocks fail invalid-params.
@@ -42,23 +43,54 @@ bounded manifest on stderr before credential access.
 The editor launch directory is not a Workspace. Startup loads and validates a
 selected private roster without Workspace admission. Each `session/new.cwd`
 passes the full profile/Provider, State-overlap and Workspace-identity admission
-before Session creation. Authentication checks current credentials without a
+before Session creation. Loading and resuming repeat that admission against the
+stored Session. Authentication checks current credentials without a
 Workspace or inference; ChatGPT token refresh and workspace-dependent account
-admission wait for `session/new`. Authentication alone grants no Run authority.
+admission wait for Session new/load/resume. Authentication alone grants no Run authority.
 
 | Method | Input → result | Admission and ordering |
 |---|---|---|
 | `initialize` | `{protocolVersion,clientInfo?,clientCapabilities?}` → `{protocolVersion:1,agentInfo,agentCapabilities,authMethods}` | First request; a repeat is `alreadyInitialized`. The client version is a u16 integer; unsupported integer versions negotiate down/up to 1, and the client disconnects if it cannot speak 1. Malformed versions fail `invalidParams`. Client info fields pass through serve's 256-byte checks. |
 | `authenticate` | `{methodId:"arany-setup"}` → `{}` | Re-probes credentials for the pinned selection without inference or Workspace admission. Exactly one agent auth method directs the user to `arany --setup` in a terminal. Missing credentials give `auth_required`; another method ID is invalid. No credential is accepted or returned. |
 | `session/new` | `{cwd,mcpServers,additionalDirectories?}` → `{sessionId}` | Maps to typed `thread/start` with the CLI tuple and CLI-pinned Tool opt-in. Absolute cwd, Workspace identity and State overlap use serve admission. Nonempty additional directories fail. Editor MCP servers are ignored with one fixed stderr notice per connection; no server is launched or contacted. Success commits Session creation before replying and counts toward serve's loaded-thread limit. |
+| `session/load` | `{sessionId,cwd,mcpServers,additionalDirectories?}` → `{}` | Maps to `thread/resume` with current CLI Provider selection and Tool opt-in. Revalidates the stored Session's Workspace identity, State separation and current roster/Provider admission. Replays bounded history as updates before replying. Unknown Sessions refuse; foreign Workspaces fail `workspaceMismatch`; active/locked Sessions fail `busy`/`sessionBusy`. |
+| `session/resume` | `{sessionId,cwd,mcpServers?,additionalDirectories?}` → `{}` | Same admission and history-size refusal as load, without history updates. A successful load or resume makes the Session available for subsequent prompts. No mode/config state is returned until modes are supported. |
 | `session/prompt` | `{sessionId,prompt:ContentBlock[]}` → `{stopReason}` | Requires available selection and a loaded Session. Converts bounded rich content as below. No URI is fetched, opened or turned into authority. Maps to `turn/start`, starting one ordinary Goal. One prompt per process; a concurrent prompt fails `busy`, without queueing or execution. |
 | `session/cancel` | Notification `{sessionId}` | Cancels that Session's active prompt through `turn/interrupt`. Before the turn ID arrives, cancellation is latched and forwarded once. Repeated/unknown cancellations do nothing. |
 | `$/cancel_request` | Notification `{requestId}` | Same cancellation when the ID names the active prompt; unknown IDs do nothing. |
 
-Capabilities declare `loadSession:false`, image/embeddedContext true and audio false,
-MCP HTTP/SSE false, and empty session capabilities. Client filesystem and
+Capabilities declare `loadSession:true`, image/embeddedContext true and audio false,
+MCP HTTP/SSE false, and `sessionCapabilities:{resume:{}}`. Client filesystem and
 terminal offers are ignored. Arany never sends `fs/*`, `terminal/*` or
-`elicitation/*`, and never connects editor-supplied MCP servers.
+`elicitation/*`, and never connects editor-supplied MCP servers. Load/resume
+ignore editor MCP servers with the same once-per-connection notice as new and
+refuse nonempty additional directories.
+
+### Stored history and continuation
+
+Load projects only the strictly reduced committed history returned by serve's
+`thread/resume`: turns in history order, each user message, its Tool items, then
+its committed answer when present. User messages become `user_message_chunk`;
+answers become `agent_message_chunk`. Each historical Tool produces a
+`tool_call` followed by its terminal `tool_call_update`, using the live Tool
+projection and the client's original cwd spelling for display locations.
+
+An unfinished Run stays interrupted. The user update's `_meta["arany.turnId"]`
+and `_meta["arany.turnStatus"]` carry the historical Run ID and serve status;
+`_meta["arany.images"]` carries image metadata only, never reconstructed pixels.
+Unfinished intents replay as uncertain with the same explicit unknown-outcome
+text and metadata as live Tools. No observation, answer or completion is
+invented. Replay executes no Provider, Tool, approval, continuation or Goal retry
+and appends no Events. A later plain prompt starts a new Goal in the same Session,
+with fresh Run admission, as on serve; it never resumes an interrupted Goal
+implicitly. Resume attaches without replaying any messages.
+
+Serve validates the entire resume result against its 1 MiB line bound before
+loading the thread or returning history. Overflow maps to `-32603 contextTooLarge`
+with no partial replay or newly loaded Session. The translator retains that one
+bounded result and projects at most two updates per item through the existing
+bounded output queue; it keeps no second history buffer. Existing per-update
+Tool/text truncation applies. Reloading a loaded Session consumes no extra slot.
 
 Text blocks concatenate in order without separators. A `resource_link` becomes
 `[@name](uri)`. An embedded `resource` must contain `uri` and `text`; blob resources
@@ -200,6 +232,7 @@ Shared bounds and their Engine behavior belong to [serve limits](./serve.md#limi
 | Pending permissions | One, with serve's immutable intent deadline; oversize denies unsent. |
 | Oversized answer projection | Cut at a UTF-8 boundary to at most 128 KiB text plus `[truncated; see arany show SESSION_ID]`; worst-case JSON escaping still fits the line cap. Other oversized projections fail closed. |
 | Reconciliation | Serve's bounded Event pages and Session Event cap; no retained history beyond the current page, one active answer, at most 10,000 deduplication entries for Tool phases per prompt, and one cursor plus original cwd per Session; deduplication overflow suppresses further Tool projections and marks incompleteUpdates. |
+| Load/resume history | Serve's 1 MiB resume result and Session Event cap. An oversized result fails `contextTooLarge` before any history update or thread insertion; at most one result is being projected and two updates per item are constructed. |
 | Shutdown | Serve's total three-second grace includes both output queues and cancellation/Engine closure. Timeout reports `Run may be interrupted; check Session history`. |
 
 Linux and macOS share the same Unix pipes, descriptor cloning and signal path;
@@ -220,6 +253,8 @@ State storage and all per-action resource limits remain unchanged.
 | Hostile input and recovery | Oversized/malformed lines recover; resource links remain literal mentions within block/UTF-8 bounds; relative cwd, additional directories, unsupported/oversized prompts and ambiguous envelopes refuse; offered fs/terminal and editor MCP never execute; EOF during recovery preserves the committed completion with incompleteUpdates | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Shipped command | TTY refusal, including with `--tools`, exits 2 before State; cleared credentials initialize successfully, auth/new fail auth_required, no Session, EOF exits 0 with empty stderr and schema-valid stdout | [Session process corpus](../../crates/arany-cli/tests/session_run.rs) |
 | Editor launch directory | A launch directory containing State still permits initialize, profile authentication and Session creation for a different cwd; a session cwd containing State refuses without creating a Session | [Session process corpus](../../crates/arany-cli/tests/session_run.rs) |
+| Stored Session load/resume | A second server over the same State replays committed user/answer and Tool history before its schema-valid response; resume sends no history; neither executes nor changes Events; a later prompt appends a fresh Run to the same Session | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
+| Load admission and recovery | Unknown Sessions, foreign Workspace identities, relative/State-overlapping cwd, additional roots, active/locked Sessions and oversized history refuse without partial replay; unfinished Runs/intents retain interrupted/uncertain facts without execution | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Admitted Tool permission round trip | Allow dispatches once; reject denies; reopened intent, verdict and observation equal the permission payload and committed projections | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Permission correlation and withdrawal | Only allow_once/reject_once offered; unknown, duplicate, late, invalid/error replies deny or do nothing; timeout, client cancellation and server withdrawal cannot authorize a Tool | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Rich prompt and inert Tool data | Oversized resources, blobs, image MIME/base64/count/byte overflow reject; context closing tags neutralized; PNG and image-only conversion, original cwd spelling, uncertain metadata, escaped titles, longer fences and truncation markers validate against the pinned schema | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
