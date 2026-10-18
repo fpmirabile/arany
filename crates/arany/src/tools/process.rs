@@ -68,20 +68,25 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     if site.hook_stdin.is_some() {
         command.stdin(std::process::Stdio::piped());
     }
+    let mut writer = None;
     let mut child = command.spawn().map_err(|_| ToolError::Operation)?;
     if let (Some(input), Some(mut stdin)) = (site.hook_stdin, child.stdin.take()) {
         let input = input.to_owned();
-        // A hook that never reads stays bounded by the capture deadline killing the child.
-        tokio::spawn(async move {
+        // Aborted below once capture ends, so a hook that never reads cannot outlive the deadline.
+        writer = Some(tokio::spawn(async move {
             let _ = tokio::io::AsyncWriteExt::write_all(&mut stdin, input.as_bytes()).await;
-        });
+        }));
     }
-    let (status, out, err) = capture(
+    let captured = capture(
         child,
         (site.intent.limits.result_bytes as usize / 2).saturating_sub(128),
         Duration::from_millis(u64::from(site.intent.limits.runtime_ms)),
     )
-    .await?;
+    .await;
+    if let Some(writer) = writer {
+        writer.abort();
+    }
+    let (status, out, err) = captured?;
     #[cfg(target_os = "linux")]
     let changeset = {
         site.stop_descendants().await?;

@@ -3316,6 +3316,7 @@ mod goal_replay_tests {
         assert!(rejected(&view, finished(other, deny.clone())));
         let forged_pass = finished(hook_observation.clone(), HookResult::Passed);
         assert!(forged_pass.payload().is_err());
+        let mid = view.clone();
         apply(&mut view, finished(hook_observation.clone(), deny.clone())).unwrap();
         assert!(rejected(&view, started(intent.digest(), &second)));
         for (decision, restriction, hooks, basis) in [
@@ -3415,6 +3416,23 @@ mod goal_replay_tests {
         let not_completed = HookResult::Ignored {
             why: HookIgnoreReason::NotCompleted,
         };
+        // A Guard failure after dispatch carries the not-attempted cache outcome of any process.
+        uncertain.cache_update = CacheUpdate::NotAttempted;
+        let not_completed_event = finished(uncertain.clone(), not_completed.clone());
+        assert!(not_completed_event.payload().is_ok());
+        let mut after_uncertain = mid;
+        apply(&mut after_uncertain, not_completed_event).unwrap();
+        apply(
+            &mut after_uncertain,
+            verdict(
+                Decision::Deny,
+                Some(Decision::Deny),
+                1,
+                PermissionSource::Hook,
+            ),
+        )
+        .unwrap();
+        assert!(!after_uncertain.runs[0].tools[0].settled_without_stop());
         let mut stopped = view.clone();
         stopped.runs[0].tools[0].hooks[0].outcome = Some(HookOutcome {
             observation: uncertain,

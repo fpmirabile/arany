@@ -12,7 +12,8 @@ pub const MAX_HOOKS: usize = 128;
 pub const MAX_COMMAND_BYTES: usize = 4096;
 pub const MAX_TIMEOUT_SECONDS: u64 = 600;
 pub const MAX_HOOKS_PER_OCCURRENCE: usize = 8;
-pub const MAX_HOOK_INPUT_BYTES: usize = 64 * 1024;
+// Half of the Guard task ceiling: JSON escaping can double the input inside the task.
+pub const MAX_HOOK_INPUT_BYTES: usize = 32 * 1024;
 pub const MAX_HOOK_REASON_BYTES: usize = 1024;
 pub const HOOK_RESULT_BYTES: u32 = 32 * 1024;
 
@@ -347,7 +348,7 @@ pub(crate) fn pre_tool_use_input(
     })
     .to_string();
     if input.len() > MAX_HOOK_INPUT_BYTES {
-        return Err(ConfigError::Limit("64 KiB hook input"));
+        return Err(ConfigError::Limit("32 KiB hook input"));
     }
     Ok(input)
 }

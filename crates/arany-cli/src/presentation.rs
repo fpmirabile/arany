@@ -84,16 +84,30 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
             _ => " · permission mode denial",
         });
     }
-    if tool.hooks.iter().any(|hook| {
-        matches!(
-            hook.outcome.as_ref().map(|outcome| &outcome.result),
-            Some(arany::permissions::HookResult::Ignored {
+    let hook_results = tool.hooks.iter().filter_map(|hook| hook.outcome.as_ref());
+    let (mut unknown, mut failed) = (false, false);
+    for outcome in hook_results {
+        if matches!(
+            outcome.observation.disposition,
+            arany::ToolDisposition::Uncertain | arany::ToolDisposition::Cancelled
+        ) || outcome.observation.disposition == arany::ToolDisposition::Failed
+            && outcome.observation.attestation.is_none()
+        {
+            unknown = true;
+        } else if matches!(
+            outcome.result,
+            arany::permissions::HookResult::Ignored {
                 why: arany::permissions::HookIgnoreReason::NonZeroExit
                     | arany::permissions::HookIgnoreReason::InvalidJson
                     | arany::permissions::HookIgnoreReason::NotCompleted
-            })
-        )
-    }) {
+            }
+        ) {
+            failed = true;
+        }
+    }
+    if unknown {
+        summary.push_str(" · hook outcome unknown");
+    } else if failed {
         summary.push_str(" · hook failed (non-blocking)");
     }
     summary

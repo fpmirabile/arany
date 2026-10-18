@@ -192,7 +192,8 @@ impl Event {
                         observation.intent.call,
                         crate::tools::ToolCall::Command { .. }
                     )
-                    && observation.cache_update == crate::tools::CacheUpdate::NotApplicable
+                    && !(observation.cache_update == crate::tools::CacheUpdate::NotAttempted
+                        && observation.disposition == crate::tools::ToolDisposition::Succeeded)
                     && observation.intent.run_id == *run_id
                     && observation.intent.agent_run_id == *agent_run_id
                     && outcome.result.valid_for(observation)

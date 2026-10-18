@@ -1343,6 +1343,7 @@ async fn hook_limits_fail_closed_and_timeouts_reap_descendants() {
         "Hook denied this Tool: hook limit reached"
     );
     assert!(!case.dispatched());
+    #[cfg(target_os = "linux")]
     let survivors = std::fs::read_dir("/proc")
         .unwrap()
         .filter_map(Result::ok)
@@ -1352,6 +1353,7 @@ async fn hook_limits_fail_closed_and_timeouts_reap_descendants() {
             text.starts_with("sleep") && text.contains(&marker)
         })
         .count();
+    #[cfg(target_os = "linux")]
     assert_eq!(survivors, 0);
 }
 
