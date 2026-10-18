@@ -295,6 +295,9 @@ impl AgentDefinition {
     }
 
     pub(crate) fn allows_worker_tool(&self, tool: crate::session::worker::WorkerTool) -> bool {
+        if tool == crate::session::worker::WorkerTool::Command && !self.editor() {
+            return false;
+        }
         let label = tool.label();
         self.tools
             .as_ref()
@@ -375,7 +378,9 @@ fn supported_tool(name: &str) -> Option<Vec<&str>> {
         "Edit" => vec!["edit"],
         "Write" => vec!["write"],
         "Skill" => vec!["skill"],
-        "list" | "read" | "search" | "edit" | "write" | "mkdir" | "skill" | "mcp_list" => {
+        "Bash" => vec!["command"],
+        "list" | "read" | "search" | "edit" | "write" | "mkdir" | "skill" | "mcp_list"
+        | "command" => {
             vec![name]
         }
         _ => return None,
@@ -661,6 +666,31 @@ mod tests {
     }
 
     #[test]
+    fn agent_definition_bash_only_narrows_editor_command_authority() {
+        let call = ToolCall::Command {
+            program: "check".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        };
+        for name in ["Bash", "command"] {
+            let (researcher, notes) =
+                strict(&document(&format!("tools: [{name}]\n"), "Body")).unwrap();
+            assert!(notes.is_empty());
+            assert!(!researcher.allows_worker(&call));
+            assert!(!researcher.allows(&call));
+            let (editor, _) =
+                strict(&document(&format!("tools: [Write, {name}]\n"), "Body")).unwrap();
+            assert!(editor.allows_worker(&call));
+            let (denied, _) = strict(&document(
+                &format!("tools: [Write, {name}]\ndisallowedTools: [Bash]\n"),
+                "Body",
+            ))
+            .unwrap();
+            assert!(!denied.allows_worker(&call));
+        }
+    }
+
+    #[test]
     fn agent_definition_parser_accepts_peer_subset_and_rejects_executable_yaml() {
         for fields in [
             "",
@@ -703,7 +733,6 @@ mod tests {
             ("hooks: {}\n", None),
             ("mcpServers: {}\n", None),
             ("color: red\n", None),
-            ("tools: [Bash]\n", Some(Vec::new())),
             ("tools: [Git, 'Read*']\n", Some(Vec::new())),
         ] {
             let (definition, notes) = strict(&document(fields, "Body")).unwrap();

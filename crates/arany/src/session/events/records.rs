@@ -544,6 +544,7 @@ impl ProviderCallRecord {
                             | ProviderFailureReason::WorkerFinishDeferred
                             | ProviderFailureReason::WorkerDelegateRefused
                             | ProviderFailureReason::WorkerToolRefused
+                            | ProviderFailureReason::CriterionNotMetInView
                     )
                 )
             })

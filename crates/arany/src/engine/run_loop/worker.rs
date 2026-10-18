@@ -92,6 +92,8 @@ impl RunLoop<'_> {
                         == crate::tools::types::digest(
                             &serde_json::to_vec(definition).expect("normalized definition"),
                         )
+                    && a.commands.iter().all(|c| policy.parent_grant.commands.contains(c) && plan.commands.contains(c) && definition.allows_worker_tool(WorkerTool::Command))
+                    && !matches!(&a.criterion, crate::session::GoalSuccessCriterion::ToolCallSucceeded { call } if matches!(call.as_ref(), ToolCall::Command { program, .. } if !a.commands.contains(program)))
                     && a.max_turns <= definition.max_turns
                     && a.max_turns <= policy.max_turns
                     && a.lease.iter().all(|p| {
@@ -159,6 +161,15 @@ impl RunLoop<'_> {
         grant.tools.retain(|tool| {
             !matches!(tool, WorkerTool::Skill | WorkerTool::McpList)
                 && def.allows_worker_tool(*tool)
+        });
+        let plan = self
+            .ledger()
+            .plan_contract()?
+            .ok_or(EngineError::InvalidRequest)?;
+        grant.commands.retain(|c| {
+            a.commands.contains(c)
+                && plan.commands.contains(c)
+                && def.allows_worker_tool(WorkerTool::Command)
         });
         grant.skills.clear();
         grant.mcp_servers.clear();
@@ -387,6 +398,16 @@ impl RunLoop<'_> {
         ),
         EngineError,
     > {
+        if matches!(intent.call, ToolCall::Command { .. }) {
+            return Ok((ToolObservation {
+                enforcement_cause: None,
+                intent,
+                disposition: ToolDisposition::Denied,
+                output: "Worker commands are unavailable until C3-2 and C3-3; no runtime bypass is supported".into(),
+                attestation: None,
+                cache_update: CacheUpdate::NotApplicable,
+            }, None));
+        }
         let mut slot = self.worker.lock().await;
         let view = slot
             .get_mut(&intent.agent_run_id)
@@ -526,6 +547,7 @@ impl RunLoop<'_> {
             profile: None,
             grant: Some(ChildGrant::EditOnly),
             assignment: Some(WorkerAssignment {
+                cache_generation: None,
                 request: *assignment.clone(),
                 grant: grant.clone(),
                 policy_digest: observation.intent.policy_digest,
@@ -707,6 +729,14 @@ impl RunLoop<'_> {
             .ok_or(EngineError::CoordinatorFailed)?
             .dispose()?;
         let no_change = bytes.as_ref().is_some_and(|b| matches!(decode_data(b, WorkerDataPurpose::Handover), Ok(WorkerDataFacts::Changes(files)) if files.is_empty()));
+        let criterion_evidence = self
+            .ledger()
+            .view(|v| {
+                crate::session::private_criterion_evidence(v.runs.last().expect("active Run"), id)
+            })?
+            .map_err(|_| EngineError::InvalidHistory)?;
+        let criterion_unverified = data.is_some() && criterion_evidence.is_empty();
+        let data = data.filter(|_| !criterion_unverified);
         let success = data.is_some();
         let (disposition, cause) = if private_uncertain {
             (
@@ -727,7 +757,9 @@ impl RunLoop<'_> {
         } else {
             (
                 WorkerDisposition::Failed,
-                if stopped {
+                if criterion_unverified {
+                    WorkerCause::CriterionUnverified
+                } else if stopped {
                     WorkerCause::Budget
                 } else {
                     failure
@@ -821,6 +853,15 @@ impl RunLoop<'_> {
                 run_id: self.run_id,
                 agent_run_id: id,
                 record: WorkerHandover {
+                    criterion_evidence: self
+                        .ledger()
+                        .view(|v| {
+                            crate::session::private_criterion_evidence(
+                                v.runs.last().expect("active Run"),
+                                id,
+                            )
+                        })?
+                        .map_err(|_| EngineError::InvalidHistory)?,
                     assignment_id: id,
                     base_digest: cleanup_base(self, id)?,
                     data: data.clone(),

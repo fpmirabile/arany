@@ -154,6 +154,7 @@ impl Event {
                                 || !p.base.valid()
                                 || p.policy_digest == [0; 32]
                                 || p.permissions_digest == Some([0; 32])
+                                || p.cache_generation == Some([0; 32])
                                 || p.data_bytes == 0
                                 || p.data_bytes as usize > WORKER_DATA_BYTES)
                         {
@@ -363,6 +364,11 @@ impl Event {
                     && record.assignment_id == record.data.assignment_id
                     && record.data.valid()
                     && record.base_digest != [0; 32]
+                    && !record.criterion_evidence.is_empty()
+                    && record.criterion_evidence.len() <= 8
+                    && record.criterion_evidence.iter().enumerate().all(|(i, s)| {
+                        *s > 0 && record.criterion_evidence[..i].iter().all(|p| p < s)
+                    })
                     && matches!(
                         record.data.purpose,
                         WorkerDataPurpose::Handover | WorkerDataPurpose::Mutation

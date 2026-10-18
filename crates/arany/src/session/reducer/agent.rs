@@ -471,7 +471,14 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                     .last()
                     .is_some_and(|call| call.phase == record.phase)
                 && run.hooks_settled();
-            let valid = stop_continuation
+            let gate_continuation = agent.assignment.is_some()
+                && agent.provider_calls.last().is_some_and(|c| {
+                    c.failure_reason
+                        == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
+                })
+                && record.phase == AgentPhase::ChildWork;
+            let valid = gate_continuation
+                || stop_continuation
                 || tool_continuation
                 || tool_review
                 || delegated

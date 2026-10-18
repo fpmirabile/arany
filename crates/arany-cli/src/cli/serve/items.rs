@@ -235,6 +235,7 @@ pub(super) fn tool_item(
                     arany::Attestation::Guard(_) => Some(Attestation::Guard),
                     arany::Attestation::InProcess { .. } => Some(Attestation::InProcess),
                     arany::Attestation::Unguarded(_)
+                    | arany::Attestation::WorkerCommand { .. }
                     | arany::Attestation::WorkerRead { .. }
                     | arany::Attestation::WorkerMutation { .. }
                     | arany::Attestation::WorkerData { .. } => None,

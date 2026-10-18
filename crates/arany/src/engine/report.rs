@@ -155,7 +155,8 @@ fn push_cache_facts(
                     crate::tools::CacheUpdate::Uncertain => cache_uncertain = true,
                     crate::tools::CacheUpdate::NotApplicable
                     | crate::tools::CacheUpdate::NotAttempted
-                    | crate::tools::CacheUpdate::Published => {}
+                    | crate::tools::CacheUpdate::Published
+                    | crate::tools::CacheUpdate::Discarded => {}
                 }
             }
         }

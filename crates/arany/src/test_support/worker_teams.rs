@@ -106,6 +106,7 @@ impl TeamProvider {
                     objective: format!("editor {number} wave {wave}"),
                     profile: None,
                     editor: Some(Box::new(EditorAssignment {
+                        commands: Vec::new(),
                         definition: "editor".into(),
                         definition_digest: digest,
                         mission: format!("editor {number} wave {wave}"),

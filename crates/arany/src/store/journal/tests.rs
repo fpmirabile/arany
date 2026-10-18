@@ -236,63 +236,67 @@ fn every_event_slot_admits_a_current_tool_observation() {
 
 #[test]
 fn worker_protocol_store_cold_prefixes_and_old_versions_preserve_data() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = StateRoot::admit(&temp.path().join("state")).expect("private worker State root");
-    let f = crate::session::worker_protocol_fixture();
-    let mut connection = open_connection(&root, false).unwrap();
-    let mut hot = None;
-    for (index, event) in f.events.iter().enumerate() {
-        append(&mut connection, &mut hot, f.session, event.clone()).unwrap();
-        let cold = open_connection(&root, true).unwrap();
-        let (_, view) = resolve_view(&cold, f.session, 0, &mut 0).unwrap();
-        let expected = SessionView::replay(f.session, &f.envelopes()[..=index]).unwrap();
-        assert_eq!(view, expected, "cold prefix {index}");
-    }
-    drop(hot);
-    for kind in [
-        "RunStarted",
-        "AgentSpawned",
-        "ProviderCallRecorded",
-        "AgentFinished",
-        "ToolStarted",
-        "ToolFinished",
-        "WorkerDataChunk",
-        "WorkerDataSealed",
-        "WorkerHandoverRecorded",
-        "WorkerIntegrationRecorded",
-        "WorkerLeaseReleased",
-        "WorkerVerificationRecorded",
+    for f in [
+        crate::session::worker_protocol_fixture(),
+        crate::session::worker_command_protocol_fixture(),
     ] {
-        let current = payload_version(kind).unwrap();
-        // A version-1 kind has no previous version; a foreign version must reject just the same.
-        let stale = if current > 1 {
-            current - 1
-        } else {
-            current + 1
-        };
-        connection
-            .execute(
-                "UPDATE events SET event_version=?1 WHERE kind=?2",
-                params![stale, kind],
-            )
-            .unwrap();
-        let before = std::fs::read(root.path().join(DATABASE_FILE)).unwrap();
-        let cold = open_connection(&root, true).unwrap();
-        assert!(
-            resolve_view(&cold, f.session, 0, &mut 0).is_err(),
-            "old {kind}"
-        );
-        drop(cold);
-        assert_eq!(
-            std::fs::read(root.path().join(DATABASE_FILE)).unwrap(),
-            before,
-            "unchanged {kind}"
-        );
-        connection
-            .execute(
-                "UPDATE events SET event_version=?1 WHERE kind=?2",
-                params![current, kind],
-            )
-            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).expect("private worker State root");
+        let mut connection = open_connection(&root, false).unwrap();
+        let mut hot = None;
+        for (index, event) in f.events.iter().enumerate() {
+            append(&mut connection, &mut hot, f.session, event.clone()).unwrap();
+            let cold = open_connection(&root, true).unwrap();
+            let (_, view) = resolve_view(&cold, f.session, 0, &mut 0).unwrap();
+            let expected = SessionView::replay(f.session, &f.envelopes()[..=index]).unwrap();
+            assert_eq!(view, expected, "cold prefix {index}");
+        }
+        drop(hot);
+        for kind in [
+            "RunStarted",
+            "AgentSpawned",
+            "ProviderCallRecorded",
+            "AgentFinished",
+            "ToolStarted",
+            "ToolFinished",
+            "WorkerDataChunk",
+            "WorkerDataSealed",
+            "WorkerHandoverRecorded",
+            "WorkerIntegrationRecorded",
+            "WorkerLeaseReleased",
+            "WorkerVerificationRecorded",
+        ] {
+            let current = payload_version(kind).unwrap();
+            // A version-1 kind has no previous version; a foreign version must reject just the same.
+            let stale = if current > 1 {
+                current - 1
+            } else {
+                current + 1
+            };
+            connection
+                .execute(
+                    "UPDATE events SET event_version=?1 WHERE kind=?2",
+                    params![stale, kind],
+                )
+                .unwrap();
+            let before = std::fs::read(root.path().join(DATABASE_FILE)).unwrap();
+            let cold = open_connection(&root, true).unwrap();
+            assert!(
+                resolve_view(&cold, f.session, 0, &mut 0).is_err(),
+                "old {kind}"
+            );
+            drop(cold);
+            assert_eq!(
+                std::fs::read(root.path().join(DATABASE_FILE)).unwrap(),
+                before,
+                "unchanged {kind}"
+            );
+            connection
+                .execute(
+                    "UPDATE events SET event_version=?1 WHERE kind=?2",
+                    params![current, kind],
+                )
+                .unwrap();
+        }
     }
 }

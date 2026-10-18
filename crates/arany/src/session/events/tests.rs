@@ -756,8 +756,8 @@ mod account_default_tests {
         let mut missing_roster = serde_json::to_value(ordinary).unwrap();
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(13));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(8));
+        assert_eq!(payload_version("RunStarted"), Some(14));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(9));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
@@ -957,7 +957,7 @@ mod provider_call_tests {
     use super::*;
 
     #[test]
-    fn provider_call_record_v8_rejects_v6_and_inconsistent_cache_fields() {
+    fn provider_call_record_rejects_old_versions_and_inconsistent_cache_fields() {
         let current = payload_version("ProviderCallRecorded").expect("payload version");
         let run = RunId::new();
         let agent = AgentRunId::new();
@@ -1305,7 +1305,7 @@ mod child_grant_tests {
             Some("inspect"),
             Some(ChildGrant::ReadOnly),
         );
-        assert_eq!(payload_version(child.kind()), Some(9));
+        assert_eq!(payload_version(child.kind()), Some(10));
         let payload = child.payload().expect("child payload");
         let mut named = child.clone();
         if let Event::AgentSpawned { profile, .. } = &mut named {
@@ -1433,12 +1433,12 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(11));
+        assert_eq!(payload_version("ToolFinished"), Some(12));
         assert_eq!(
-            Event::decode("ToolFinished", 11, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 12, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
-        for previous in [10, 9, 8, 7] {
+        for previous in [11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1491,7 +1491,7 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(10));
+        assert_eq!(payload_version("ToolStarted"), Some(11));
         assert_eq!(payload_version("ToolPermissionDecided"), Some(4));
     }
 
@@ -1620,8 +1620,8 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 13,
-                Event::ToolStarted { .. } => 10,
+                Event::RunStarted { .. } => 14,
+                Event::ToolStarted { .. } => 11,
                 Event::RunFinished { .. } => 8,
                 _ => 7,
             };
@@ -1717,5 +1717,126 @@ mod payload_version_tests {
             unbounded.payload().is_err(),
             "a deadline beyond the Goal maximum"
         );
+    }
+}
+
+#[test]
+fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
+    use crate::session::worker::*;
+    let f = crate::session::worker_command_protocol_fixture();
+    for (kind, pointer, field) in [
+        (
+            "RunStarted",
+            "/config/worker_policy/parent_grant",
+            "commands",
+        ),
+        (
+            "ProviderCallRecorded",
+            "/delegation/0/assignment",
+            "commands",
+        ),
+        ("AgentSpawned", "/assignment", "cache_generation"),
+        ("AgentSpawned", "/assignment/grant", "commands"),
+        ("ToolStarted", "/intent/target", "cache_generation"),
+        ("ToolFinished", "/intent/target", "cache_generation"),
+        ("WorkerHandoverRecorded", "", "criterion_evidence"),
+    ] {
+        let e = f
+            .envelopes()
+            .into_iter()
+            .find(|e| {
+                e.event.kind() == kind && {
+                    let v: serde_json::Value =
+                        serde_json::from_str(&e.event.payload().unwrap()).unwrap();
+                    v.pointer(pointer).and_then(|v| v.get(field)).is_some()
+                }
+            })
+            .expect("command fixture includes the field");
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&e.event.payload().unwrap()).unwrap();
+        payload
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(
+            Event::decode(
+                kind,
+                e.event.version(),
+                &payload.to_string(),
+                e.run_id,
+                e.agent_run_id
+            )
+            .is_err(),
+            "{kind} {field}"
+        );
+        assert!(
+            Event::decode(
+                kind,
+                e.event.version() - 1,
+                &e.event.payload().unwrap(),
+                e.run_id,
+                e.agent_run_id
+            )
+            .is_err(),
+            "old {kind}"
+        );
+    }
+    for commands in [
+        vec!["x".into(); 9],
+        vec!["b".into(), "a".into()],
+        vec!["x".into(), "x".into()],
+        vec!["x".repeat(65)],
+    ] {
+        let e = f
+            .envelopes()
+            .into_iter()
+            .find(|e| {
+                matches!(
+                    e.event,
+                    Event::AgentSpawned {
+                        assignment: Some(_),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&e.event.payload().unwrap()).unwrap();
+        value["assignment"]["request"]["commands"] = serde_json::json!(commands);
+        assert!(
+            Event::decode(
+                e.event.kind(),
+                e.event.version(),
+                &value.to_string(),
+                e.run_id,
+                e.agent_run_id
+            )
+            .is_err()
+        );
+    }
+    let result = WorkerCommandResult {
+        exit_code: Some(0),
+        stdout: String::new(),
+        stderr: String::new(),
+        private_capture: PrivateCapture::None {},
+    };
+    for field in ["exit_code", "private_capture"] {
+        let mut value = serde_json::to_value(&result).unwrap();
+        value.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<WorkerCommandResult>(value).is_err(),
+            "missing {field}"
+        );
+    }
+    for capture in [
+        serde_json::json!({"kind":"unknown"}),
+        serde_json::json!({"kind":"none","extra":true}),
+        serde_json::json!({"kind":"rejected","cause":"unknown"}),
+    ] {
+        let mut value = serde_json::to_value(&result).unwrap();
+        value["private_capture"] = capture;
+        assert!(serde_json::from_value::<WorkerCommandResult>(value).is_err());
     }
 }

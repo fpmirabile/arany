@@ -335,6 +335,7 @@ pub async fn exercise_private_guard_target(
         executable,
     )?;
     let grant = WorkerGrant {
+        commands: Vec::new(),
         read_paths: vec!["owned".into()],
         write_paths: vec!["owned".into()],
         tools: vec![
