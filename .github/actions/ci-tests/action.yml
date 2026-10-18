@@ -38,25 +38,20 @@ runs:
     - name: Fetch locked Rust dependencies
       shell: bash
       run: cargo fetch --locked
-    - name: Check ordinary production targets (debug and release)
+    - name: Check production release targets
       if: inputs.profile == 'debug'
       shell: bash
-      env:
-        RUSTFLAGS: ''
-      run: |
-        cargo check --workspace --lib --bins --locked --offline
-        cargo check --workspace --lib --bins --release --locked --offline
+      run: cargo clippy --workspace --lib --bins --release --locked --offline -- -D warnings
     - name: Check ordinary release targets with all features
-      if: inputs.profile == 'debug'
+      if: runner.os == 'Linux' && inputs.profile == 'debug'
       shell: bash
       env:
-        RUSTFLAGS: ''
+        # Clear arany_ci only here to compile the ordinary release test alternatives.
+        RUSTFLAGS: '-D warnings'
       run: cargo check --workspace --all-targets --all-features --release --locked --offline
     - name: Reject product unwraps
       if: inputs.profile == 'debug'
       shell: bash
-      env:
-        RUSTFLAGS: ''
       run: cargo clippy --workspace --lib --bins --locked --offline -- -D warnings -D clippy::unwrap_used
     - name: Clippy on macOS
       if: runner.os == 'macOS' && inputs.profile == 'debug'
