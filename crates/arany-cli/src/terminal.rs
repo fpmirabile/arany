@@ -1173,6 +1173,10 @@ impl AttachedTerminal {
             .map_err(TerminalError::Io)
     }
 
+    pub fn release_for_output(&mut self) -> Result<(), TerminalError> {
+        self.release().map_err(TerminalError::Io)
+    }
+
     pub fn restore(&mut self) -> Result<(), TerminalError> {
         let mut first_error = self.release().err();
         if let Err(error) = clipboard::shutdown() {

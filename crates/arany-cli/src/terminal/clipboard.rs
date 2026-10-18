@@ -722,7 +722,7 @@ mod cleanup_tests {
                     };
                     let _worker_lock = WORKER.task.lock().unwrap();
                     let mut terminal = released();
-                    terminal.release().unwrap();
+                    terminal.release_for_output().unwrap();
                     terminal.replace_released(released());
                     assert!(!WORKER.cleanup_unconfirmed.load(Ordering::Acquire));
                     if case == "transitions" {
