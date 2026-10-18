@@ -13,8 +13,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 const CAPTURE_BYTES: usize = 48 * 1024;
-// Room for the full pinned config plus one base64 agent definition file.
-const TASK_BYTES_CAP: usize = 96 * 1024 + (64 * 1024_usize).div_ceil(3) * 4;
+const TASK_BYTES_CAP: usize = 96 * 1024;
+// Only a task carrying one base64 agent definition file may exceed the common cap.
+const DEFINITION_TASK_BYTES: usize = (64 * 1024_usize).div_ceil(3) * 4;
 pub(super) const RUNTIME_ROOT: &str = "/usr";
 // Loaded CI hosts stall teardown for seconds; one shared bound only widens the wait for termination evidence.
 pub(super) const TEARDOWN_WAIT: Duration = Duration::from_secs(10);
@@ -845,9 +846,13 @@ pub(super) async fn capture(
     Err(error)
 }
 
+fn task_cap(definition: bool) -> usize {
+    TASK_BYTES_CAP + if definition { DEFINITION_TASK_BYTES } else { 0 }
+}
+
 fn encode_task(task: &Task) -> Result<Vec<u8>, ToolError> {
     let mut bytes = serde_json::to_vec(task).map_err(|_| ToolError::Configuration)?;
-    if bytes.len() > TASK_BYTES_CAP {
+    if bytes.len() > task_cap(task.definition.is_some()) {
         return Err(ToolError::Limit);
     }
     bytes.push(b'\n');
@@ -857,13 +862,13 @@ fn encode_task(task: &Task) -> Result<Vec<u8>, ToolError> {
 fn read_task(reader: &mut std::io::BufReader<impl Read>) -> Result<Task, ToolError> {
     let mut task = Vec::new();
     std::io::BufRead::read_until(
-        &mut Read::take(&mut *reader, (TASK_BYTES_CAP + 1) as u64),
+        &mut Read::take(&mut *reader, (task_cap(true) + 1) as u64),
         b'\n',
         &mut task,
     )
     .map_err(|_| ToolError::Operation)?;
     if task.last() != Some(&b'\n') {
-        return Err(if task.len() > TASK_BYTES_CAP {
+        return Err(if task.len() > task_cap(true) {
             ToolError::Limit
         } else {
             ToolError::Operation
@@ -872,7 +877,12 @@ fn read_task(reader: &mut std::io::BufReader<impl Read>) -> Result<Task, ToolErr
     if !reader.buffer().is_empty() {
         return Err(ToolError::Configuration);
     }
-    serde_json::from_slice(&task).map_err(|_| ToolError::Configuration)
+    let task_len = task.len();
+    let task: Task = serde_json::from_slice(&task).map_err(|_| ToolError::Configuration)?;
+    if task_len > task_cap(task.definition.is_some()) + 1 {
+        return Err(ToolError::Limit);
+    }
+    Ok(task)
 }
 
 #[cfg(target_os = "macos")]
@@ -1418,8 +1428,21 @@ mod tests {
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
             parent_namespaces: profile::Namespaces::read().unwrap(),
         };
-        let encoded = encode_task(&task(config)).unwrap();
-        assert!(encoded.len() > 96 * 1024);
+        let encoded = encode_task(&task(config.clone())).unwrap();
+        assert!(encoded.len() > TASK_BYTES_CAP);
+        let decoded = read_task(&mut std::io::BufReader::new(encoded.as_slice())).unwrap();
+        assert!(decoded.definition.is_some());
+        let mut plain = task(config);
+        plain.definition = None;
+        plain.intent.call = ToolCall::List { path: ".".into() };
+        plain.config.workspace_paths = vec!["p".repeat(TASK_BYTES_CAP)];
+        assert!(matches!(encode_task(&plain), Err(ToolError::Limit)));
+        let mut oversized = serde_json::to_vec(&plain).unwrap();
+        oversized.push(b'\n');
+        assert!(matches!(
+            read_task(&mut std::io::BufReader::new(oversized.as_slice())),
+            Err(ToolError::Limit)
+        ));
     }
 
     #[test]

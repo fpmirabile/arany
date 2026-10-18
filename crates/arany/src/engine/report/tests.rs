@@ -118,6 +118,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         tools,
         tool_compaction_summary: None,
         tool_compaction_covered_count: 0,
+        definitions: Default::default(),
         display: Vec::new(),
         steering_notes: Vec::new(),
         provider_fallbacks: (0..64)
@@ -652,6 +653,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         tools: vec![tool; 100],
         tool_compaction_summary: None,
         tool_compaction_covered_count: 0,
+        definitions: Default::default(),
         display: Vec::new(),
         steering_notes: Vec::new(),
         provider_fallbacks: Vec::new(),

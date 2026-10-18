@@ -686,16 +686,16 @@ mod tests {
                 "unsafe definition rejected"
             );
         }
-        for fields in [
-            "hooks: {}\n",
-            "mcpServers: {}\n",
-            "color: red\n",
-            "tools: [Bash]\n",
-            "tools: [Git, 'Read*']\n",
+        for (fields, tools) in [
+            ("hooks: {}\n", None),
+            ("mcpServers: {}\n", None),
+            ("color: red\n", None),
+            ("tools: [Bash]\n", Some(Vec::new())),
+            ("tools: [Git, 'Read*']\n", Some(Vec::new())),
         ] {
             let (definition, notes) = strict(&document(fields, "Body")).unwrap();
             assert_eq!(notes.len(), 1, "{fields}");
-            assert!(definition.tools.as_ref().is_none_or(Vec::is_empty));
+            assert_eq!(definition.tools, tools, "{fields}");
         }
         for (fields, field) in [
             ("tools: [Read]\ntools: [Write]\n", "frontmatter"),

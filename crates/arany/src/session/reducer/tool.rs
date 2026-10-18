@@ -320,6 +320,14 @@ pub(super) fn apply(
                 }
                 tool.observation = Some(observation.clone());
                 tool.finished_sequence = Some(prior);
+                if matches!(
+                    observation.intent.call,
+                    crate::tools::ToolCall::ParseAgentDefinition { .. }
+                ) {
+                    run.definitions = super::DefinitionCache::default();
+                    let computed = super::compute_definition_registry(run).ok();
+                    run.definitions = super::DefinitionCache(computed);
+                }
             }
             let goal_id = current
                 .goals

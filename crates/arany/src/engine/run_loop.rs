@@ -826,7 +826,7 @@ impl<'a> RunLoop<'a> {
     }
 
     async fn settle_definition_stop(&self) -> Result<(), EngineError> {
-        let stopped = self.pause_requested()
+        let stopped = self.pause_at_boundary()
             || self.controls.cancellation.is_cancelled()
             || self.ledger().active_time_exhausted()
             || self.ledger().view(|view| {
@@ -843,12 +843,10 @@ impl<'a> RunLoop<'a> {
                         })
                 })
             })?;
-        if stopped {
-            self.settle_stopped_primary().await
-        } else if !self.ledger().can_start_provider_call() {
-            self.fail_for_budget().await
-        } else {
-            self.fail_primary().await
+        match definition_stop(stopped, !self.ledger().can_start_provider_call()) {
+            DefinitionStop::Settle => self.settle_stopped_primary().await,
+            DefinitionStop::Budget => self.fail_for_budget().await,
+            DefinitionStop::Fail => self.fail_primary().await,
         }
     }
 
@@ -1034,4 +1032,35 @@ fn valid_finish(finish: &Finish, result_limit: usize) -> bool {
         && finish.result.len() <= result_limit
         && Event::finished_payload_size(&finish.summary, &finish.result)
             .is_ok_and(|bytes| bytes <= crate::store::MAX_EVENT_BYTES)
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum DefinitionStop {
+    Settle,
+    Budget,
+    Fail,
+}
+
+// Interruptions (cancel, pause, active time, Uncertain or Cancelled parse) settle honestly; only a plain refusal fails.
+fn definition_stop(interrupted: bool, provider_budget_closed: bool) -> DefinitionStop {
+    if interrupted {
+        DefinitionStop::Settle
+    } else if provider_budget_closed {
+        DefinitionStop::Budget
+    } else {
+        DefinitionStop::Fail
+    }
+}
+
+#[cfg(test)]
+mod definition_stop_tests {
+    use super::*;
+
+    #[test]
+    fn parser_stops_settle_interruptions_and_fail_budget_or_refusal_distinctly() {
+        assert_eq!(definition_stop(true, true), DefinitionStop::Settle);
+        assert_eq!(definition_stop(true, false), DefinitionStop::Settle);
+        assert_eq!(definition_stop(false, true), DefinitionStop::Budget);
+        assert_eq!(definition_stop(false, false), DefinitionStop::Fail);
+    }
 }

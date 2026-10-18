@@ -209,6 +209,7 @@ pub struct RunView {
     pub tools: Vec<ToolView>,
     pub tool_compaction_summary: Option<String>,
     pub tool_compaction_covered_count: u32,
+    pub definitions: DefinitionCache,
     pub display: Vec<super::events::DisplayChunk>,
     pub steering_notes: Vec<String>,
 }
@@ -785,11 +786,19 @@ fn active_run(view: &mut SessionView, id: RunId) -> Result<&mut RunView, ReplayE
 
 type DefinitionMap = std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>;
 
-// Replay asks for the registry on every event of a delegated Run; one slot keyed by the exact inputs avoids re-parsing up to 1 MiB each time.
-static REGISTRY_CACHE: std::sync::Mutex<Option<(u64, std::sync::Arc<DefinitionMap>)>> =
-    std::sync::Mutex::new(None);
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DefinitionCache(Option<std::sync::Arc<DefinitionMap>>);
 
 fn definition_registry(run: &RunView) -> Result<std::sync::Arc<DefinitionMap>, ReplayError> {
+    match &run.definitions.0 {
+        Some(registry) => Ok(registry.clone()),
+        None => compute_definition_registry(run),
+    }
+}
+
+fn compute_definition_registry(
+    run: &RunView,
+) -> Result<std::sync::Arc<DefinitionMap>, ReplayError> {
     let Some(pin) = run
         .config
         .as_ref()
@@ -827,26 +836,11 @@ fn definition_registry(run: &RunView) -> Result<std::sync::Arc<DefinitionMap>, R
         .map_or(config.model.as_str(), |routes| {
             routes.child[0].model.as_str()
         });
-    let key = {
-        use std::hash::{Hash as _, Hasher as _};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (run.id, &pin.digest, child_model, &outputs).hash(&mut hasher);
-        hasher.finish()
-    };
-    if let Some((cached, registry)) = REGISTRY_CACHE.lock().ok().and_then(|slot| slot.clone())
-        && cached == key
-    {
-        return Ok(registry);
-    }
-    let registry = std::sync::Arc::new(
+    Ok(std::sync::Arc::new(
         crate::tools::definitions::registry(pin, outputs.into_iter(), child_model)
             .map_err(|_| ReplayError::InvalidTransition)?
             .definitions,
-    );
-    if let Ok(mut slot) = REGISTRY_CACHE.lock() {
-        *slot = Some((key, registry.clone()));
-    }
-    Ok(registry)
+    ))
 }
 
 fn definition_mode(
