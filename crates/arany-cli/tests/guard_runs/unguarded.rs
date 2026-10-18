@@ -67,6 +67,7 @@ struct Host {
     workspace: PathBuf,
     state: PathBuf,
     engine: Engine,
+    restricted_approvals: bool,
 }
 
 struct Seen {
@@ -112,6 +113,7 @@ impl Host {
             workspace,
             state,
             engine,
+            restricted_approvals: false,
         }
     }
 
@@ -130,6 +132,11 @@ impl Host {
     ) -> Seen {
         let provider = Arc::new(ScriptedProvider::new(outcomes));
         let (approvals, mut inbox) = arany::ToolApprovals::new(terminal.unwrap_or_default());
+        let approvals = if self.restricted_approvals {
+            approvals.without_human_only()
+        } else {
+            approvals
+        };
         let controls = RunControls {
             tools: ToolGrant::Configured,
             approvals: terminal.map(|_| approvals),
@@ -480,6 +487,43 @@ async fn headless_exec_denies_unguarded_without_an_exact_rule_and_dispatches_wit
     let session = seen.outcome.session_id;
     let (_, view) = host.reopen(session).await;
     assert_eq!(view.runs[0].unguarded_tools(), 1);
+}
+
+#[tokio::test]
+async fn restricted_approval_channels_never_dispatch_unguarded_even_with_an_exact_rule() {
+    for exact_rule in [false, true] {
+        let mut host = Host::new(None);
+        host.restricted_approvals = true;
+        if exact_rule {
+            write_rule(&host, SCRIPT);
+        }
+        let (first, second) = (guarded(SCRIPT), unguarded(SCRIPT));
+        let mut outcomes = script(&first, &second, vec![]);
+        outcomes.pop();
+        let seen = host
+            .run(
+                &host.workspace,
+                outcomes,
+                Some(ApprovalMode::Request),
+                vec![],
+            )
+            .await;
+        assert_eq!(seen.unconsumed, 0);
+        assert_eq!(seen.requests, 2);
+        assert!(seen.prompts.is_empty());
+        denied(&seen, "Human-only approval is unavailable");
+        assert!(!host.workspace.join("ran.txt").exists());
+        let session = seen.outcome.session_id;
+        let (_, view) = host.reopen(session).await;
+        let tool = view.runs[0].tools.last().unwrap();
+        let verdict = tool.permission_verdict.as_ref().unwrap();
+        assert!(!verdict.approved);
+        assert_eq!(verdict.source, PermissionSource::UnavailableApproval);
+        assert_eq!(
+            tool.observation.as_ref().unwrap().disposition,
+            arany::ToolDisposition::Denied
+        );
+    }
 }
 
 #[tokio::test]

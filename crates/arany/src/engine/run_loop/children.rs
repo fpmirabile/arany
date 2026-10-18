@@ -348,6 +348,9 @@ impl RunLoop<'_> {
                     .await?;
                 }
             }
+            if self.uncertain_hook()? {
+                return self.settle_stopped_primary().await.map(|()| false);
+            }
             return match reason {
                 AbortReason::Failed if self.ledger().active_time_exhausted() => {
                     self.settle_stopped_primary().await
@@ -763,7 +766,7 @@ impl RunLoop<'_> {
                                 queue.budget_stopped
                             };
                             if !continues {
-                                abort_reason = Some(AbortReason::Failed);
+                                abort_reason = self.hook_abort()?.or(Some(AbortReason::Failed));
                             }
                             if !queue.budget_stopped {
                                 self.verify_workers().await?;
@@ -963,11 +966,7 @@ impl RunLoop<'_> {
                     Err(error) => return Err(error),
                 };
                 Some(
-                    if self.ledger().view(|v| {
-                        v.runs
-                            .last()
-                            .is_some_and(|r| r.actor_stopped_by_hook(children[index].agent_run_id))
-                    })? {
+                    if self.actor_hook_requested_stop(children[index].agent_run_id)? {
                         AgentDisposition::StoppedByHook
                     } else {
                         AgentDisposition::Finished
@@ -1001,6 +1000,8 @@ impl RunLoop<'_> {
                     Some(AbortReason::Paused)
                 } else if step_disposition == Some(AgentDisposition::StoppedByHook) {
                     Some(AbortReason::Hook)
+                } else if let Some(reason) = self.hook_abort()? {
+                    Some(reason)
                 } else if step_disposition == Some(AgentDisposition::Failed) {
                     Some(AbortReason::Failed)
                 } else if step_disposition == Some(AgentDisposition::Cancelled) {
@@ -1040,7 +1041,7 @@ impl RunLoop<'_> {
             record: call_record(AgentPhase::ChildWork, &result, valid_response, None),
         })
         .await?;
-        if matches!(abort_reason, Some(AbortReason::Hook)) {
+        if matches!(abort_reason, Some(AbortReason::Hook)) || self.hook_abort()?.is_some() {
             self.finish_child(agent_run_id, AgentDisposition::Cancelled, None, true)
                 .await?;
             return Ok(Some(AgentDisposition::Cancelled));
@@ -1107,7 +1108,12 @@ impl RunLoop<'_> {
                     child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
                     return Ok(None);
                 }
-                let disposition = if skipped || self.controls.cancellation.is_cancelled() {
+                let disposition = if self.actor_hook_requested_stop(agent_run_id)? {
+                    AgentDisposition::StoppedByHook
+                } else if skipped
+                    || self.controls.cancellation.is_cancelled()
+                    || self.hook_requested_stop()?
+                {
                     AgentDisposition::Cancelled
                 } else {
                     AgentDisposition::Failed
@@ -1150,36 +1156,13 @@ impl RunLoop<'_> {
         deadline: Instant,
     ) -> Result<ChildStop, EngineError> {
         let agent_run_id = child.agent_run_id;
-        let subject = child
-            .definition
-            .as_ref()
-            .map_or("researcher", |definition| definition.name.as_str());
-        let fits = self
-            .controls
-            .tools
-            .zip(child.tools.as_ref())
-            .is_none_or(|(runtime, tools)| {
-                tools.has_stop_room(&turn, runtime.context_limit_bytes())
-            });
         let stop = self
-            .lifecycle_hooks(
-                agent_run_id,
-                crate::tools::permissions::HookEvent::SubagentStop,
-                subject,
-                &finish.result,
-                Some(deadline),
-                fits,
-            )
+            .run_subagent_stop(child, "researcher", &finish.result, turn, deadline)
             .await;
-        let feedback = match stop {
-            Ok(Some(feedback)) => feedback,
+        match stop {
+            Ok(Some(())) => {}
             Ok(None) => {
-                let stopped = self.ledger().view(|view| {
-                    view.runs
-                        .iter()
-                        .any(|run| run.id == self.run_id && run.actor_stopped_by_hook(agent_run_id))
-                })?;
-                if stopped {
+                if self.actor_hook_requested_stop(agent_run_id)? {
                     if !child.editor {
                         self.finish_child(
                             agent_run_id,
@@ -1215,20 +1198,11 @@ impl RunLoop<'_> {
                 }
                 return Ok(ChildStop::End(disposition));
             }
+            Err(EngineError::Tool(crate::tools::ToolError::Uncertain)) if child.editor => {
+                return Ok(ChildStop::End(AgentDisposition::Failed));
+            }
             Err(error) => return Err(error),
         };
-        if let Some(tools) = child.tools.as_mut() {
-            tools.add_stop_feedback(&turn, &feedback);
-        }
-        child
-            .stop_hook_feedback
-            .push(crate::provider::StopHookFeedback {
-                after_step: child.tools.as_ref().map_or(0, |tools| tools.steps.len()),
-                turn,
-                text: feedback,
-                facts: None,
-                steering_notes: Vec::new(),
-            });
         if !child.editor {
             self.ledger().child_call_finished()?;
         }
@@ -1245,6 +1219,69 @@ impl RunLoop<'_> {
         Ok(ChildStop::End(AgentDisposition::Failed))
     }
 
+    pub(super) async fn run_subagent_stop(
+        &self,
+        child: &mut ChildWork,
+        default_subject: &str,
+        message: &str,
+        turn: ProviderTurn,
+        deadline: Instant,
+    ) -> Result<Option<()>, EngineError> {
+        let subject = child
+            .definition
+            .as_ref()
+            .map_or(default_subject, |definition| definition.name.as_str())
+            .to_owned();
+        let fits = self
+            .controls
+            .tools
+            .zip(child.tools.as_ref())
+            .is_none_or(|(runtime, tools)| {
+                tools.has_stop_room(&turn, runtime.context_limit_bytes())
+            });
+        let Some(feedback) = self
+            .lifecycle_hooks(
+                child.agent_run_id,
+                crate::tools::permissions::HookEvent::SubagentStop,
+                &subject,
+                message,
+                Some(deadline),
+                fits,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        if let Some(tools) = child.tools.as_mut() {
+            tools.add_stop_feedback(&turn, &feedback);
+        }
+        child
+            .stop_hook_feedback
+            .push(crate::provider::StopHookFeedback {
+                after_step: child.tools.as_ref().map_or(0, |tools| tools.steps.len()),
+                turn,
+                text: feedback,
+                facts: None,
+                steering_notes: Vec::new(),
+            });
+        Ok(Some(()))
+    }
+
+    fn hook_abort(&self) -> Result<Option<AbortReason>, EngineError> {
+        if self.uncertain_hook()? {
+            return Ok(Some(AbortReason::Failed));
+        }
+        if self.hook_requested_stop()? {
+            return Ok(Some(AbortReason::Hook));
+        }
+        let settled = self.ledger().view(|view| {
+            view.runs
+                .last()
+                .is_some_and(crate::session::RunView::hooks_settled)
+        })?;
+        Ok((!settled).then_some(AbortReason::Failed))
+    }
+
     pub(super) async fn begin_synthesis(
         &self,
         root_request: &mut ProviderRequest,
@@ -1258,7 +1295,7 @@ impl RunLoop<'_> {
     }
 
     fn refresh_team_context(&self, root: &mut ProviderRequest) -> Result<(), EngineError> {
-        let (reports, pending, observations) = self.ledger().view(|v| {
+        let (reports, pending, integrations) = self.ledger().view(|v| {
             let run = v.runs.last().expect("Run");
             let proposals: Vec<_> = run.primary().into_iter().flat_map(|a| &a.provider_calls).filter_map(|c| c.delegation.as_ref()).flatten().collect();
             let mut order = std::collections::HashMap::new();
@@ -1324,7 +1361,8 @@ impl RunLoop<'_> {
                         } if run.agents.iter().find(|a| a.id == *assignment_id).and_then(|a| a.assignment.as_ref()).is_some_and(|w| usize::from(w.pins.request.wave) == wave)
                     )
                 })
-                .filter_map(|t| t.observation.clone())
+                .filter(|t| t.observation.is_some())
+                .cloned()
                 .collect::<Vec<_>>();
             reports.sort_by_key(|(index, _)| *index);
             (reports.into_iter().map(|(_, report)| report).collect::<Vec<_>>(), pending, observations)
@@ -1332,7 +1370,18 @@ impl RunLoop<'_> {
         root.input.child_results = reports;
         if let Some(tools) = root.input.tools.as_mut() {
             if let Some(step) = tools.steps.iter_mut().rev().find(|s| s.requests.is_empty()) {
-                step.observations = observations;
+                step.observations = integrations
+                    .iter()
+                    .filter_map(|tool| tool.observation.clone())
+                    .collect();
+                step.hook_feedback = integrations
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, tool)| {
+                        let feedback = tool.hook_feedback();
+                        (!feedback.is_empty()).then_some((index, feedback))
+                    })
+                    .collect();
             }
             let mut catalog: serde_json::Value =
                 serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
@@ -1723,7 +1772,7 @@ impl RunLoop<'_> {
     }
 }
 
-enum ChildStop {
+pub(super) enum ChildStop {
     Proceed,
     Reprompt,
     End(AgentDisposition),

@@ -233,7 +233,7 @@ impl<'a> RunLoop<'a> {
                     .any(|observation| {
                         observation.disposition == crate::tools::ToolDisposition::Uncertain
                     })
-            });
+            }) || self.uncertain_hook_in(run);
             let action_cancelled = run.lifecycle_hooks.iter().any(|hook| {
                 hook.outcome.as_ref().is_some_and(|outcome| {
                     outcome.observation.disposition == crate::tools::ToolDisposition::Cancelled
@@ -1074,6 +1074,35 @@ impl<'a> RunLoop<'a> {
         self.ledger().view(|view| {
             view.runs.iter().any(|run| {
                 run.id == self.run_id && run.hooks_settled() && run.hook_stop_reason().is_some()
+            })
+        })
+    }
+
+    fn uncertain_hook(&self) -> Result<bool, EngineError> {
+        self.ledger().view(|view| {
+            view.runs
+                .last()
+                .is_some_and(|run| self.uncertain_hook_in(run))
+        })
+    }
+
+    fn uncertain_hook_in(&self, run: &crate::session::RunView) -> bool {
+        run.tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+            .flat_map(|tool| &tool.hooks)
+            .chain(&run.lifecycle_hooks)
+            .any(|hook| {
+                hook.outcome.as_ref().is_some_and(|outcome| {
+                    outcome.observation.disposition == crate::tools::ToolDisposition::Uncertain
+                })
+            })
+    }
+
+    fn actor_hook_requested_stop(&self, agent: AgentRunId) -> Result<bool, EngineError> {
+        self.ledger().view(|view| {
+            view.runs.iter().any(|run| {
+                run.id == self.run_id && run.hooks_settled() && run.actor_stopped_by_hook(agent)
             })
         })
     }

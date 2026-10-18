@@ -1204,8 +1204,8 @@ mod tests {
             assert_eq!(line["created_at_ms"], event.created_at_ms);
             let version = match line["kind"].as_str() {
                 Some("RunStarted") => 13,
-                Some("AgentSpawned") => 9,
-                Some("AgentFinished" | "RunFinished" | "ProviderCallRecorded") => 8,
+                Some("AgentSpawned" | "AgentFinished") => 9,
+                Some("RunFinished" | "ProviderCallRecorded") => 8,
                 Some("GoalProviderCallReserved") => 7,
                 _ => 6,
             };

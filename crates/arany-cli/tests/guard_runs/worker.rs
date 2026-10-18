@@ -96,6 +96,66 @@ pub(super) async fn worker_case(case: &'static str) {
             br#"{"permissions":{"defaultMode":"default"}}"#,
         );
     }
+    if case.starts_with("hook_") {
+        let shell = std::fs::canonicalize("/bin/sh").unwrap();
+        let hash: String = Sha256::digest(std::fs::read(&shell).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["notes"],"write":true,"commands":[{"name":"sh","executable":shell,"sha256":hash,"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]})).unwrap());
+        let command =
+            |script: &str| serde_json::json!({"type":"command","command":script,"timeout":5});
+        let hooks = match case {
+            "hook_write" => {
+                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("exit 0")]}],"PostToolUse":[{"matcher":"Write","hooks":[command("echo checked >&2; exit 2")]}]})
+            }
+            "hook_stop_block" => {
+                serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command("echo verify-worker >&2; exit 2")]}]})
+            }
+            "hook_stop" => {
+                serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
+            }
+            "hook_write_stop" => {
+                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
+            }
+            "hook_write_update" => {
+                let rewritten = serde_json::to_string(&arany::ToolCall::Write {
+                    path: "notes/a".into(),
+                    expected_digest: None,
+                    content: "rewritten".into(),
+                })
+                .unwrap();
+                let output = serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","updatedInput":serde_json::from_str::<serde_json::Value>(&rewritten).unwrap()}});
+                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command(&format!("printf '%s' '{output}'"))]}]})
+            }
+            "hook_default_timeout" => {
+                let plain = || serde_json::json!({"type":"command","command":"exit 0"});
+                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[plain()]}],"PostToolUse":[{"matcher":"Write","hooks":[plain()]}]})
+            }
+            "hook_stop_uncertain" => {
+                serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command("kill -9 $PPID")]}]})
+            }
+            "hook_handover_uncertain" => {
+                serde_json::json!({"PreToolUse":[{"matcher":"Edit","hooks":[command("kill -9 $PPID")]}]})
+            }
+            "hook_uncertain" => {
+                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("kill -9 $PPID")]}]})
+            }
+            "hook_post_stop" => {
+                serde_json::json!({"PostToolUse":[{"matcher":"Edit","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
+            }
+            "hook_handover_post" => {
+                serde_json::json!({"PostToolUse":[{"matcher":"Edit","hooks":[command("echo published >&2; exit 2")]}]})
+            }
+            _ => {
+                serde_json::json!({"PreToolUse":[{"matcher":"Edit","hooks":[command(r#"IFS= read -r input; case "$input" in *'"files":["notes/a","notes/b"]'*) echo sealed-denial >&2; exit 2;; *) exit 0;; esac"#)]}]})
+            }
+        };
+        private_file(
+            &state.join("permissions.json"),
+            &serde_json::to_vec(&serde_json::json!({"hooks":hooks})).unwrap(),
+        );
+    }
     if case == "subagent_stop" {
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
         let command = serde_json::json!({"name":"sh","executable":shell,"sha256":Sha256::digest(std::fs::read(&shell).unwrap()).iter().map(|byte| format!("{byte:02x}")).collect::<String>(),"interpreter":true,"inputs":[]});
@@ -209,6 +269,28 @@ pub(super) async fn worker_case(case: &'static str) {
         .iter()
         .filter(|r| r.phase == AgentPhase::RootSynthesis)
         .count();
+    if matches!(
+        case,
+        "hook_uncertain" | "hook_stop_uncertain" | "hook_handover_uncertain"
+    ) {
+        assert!(
+            matches!(
+                result,
+                Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+            ),
+            "an unknown worker hook stops the Run as Uncertain: {result:?}"
+        );
+        assert_eq!(synthesis_calls, 0);
+        assert_eq!(child_calls, if case == "hook_uncertain" { 1 } else { 4 });
+        assert!(worker.released.is_some(), "{case}: private view disposed");
+        assert!(
+            run.agents
+                .iter()
+                .all(|agent| agent.status != arany::AgentStatus::Active),
+            "{case}"
+        );
+        return;
+    }
     assert_eq!(std::fs::read(workspace.join(".git/config")).unwrap(), git);
     for bytes in [
         bundle.stdout,
@@ -329,17 +411,79 @@ pub(super) async fn worker_case(case: &'static str) {
         );
     } else {
         let result = result.expect(case);
+        if case == "hook_write_update" {
+            let tools = &run.agents[1].tools;
+            assert!(tools.iter().all(|tool| {
+                tool.observation.as_ref().unwrap().disposition == arany::ToolDisposition::Denied
+            }));
+            assert!(tools.iter().all(|tool| tool.hooks.len() == 1));
+            assert_eq!(
+                std::fs::read(workspace.join("notes/a")).unwrap(),
+                b"original a"
+            );
+            return;
+        }
+        if case == "hook_post_stop" {
+            assert_eq!(run.status, RunStatus::StoppedByHook);
+            assert_eq!(synthesis_calls, 0);
+            assert_eq!(
+                std::fs::read(workspace.join("notes/a")).unwrap(),
+                b"edited a"
+            );
+            assert_eq!(run.hook_stop_reason(), Some(Some("halt")));
+            return;
+        }
         assert!(result.stopped.is_none(), "{case}");
         assert!(worker.released.is_some(), "{case}");
-        if matches!(case, "success" | "subagent_stop") {
+        if matches!(
+            case,
+            "success"
+                | "hook_write"
+                | "hook_default_timeout"
+                | "hook_stop_block"
+                | "hook_handover_post"
+                | "subagent_stop"
+        ) {
             assert_eq!(run.status, RunStatus::Finished);
+            assert_eq!(child_calls, if case == "hook_stop_block" { 12 } else { 4 });
+            if case == "hook_stop_block" {
+                assert_eq!(run.lifecycle_hooks.len(), 8);
+            }
             if case == "subagent_stop" {
                 assert!(run.lifecycle_hooks.iter().any(|h| h.invocation.event
                     == arany::permissions::HookEvent::SubagentStop
                     && h.invocation.intent.agent_run_id == run.agents[1].id
                     && h.outcome.is_some()));
             }
-            assert_eq!(child_calls, 4);
+            if case == "hook_write" {
+                let tools = &run.agents[1].tools;
+                assert_eq!(tools[0].hooks.len(), 2);
+                assert_eq!(tools[1].hooks.len(), 2);
+                assert!(tools[..2].iter().all(|tool| {
+                    tool.hooks
+                        .iter()
+                        .all(|hook| hook.invocation.intent.agent_run_id == run.agents[1].id)
+                }));
+            }
+            if case == "hook_handover_post" {
+                let synthesis = calls
+                    .iter()
+                    .find(|call| call.phase == AgentPhase::RootSynthesis)
+                    .unwrap();
+                assert!(
+                    synthesis
+                        .input
+                        .tools
+                        .as_ref()
+                        .unwrap()
+                        .steps
+                        .iter()
+                        .any(|step| step
+                            .hook_feedback
+                            .values()
+                            .any(|lines| lines == &["hook feedback: published"]))
+                );
+            }
             assert_eq!(synthesis_calls, 2);
             assert!(worker.verification.as_ref().unwrap().1.passed);
             assert_eq!(
@@ -355,7 +499,30 @@ pub(super) async fn worker_case(case: &'static str) {
                 b"edited a"
             );
         } else {
-            assert_eq!(run.status, RunStatus::Failed, "{case}");
+            assert_eq!(
+                run.status,
+                if matches!(case, "hook_stop" | "hook_write_stop") {
+                    RunStatus::StoppedByHook
+                } else {
+                    RunStatus::Failed
+                },
+                "{case}"
+            );
+            if matches!(case, "hook_stop" | "hook_write_stop") {
+                assert_eq!(synthesis_calls, 0);
+                assert!(worker.handover.is_none());
+                assert_eq!(run.hook_stop_reason(), Some(Some("halt")));
+                assert_eq!(run.agents[1].status, arany::AgentStatus::StoppedByHook);
+            }
+            if case == "hook_handover_deny" {
+                assert_eq!(
+                    worker.integration.as_ref().unwrap().1.outcome,
+                    WorkerIntegrationOutcome::Denied
+                );
+                let tool = run.tools.last().unwrap();
+                assert_eq!(tool.hooks.len(), 1);
+                assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+            }
             if case == "private_loss" {
                 assert!(injected, "{case}");
                 assert_eq!(synthesis_calls, 1, "{case}");
@@ -403,6 +570,55 @@ async fn foreground_worker_guard_journey_budgets_denials_and_private_vs_publicat
         "private_loss",
         "publication_loss",
         "headroom",
+    ] {
+        worker_case(case).await;
+    }
+}
+
+#[tokio::test]
+async fn foreground_worker_hook_journey_bounds_stop_blocks_and_denies_sealed_handover() {
+    for case in [
+        "hook_write",
+        "hook_stop_block",
+        "hook_handover_deny",
+        "hook_handover_post",
+        "hook_stop",
+        "hook_write_stop",
+        "hook_write_update",
+        "hook_post_stop",
+    ] {
+        worker_case(case).await;
+    }
+}
+
+#[test]
+fn foreground_worker_handover_hook_fits_a_two_mebibyte_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(worker_case("hook_handover_deny"));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn foreground_worker_default_hook_timeouts_leave_the_delegated_tool_runtime() {
+    worker_case("hook_default_timeout").await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn foreground_worker_unknown_hook_outcome_stops_the_run_as_uncertain() {
+    for case in [
+        "hook_uncertain",
+        "hook_stop_uncertain",
+        "hook_handover_uncertain",
     ] {
         worker_case(case).await;
     }
@@ -463,6 +679,10 @@ async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
         "cancel_foreground",
         "cancel_background",
         "cancel_mixed",
+        "hook_sibling_stop",
+        // Killing the Guard parent proves an unknown outcome only on Linux, like the other Uncertain hook journeys.
+        #[cfg(target_os = "linux")]
+        "hook_uncertain_sibling",
         "turn_limit",
         "resume_unknown",
     ] {
