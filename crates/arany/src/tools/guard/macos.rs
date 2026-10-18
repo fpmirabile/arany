@@ -972,10 +972,7 @@ async fn execute_worker(
             })
             .await
             .map_err(|_| {
-                ToolError::GuardBootstrap(BootstrapFailure {
-                    stage: BootstrapStage::Handshake,
-                    check: None,
-                })
+                ToolError::GuardBootstrap(BootstrapFailure::at(BootstrapStage::Handshake))
             })??;
             if ready.pid != pid {
                 return Err(ToolError::ProtectionUnavailable);

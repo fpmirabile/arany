@@ -328,6 +328,7 @@ pub(super) enum GuardCheck {
     ImageStillListed,
     MountStillPresent,
     WorkerClosed,
+    WorkerPanicked,
     ReportMalformed,
     ReportUnattested,
     ReportTrailing,
@@ -345,6 +346,7 @@ impl GuardCheck {
             Self::ImageStillListed => "image still listed",
             Self::MountStillPresent => "mount still present",
             Self::WorkerClosed => "worker closed before its report",
+            Self::WorkerPanicked => "worker panicked",
             Self::ReportMalformed => "malformed report",
             Self::ReportUnattested => "unattested report",
             Self::ReportTrailing => "report not followed by end of stream",
@@ -394,6 +396,9 @@ pub struct BootstrapFailure {
     stage: BootstrapStage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     check: Option<GuardCheck>,
+    // Local diagnostics only: never serialized, journaled or shown to the model.
+    #[serde(skip)]
+    detail: Option<String>,
 }
 
 impl std::fmt::Display for BootstrapFailure {
@@ -403,8 +408,20 @@ impl std::fmt::Display for BootstrapFailure {
 }
 
 impl BootstrapFailure {
+    fn at(stage: BootstrapStage) -> Self {
+        Self {
+            stage,
+            check: None,
+            detail: None,
+        }
+    }
+
     pub(super) fn check(&self) -> Option<&'static str> {
         self.check.map(GuardCheck::label)
+    }
+
+    pub(super) fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
     }
 
     pub(super) fn failure_stage(&self) -> &'static str {
@@ -766,7 +783,55 @@ pub(super) fn execution_failure(check: GuardCheck) -> ToolError {
     ToolError::GuardBootstrap(BootstrapFailure {
         stage: BootstrapStage::Payload,
         check: Some(check),
+        detail: None,
     })
+}
+
+#[cfg(any(target_os = "macos", test))]
+const WORKER_STDERR_TAIL: u64 = 4096;
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn read_tail(
+    file: &mut (impl std::io::Read + std::io::Seek),
+) -> std::io::Result<Vec<u8>> {
+    let end = file.seek(std::io::SeekFrom::End(0))?;
+    file.seek(std::io::SeekFrom::Start(
+        end.saturating_sub(WORKER_STDERR_TAIL),
+    ))?;
+    let mut tail = Vec::new();
+    std::io::Read::take(file, WORKER_STDERR_TAIL).read_to_end(&mut tail)?;
+    Ok(tail)
+}
+
+// A worker that closed before its report may have left a panic on its own stderr.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn with_worker_exit(error: ToolError, stderr_tail: &[u8]) -> ToolError {
+    match error {
+        ToolError::GuardBootstrap(BootstrapFailure {
+            stage: BootstrapStage::Payload,
+            check: Some(GuardCheck::WorkerClosed),
+            ..
+        }) => {
+            let detail = String::from_utf8_lossy(stderr_tail)
+                .chars()
+                .map(|ch| if ch.is_ascii_graphic() { ch } else { ' ' })
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let check = if detail.contains("panicked at") {
+                GuardCheck::WorkerPanicked
+            } else {
+                GuardCheck::WorkerClosed
+            };
+            ToolError::GuardBootstrap(BootstrapFailure {
+                stage: BootstrapStage::Payload,
+                check: Some(check),
+                detail: (!detail.is_empty()).then_some(detail),
+            })
+        }
+        error => error,
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1345,10 +1410,7 @@ pub(super) fn helper_main() -> ExitCode {
     if result.is_ok() {
         ExitCode::SUCCESS
     } else {
-        let _ = serde_json::to_writer(
-            std::io::stderr().lock(),
-            &BootstrapFailure { stage, check: None },
-        );
+        let _ = serde_json::to_writer(std::io::stderr().lock(), &BootstrapFailure::at(stage));
         ExitCode::FAILURE
     }
 }
@@ -1657,6 +1719,49 @@ mod tests {
                 > supervisor_go + runtime + PAYLOAD_KILL_WAIT
         );
         assert!(payload_report_deadline(supervisor_go, u32::MAX) > supervisor_go);
+    }
+
+    #[test]
+    fn a_closed_worker_names_its_panic_from_a_bounded_stderr_tail() {
+        let mut file = tempfile::tempfile().unwrap();
+        std::io::Write::write_all(&mut file, &vec![b'x'; 10_000]).unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            b"\nthread 'main' panicked at src/unit.rs:1:2:\n\x1b[31mboom\n",
+        )
+        .unwrap();
+        let tail = read_tail(&mut file).unwrap();
+        assert_eq!(tail.len() as u64, WORKER_STDERR_TAIL);
+        let closed = || execution_failure(GuardCheck::WorkerClosed);
+        let ToolError::GuardBootstrap(panicked) = with_worker_exit(closed(), &tail) else {
+            panic!("a closed worker stays a Guard failure");
+        };
+        assert_eq!(panicked.failure_stage(), "execution");
+        assert_eq!(panicked.check(), Some("worker panicked"));
+        let detail = panicked.detail().unwrap();
+        assert!(detail.ends_with("thread 'main' panicked at src/unit.rs:1:2: [31mboom"));
+        assert!(detail.chars().all(|ch| ch.is_ascii_graphic() || ch == ' '));
+        assert_eq!(
+            serde_json::to_string(&panicked).unwrap(),
+            r#"{"stage":"payload","check":"worker_panicked"}"#
+        );
+
+        let ToolError::GuardBootstrap(silent) = with_worker_exit(closed(), b"") else {
+            panic!("a closed worker stays a Guard failure");
+        };
+        assert_eq!(
+            (silent.check(), silent.detail()),
+            (Some("worker closed before its report"), None)
+        );
+        let other = with_worker_exit(
+            execution_failure(GuardCheck::ReportMalformed),
+            b"panicked at x",
+        );
+        assert!(matches!(
+            other,
+            ToolError::GuardBootstrap(failure)
+                if failure.check() == Some("malformed report") && failure.detail().is_none()
+        ));
     }
 
     #[tokio::test]
@@ -2023,10 +2128,7 @@ mod tests {
 
     #[test]
     fn runtime_mount_rejection_reports_its_own_bootstrap_stage() {
-        let failure = BootstrapFailure {
-            stage: BootstrapStage::RuntimeMounts,
-            check: None,
-        };
+        let failure = BootstrapFailure::at(BootstrapStage::RuntimeMounts);
         assert_eq!(failure.failure_stage(), "runtime mount topology");
         assert_eq!(failure.to_string(), "runtime mount topology");
     }
