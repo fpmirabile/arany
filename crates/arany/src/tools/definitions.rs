@@ -987,14 +987,7 @@ mod tests {
                     std::fs::write(temp.path().join("target"), &original).unwrap();
                     std::fs::hard_link(temp.path().join("target"), &path).unwrap();
                 }
-                "fifo" => rustix::fs::mknodat(
-                    &directory,
-                    "reader.md",
-                    rustix::fs::FileType::Fifo,
-                    rustix::fs::Mode::RUSR,
-                    0,
-                )
-                .unwrap(),
+                "fifo" => nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRUSR).unwrap(),
                 "directory" => std::fs::create_dir(&path).unwrap(),
                 _ => {
                     std::fs::write(&path, &original).unwrap();
