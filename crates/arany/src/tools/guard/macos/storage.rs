@@ -1,4 +1,4 @@
-use super::super::{CAPTURE_BYTES, CleanupCheck, TEARDOWN_WAIT, retry_transient};
+use super::super::{CAPTURE_BYTES, GuardCheck, TEARDOWN_WAIT, retry_transient};
 use super::system_program;
 use crate::private_fs::open_directory;
 use crate::tools::toolchains::RuntimeGrant;
@@ -389,7 +389,7 @@ pub(super) fn storage_mounted(root: &Path) -> Result<bool, ToolError> {
 #[derive(Debug)]
 pub(super) struct CleanupFailed {
     pub(super) error: ToolError,
-    pub(super) check: CleanupCheck,
+    pub(super) check: GuardCheck,
 }
 
 impl From<CleanupFailed> for ToolError {
@@ -406,7 +406,7 @@ pub(super) async fn cleanup_storage_until(
     root: &Path,
     deadline: tokio::time::Instant,
 ) -> Result<(), CleanupFailed> {
-    let check = Cell::new(CleanupCheck::Inspection);
+    let check = Cell::new(GuardCheck::Inspection);
     retry_transient(CLEANUP_ATTEMPTS, CLEANUP_PAUSE, deadline, || {
         cleanup_storage_once(root, &check)
     })
@@ -417,8 +417,8 @@ pub(super) async fn cleanup_storage_until(
     })
 }
 
-async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result<(), ToolError> {
-    check.set(CleanupCheck::Inspection);
+async fn cleanup_storage_once(root: &Path, check: &Cell<GuardCheck>) -> Result<(), ToolError> {
+    check.set(GuardCheck::Inspection);
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
     let mut has_images = false;
@@ -434,7 +434,7 @@ async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result
         }
     }
     if !has_images {
-        check.set(CleanupCheck::MountStillPresent);
+        check.set(GuardCheck::MountStillPresent);
         return if !storage_mounted(root)?
             && !super::ffi::mounts()?
                 .iter()
@@ -452,10 +452,10 @@ async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result
         Err(_) => return Err(ToolError::Path),
     };
     let mut admitted_image = false;
-    check.set(CleanupCheck::ListingUnavailable);
+    check.set(GuardCheck::ListingUnavailable);
     let attached = disk_command(root, &["info", "-plist"]).await?;
     let owned_attachments = attachments(&attached, root)?;
-    check.set(CleanupCheck::Inspection);
+    check.set(GuardCheck::Inspection);
     if let Some(pending) = &pending {
         if pending.version != 1 || !STORAGE_NAMES.contains(&pending.image.as_str()) {
             return Err(ToolError::ProtectionUnavailable);
@@ -494,7 +494,7 @@ async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result
             .find(|attachment| attachment.name == name);
         if let Some(attachment) = owned {
             verify_image(&directory, name)?;
-            check.set(CleanupCheck::MountStillPresent);
+            check.set(GuardCheck::MountStillPresent);
             let mounts = super::ffi::mounts()?;
             for (device, target) in &mounts {
                 if device == &attachment.device && target != &root.join(name) {
@@ -510,13 +510,13 @@ async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result
             } else if mounts.iter().any(|(_, target)| target == &root.join(name)) {
                 return Err(ToolError::ProtectionUnavailable);
             }
-            check.set(CleanupCheck::Inspection);
+            check.set(GuardCheck::Inspection);
             devices.push(attachment.device.clone());
         } else if metadata.dev() != parent.0 {
             return Err(ToolError::ProtectionUnavailable);
         }
     }
-    check.set(CleanupCheck::MountStillPresent);
+    check.set(GuardCheck::MountStillPresent);
     if super::ffi::mounts()?.iter().any(|(_, target)| {
         target.starts_with(root) && !STORAGE_NAMES.iter().any(|name| target == &root.join(name))
     }) {
@@ -532,15 +532,15 @@ async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result
     }
     for device in devices {
         // Recheck OS ownership immediately before acting on a potentially reused disk number.
-        check.set(CleanupCheck::ListingUnavailable);
+        check.set(GuardCheck::ListingUnavailable);
         let current = disk_command(root, &["info", "-plist"]).await?;
         let current = attachments(&current, root)?;
-        check.set(CleanupCheck::DeviceUnlisted);
+        check.set(GuardCheck::DeviceUnlisted);
         super::super::require_listed(
             current.iter().map(|attachment| attachment.device.as_path()),
             device.as_path(),
         )?;
-        check.set(CleanupCheck::DetachFailed);
+        check.set(GuardCheck::DetachFailed);
         disk_command(
             root,
             &[
@@ -562,22 +562,22 @@ async fn confirm_detached(
     root: &Path,
     directory: &cap_std::fs::Dir,
     pending: bool,
-    check: &Cell<CleanupCheck>,
+    check: &Cell<GuardCheck>,
 ) -> Result<(), ToolError> {
-    check.set(CleanupCheck::ListingUnavailable);
+    check.set(GuardCheck::ListingUnavailable);
     let remaining = disk_command(root, &["info", "-plist"]).await?;
     let remaining = attachments(&remaining, root)?;
-    check.set(CleanupCheck::ImageStillListed);
+    check.set(GuardCheck::ImageStillListed);
     if !remaining.is_empty() {
         return Err(ToolError::ProtectionUnavailable);
     }
     if pending {
-        check.set(CleanupCheck::Inspection);
+        check.set(GuardCheck::Inspection);
         directory
             .remove_file(STORAGE_PENDING)
             .map_err(|_| ToolError::Operation)?;
     }
-    check.set(CleanupCheck::MountStillPresent);
+    check.set(GuardCheck::MountStillPresent);
     if storage_mounted(root)? {
         Err(ToolError::ProtectionUnavailable)
     } else {

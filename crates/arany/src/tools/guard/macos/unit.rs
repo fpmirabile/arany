@@ -932,7 +932,7 @@ pub(super) async fn execute(
                 }
                 Ok((observation, candidate))
             } else {
-                super::super::read_observation(&mut stream, intent)
+                super::super::read_worker_report(&mut stream, intent)
                     .await
                     .map(|observation| (observation, super::super::CacheCandidate::Received))
             }
@@ -944,13 +944,13 @@ pub(super) async fn execute(
     let result = if let Some(window) = active_window {
         tokio::select! {
             biased;
-            () = cancellation.cancelled() => Err(ToolError::Operation),
+            () = cancellation.cancelled() => Err(super::super::execution_failure(super::super::GuardCheck::Cancelled)),
             result = tokio::time::timeout_at(window.completion_deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
         }
     } else {
         tokio::select! {
             biased;
-            () = cancellation.cancelled() => Err(ToolError::Operation),
+            () = cancellation.cancelled() => Err(super::super::execution_failure(super::super::GuardCheck::Cancelled)),
             result = tokio::time::timeout_at(completion_deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
         }
     };
