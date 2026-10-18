@@ -24,7 +24,6 @@ fn account_path_uses_the_private_binary_fixture() {
     }
 }
 
-/// A scripted one-request Tool step; the id only has to be unique within its step.
 fn tool_outcome(
     call: arany::ToolCall,
     plan_contract: Option<Box<arany::GoalPlanContract>>,
@@ -110,7 +109,6 @@ mod tools_researcher;
 #[path = "session_run/tools/replay.rs"]
 mod tool_replay;
 
-/// Hex SHA-256, as Tool configuration pins resources.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};

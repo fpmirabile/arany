@@ -128,7 +128,6 @@ fn retry_busy<T>(mut attempt: impl FnMut() -> Result<T, StoreError>) -> Result<T
     attempt()
 }
 
-/// Acquires a cache lease that a prior lease or session in the same test has released.
 #[cfg(test)]
 pub(crate) fn begin_released(
     state: &StateRoot,

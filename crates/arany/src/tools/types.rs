@@ -843,7 +843,6 @@ pub(crate) fn uses_guard_alias(args: &[String]) -> bool {
     })
 }
 
-/// The latest Guard-attested observation of the identical command, when it qualifies for an unguarded re-run.
 pub(crate) fn qualifying_guard_failure<'a>(
     call: &ToolCall,
     observations: impl Iterator<Item = &'a ToolObservation>,
