@@ -775,13 +775,26 @@ pub(crate) fn failure_check(error: &ToolError) -> Option<&'static str> {
     }
 }
 
+fn record_failure(site: &'static str, intent: &EffectIntent, error: &ToolError) {
+    crate::diagnostics::tool_failure(site, error);
+    #[cfg(any(test, feature = "test-support"))]
+    crate::test_support::record_tool_failure(
+        intent.id,
+        site,
+        failure_stage(error),
+        failure_check(error),
+    );
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = intent;
+}
+
 fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
     let site = match intent.call.facts().site {
         Site::InProcess => "Read",
         Site::Guard => "Guard",
         Site::Unguarded => "Unguarded",
     };
-    crate::diagnostics::tool_failure(site, &error);
+    record_failure(site, &intent, &error);
     ToolObservation {
         enforcement_cause: None,
         output: match error {
@@ -803,7 +816,7 @@ fn uncertain_observation(
     error: ToolError,
     cache_update: crate::tools::CacheUpdate,
 ) -> ToolObservation {
-    crate::diagnostics::tool_failure("Guard", &error);
+    record_failure("Guard", &intent, &error);
     let stage = failure_stage(&error);
     ToolObservation {
         enforcement_cause: None,
