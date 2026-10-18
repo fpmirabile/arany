@@ -1015,6 +1015,7 @@ mod tests {
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
+            definitions: Default::default(),
             display: Vec::new(),
             steering_notes: Vec::new(),
             provider_fallbacks: Vec::new(),
@@ -1730,6 +1731,7 @@ mod tests {
                     Event::RunStarted {
                         run_id,
                         config: RunConfig {
+                            agent_definitions: None,
                             roster: None,
                             providers: None,
                             provider: "scripted".into(),
@@ -1756,6 +1758,7 @@ mod tests {
                         active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                     },
                     Event::AgentSpawned {
+                        definition: None,
                         run_id,
                         agent_run_id,
                         role: AgentRole::Primary,

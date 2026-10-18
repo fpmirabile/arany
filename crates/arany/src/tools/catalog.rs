@@ -9,6 +9,7 @@ pub(crate) enum Family {
     Skill,
     Mcp,
     Git,
+    Preparation,
 }
 
 /// Where an operation may execute: in the Engine under the admitted Workspace handle, or in the Guard.
@@ -83,7 +84,7 @@ const fn write_row(name: &'static str, order: u8, description: &'static str) -> 
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 15] = [
+pub(crate) static ALL: [OperationFacts; 16] = [
     read_row(
         "list",
         Family::File,
@@ -191,6 +192,10 @@ pub(crate) static ALL: [OperationFacts; 15] = [
             "Ask the user to run a command that already failed inside the Guard again on the host with no sandbox. Use only after a `command` with identical program, args and cwd failed in this Run; put a one-sentence question for the user in `justification`. The user may refuse; never retry on your own.",
         )
     },
+    OperationFacts {
+        prelude: true,
+        ..facts_row("parse_agent_definition", Family::Preparation, 15, "")
+    },
 ];
 
 impl ToolCall {
@@ -200,6 +205,7 @@ impl ToolCall {
 
     pub(crate) const fn facts(&self) -> &'static OperationFacts {
         match self {
+            Self::ParseAgentDefinition { .. } => &ALL[15],
             Self::List { .. } => &ALL[0],
             Self::Read { .. } => &ALL[1],
             Self::Search { .. } => &ALL[2],
@@ -254,6 +260,7 @@ impl OperationFacts {
             Family::Skill => skills::schema(),
             Family::Mcp => mcp::schema(self.name),
             Family::Git => git::schema(self.name),
+            Family::Preparation => None,
         }
     }
 }
@@ -293,6 +300,12 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
         let Some(facts) = facts_of(call) else {
             return false;
         };
+        if catalog["operations"]
+            .as_array()
+            .is_some_and(|names| !names.iter().any(|name| name == facts.name))
+        {
+            return false;
+        }
         let (key, field, cap) = match facts.family {
             Family::File if facts.mutates => return catalog["write"] == true,
             Family::File => return true,
@@ -300,6 +313,7 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
             Family::Skill => ("skills", "name", MAX_SKILLS),
             Family::Mcp => ("mcp_servers", "server", 4),
             Family::Git => return catalog["git"].is_object(),
+            Family::Preparation => return false,
         };
         let names: Vec<_> = catalog[key]
             .as_array()
@@ -483,6 +497,10 @@ mod tests {
                 cwd: ".".into(),
                 justification: "Run the failed command once on the host".into(),
             },
+            ToolCall::ParseAgentDefinition {
+                index: 0,
+                raw_digest: [1; 32],
+            },
         ]
     }
 
@@ -534,6 +552,17 @@ mod tests {
             .filter(|facts| !facts.description.is_empty())
             .collect();
         assert_eq!(schemas.len(), offered.len());
+        for facts in offered {
+            assert_eq!(
+                schemas
+                    .iter()
+                    .filter(|call| std::ptr::eq(facts_of(call).unwrap(), facts))
+                    .count(),
+                1,
+                "{}",
+                facts.name
+            );
+        }
         for call in &schemas {
             let facts = facts_of(call).expect("schema operation is in the table");
             assert!(!facts.description.is_empty(), "{}", facts.name);
@@ -541,7 +570,7 @@ mod tests {
         assert!(
             ALL.iter()
                 .filter(|facts| facts.schema().is_none())
-                .all(|facts| facts.name == "apply_changeset")
+                .all(|facts| matches!(facts.name, "apply_changeset" | "parse_agent_definition"))
         );
     }
 }

@@ -1146,6 +1146,7 @@ impl Provider for FiniteTokenTeam {
         let (outcome, input_tokens, output_tokens) = match phase {
             AgentPhase::RootPlan => (
                 ProviderOutcome::Delegate(Delegate {
+                    agent: None,
                     children: vec![
                         "Review one".into(),
                         "Review two".into(),
@@ -1516,6 +1517,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                agent_definitions: None,
                 roster: None,
                 providers: None,
                 provider: "scripted".into(),
@@ -1542,6 +1544,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
             active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
         },
         Event::AgentSpawned {
+            definition: None,
             run_id,
             agent_run_id,
             role: arany::AgentRole::Primary,
@@ -1645,6 +1648,7 @@ impl Provider for PendingChildren {
             AgentPhase::RootPlan => Ok(ProviderResponse {
                 turn: arany::ProviderTurn::scripted(),
                 outcome: ProviderOutcome::Delegate(Delegate {
+                    agent: None,
                     children: vec!["First child".into(), "Second child".into()],
                 }),
                 response_id: None,
@@ -3304,6 +3308,7 @@ async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
     let offer = steering.clone();
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect facts".into()],
         }),
         finish_with("child result"),
@@ -3594,6 +3599,7 @@ async fn pause_at_the_delegate_boundary_spawns_no_child() {
     let pause = steering.clone();
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect facts".into()],
         }),
         finish_with("never reached"),
@@ -3649,6 +3655,7 @@ async fn pause_before_synthesis_starts_no_synthesis_call() {
     let pause = steering.clone();
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect facts".into()],
         }),
         finish_with("child result"),
@@ -3780,6 +3787,7 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect facts".into()],
         }),
         crate::tool_outcome(facts_read(), None),
@@ -3887,6 +3895,7 @@ async fn child_mcp_call_or_write_is_rejected_before_dispatch() {
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
+                agent: None,
                 children: vec!["Inspect facts".into()],
             }),
             crate::tool_outcome(call, None),
@@ -3951,6 +3960,7 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
             Some(Box::new(facts_plan(facts_digest("v1")))),
         ),
         ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect notes".into()],
         }),
         crate::tool_outcome(facts_read(), None),
@@ -4027,6 +4037,7 @@ async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
         let mut outcomes = vec![ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect facts".into()],
         })];
         outcomes.extend((0..16).map(|_| crate::tool_outcome(facts_read(), None)));
@@ -4095,6 +4106,7 @@ async fn pause_during_research_finishes_the_child_call_and_dispatches_no_child_t
     let pause = steering.clone();
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect facts".into()],
         }),
         crate::tool_outcome(facts_read(), None),
@@ -4135,6 +4147,7 @@ async fn cancellation_after_a_child_tool_request_dispatches_no_child_tool() {
     let cancellation = RunCancellation::new();
     let mut provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect facts".into()],
         }),
         crate::tool_outcome(facts_read(), None),
@@ -4174,6 +4187,7 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect facts".into()],
         }),
         crate::tool_outcome(facts_read(), None),
@@ -4257,6 +4271,7 @@ async fn near_deadline_child_tool_stops_before_tool_started() {
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect facts".into()],
         }),
         crate::tool_outcome(facts_read(), None),
@@ -4314,6 +4329,7 @@ async fn pause_before_queued_children_start_cancels_them_without_failing_the_run
     let pause = steering.clone();
     let mut provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect facts".into(), "Inspect facts again".into()],
         }),
         crate::tool_outcome(facts_read(), None),
@@ -4428,6 +4444,7 @@ async fn delegation_turn_is_replayed_before_synthesis() {
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["Inspect facts".into()],
         }),
         finish_with("facts say v1"),
@@ -4796,6 +4813,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                agent_definitions: None,
                 roster: None,
                 providers: None,
                 provider: "scripted".into(),
@@ -4822,6 +4840,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
             active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
         },
         Event::AgentSpawned {
+            definition: None,
             run_id,
             agent_run_id,
             role: arany::AgentRole::Primary,

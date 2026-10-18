@@ -217,6 +217,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                 Event::RunStarted {
                     run_id,
                     config: RunConfig {
+                        agent_definitions: None,
                         roster: None,
                         providers: None,
                         provider: "scripted".into(),
@@ -243,6 +244,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                 },
                 Event::AgentSpawned {
+                    definition: None,
                     run_id,
                     agent_run_id,
                     role: AgentRole::Primary,

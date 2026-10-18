@@ -32,8 +32,9 @@ pub use events::{
     WorkspaceIdentity,
 };
 pub(crate) use events::{
-    GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_GOAL_PLAN_CONTRACT_BYTES,
-    MAX_STEP_TOOL_CALLS, ReplayError, STORE_ACTION_OVERHEAD_MS, payload_version,
+    GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
+    MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, ReplayError, STORE_ACTION_OVERHEAD_MS,
+    payload_version,
 };
 pub(crate) use lineage::prefix_digest;
 pub(crate) use reducer::ForkInheritance;

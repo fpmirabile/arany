@@ -285,6 +285,7 @@ fn push_success_facts(
         .iter()
         .filter(|task_run| goal.run_ids.contains(&task_run.id))
     {
+        push_definition_diagnostics(report, task_run, omitted_facts);
         for tool in &task_run.tools {
             let Some(observation) = tool.observation.as_ref() else {
                 continue;
@@ -296,6 +297,7 @@ fn push_success_facts(
             }
             let call = &tool.intent.call;
             match call {
+                crate::tools::ToolCall::ParseAgentDefinition { .. } => {}
                 crate::tools::ToolCall::Write { path, .. }
                 | crate::tools::ToolCall::Edit { path, .. } => {
                     push_goal_report_item(
@@ -435,6 +437,9 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
 
 fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
     match call {
+        crate::tools::ToolCall::ParseAgentDefinition { .. } => {
+            "Agent definition preparation".into()
+        }
         crate::tools::ToolCall::Read { path, .. }
         | crate::tools::ToolCall::List { path }
         | crate::tools::ToolCall::Search { path, .. }
@@ -466,6 +471,9 @@ fn goal_report_evidence(
         _ => "Guard",
     };
     match call {
+        crate::tools::ToolCall::ParseAgentDefinition { .. } => {
+            "Agent definition preparation".into()
+        }
         crate::tools::ToolCall::Command { program, .. } => {
             serde_json::from_str::<crate::tools::types::CommandResult>(output)
                 .ok()
@@ -506,5 +514,49 @@ fn goal_report_evidence(
             format!("{attester} attested MCP call {server}.{tool}.")
         }
         _ => format!("{attester} attested {}.", goal_report_call_label(call)),
+    }
+}
+
+fn push_definition_diagnostics(
+    report: &mut GoalReport,
+    run: &crate::session::RunView,
+    omitted_facts: &mut bool,
+) {
+    let Some(config) = run.config.as_ref() else {
+        return;
+    };
+    let Some(pin) = config.agent_definitions.as_ref() else {
+        return;
+    };
+    let outputs: Vec<_> = run
+        .tools
+        .iter()
+        .filter(|tool| {
+            matches!(
+                tool.intent.call,
+                crate::tools::ToolCall::ParseAgentDefinition { .. }
+            )
+        })
+        .filter_map(|tool| tool.observation.as_ref())
+        .filter(|observation| observation.attested_for(&observation.intent))
+        .map(|observation| observation.output.as_str())
+        .collect();
+    let child_model = config
+        .providers
+        .as_ref()
+        .map_or(config.model.as_str(), |routes| {
+            routes.child[0].model.as_str()
+        });
+    let Ok(registry) = crate::tools::definitions::registry(pin, outputs.into_iter(), child_model)
+    else {
+        return;
+    };
+    for note in registry.diagnostics {
+        push_goal_report_item(
+            report,
+            GoalReportSection::Evidence,
+            &format!("Agent definition {note}."),
+            omitted_facts,
+        );
     }
 }

@@ -111,6 +111,7 @@ impl Provider for GatedFailureProvider {
             .push(request.clone());
         let outcome = match request.phase {
             AgentPhase::RootPlan => ProviderOutcome::Delegate(Delegate {
+                agent: None,
                 children: vec!["A".into(), "B".into()],
             }),
             AgentPhase::ChildWork => {
@@ -126,6 +127,7 @@ impl Provider for GatedFailureProvider {
                             return Ok(ProviderResponse {
                                 turn: crate::provider::ProviderTurn::scripted(),
                                 outcome: ProviderOutcome::Delegate(Delegate {
+                                    agent: None,
                                     children: vec!["not permitted".into()],
                                 }),
                                 response_id: None,
@@ -531,6 +533,7 @@ impl Segment {
     fn spawn(&mut self, role: AgentRole) -> AgentRunId {
         let agent_run_id = AgentRunId::new();
         self.commit(Event::AgentSpawned {
+            definition: None,
             run_id: self.run_id,
             agent_run_id,
             role,
@@ -595,6 +598,7 @@ fn child_routes() -> ProviderRoutes {
 
 fn run_config(providers: Option<ProviderRoutes>) -> crate::session::RunConfig {
     crate::session::RunConfig {
+        agent_definitions: None,
         roster: None,
         providers,
         provider: "other".into(),

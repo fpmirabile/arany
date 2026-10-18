@@ -11,6 +11,8 @@ This contract owns Provider selection and pinning, native and custom admission, 
 - Rollout is staged: native OpenAI and Anthropic first; exact custom profiles after data-free conformance; OpenRouter stays deferred behind its route and privacy gate; Z.AI stays unadmitted until an exact profile passes a strict outcome contract.
 - Selection is deterministic from admitted user configuration. There is no model-selected destination, hidden discovery call or preliminary model check inside a Run. Fallback is disabled unless explicitly configured as described below.
 
+The primary Delegate envelope accepts optional nullable `agent`, selecting one admitted researcher definition for its `children` objectives. Both outcome encodings share this field. [Execution](./execution.md#agent-definitions) owns its strict selection and authority intersection. Definition bodies stay in labelled untrusted user guidance; no new system role or Provider destination is introduced.
+
 ## Per-role selection and fallback
 
 `Providers { primary, child, review, compaction }` binds primary planning/synthesis, researcher or reasoning children, AI Tool review and summary calls. A child receives the same narrowing of instructions, Tools, authority and Goal facts regardless of its Provider. Each route retains its own immutable identity, account or custom conformance provenance, effort, output-token bound and call limits. Pinned role deadlines are positive and at most 20 minutes; compiled routes retain their narrower limits. The role-specific output caps still apply, and concurrent children fit both the primary and every admitted child route's concurrency ceiling.

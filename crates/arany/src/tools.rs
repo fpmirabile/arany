@@ -4,6 +4,7 @@ mod approval;
 mod cancel;
 pub(crate) mod catalog;
 pub(crate) mod config;
+pub(crate) mod definitions;
 mod dispatch;
 mod executable;
 mod fs;
@@ -13,6 +14,7 @@ mod mcp;
 pub mod permissions;
 mod process;
 mod skills;
+pub use definitions::{DefinitionFilePin, DefinitionRegistryPin};
 pub(crate) mod toolchains;
 pub(crate) mod types;
 mod unguarded;
@@ -133,6 +135,7 @@ pub(crate) struct PermissionSnapshot {
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
     config: Config,
+    pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
     permissions: Option<PermissionSnapshot>,
     unguarded_rules: Option<unguarded_rules::ExactCommandRules>,
     workspace: PathBuf,
@@ -355,6 +358,7 @@ impl ToolRuntime {
         }
         let workspace_identity = fs::workspace_identity(&root)?;
         config.discover_skills(workspace)?;
+        let definitions = definitions::snapshot(&root, state, &config)?;
         if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
             return Err(ToolError::ChangedInput);
         }
@@ -388,6 +392,7 @@ impl ToolRuntime {
         #[cfg(target_os = "macos")]
         capture.complete();
         Ok(Self {
+            definitions: std::sync::Arc::new(definitions),
             config,
             permissions,
             unguarded_rules,

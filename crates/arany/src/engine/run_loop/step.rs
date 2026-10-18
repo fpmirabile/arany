@@ -78,6 +78,40 @@ struct Permission {
 }
 
 impl Permission {
+    fn narrow_definition(
+        mut self,
+        definition: &crate::tools::definitions::AgentDefinition,
+        call: &ToolCall,
+    ) -> Self {
+        self.decision = self.decision.narrow(definition.decision(call));
+        if let Some(mode) = definition.permission_mode {
+            let (restriction, _, required_approval) =
+                crate::tools::permissions::PermissionConfig::evaluate_mode(mode, call);
+            if restriction == Decision::Deny && self.decision != Decision::Deny
+                || restriction == Decision::Ask && self.decision == Decision::Allow
+            {
+                self.basis = PermissionSource::Mode;
+            }
+            self.decision = self.decision.narrow(restriction);
+            self.approval = match (self.approval, required_approval) {
+                (Some(ApprovalMode::Request), _) | (_, Some(ApprovalMode::Request)) => {
+                    Some(ApprovalMode::Request)
+                }
+                (existing, required) => existing.or(required),
+            };
+            if mode == crate::tools::permissions::PermissionMode::DontAsk
+                && self.decision == Decision::Ask
+            {
+                self.decision = Decision::Deny;
+                self.basis = PermissionSource::Mode;
+            }
+        }
+        if self.decision == Decision::Deny {
+            self.approval = None;
+        }
+        self
+    }
+
     fn narrow_terminal(mut self, mode: Option<ApprovalMode>, call: &ToolCall) -> Self {
         if self.decision != Decision::Deny
             && self.basis != PermissionSource::ExactCommandRule
@@ -225,7 +259,7 @@ impl RunLoop<'_> {
         Ok(Some(intent))
     }
 
-    fn primary_intent(
+    pub(super) fn primary_intent(
         &self,
         runtime: &ToolRuntime,
         call: ToolCall,
@@ -329,7 +363,7 @@ impl RunLoop<'_> {
         Some(intent)
     }
 
-    async fn run_intent(
+    pub(super) async fn run_intent(
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
@@ -454,6 +488,14 @@ impl RunLoop<'_> {
     }
 
     fn permission(&self, grant: &Grant<'_>, runtime: &ToolRuntime, call: &ToolCall) -> Permission {
+        // Definition parsing is an internal Engine step, never a model Tool; it runs only in the fixed Guard grant.
+        if matches!(call, ToolCall::ParseAgentDefinition { .. }) {
+            return Permission {
+                decision: Decision::Allow,
+                basis: PermissionSource::Mode,
+                approval: None,
+            };
+        }
         let (mut decision, mut basis, mut approval) = runtime
             .permissions()
             .map_or((Decision::Allow, PermissionSource::Mode, None), |config| {
@@ -478,10 +520,18 @@ impl RunLoop<'_> {
                 approval = None;
             }
         }
-        Permission {
+        let permission = Permission {
             decision,
             basis,
             approval,
+        };
+        match grant {
+            Grant::Researcher { child, .. } => {
+                child.definition.as_ref().map_or(permission, |definition| {
+                    permission.narrow_definition(definition, call)
+                })
+            }
+            Grant::Primary { .. } => permission,
         }
     }
 
@@ -546,13 +596,13 @@ impl RunLoop<'_> {
                     request,
                     review_allowed,
                 } => {
-                    self.before_primary_dispatch(
+                    Box::pin(self.before_primary_dispatch(
                         runtime,
                         request,
                         *review_allowed && self.ledger().admits(Action::Review),
                         intent,
                         permission,
-                    )
+                    ))
                     .await?
                 }
                 Grant::Researcher { deadline, .. } => {
@@ -572,7 +622,16 @@ impl RunLoop<'_> {
                 }
             }
         };
-        if config.is_some() || unguarded {
+        let mode = config
+            .map(crate::tools::permissions::PermissionConfig::mode)
+            .or_else(|| match grant {
+                Grant::Researcher { child, .. } => child
+                    .definition
+                    .as_ref()
+                    .and_then(|definition| definition.permission_mode),
+                Grant::Primary { .. } => None,
+            });
+        if mode.is_some() || unguarded {
             let approved = matches!(&verdict, Verdict::Dispatch { .. });
             // An approving review that did not lead to dispatch is not an AI approval.
             let source = if !approved && source == PermissionSource::AiReview {
@@ -589,7 +648,7 @@ impl RunLoop<'_> {
                 verdict: PermissionVerdict {
                     intent_digest: digest,
                     decision,
-                    mode: config.map(|config| config.mode()),
+                    mode,
                     basis,
                     source,
                     approved,
@@ -621,7 +680,8 @@ impl RunLoop<'_> {
             }
         }
         let mut unsaved_rule = false;
-        let goal_allows = self.ledger().allows_tool(&intent.call);
+        let goal_allows = matches!(intent.call, ToolCall::ParseAgentDefinition { .. })
+            || self.ledger().allows_tool(&intent.call);
         let mut approved = true;
         let mut active_time_exhausted = false;
         if goal_allows
@@ -808,7 +868,7 @@ impl RunLoop<'_> {
                 let Some(queue_pause) = queue_pause else {
                     return Err(EngineError::CoordinatorFailed);
                 };
-                self.dispatch_guard(runtime, intent, queue_pause).await?
+                Box::pin(self.dispatch_guard(runtime, intent, queue_pause)).await?
             } else {
                 match self.reserve_active_segment(tool_action_bound(runtime, &intent)) {
                     Ok(segment) => (
@@ -847,8 +907,7 @@ impl RunLoop<'_> {
         let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
         let action_bound = tool_action_bound(&runtime, &intent);
         let runtime_ms = intent.limits.runtime_ms;
-        let execution = runtime.execute(intent, worker_cancellation.clone());
-        tokio::pin!(execution);
+        let mut execution = Box::pin(runtime.execute(intent, worker_cancellation.clone()));
         let mut active_segment = None;
         let mut observation = loop {
             tokio::select! {
@@ -1243,9 +1302,151 @@ fn active_time_limit_observation(intent: EffectIntent) -> ToolObservation {
     )
 }
 
+impl RunLoop<'_> {
+    pub(super) async fn initialize_definitions(
+        &self,
+        request: &mut ProviderRequest,
+    ) -> Result<bool, EngineError> {
+        let Some(runtime) = self.controls.tools else {
+            return Ok(true);
+        };
+        let Some(pin) = runtime.definitions.pin() else {
+            return Ok(true);
+        };
+        let mut outputs = Vec::with_capacity(pin.files.len());
+        let mut normalized_bytes = 0;
+        for (index, file) in pin.files.iter().enumerate() {
+            if self.pause_at_boundary() || self.controls.cancellation.is_cancelled() {
+                return Ok(false);
+            }
+            let call = ToolCall::ParseAgentDefinition {
+                index: u16::try_from(index).map_err(|_| EngineError::InvalidRequest)?,
+                raw_digest: file.digest,
+            };
+            let Some(mut intent) = self.primary_intent(runtime, call)? else {
+                return Ok(false);
+            };
+            intent.limits.result_bytes = MAX_TOOL_RESULT_BYTES as u32;
+            let grant = Grant::Primary {
+                request,
+                review_allowed: false,
+            };
+            let Some(observation) = Box::pin(self.run_intent(&grant, runtime, intent)).await?
+            else {
+                return Ok(false);
+            };
+            if observation.disposition != ToolDisposition::Succeeded
+                || observation.attestation.is_none()
+            {
+                return Ok(false);
+            }
+            normalized_bytes += observation.output.len();
+            if normalized_bytes > 1024 * 1024 {
+                return Ok(false);
+            }
+            outputs.push(observation.output);
+        }
+        let child_model = &self.routing.providers.child[0].identity().model;
+        let Ok(registry) = crate::tools::definitions::registry(
+            &pin,
+            outputs.iter().map(String::as_str),
+            child_model,
+        ) else {
+            return Ok(false);
+        };
+        let registry = registry.definitions;
+        let tools = request
+            .input
+            .tools
+            .as_mut()
+            .ok_or(EngineError::InvalidRequest)?;
+        let mut catalog: serde_json::Value =
+            serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
+        catalog["agents"] = serde_json::json!(
+            registry
+                .values()
+                .map(crate::tools::definitions::AgentDefinition::catalog_entry)
+                .collect::<Vec<_>>()
+        );
+        tools.catalog = serde_json::to_string(&catalog).map_err(|_| EngineError::InvalidRequest)?;
+        if tools.catalog.len() > crate::tools::types::MAX_TOOL_CATALOG_BYTES
+            || tools.rendered_len() > runtime.context_limit_bytes()
+        {
+            return Ok(false);
+        }
+        self.definitions
+            .set(registry)
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        Ok(true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_definition_modes_never_resolve_parent_asks_and_dont_ask_denies_them() {
+        use crate::tools::permissions::PermissionMode;
+        let read = ToolCall::Read {
+            path: "file".into(),
+            offset: 0,
+            limit: 1,
+        };
+        let mut definition = crate::tools::definitions::AgentDefinition {
+            version: 1,
+            name: "reader".into(),
+            description: "Read".into(),
+            tools: None,
+            disallowed_tools: Vec::new(),
+            model: None,
+            permission_mode: None,
+            max_turns: crate::session::MAX_CHILD_TURNS,
+            isolation: None,
+            background: false,
+            body: String::new(),
+        };
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Plan,
+            PermissionMode::Auto,
+            PermissionMode::DontAsk,
+        ] {
+            definition.permission_mode = Some(mode);
+            for decision in [Decision::Allow, Decision::Ask, Decision::Deny] {
+                let permission = Permission {
+                    decision,
+                    basis: PermissionSource::Rule,
+                    approval: (decision == Decision::Ask).then_some(ApprovalMode::Request),
+                }
+                .narrow_definition(&definition, &read);
+                let expected = if mode == PermissionMode::DontAsk && decision == Decision::Ask {
+                    Decision::Deny
+                } else {
+                    decision
+                };
+                assert_eq!(permission.decision, expected);
+                assert_eq!(
+                    permission.approval,
+                    (expected == Decision::Ask).then_some(ApprovalMode::Request)
+                );
+            }
+        }
+        definition.permission_mode = Some(PermissionMode::Auto);
+        let catalog = ToolCall::McpList {
+            server: "server".into(),
+        };
+        let restriction = Permission {
+            decision: Decision::Allow,
+            basis: PermissionSource::Rule,
+            approval: None,
+        }
+        .narrow_definition(&definition, &catalog);
+        assert_eq!(restriction.decision, Decision::Ask);
+        assert_eq!(restriction.basis, PermissionSource::Mode);
+        assert_eq!(restriction.approval, Some(ApprovalMode::Auto));
+    }
 
     #[tokio::test]
     async fn cancellation_refuses_buffered_and_late_active_window_requests() {

@@ -908,6 +908,7 @@ fn compaction_preserves_unanswered_accepted_objectives_as_untrusted_data() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["not allowed".into()],
         })])
         .with_compactions(vec![Ok(CompactionResponse {
@@ -1133,7 +1134,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             transaction.commit().unwrap();
             drop(connection);
             let responses = if matches!(policy, CollaborationPolicy::Team { .. }) {
-                vec![ProviderOutcome::Delegate(Delegate { children: vec!["Child".into()] }), finish(), finish()]
+                vec![ProviderOutcome::Delegate(Delegate { agent: None, children: vec!["Child".into()] }), finish(), finish()]
             } else { vec![finish()] };
             let provider = ScriptedProvider::new(responses);
             let requests = provider.requests.clone();
@@ -1238,7 +1239,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             transaction.commit().unwrap();
             drop(connection);
             let provider = ScriptedProvider::new(vec![
-                ProviderOutcome::Delegate(Delegate { children: vec!["Child one".into(), "Child two".into()] }),
+                ProviderOutcome::Delegate(Delegate { agent: None, children: vec!["Child one".into(), "Child two".into()] }),
                 finish(),
                 finish(),
                 finish(),
@@ -1591,6 +1592,7 @@ fn bounded_finish_output_must_fit_canonical_json() {
             let mut responses = Vec::new();
             if child {
                 responses.push(ProviderOutcome::Delegate(Delegate {
+                    agent: None,
                     children: vec!["Child".into()],
                 }));
             }
@@ -1709,6 +1711,7 @@ fn invalid_delegation_fails_the_run_without_committing_an_answer() {
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["unauthorized child".into()],
         })]);
         let requests = provider.requests.clone();
@@ -1851,6 +1854,7 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
+                agent: None,
                 children: vec!["Check fact".into()],
             }),
             ProviderOutcome::Finish(Finish {
@@ -2587,6 +2591,7 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
+                agent: None,
                 children: vec!["Inspect".into()],
             }),
             ProviderOutcome::Finish(Finish {
@@ -2972,6 +2977,7 @@ fn eight_children_use_the_same_ordered_loop() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let objectives: Vec<_> = (1..=8).map(|index| format!("Child {index}")).collect();
         let mut responses = vec![ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: objectives.clone(),
         })];
         responses.extend((0..8).map(|_| {
@@ -3059,8 +3065,10 @@ fn collaboration_capacity_corpus_rejects_invalid_delegation() {
         ];
         for (index, (policy, count)) in cases.into_iter().enumerate() {
             let children = (0..count).map(|child| format!("Child {child}")).collect();
-            let provider =
-                ScriptedProvider::new(vec![ProviderOutcome::Delegate(Delegate { children })]);
+            let provider = ScriptedProvider::new(vec![ProviderOutcome::Delegate(Delegate {
+                children,
+                agent: None,
+            })]);
             let requests = provider.requests.clone();
             let provider = Arc::new(provider);
             let engine = engine_support::open(
@@ -3150,6 +3158,7 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
+                agent: None,
                 children: vec!["Check fact".into()],
             }),
             ProviderOutcome::Finish(Finish {
@@ -3157,6 +3166,7 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
                 result: "Fact is true".into(),
             }),
             ProviderOutcome::Delegate(Delegate {
+                agent: None,
                 children: vec!["Second round".into()],
             }),
         ]);
@@ -4505,6 +4515,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                             max_active_children: 1,
                         };
                         responses.push_back(Ok(ProviderOutcome::Delegate(Delegate {
+                            agent: None,
                             children: vec!["A".into()],
                         })));
                         responses.push_back(Ok(ProviderOutcome::Finish(Finish {
