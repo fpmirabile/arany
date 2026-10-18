@@ -514,6 +514,7 @@ mod tests {
             use_count: 1,
         };
         run.tools.push(arany::ToolView {
+            checkpoint: None,
             intent: intent.clone(),
             observation: None,
             review_call_index: None,
@@ -700,6 +701,7 @@ mod tests {
             use_count: 1,
         };
         run.agents[2].tools.push(arany::ToolView {
+            checkpoint: None,
             intent: child_read,
             observation: None,
             review_call_index: None,

@@ -759,6 +759,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         accepted_sequence: 1,
         finished_sequence: None,
         tools: vec![arany::ToolView {
+            checkpoint: None,
             intent: intent.clone(),
             observation: None,
             review_call_index: None,

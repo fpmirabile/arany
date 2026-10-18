@@ -2,6 +2,47 @@ use super::{methods::*, rpc::*, *};
 use serde_json::{Value, json};
 
 #[test]
+fn supervisor_event_projects_canonical_jsonl_and_validates_against_exported_schema() {
+    let actor = arany::AgentRunId::new();
+    let verdict = crate::presentation::supervisor_fixture(actor, 1).verdicts()[0]
+        .1
+        .clone();
+    let run = arany::RunId::new();
+    let session = arany::SessionId::new();
+    let event = arany::Event::SupervisorVerdictRecorded {
+        run_id: run,
+        agent_run_id: actor,
+        verdict,
+    };
+    let envelope = arany::EventEnvelope {
+        sequence: 2,
+        session_id: session,
+        run_id: Some(run),
+        agent_run_id: Some(actor),
+        event,
+        created_at_ms: 1,
+    };
+    let line = serde_json::to_value(EventLine::from(&envelope)).unwrap();
+    assert_eq!(line["kind"], "SupervisorVerdictRecorded");
+    assert_eq!(line["event_version"], 1);
+    assert_eq!(
+        line["payload"],
+        serde_json::from_str::<Value>(&envelope.event.payload().unwrap()).unwrap()
+    );
+    let schema = protocol_schema();
+    validate(
+        &schema,
+        &schema["notifications"]["events/committed"]["params"],
+        &json!({"threadId": session.to_string(), "event": line}),
+    );
+    validate(
+        &schema,
+        &schema["methods"]["events/subscribe"]["result"],
+        &json!({"events": [line], "nextSince": null}),
+    );
+}
+
+#[test]
 fn schema_snapshot_is_byte_stable() {
     let actual = format!(
         "{}\n",

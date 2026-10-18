@@ -31,6 +31,7 @@ pub(super) enum MessageKind {
     Tool,
     ToolDetails,
     Commentary,
+    Supervisor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +41,7 @@ enum MessageSource {
     Notice(u64),
     Tool(usize, usize),
     Commentary(usize, u32, u8),
+    Supervisor(usize, usize),
 }
 
 struct Notice {
@@ -153,6 +155,7 @@ impl History {
                 .position(|message| match message.source {
                     MessageSource::User(run)
                     | MessageSource::Assistant(run)
+                    | MessageSource::Supervisor(run, _)
                     | MessageSource::Tool(run, _)
                     | MessageSource::Commentary(run, _, _) => run >= first,
                     MessageSource::Notice(_) => false,
@@ -200,6 +203,18 @@ impl History {
                         width,
                     );
                     self.push_notices_after(Some(MessageSource::Tool(index, tool_index)), width);
+                }
+                for (verdict_index, (_, verdict)) in run.supervisor.verdicts().iter().enumerate() {
+                    let source = MessageSource::Supervisor(index, verdict_index);
+                    if self.details {
+                        self.push_owned(
+                            source,
+                            MessageKind::Supervisor,
+                            crate::presentation::supervisor_line(verdict),
+                            width,
+                        );
+                    }
+                    self.push_notices_after(Some(source), width);
                 }
                 if self.details {
                     for (call, item, text) in crate::presentation::display_commentary(run) {
@@ -329,7 +344,11 @@ impl History {
     }
 
     fn push(&mut self, source: MessageSource, kind: MessageKind, text: &str, width: usize) {
-        let rows = message_row_count(text, width);
+        let rows = if kind == MessageKind::Supervisor {
+            message_rows(kind, text, width).len()
+        } else {
+            message_row_count(text, width)
+        };
         self.push_count(source, kind, rows);
     }
 
@@ -553,8 +572,15 @@ impl History {
         for message in self.messages.iter().rev() {
             let text = message_text(view, message, &self.notices);
             if let Some(byte) = text.find(query) {
-                let before = message_row_count(&text[..byte], self.width);
-                let row = message.start + before.saturating_sub(2);
+                let offset = if message.kind == MessageKind::Supervisor {
+                    message_rows(message.kind, &text, self.width)
+                        .iter()
+                        .rposition(|row| row.source_byte <= byte)
+                        .unwrap_or(0)
+                } else {
+                    message_row_count(&text[..byte], self.width).saturating_sub(2)
+                };
+                let row = message.start + offset;
                 self.top = row.saturating_sub(1).min(self.tail());
                 self.follow_tail = false;
                 self.matched_row = Some(row);
@@ -821,6 +847,9 @@ fn message_text<'a>(
         return Cow::Borrowed(text);
     }
     match message.source {
+        MessageSource::Supervisor(run, verdict) => Cow::Owned(
+            crate::presentation::supervisor_line(&view.runs[run].supervisor.verdicts()[verdict].1),
+        ),
         MessageSource::Tool(run, tool) => Cow::Owned(if message.kind == MessageKind::ToolDetails {
             crate::presentation::tool_detail_text(&view.runs[run].tools[tool])
         } else {
@@ -888,10 +917,17 @@ fn message_heading(kind: MessageKind) -> &'static str {
         MessageKind::Incomplete => "Arany · incomplete:",
         MessageKind::Tool | MessageKind::ToolDetails => "Tool:",
         MessageKind::Commentary => "Arany · commentary:",
+        MessageKind::Supervisor => "Supervisor (shadow):",
     }
 }
 
 fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> {
+    if kind == MessageKind::Supervisor {
+        let mut rows = message_rows(MessageKind::Commentary, text, width);
+        rows.remove(0);
+        rows.pop();
+        return rows;
+    }
     let width = width.min(MAX_ROW_CELLS);
     let heading = message_heading(kind);
     let mut rows = vec![MessageRow {
@@ -1024,6 +1060,85 @@ mod tests {
             lifecycle_hook_sequence: None,
             provider_sequences: Default::default(),
             provider_fallbacks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn supervisor_verdicts_are_detail_only_width_bounded_and_stable_on_redraw() {
+        let mut view = session();
+        let mut run = run("objective", "answer");
+        run.assistant_message = None;
+        run.status = RunStatus::Active;
+        run.supervisor = crate::presentation::supervisor_fixture(AgentRunId::new(), 256);
+        view.runs.push(run);
+        for width in [16, 40, 80, 160] {
+            let mut history = History::default();
+            history.sync(&view, width, 4096);
+            assert!(
+                !history
+                    .messages
+                    .iter()
+                    .any(|m| m.kind == MessageKind::Supervisor)
+            );
+            history.set_details(true);
+            history.sync(&view, width, 4096);
+            assert_eq!(
+                history
+                    .messages
+                    .iter()
+                    .filter(|m| m.kind == MessageKind::Supervisor)
+                    .count(),
+                256
+            );
+            let rows = history.visible(&view);
+            assert!(
+                rows.iter()
+                    .all(|r| UnicodeWidthStr::width(r.text.as_str()) <= width)
+            );
+            let text = rows
+                .iter()
+                .map(|r| r.text.strip_prefix("  ").unwrap_or(&r.text))
+                .collect::<String>();
+            assert!(text.contains("Supervisor (shadow):"));
+            assert!(text.contains("no action taken"));
+            assert!(text.contains("verdict limit reached"));
+            history.sync(&view, width, 4096);
+            assert_eq!(
+                history
+                    .messages
+                    .iter()
+                    .filter(|m| m.kind == MessageKind::Supervisor)
+                    .count(),
+                256
+            );
+            let last = history.messages.last().unwrap().start;
+            assert!(history.search(&view, "Supervisor"));
+            assert_eq!(history.matched_row, Some(last));
+            history.record_notice(super::super::TerminalNotice::History(
+                "Local notice after shadow verdict",
+            ));
+            history.dirty = true;
+            history.sync(&view, width, 4096);
+            assert!(
+                history
+                    .messages
+                    .iter()
+                    .any(|m| m.kind == MessageKind::Notice)
+            );
+            history.set_details(false);
+            history.sync(&view, width, 4096);
+            assert!(
+                !history
+                    .messages
+                    .iter()
+                    .any(|m| m.kind == MessageKind::Supervisor)
+            );
+            assert!(
+                history
+                    .messages
+                    .iter()
+                    .any(|m| m.kind == MessageKind::Notice)
+            );
         }
     }
 

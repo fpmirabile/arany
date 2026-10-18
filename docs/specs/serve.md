@@ -141,6 +141,8 @@ cursor from skipping unreturned history. Slow clients never hold Journal appends
 An individual Event that cannot fit a live line emits `events/resync` with
 `missed:1` and disables that subscription; replay refuses it with `contextTooLarge`.
 
+Raw subscription pages and `events/committed` forward canonical journal Events of every kind unchanged to the attached local client. This includes the canonical, privacy-reduced `SupervisorVerdictRecorded` payload with its `features` and `evidence`: counts, sequences and closed enums, never paths or content. Unlike the further-reduced fixed vocabulary used by the [terminal](./terminal.md#conversation-progress-and-history) and [OTLP](./telemetry.md#spans), serve retains those canonical fields. `generate-schema` includes its kind in the closed Event vocabulary. Its payload remains the journal's open object on this wire surface, with the [execution format and bounds](./execution.md#persistence-bounds) enforced by strict replay. It creates no item or approval request. Existing pagination, line-size refusal and tap-loss/resync behavior apply; observers neither recompute verdicts nor change Run control.
+
 Times are committed Event timestamps, never a presentation clock. Item IDs are
 `<runId>:user`, `<runId>:answer`, or the immutable Tool intent UUID.
 
@@ -253,7 +255,7 @@ pre-beta; stored formats retain their existing no-migration contract.
 
 | Scenario | Required observation | Evidence owner |
 |---|---|---|
-| Stable schema contract | Byte-identical pretty JSON and final newline; intentional golden changes only | [Protocol tests](../../crates/arany-cli/src/protocol/tests.rs), [schema golden](../../crates/arany-cli/tests/fixtures/serve/schema.json) |
+| Stable schema contract | Byte-identical pretty JSON and final newline; intentional golden changes only; canonical Supervisor verdicts validate in raw pages and notifications | [Protocol tests](../../crates/arany-cli/src/protocol/tests.rs), [schema golden](../../crates/arany-cli/tests/fixtures/serve/schema.json) |
 | Envelope conformance and bounds | Both version forms accepted; malformed, ambiguous and oversized lines rejected; exact 1 MiB boundary accepted | [Protocol codec table](../../crates/arany-cli/src/protocol/tests.rs) |
 | Typed conformance | Method, item, notification and reserved approval examples validate against registered schemas | [Protocol conformance corpus](../../crates/arany-cli/src/protocol/tests.rs) |
 | CLI export and refusal | Fresh process output/file bytes and safe target replacement/refusal | [Schema process test](../../crates/arany-cli/tests/generate_schema.rs) |

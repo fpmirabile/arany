@@ -25,7 +25,7 @@ Arany is a harness for multi-agent coding teams that can be trusted to work auto
 9. **Provider roster: separately deferred D work.** Judge-only adapters and a durable per-agent pause/retry/switch lifecycle after exhausted routes need accepted contracts first; current fail-and-drain recovery with explicit new-Run resume stays authoritative ([Provider contract](./docs/specs/provider.md#named-roster-presets)). Unverified: macOS attached roster evidence (manifest and Ctrl+C cancellation) and macOS saved-account roster evidence, because those roster tests are Linux-only; live account/Provider and human terminal support retain the user-owned checks below.
 10. **Multi-call steps (Stage D)** after probe P2; copy Anthropic parallel `tool_use` with the journal's four-call cap.
 11. Reserved (C2 edit-only workers are done; [Execution](./docs/specs/execution.md#worker-journal-protocol) and [Session](./docs/specs/session.md#worker-identity-and-explicit-reassignment) own the behavior).
-12. **C3 command-capable views and the Supervisor as hook adapters.** Remaining: C3-1 through C3-3, S-2 visibility and S-3 privacy-reduced corpus export. The [Supervisor adapter](./docs/specs/tools.md#supervisor-adapter) owns the pure shadow evaluator and replay contract. Native Linux/macOS private-state Engine journeys and the 1.5 MiB Guard stack canary need final-head CI evidence; the local sandbox cannot admit private State. Dogfooding and labelled loop/probing/disproportion calibration remain unverified. Signal enforcement and overrides are a separate follow-up, gated on the accepted calibration criteria; shadow candidates grant no authority.
+12. **C3 command-capable views and the Supervisor as hook adapters.** Remaining: C3-1 through C3-3 and S-3 privacy-reduced corpus export. The [Supervisor adapter](./docs/specs/tools.md#supervisor-adapter) owns the pure shadow evaluator and replay contract. Native Linux/macOS private-state Engine journeys, a native-provider product OTLP journey of shadow verdicts (exact custom profiles reject Tools) and the 1.5 MiB Guard stack canary need final-head CI evidence; the local sandbox cannot admit private State. Manual screen-reader inspection of shadow verdicts and native macOS terminal/OTLP journeys remain unverified. Dogfooding and labelled loop/probing/disproportion calibration remain unverified. Signal enforcement and overrides are a separate follow-up, gated on the accepted calibration criteria; shadow candidates grant no authority.
 13. **ACP remaining slices.** [Core turns, Tools, one-use permissions, rich prompts and stored Session load/resume](./docs/specs/acp.md) use the existing serve loop. Continue in order: (4) modes/config options via serve settings; (5) session close/list; (6) closed budget stop reasons, plan projection and optional Goal controls/committed display. Keep client fs/terminal delegation and editor MCP execution unavailable. Revisit item 8's extraction trigger only under measured pressure.
 
 Dogfooding starts after item 2; the owner leads it when that point is reached. Every later item is exercised through real use and supplies the Supervisor's calibration data.
@@ -38,7 +38,7 @@ On 2026-10-18 the owner lifted this freeze for E4 checkpoints and for item 12 (C
 
 CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
 
-- **E4 checkpoints and rewind.** Unfrozen by the owner on 2026-10-18 with the planned per-file, per-Goal and per-Session quotas and 30-day retention; the owning specs record them as each slice lands.
+- **E4 checkpoints and rewind.** Capture is specified in [Tools](./docs/specs/tools.md#checkpoints-and-rewind). Remaining slices: rewind planner and journal facts, guarded code restore, conversation fork, then terminal and serve surfaces. Native Linux/macOS capture journeys, the 1.5 MiB Guard stack canary, and private-state Store/Engine tests require the lead's unsandboxed verification; no native support claim follows from compilation.
 
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1). API-key billing is a separate route; another harness's implementation or credentials do not authorize Arany access.
 
@@ -50,7 +50,7 @@ CI stays green; no new features, spec sections or evidence gates for: terminal v
 - Goose -> `acp` subprocess adapter and `serve` loopback auth (`X-Secret-Key`, explicit allowed origins).
 - OpenHands -> sandbox-on-demand workspace adapter shape for a future container-backed Guard; `RemoteConversation` as the model for a remote client.
 - Aider -> repo map as a bounded, digest-pinned include (later).
-- Cline/Roo -> shadow-git checkpoints when E4 is unfrozen.
+- Cline/Roo -> copy Cline/Roo's restore choices and compare.
 
 ## Architecture follow-ups
 
