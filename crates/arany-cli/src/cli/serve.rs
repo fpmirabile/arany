@@ -12,7 +12,10 @@ mod approvals;
 mod history;
 mod items;
 pub(in crate::cli) mod server;
+#[cfg(test)]
 pub(in crate::cli) mod threads;
+#[cfg(not(test))]
+mod threads;
 
 pub(super) const INBOUND_CAPACITY: usize = 64;
 pub(super) const OUTBOUND_CAPACITY: usize = 256;

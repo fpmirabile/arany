@@ -150,15 +150,7 @@ pub(in crate::cli) async fn run(
     outbound: mpsc::Sender<ServerMessage>,
     shutdown: watch::Sender<bool>,
 ) -> Result<(), String> {
-    run_inner(
-        engine,
-        state,
-        inbound,
-        outbound,
-        Threads::default(),
-        shutdown,
-    )
-    .await
+    run_configured(engine, state, inbound, outbound, shutdown, None).await
 }
 
 pub(in crate::cli) async fn run_configured(

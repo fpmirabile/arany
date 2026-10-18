@@ -2,7 +2,7 @@ use crate::accounts::{chatgpt, credentials};
 use crate::cli::native_run_key_from_env;
 use arany::{
     AnthropicProvider, CustomProvider, Effort, NativeApiCredentials, OpenAiProvider, Provider,
-    StateRoot, resolve_native_effort_for_run,
+    StateRoot, resolve_native_effort_for_run, validate_native_model_id,
 };
 use std::{
     path::{Path, PathBuf},
@@ -47,6 +47,28 @@ impl FromStr for ProviderArg {
             }
         }
     }
+}
+
+pub(crate) fn validate_headless_selection(
+    provider: &ProviderArg,
+    model: &str,
+    effort: Option<Effort>,
+) -> Result<(), &'static str> {
+    if !matches!(provider, ProviderArg::Custom(_)) {
+        validate_native_model_id(model).map_err(|_| "invalid native model ID")?;
+    }
+    match provider {
+        ProviderArg::Openai | ProviderArg::Anthropic => {
+            resolve_native_effort_for_run(&provider.profile_label(), model, effort).map_err(
+                |_| "invalid native model/effort; unknown models require --effort LEVEL",
+            )?;
+        }
+        ProviderArg::Chatgpt if effort.is_none() => {
+            return Err("ChatGPT requires --effort LEVEL");
+        }
+        _ => (),
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

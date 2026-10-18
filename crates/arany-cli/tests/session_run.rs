@@ -2970,8 +2970,12 @@ fn acp_refuses_tools_and_terminal_input_before_state_admission() {
             .arg(&state),
         None,
     );
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"error: invalid arguments; run arany --help\n"
+    );
     assert!(!state.exists());
     let (_master, slave) = process::cloexec_pty(None);
     let output = Command::new(env!("CARGO_BIN_EXE_arany"))

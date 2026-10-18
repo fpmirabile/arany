@@ -447,6 +447,55 @@ async fn transport_auth_and_schema_fixture_without_private_state() {
             assert_eq!(message["error"]["data"]["reason"], expected);
         }
     }
+    for (prompt, expected) in [
+        (
+            json!([{"type":"resource_link","name":"é","uri":"x".repeat(65529)}]),
+            "auth_required",
+        ),
+        (
+            json!([{"type":"resource_link","name":"é","uri":"x".repeat(65530)}]),
+            "invalidParams",
+        ),
+        (
+            json!([{"type":"resource_link","name":"é","uri":"x".repeat(65529)}, {"type":"text","text":"x"}]),
+            "invalidParams",
+        ),
+        (
+            json!([{"type":"resource_link","name":"missing URI"}]),
+            "invalidParams",
+        ),
+        (
+            json!([{"type":"resource_link","uri":"file:///missing-name"}]),
+            "invalidParams",
+        ),
+        (
+            json!(vec![
+                json!({"type":"resource_link","name":"a","uri":"b"});
+                65
+            ]),
+            "invalidParams",
+        ),
+    ] {
+        let bytes = encode_line(&json!({"jsonrpc":"2.0","id":2,"method":"session/prompt",
+            "params":{"sessionId":"01900000-0000-7000-8000-000000000001","prompt":prompt}}))
+        .unwrap();
+        translate::input(
+            wire::decode(&bytes).unwrap(),
+            &config,
+            &shared,
+            &serve_tx,
+            &output,
+        )
+        .await
+        .unwrap();
+        let message = output_rx.recv().await.unwrap();
+        validate(&message);
+        assert_eq!(message["error"]["data"]["reason"], expected);
+    }
+    assert!(
+        serve_rx.try_recv().is_err(),
+        "refused prompts never reach serve"
+    );
     assert!(wire::decode(br#"{"jsonrpc":"2.0","id":123,"result":null}"#).is_ok());
     assert!(
         wire::decode(
@@ -530,13 +579,32 @@ async fn translator_latches_cancel_reconciles_and_remaps_failures_without_privat
         .await
         .unwrap();
     validate(&output.recv().await.unwrap());
-    translate::input(invoke(3, "session/prompt", json!({"sessionId":session,"prompt":[{"type":"text","text":"a"},{"type":"text","text":"b"}]})), &config, &shared, &serve_tx, &outbound).await.unwrap();
+    translate::input(invoke(99, "session/prompt", json!({"sessionId":arany::SessionId::new(),"prompt":[{"type":"text","text":"unknown Session"}]})), &config, &shared, &serve_tx, &outbound).await.unwrap();
+    let missing = output.recv().await.unwrap();
+    validate(&missing);
+    assert_eq!(missing["id"], 99);
+    assert_eq!(missing["error"]["code"], -32002);
+    assert_eq!(missing["error"]["data"]["reason"], "resource_not_found");
+    assert!(
+        serve_rx.try_recv().is_err(),
+        "unknown Session never starts a turn"
+    );
+    translate::input(invoke(3, "session/prompt", json!({"sessionId":session,"prompt":[
+        {"type":"text","text":"a"},
+        {"type":"resource_link","name":"file","uri":"file:///never-read","mimeType":"text/plain"},
+        {"type":"resource_link","name":"web","uri":"http://never-fetch.invalid"},
+        {"type":"resource_link","name":"é","uri":"../../never-open","_meta":{"tools":true}},
+        {"type":"text","text":"b"}
+    ]})), &config, &shared, &serve_tx, &outbound).await.unwrap();
     let Some(serve::server::ClientMessage::Message(Message::Request(start))) =
         serve_rx.recv().await
     else {
         panic!("turn start")
     };
-    assert_eq!(start.params.unwrap()["input"][0]["text"], "ab");
+    assert_eq!(
+        start.params.unwrap()["input"][0]["text"],
+        "a[@file](file:///never-read)[@web](http://never-fetch.invalid)[@é](../../never-open)b"
+    );
     let cancel = wire::decode(
         &encode_line(
             &json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}}),
@@ -753,6 +821,58 @@ async fn translator_latches_cancel_reconciles_and_remaps_failures_without_privat
     );
     drop(events);
     task.await.unwrap().unwrap();
+    _stopping.send_replace(false);
+    for close_before_recovery in [false, true] {
+        let (events, event_rx) = mpsc::channel(256);
+        let task = tokio::spawn(translate::output(
+            event_rx,
+            serve_tx.clone(),
+            outbound.clone(),
+            shared.clone(),
+            _stopping.subscribe(),
+        ));
+        translate::input(
+            invoke(13, "session/prompt", json!({"sessionId":session,"prompt":[{"type":"text","text":"EOF before recovery reply"}]})),
+            &config, &shared, &serve_tx, &outbound,
+        ).await.unwrap();
+        let Some(serve::server::ClientMessage::Message(Message::Request(start))) =
+            serve_rx.recv().await
+        else {
+            panic!("turn start")
+        };
+        events
+            .send(Message::Response(Response {
+                jsonrpc: Default::default(),
+                id: start.id,
+                result: json!({"turn":{"id":run,"goalId":goal,"status":"inProgress","items":[]}}),
+            }))
+            .await
+            .unwrap();
+        if close_before_recovery {
+            serve_rx.close();
+        }
+        events.send(Message::Notification(Notification { jsonrpc:Default::default(), method:"turn/completed".into(), params:Some(json!({"threadId":session,"turn":{"id":run,"goalId":goal,"status":"completed","items":[],"goal":{"status":"completed"}}})) })).await.unwrap();
+        if !close_before_recovery {
+            let Some(serve::server::ClientMessage::Message(Message::Request(recover))) =
+                serve_rx.recv().await
+            else {
+                panic!("recovery request")
+            };
+            assert_eq!(recover.method, "events/subscribe");
+        }
+        drop(events);
+        task.await.unwrap().unwrap();
+        let incomplete = output
+            .try_recv()
+            .expect("EOF must answer a committed completion");
+        validate(&incomplete);
+        assert_eq!(incomplete["id"], 13);
+        assert_eq!(incomplete["result"]["stopReason"], "end_turn");
+        assert_eq!(
+            incomplete["result"]["_meta"]["arany.incompleteUpdates"],
+            true
+        );
+    }
 }
 
 #[tokio::test]

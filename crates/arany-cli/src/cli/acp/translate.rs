@@ -99,12 +99,8 @@ pub(super) async fn input(
     output: &mpsc::Sender<Value>,
 ) -> Result<(), String> {
     let request = match message {
-        wire::Input::Request(request) => {
-            let _ = request.jsonrpc;
-            request
-        }
+        wire::Input::Request(request) => request,
         wire::Input::Notification(note) => {
-            let _ = note.jsonrpc;
             let cancel = {
                 let mut state = state.lock().expect("translator state");
                 if let Some(active) = &mut state.active {
@@ -136,20 +132,8 @@ pub(super) async fn input(
             }
             return Ok(());
         }
-        wire::Input::Response(reply) => {
-            let _ = (reply.jsonrpc, reply.id, reply.result);
-            return Ok(());
-        }
-        wire::Input::Error(reply) => {
-            let _ = (
-                reply.jsonrpc,
-                reply.id,
-                reply.error.code,
-                reply.error.message,
-                reply.error.data,
-            );
-            return Ok(());
-        }
+        wire::Input::Response(_reply) => return Ok(()),
+        wire::Input::Error(_reply) => return Ok(()),
     };
     let id = request.id;
     if matches!(&id, RequestId::String(value) if value.len() > 256) {
@@ -254,9 +238,6 @@ pub(super) async fn input(
                 }
             }
             let params = config.thread(params.cwd);
-            let Ok(params) = serde_json::from_value::<ThreadStartParams>(json!(params)) else {
-                return immediate(output, invalid());
-            };
             send_request(state, serve, "thread/start", params, Pending::New(id)).await
         }
         "session/prompt" => {
@@ -402,15 +383,14 @@ pub(super) async fn output(
                             emit_answer(&outbound, answer).await?;
                         }
                         if let Some(since) = page.next_since.filter(|_| !*stopping.borrow()) {
-                            send_request(
+                            recover(
                                 &state,
                                 &serve,
-                                "events/subscribe",
+                                &outbound,
                                 EventsSubscribeParams {
                                     thread_id: session,
                                     since,
                                 },
-                                Pending::Recover,
                             )
                             .await?;
                         } else {
@@ -498,15 +478,14 @@ pub(super) async fn output(
                     }
                 };
                 if let Some(since) = since.filter(|_| !*stopping.borrow()) {
-                    send_request(
+                    recover(
                         &state,
                         &serve,
-                        "events/subscribe",
+                        &outbound,
                         EventsSubscribeParams {
                             thread_id: result.thread_id,
                             since,
                         },
-                        Pending::Recover,
                     )
                     .await?;
                 } else {
@@ -525,7 +504,28 @@ pub(super) async fn output(
             _ => (),
         }
     }
+    let completed = state
+        .lock()
+        .expect("translator state")
+        .active
+        .as_ref()
+        .is_some_and(|active| active.completion.is_some());
+    if completed {
+        finish(&state, &outbound, true).await?;
+    }
     Ok(())
+}
+
+async fn recover(
+    state: &Shared,
+    serve: &mpsc::Sender<ClientMessage>,
+    outbound: &mpsc::Sender<Value>,
+    params: EventsSubscribeParams,
+) -> Result<(), String> {
+    match send_request(state, serve, "events/subscribe", params, Pending::Recover).await {
+        Err(_) if serve.is_closed() => finish(state, outbound, true).await,
+        result => result,
+    }
 }
 
 async fn emit_answer(outbound: &mpsc::Sender<Value>, mut answer: Value) -> Result<(), String> {

@@ -15,7 +15,8 @@ pub(super) enum Input {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AcpRequest {
-    pub jsonrpc: Version,
+    #[serde(rename = "jsonrpc")]
+    pub _jsonrpc: Version,
     pub id: RequestId,
     pub method: String,
     pub params: Option<Value>,
@@ -24,7 +25,8 @@ pub(super) struct AcpRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AcpNotification {
-    pub jsonrpc: Version,
+    #[serde(rename = "jsonrpc")]
+    pub _jsonrpc: Version,
     pub method: String,
     pub params: Option<Value>,
 }
@@ -32,26 +34,35 @@ pub(super) struct AcpNotification {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AcpResponse {
-    pub jsonrpc: Version,
-    pub id: RequestId,
-    pub result: Value,
+    #[serde(rename = "jsonrpc")]
+    pub _jsonrpc: Version,
+    #[serde(rename = "id")]
+    pub _id: RequestId,
+    #[serde(rename = "result")]
+    pub _result: Value,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AcpError {
-    pub jsonrpc: Version,
+    #[serde(rename = "jsonrpc")]
+    pub _jsonrpc: Version,
     #[serde(deserialize_with = "Deserialize::deserialize")]
-    pub id: Option<RequestId>,
-    pub error: AcpErrorObject,
+    #[serde(rename = "id")]
+    pub _id: Option<RequestId>,
+    #[serde(rename = "error")]
+    pub _error: AcpErrorObject,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AcpErrorObject {
-    pub code: i64,
-    pub message: String,
-    pub data: Option<Value>,
+    #[serde(rename = "code")]
+    pub _code: i64,
+    #[serde(rename = "message")]
+    pub _message: String,
+    #[serde(rename = "data")]
+    pub _data: Option<Value>,
 }
 
 pub(super) fn decode(line: &[u8]) -> Result<Input, CodecError> {
@@ -64,7 +75,8 @@ pub(super) fn decode(line: &[u8]) -> Result<Input, CodecError> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Initialize {
-    pub protocol_version: u16,
+    #[serde(rename = "protocolVersion")]
+    pub _protocol_version: u16,
     pub client_info: Option<Info>,
 }
 
@@ -77,7 +89,6 @@ pub(super) struct Info {
 
 impl Initialize {
     pub fn client(self) -> Result<ClientInfo, ()> {
-        let _ = self.protocol_version;
         let info = self.client_info.unwrap_or(Info {
             name: "acp-client".into(),
             title: None,
@@ -118,27 +129,34 @@ pub(super) struct NewSession {
 pub(super) struct Prompt {
     pub session_id: SessionId,
     #[serde(deserialize_with = "blocks")]
-    pub prompt: Vec<Text>,
+    pub prompt: Vec<PromptBlock>,
 }
 
-fn blocks<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Text>, D::Error> {
-    crate::cli::bounded_list::<D, Text, 64>(d, "at most 64 content blocks")
+fn blocks<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<PromptBlock>, D::Error> {
+    crate::cli::bounded_list::<D, PromptBlock, 64>(d, "at most 64 content blocks")
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub(super) enum Text {
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(super) enum PromptBlock {
     Text { text: String },
+    ResourceLink { name: String, uri: String },
 }
 
 impl Prompt {
     pub fn text(&self) -> Result<String, ()> {
         let mut combined = String::new();
-        for Text::Text { text } in &self.prompt {
-            if text.len() > 64 * 1024 - combined.len() {
-                return Err(());
+        for block in &self.prompt {
+            let parts: &[&str] = match block {
+                PromptBlock::Text { text } => &[text],
+                PromptBlock::ResourceLink { name, uri } => &["[@", name, "](", uri, ")"],
+            };
+            for part in parts {
+                if part.len() > 64 * 1024 - combined.len() {
+                    return Err(());
+                }
+                combined.push_str(part);
             }
-            combined.push_str(text);
         }
         if combined.trim().is_empty() {
             return Err(());

@@ -1,4 +1,8 @@
-use super::{exec::CollaborationArg, provider::select::ProviderArg, serve};
+use super::{
+    exec::CollaborationArg,
+    provider::select::{ProviderArg, validate_headless_selection},
+    serve,
+};
 use arany::{Effort, Engine, EngineConfig, StateRoot, Telemetry};
 use arany_cli::protocol::{methods::*, rpc::*};
 use clap::Args;
@@ -20,8 +24,6 @@ mod wire;
 pub(crate) struct AcpArgs {
     #[arg(long)]
     pub state_dir: Option<PathBuf>,
-    #[arg(long, hide = true)]
-    pub tools: bool,
     #[arg(long, required_unless_present = "profile")]
     pub provider: Option<ProviderArg>,
     #[arg(long, required_unless_present = "profile")]
@@ -40,48 +42,12 @@ pub(crate) fn admit(args: &AcpArgs) -> Result<(), &'static str> {
     if std::io::stdin().is_terminal() || std::io::stdout().is_terminal() {
         return Err("acp requires piped stdin and stdout");
     }
-    if args.tools {
-        return Err("tools are unavailable in the ACP core text adapter");
-    }
-    if !matches!(
-        (args.collaboration, args.max_active_children),
-        (CollaborationArg::Single, None)
-            | (CollaborationArg::Auto, None | Some(0..=8))
-            | (CollaborationArg::Team, None | Some(1..=8))
-    ) {
-        return Err("invalid collaboration policy");
-    }
+    args.collaboration.policy(args.max_active_children)?;
     if args.profile.is_none()
         && let Some(provider) = &args.provider
     {
         let model = args.model.as_deref().unwrap_or_default();
-        validate_tuple(provider, model, args.effort)?;
-    }
-    Ok(())
-}
-
-fn validate_tuple(
-    provider: &ProviderArg,
-    model: &str,
-    effort: Option<Effort>,
-) -> Result<(), &'static str> {
-    if model.is_empty() || model.len() > 128 || model.chars().any(char::is_control) {
-        return Err("invalid model");
-    }
-    match provider {
-        ProviderArg::Openai | ProviderArg::Anthropic => {
-            arany::resolve_native_effort_for_run(&provider.profile_label(), model, effort)
-                .map_err(
-                    |_| "invalid native model/effort; unknown models require --effort LEVEL",
-                )?;
-        }
-        ProviderArg::Chatgpt => {
-            arany::validate_native_model_id(model).map_err(|_| "invalid native model ID")?;
-            if effort.is_none() {
-                return Err("ChatGPT requires --effort LEVEL");
-            }
-        }
-        ProviderArg::Custom(_) => (),
+        validate_headless_selection(provider, model, args.effort)?;
     }
     Ok(())
 }
@@ -165,7 +131,7 @@ pub(crate) async fn run(
             args.effort,
         )
     };
-    validate_tuple(&provider, &model, effort)?;
+    validate_headless_selection(&provider, &model, effort)?;
     if let Some(roster) = &roster {
         use std::io::Write;
         std::io::stderr()
@@ -194,6 +160,7 @@ pub(crate) async fn run(
     let engine = Engine::open(
         state,
         EngineConfig {
+            worker_concurrency: None,
             telemetry,
             guard_executable: std::env::current_exe().ok(),
         },
