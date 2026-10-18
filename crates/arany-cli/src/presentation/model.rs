@@ -347,6 +347,7 @@ mod tests {
 
     fn session() -> SessionView {
         SessionView {
+            rewinds: Default::default(),
             id: SessionId::new(),
             title: "work\u{1b}[31m\nSession: forged".into(),
             title_is_explicit: true,

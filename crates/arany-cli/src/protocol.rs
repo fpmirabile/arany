@@ -86,6 +86,8 @@ event_kinds!(
     WorkerHandoverDiscarded,
     WorkerLeaseReleased,
     WorkerVerificationRecorded,
+    WorkspaceRewindStarted,
+    WorkspaceRewindFinished,
 );
 
 fn event_kind_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {

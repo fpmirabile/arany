@@ -157,11 +157,11 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "WorkerVerificationRecorded" => Some(1),
         "GoalStarted" | "GoalFinished" => Some(7),
         "SupervisorVerdictRecorded" => Some(1),
-        "ProviderFallbackUsed" => Some(1),
+        "WorkspaceRewindStarted" | "WorkspaceRewindFinished" | "ProviderFallbackUsed" => Some(1),
         "ToolPermissionDecided" => Some(4),
         "HookStarted" => Some(2),
         "HookFinished" => Some(4),
-        "ToolFinished" => Some(12),
+        "ToolFinished" => Some(13),
         "RunStarted" => Some(14),
         "RunFinished" => Some(8),
         "GoalProviderCallReserved" => Some(7),
@@ -212,6 +212,12 @@ impl FromStr for AgentRunId {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
+    WorkspaceRewindStarted {
+        record: Box<super::rewind::RewindStarted>,
+    },
+    WorkspaceRewindFinished {
+        record: Box<super::rewind::RewindFinished>,
+    },
     SessionStarted {
         title: String,
         workspace_identity: WorkspaceIdentity,
@@ -619,6 +625,8 @@ impl Event {
 
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::WorkspaceRewindStarted { .. } => "WorkspaceRewindStarted",
+            Self::WorkspaceRewindFinished { .. } => "WorkspaceRewindFinished",
             Self::SessionStarted { .. } => "SessionStarted",
             Self::SessionDefaultChanged { .. } => "SessionDefaultChanged",
             Self::SessionForked { .. } => "SessionForked",
@@ -661,7 +669,9 @@ impl Event {
 
     pub(crate) fn scope(&self) -> (Option<RunId>, Option<AgentRunId>) {
         match self {
-            Self::SessionStarted { .. }
+            Self::WorkspaceRewindStarted { .. }
+            | Self::WorkspaceRewindFinished { .. }
+            | Self::SessionStarted { .. }
             | Self::SessionDefaultChanged { .. }
             | Self::SessionForked { .. }
             | Self::ContextCompacted { .. }
@@ -785,6 +795,8 @@ impl Event {
         self.validate()?;
         match self {
             Self::SupervisorVerdictRecorded { verdict, .. } => serialize(verdict),
+            Self::WorkspaceRewindStarted { record } => serialize(record),
+            Self::WorkspaceRewindFinished { record } => serialize(record),
             Self::SessionStarted {
                 title,
                 workspace_identity:
@@ -995,6 +1007,24 @@ impl Event {
             return Err(ReplayError::InvalidPayload);
         }
         let event = match kind {
+            "WorkspaceRewindStarted"
+                if run_id.is_none()
+                    && agent_run_id.is_none()
+                    && payload.len() <= super::rewind::MAX_REWIND_EVENT_BYTES =>
+            {
+                Self::WorkspaceRewindStarted {
+                    record: parse(payload)?,
+                }
+            }
+            "WorkspaceRewindFinished"
+                if run_id.is_none()
+                    && agent_run_id.is_none()
+                    && payload.len() <= super::rewind::MAX_REWIND_EVENT_BYTES =>
+            {
+                Self::WorkspaceRewindFinished {
+                    record: parse(payload)?,
+                }
+            }
             "WorkerDataChunk" => Self::WorkerDataChunk {
                 run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                 agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,

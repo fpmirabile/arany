@@ -1920,6 +1920,7 @@ fn append_notice<N: From<String> + std::fmt::Display>(notice: &mut Option<N>, me
 
 fn new_conversation(defaults: SessionDefaults) -> SessionView {
     SessionView {
+        rewinds: Default::default(),
         id: SessionId::new(),
         title: "New Session".into(),
         title_is_explicit: false,

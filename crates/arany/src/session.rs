@@ -6,6 +6,7 @@ mod events;
 pub(crate) mod input;
 mod lineage;
 mod reducer;
+pub mod rewind;
 pub mod worker;
 
 pub(crate) const MAX_CONTEXT_CONTENT_BYTES: usize = 376 * 1024;
@@ -39,6 +40,10 @@ pub(crate) use events::{
     MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, STORE_ACTION_OVERHEAD_MS, payload_version,
 };
 pub(crate) use lineage::prefix_digest;
+#[cfg(test)]
+pub(crate) use reducer::rewind_tests::{
+    finished as rewind_finished_fixture, started as rewind_started_fixture,
+};
 #[cfg(test)]
 pub(crate) use reducer::worker_tests::completed_fixture as worker_protocol_fixture;
 pub use reducer::{

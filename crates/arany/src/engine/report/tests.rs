@@ -195,6 +195,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         budget_closed: false,
     };
     let view = crate::session::SessionView {
+        rewinds: Default::default(),
         id: session_id,
         title: "Report bounded evidence".into(),
         title_is_explicit: false,
@@ -763,6 +764,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         active_ceiling_ms: 0,
     };
     let view = crate::session::SessionView {
+        rewinds: Default::default(),
         id: SessionId::new(),
         title: "Report".into(),
         title_is_explicit: false,
@@ -918,4 +920,43 @@ fn unresolved_facts_always_leave_room_for_the_omission_marker() {
     }
     assert!(omitted);
     assert!(goal_report_fits_with_omission(&mut report));
+}
+
+#[test]
+fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated() {
+    let f = crate::session::worker_protocol_fixture();
+    let mut view = crate::session::SessionView::replay(f.session, &f.envelopes())
+        .unwrap()
+        .unwrap();
+    let start = crate::session::rewind_started_fixture(&view, view.rewinds.checkpoints[0].clone());
+    for finish in [false, true] {
+        let event = if finish {
+            crate::session::rewind_finished_fixture(
+                &view,
+                crate::session::rewind::RewindOutcome::Restored,
+            )
+        } else {
+            start.clone()
+        };
+        view.apply_committed(&crate::session::EventEnvelope {
+            sequence: view.last_sequence + 1,
+            session_id: view.id,
+            run_id: None,
+            agent_run_id: None,
+            event,
+            created_at_ms: 0,
+        })
+        .unwrap();
+    }
+    let goal = view.goal(f.goal).unwrap();
+    let report = super::goal_report(&view, &view.runs[0], goal);
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .any(|line| line.contains("Workspace rewind"))
+    );
+    assert!(serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES);
+    assert!(!goal.success_criterion_satisfied);
+    assert!(!view.runs[0].worker_history()[0].verified);
 }

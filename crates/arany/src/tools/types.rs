@@ -1098,8 +1098,17 @@ pub(crate) fn model_result(observation: &ToolObservation, feedback: &[String]) -
 }
 
 pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
-    let output = super::skills::parse_json(observation.output.as_bytes(), MAX_TOOL_RESULT_BYTES)
-        .unwrap_or_else(|_| json!(observation.output));
+    let mut output =
+        super::skills::parse_json(observation.output.as_bytes(), MAX_TOOL_RESULT_BYTES)
+            .unwrap_or_else(|_| json!(observation.output));
+    if matches!(
+        observation.intent.call,
+        ToolCall::Write { .. } | ToolCall::Edit { .. }
+    ) && let Some(o) = output.as_object_mut()
+    {
+        o.remove("before");
+        o.remove("executable");
+    }
     let private = matches!(observation.intent.target, EffectTarget::WorkerView { .. });
     let effect = if private {
         "none"
@@ -1183,6 +1192,52 @@ mod model_call_tests {
         });
         assert_eq!(read["operation"], "read");
         assert_eq!(read["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn typed_publication_metadata_keeps_model_bytes_identical() {
+        for call in [
+            ToolCall::Write {
+                path: "file".into(),
+                expected_digest: None,
+                content: "new".into(),
+            },
+            ToolCall::Edit {
+                path: "file".into(),
+                expected_digest: hex_digest(b"old"),
+                old: "old".into(),
+                new: "new".into(),
+            },
+        ] {
+            let intent = EffectIntent {
+                target: EffectTarget::Workspace,
+                id: Uuid::now_v7(),
+                run_id: RunId::new(),
+                agent_run_id: AgentRunId::new(),
+                policy_digest: [1; 32],
+                enforcement_digest: [2; 32],
+                workspace_device: 1,
+                workspace_inode: 2,
+                call,
+                limits: ToolLimits::default(),
+                expires_at_ms: 1,
+                use_count: 1,
+            };
+            let mut o = ToolObservation {
+                attestation: Some(Attestation::for_site(&intent)),
+                intent,
+                disposition: ToolDisposition::Succeeded,
+                output: json!({"sha256":hex_digest(b"new"),"bytes":3}).to_string(),
+                cache_update: CacheUpdate::NotApplicable,
+                enforcement_cause: None,
+            };
+            let original = serde_json::to_vec(&model_observation(&o)).unwrap();
+            o.output = json!({"sha256":hex_digest(b"new"),"bytes":3,"executable":true,"before":{"sha256":hex_digest(b"old"),"bytes":3,"executable":true}}).to_string();
+            assert_eq!(
+                serde_json::to_vec(&model_observation(&o)).unwrap(),
+                original
+            );
+        }
     }
 }
 

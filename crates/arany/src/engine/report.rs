@@ -85,6 +85,16 @@ pub(super) fn goal_report(
     push_cache_facts(&mut report, view, goal, &mut omitted_facts);
     push_unguarded_facts(&mut report, view, goal, &mut omitted_facts);
     push_checkpoint_facts(&mut report, view, goal, &mut omitted_facts);
+    if let Some(facts) =
+        crate::session::rewind::history_facts(view, goal.started_sequence, view.last_sequence)
+    {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            &facts,
+            &mut omitted_facts,
+        );
+    }
     for (index, (_, fallback)) in view
         .runs
         .iter()

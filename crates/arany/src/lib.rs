@@ -58,7 +58,6 @@ pub use provider::{
     resolve_native_effort, resolve_native_effort_for_run, valid_profile_name,
     validate_native_api_key, validate_native_model_id,
 };
-pub use session::worker;
 pub use session::{
     AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, ChildGrant,
     CollaborationPolicy, CompactionFailure, CompactionRecord, CompactionStatus, CompactionView,
@@ -71,6 +70,7 @@ pub use session::{
     WorkspaceIdentity,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
+pub use session::{rewind, worker};
 pub use store::{
     CheckpointReset, HistoryRecovery, HistoryReset, Record, RecordKind, StateRoot, Store,
     StoreError,

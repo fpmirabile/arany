@@ -305,3 +305,56 @@ fn worker_protocol_store_cold_prefixes_and_old_versions_preserve_data() {
             .unwrap();
     }
 }
+
+#[test]
+fn rewind_store_cold_prefixes_and_unsupported_versions_preserve_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = StateRoot::admit(&temp.path().join("state")).expect("private rewind State root");
+    let f = crate::session::worker_protocol_fixture();
+    let mut connection = open_connection(&root, false).unwrap();
+    let mut hot = None;
+    for event in &f.events {
+        append(&mut connection, &mut hot, f.session, event.clone()).unwrap();
+    }
+    let (_, view) = resolve_view(&connection, f.session, 0, &mut 0).unwrap();
+    let view = view.unwrap();
+    let event = crate::session::rewind_started_fixture(&view, view.rewinds.checkpoints[0].clone());
+    append(&mut connection, &mut hot, f.session, event).unwrap();
+    let (_, view) = resolve_view(&connection, f.session, 0, &mut 0).unwrap();
+    let view = view.unwrap();
+    assert!(view.rewinds.operations[0].finished.is_none());
+    assert_eq!(
+        view.rewinds.operations[0].outcome(),
+        crate::session::rewind::RewindOutcome::Uncertain
+    );
+    let event = crate::session::rewind_finished_fixture(
+        &view,
+        crate::session::rewind::RewindOutcome::Restored,
+    );
+    append(&mut connection, &mut hot, f.session, event).unwrap();
+    drop(hot);
+    for kind in ["WorkspaceRewindStarted", "WorkspaceRewindFinished"] {
+        {
+            connection
+                .execute("UPDATE events SET event_version=2 WHERE kind=?1", [kind])
+                .unwrap();
+            let before = std::fs::read(root.path().join(DATABASE_FILE)).unwrap();
+            let cold = open_connection(&root, true).unwrap();
+            assert!(resolve_view(&cold, f.session, 0, &mut 0).is_err());
+            drop(cold);
+            assert_eq!(
+                std::fs::read(root.path().join(DATABASE_FILE)).unwrap(),
+                before
+            );
+            connection
+                .execute("UPDATE events SET event_version=1 WHERE kind=?1", [kind])
+                .unwrap();
+        }
+    }
+    let cold = open_connection(&root, true).unwrap();
+    let (_, view) = resolve_view(&cold, f.session, 0, &mut 0).unwrap();
+    assert_eq!(
+        view.unwrap().rewinds.operations[0].outcome(),
+        crate::session::rewind::RewindOutcome::Restored
+    );
+}

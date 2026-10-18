@@ -249,7 +249,9 @@
             "WorkerIntegrationRecorded",
             "WorkerHandoverDiscarded",
             "WorkerLeaseReleased",
-            "WorkerVerificationRecorded"
+            "WorkerVerificationRecorded",
+            "WorkspaceRewindStarted",
+            "WorkspaceRewindFinished"
           ],
           "type": "string"
         },

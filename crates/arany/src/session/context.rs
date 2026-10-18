@@ -79,13 +79,27 @@ impl CompiledContext {
                 None
             });
         let covered_sequence = selected_compaction.as_ref().map_or(0, |value| value.1);
-        let (compaction_event_sequence, compaction_content_digest, summary) =
+        let (compaction_event_sequence, compaction_content_digest, mut summary) =
             if let Some((event_sequence, _, digest, summary)) = selected_compaction {
                 used += summary.len() + 64;
                 (Some(event_sequence), Some(digest), Some(summary))
             } else {
                 (None, None, None)
             };
+        if let Some(facts) =
+            session.and_then(|v| super::rewind::history_facts(v, covered_sequence, v.last_sequence))
+        {
+            used += facts.len() + 64;
+            if used > budget {
+                return Err(ContextTooLarge);
+            }
+            if let Some(summary) = &mut summary {
+                summary.push('\n');
+                summary.push_str(&facts);
+            } else {
+                summary = Some(facts);
+            }
+        }
         let runs = session.map_or(&[][..], |view| view.runs.as_slice());
         let mut selected = Vec::new();
         let mut image_count = objective_images.len();

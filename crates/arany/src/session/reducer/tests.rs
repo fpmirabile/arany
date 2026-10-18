@@ -49,6 +49,7 @@ mod goal_recovery_tests {
             finished_sequence: disposition.map(|_| 2),
         };
         SessionView {
+            rewinds: Default::default(),
             id: session_id,
             title: "Interrupted Goal".into(),
             title_is_explicit: false,
@@ -2673,6 +2674,7 @@ mod goal_replay_tests {
             },
         };
         SessionView {
+            rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
             title_is_explicit: false,
@@ -3467,15 +3469,36 @@ mod goal_replay_tests {
     }
 
     fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObservation {
+        let output = if matches!(intent.call, ToolCall::Write { .. } | ToolCall::Edit { .. }) {
+            let expected = match &intent.call {
+                ToolCall::Write {
+                    expected_digest, ..
+                } => expected_digest.clone(),
+                ToolCall::Edit {
+                    expected_digest, ..
+                } => Some(expected_digest.clone()),
+                _ => unreachable!(),
+            };
+            serde_json::to_string(&crate::session::rewind::FilePublicationResult {
+                sha256: crate::tools::types::hex_digest(content),
+                bytes: content.len() as u32,
+                executable: false,
+                before: expected.map(|sha256| crate::session::rewind::FileState {
+                    sha256,
+                    bytes: 0,
+                    executable: false,
+                }),
+            })
+            .unwrap()
+        } else {
+            serde_json::json!({ "sha256": crate::tools::types::hex_digest(content) }).to_string()
+        };
         ToolObservation {
             enforcement_cause: None,
             attestation: Some(crate::tools::Attestation::for_site(&intent)),
             intent,
             disposition: ToolDisposition::Succeeded,
-            output: serde_json::json!({
-                "sha256": crate::tools::types::hex_digest(content)
-            })
-            .to_string(),
+            output,
             cache_update: CacheUpdate::NotApplicable,
         }
     }
@@ -3501,6 +3524,7 @@ mod goal_replay_tests {
             budget: GoalBudget::default(),
         };
         let mut view = SessionView {
+            rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
             title_is_explicit: false,
@@ -3607,6 +3631,21 @@ mod goal_replay_tests {
                 budget_closed: false,
             }],
         };
+        for path in ["unrelated", "src/main.rs"] {
+            let mut after_rewind = view.clone();
+            let mut rewind = super::super::rewind_tests::restored_operation();
+            rewind.files[0].path = path.into();
+            rewind.finished_sequence = Some(3);
+            after_rewind.rewinds.operations.push(rewind);
+            after_rewind.last_sequence = 4;
+            after_rewind
+                .record_goal_plan_contract(&goal_id, &run_id, &contract)
+                .unwrap();
+            assert_eq!(
+                after_rewind.goals[0].success_criterion_satisfied,
+                path == "unrelated"
+            );
+        }
         view.apply_committed(&EventEnvelope {
             sequence: 2,
             session_id,
@@ -3651,6 +3690,7 @@ mod goal_replay_tests {
             budget: GoalBudget::default(),
         };
         let mut view = SessionView {
+            rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
             title_is_explicit: false,

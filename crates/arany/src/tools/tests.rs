@@ -141,7 +141,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
     let result = super::fs::native(&root_path, &write, &config).unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&result).unwrap(),
-        json!({"sha256":hex_digest(b"created"),"bytes":7})
+        json!({"sha256":hex_digest(b"created"),"bytes":7,"executable":false,"before":null})
     );
     assert!(super::fs::native(&root_path, &write, &config).is_err());
     let original = super::fs::open_file(&root, "nested/file").unwrap();
@@ -151,7 +151,12 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         old: "admitted".into(),
         new: "replaced".into(),
     };
-    super::fs::native(&root_path, &edit, &config).unwrap();
+    let output = super::fs::native(&root_path, &edit, &config).unwrap();
+    let output: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(output["before"]["sha256"], hex_digest(b"admitted"));
+    assert_eq!(output["before"]["bytes"], 8);
+    assert_eq!(output["bytes"], 8);
+    assert_eq!(output["before"]["executable"], output["executable"]);
     let mut old_bytes = Vec::new();
     std::io::Read::read_to_end(&mut std::io::Read::take(original, 32), &mut old_bytes).unwrap();
     assert_eq!(

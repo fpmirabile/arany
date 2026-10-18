@@ -1065,6 +1065,7 @@ mod tests {
     #[test]
     fn active_submissions_keep_objectives_local_and_lock_mutations() {
         let mut view = SessionView {
+            rewinds: Default::default(),
             id: SessionId::new(),
             title: "Current".into(),
             title_is_explicit: true,
@@ -1447,6 +1448,7 @@ mod tests {
     #[test]
     fn idle_validation_rejects_local_arguments_before_any_effect() {
         let mut view = SessionView {
+            rewinds: Default::default(),
             id: SessionId::new(),
             title: "Current".into(),
             title_is_explicit: true,

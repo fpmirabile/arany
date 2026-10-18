@@ -1462,7 +1462,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         ("ProviderCallRecorded", 8),
         ("AgentFinished", 9),
         ("ToolStarted", 10),
-        ("ToolFinished", 12),
+        ("ToolFinished", 13),
         ("WorkerStopObserved", 1),
         ("WorkerHandoverDiscarded", 1),
         ("WorkerDataChunk", 1),
@@ -2008,7 +2008,7 @@ fn worker_protocol_verification_cannot_skip_a_later_workspace_mutation() {
         &intent,
         ToolDisposition::Succeeded,
         Some(Attestation::for_site(&intent)),
-        &serde_json::json!({"sha256":crate::tools::types::hex_digest(b"other")}).to_string(),
+        &serde_json::json!({"sha256":crate::tools::types::hex_digest(b"other"), "bytes":5, "executable":false, "before":{"sha256":crate::tools::types::hex_digest(b"new"),"bytes":3,"executable":false}}).to_string(),
     );
     refused(&f, verification, "stale positive evidence after a mutation");
 }

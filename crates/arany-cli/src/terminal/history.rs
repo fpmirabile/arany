@@ -1022,6 +1022,7 @@ mod tests {
 
     fn session() -> SessionView {
         SessionView {
+            rewinds: Default::default(),
             id: SessionId::new(),
             title: "History".into(),
             title_is_explicit: true,

@@ -610,6 +610,7 @@ mod tests {
     #[test]
     fn linear_presentation_is_labeled_append_only_and_control_free() {
         let mut view = SessionView {
+            rewinds: Default::default(),
             id: SessionId::new(),
             title: "bad\u{1b}[31m\nSession: forged".into(),
             title_is_explicit: true,
