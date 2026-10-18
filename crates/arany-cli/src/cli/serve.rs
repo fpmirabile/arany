@@ -95,10 +95,8 @@ pub(crate) async fn run(
                 result = &mut reader_task => {
                     reader_done = true;
                     shutdown.send_replace(true);
+                    // The reader queues its own Eof before it finishes, including after an error.
                     let read = result.map_err(|_| "protocol reader failed".to_owned()).and_then(|r| r);
-                    if read.is_err() {
-                        let _ = inbound.send(ClientMessage::Eof).await;
-                    }
                     let stopped = serving.await;
                     read.and(stopped)
                 }
