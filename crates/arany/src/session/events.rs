@@ -156,12 +156,13 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "WorkerLeaseReleased"
         | "WorkerVerificationRecorded" => Some(1),
         "GoalStarted" | "GoalFinished" => Some(7),
+        "SupervisorVerdictRecorded" => Some(1),
         "ProviderFallbackUsed" => Some(1),
         "ToolPermissionDecided" => Some(4),
         "HookStarted" => Some(2),
         "HookFinished" => Some(4),
         "ToolFinished" => Some(12),
-        "RunStarted" => Some(13),
+        "RunStarted" => Some(14),
         "RunFinished" => Some(8),
         "GoalProviderCallReserved" => Some(7),
         "GoalCompactionCallReserved" => Some(7),
@@ -331,6 +332,11 @@ pub enum Event {
         agent_run_id: AgentRunId,
         intent: crate::tools::EffectIntent,
         active_ceiling_ms: u64,
+    },
+    SupervisorVerdictRecorded {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        verdict: crate::supervisor::SupervisorVerdict,
     },
     ToolFinished {
         checkpoint: Option<super::Checkpoint>,
@@ -634,6 +640,7 @@ impl Event {
             Self::GoalSteeringNoteRecorded { .. } => "GoalSteeringNoteRecorded",
             Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
             Self::ToolStarted { .. } => "ToolStarted",
+            Self::SupervisorVerdictRecorded { .. } => "SupervisorVerdictRecorded",
             Self::ToolFinished { .. } => "ToolFinished",
             Self::ToolPermissionDecided { .. } => "ToolPermissionDecided",
             Self::HookStarted { .. } => "HookStarted",
@@ -756,6 +763,11 @@ impl Event {
                 agent_run_id,
                 ..
             }
+            | Self::SupervisorVerdictRecorded {
+                run_id,
+                agent_run_id,
+                ..
+            }
             | Self::ToolFinished {
                 run_id,
                 agent_run_id,
@@ -772,6 +784,7 @@ impl Event {
     pub fn payload(&self) -> Result<String, ReplayError> {
         self.validate()?;
         match self {
+            Self::SupervisorVerdictRecorded { verdict, .. } => serialize(verdict),
             Self::SessionStarted {
                 title,
                 workspace_identity:
@@ -976,6 +989,11 @@ impl Event {
         if payload_version(kind) != Some(version) {
             return Err(ReplayError::UnknownEvent);
         }
+        if kind == "SupervisorVerdictRecorded"
+            && payload.len() > crate::supervisor::MAX_VERDICT_BYTES
+        {
+            return Err(ReplayError::InvalidPayload);
+        }
         let event = match kind {
             "WorkerDataChunk" => Self::WorkerDataChunk {
                 run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
@@ -1106,6 +1124,13 @@ impl Event {
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                     text: data.text,
                     images: data.images,
+                }
+            }
+            "SupervisorVerdictRecorded" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::SupervisorVerdictRecorded {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    verdict: parse(payload)?,
                 }
             }
             "RunStarted" if run_id.is_some() && agent_run_id.is_none() => {

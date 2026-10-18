@@ -617,6 +617,7 @@ fn child_routes() -> ProviderRoutes {
 
 fn run_config(providers: Option<ProviderRoutes>) -> crate::session::RunConfig {
     crate::session::RunConfig {
+        supervisor: None,
         worker_policy: None,
         agent_definitions: None,
         roster: None,

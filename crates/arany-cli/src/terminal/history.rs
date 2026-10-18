@@ -1003,6 +1003,7 @@ mod tests {
 
     fn run(objective: &str, answer: &str) -> RunView {
         RunView {
+            supervisor: Default::default(),
             workers: Default::default(),
             id: RunId::new(),
             objective: objective.into(),
@@ -1735,6 +1736,7 @@ mod tests {
                     Event::RunStarted {
                         run_id,
                         config: RunConfig {
+                            supervisor: None,
                             worker_policy: None,
                             agent_definitions: None,
                             roster: None,

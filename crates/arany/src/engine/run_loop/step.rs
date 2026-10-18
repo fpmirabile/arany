@@ -215,7 +215,7 @@ struct ActiveTime {
 }
 
 // Boxing a large future in a non-async wrapper keeps debug-build callers from holding it in their own frames.
-pub(super) type BoxedStep<'a, T> =
+pub(in crate::engine) type BoxedStep<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, EngineError>> + Send + 'a>>;
 
 impl RunLoop<'_> {
@@ -684,6 +684,7 @@ impl RunLoop<'_> {
                 (
                     Action::Tool
                         .remaining(1, &self.routing.providers)
+                        .saturating_add(self.ledger().verdicts(Action::Tool))
                         .saturating_add(2 * (hook_events + narrowing))
                         .saturating_add(if narrowing > 0 { 3 } else { 0 }),
                     Action::Tool
@@ -698,7 +699,8 @@ impl RunLoop<'_> {
                 };
                 (
                     step.max_events_for_admitted(&self.routing.providers)
-                        .saturating_add(2 * hook_events),
+                        .saturating_add(2 * hook_events)
+                        .saturating_add(self.ledger().verdicts(step)),
                     step.tool_observations().saturating_add(hook_events),
                 )
             }

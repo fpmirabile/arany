@@ -66,6 +66,8 @@ approval, dispatch, committed observation and continuation have one owner.
 Only the primary integrates changesets. The Engine coordinator owns the bounded immutable worker base, acknowledged overlay and pending handover bytes for the live Run; no native filesystem persists across worker calls. The reducer owns canonical leases, target revisions, data references, worker dispositions, integration and verification. Guard owns each disposable file view, attests private mutation/capture and publishes only the primary's eligible changeset. Journal acknowledgments advance in-memory worker state, never the reverse. The [execution contract](../specs/execution.md)
 and [Goal contract](../specs/goals.md) own lifecycle, budgets and recovery.
 
+The Supervisor is one Engine-owned pure evaluator over committed reducer facts. The coordinator journals shadow verdicts before advancing; replay recomputes them from the Run pin. It does not subscribe to the lossy tap and has no enforcement authority. The [Supervisor contract](../specs/tools.md#supervisor-adapter) owns signals, bounds and replay.
+
 `Journal::append` publishes only committed Events to a bounded broadcast ring of
 256 envelopes. Clients, telemetry and diagnostics each subscribe to that tap;
 a lagging receiver gets `Resync { missed }` and rebuilds from the committed view.

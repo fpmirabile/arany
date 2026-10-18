@@ -10,6 +10,7 @@ type Admits = fn(&Event) -> bool;
 enum Fault {
     Checkpoint(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
     CheckpointStall(SessionId),
+    SupervisorOff(SessionId),
     WorkerReceipt(uuid::Uuid),
     GoalAppend(SessionId, Admits),
     GoalAcknowledgment(
@@ -69,6 +70,14 @@ impl FaultPlan {
             Some(Fault::Checkpoint(_, entered, release)) => Some((entered, release)),
             _ => None,
         }
+    }
+
+    pub fn supervisor_off(session_id: SessionId) {
+        plan().push(Fault::SupervisorOff(session_id));
+    }
+
+    pub(crate) fn take_supervisor_off(session_id: SessionId) -> bool {
+        take(|fault| matches!(fault, Fault::SupervisorOff(id) if *id == session_id)).is_some()
     }
 
     /// Fails the next Event that `admits` accepts for the Session before it commits.

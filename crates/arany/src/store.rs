@@ -47,6 +47,9 @@ const RUN_START_EXTRA_BYTES: usize =
     MAX_GOAL_STARTED_BYTES + MAX_MESSAGE_ACCEPTED_BYTES - 2 * MAX_EVENT_BYTES;
 fn event_payload_limit(kind: &str, version: i64) -> usize {
     match kind {
+        "SupervisorVerdictRecorded" if payload_version(kind) == Some(version) => {
+            crate::supervisor::MAX_VERDICT_BYTES
+        }
         "MessageAccepted" if payload_version(kind) == Some(version) => MAX_MESSAGE_ACCEPTED_BYTES,
         "GoalStarted" if payload_version(kind) == Some(version) => MAX_GOAL_STARTED_BYTES,
         "ToolFinished" if payload_version(kind) == Some(version) => MAX_TOOL_FINISHED_BYTES,
