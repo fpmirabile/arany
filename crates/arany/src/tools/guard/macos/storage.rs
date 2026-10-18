@@ -535,7 +535,7 @@ async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result
         check.set(CleanupCheck::ListingUnavailable);
         let current = disk_command(root, &["info", "-plist"]).await?;
         let current = attachments(&current, root)?;
-        check.set(CleanupCheck::Inspection);
+        check.set(CleanupCheck::DeviceUnlisted);
         if !current.iter().any(|attachment| attachment.device == device) {
             return Err(ToolError::ChangedInput);
         }
