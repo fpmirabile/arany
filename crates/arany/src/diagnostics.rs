@@ -538,6 +538,7 @@ mod tests {
             run_id: Default::default(),
             agent_run_id: Default::default(),
             record: crate::session::ProviderCallRecord {
+                delegation: None,
                 phase: crate::provider::AgentPhase::RootSynthesis,
                 disposition: crate::session::ProviderCallDisposition::InvalidResponse,
                 response_id: Some(CANARY.into()),
@@ -556,6 +557,7 @@ mod tests {
             observation: crate::tools::ToolObservation {
                 enforcement_cause: None,
                 intent: crate::tools::EffectIntent {
+                    target: crate::session::worker::EffectTarget::Workspace,
                     id: uuid::Uuid::now_v7(),
                     run_id: Default::default(),
                     agent_run_id: Default::default(),

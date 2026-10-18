@@ -2,7 +2,7 @@ use super::catalog::{Family, Site};
 use super::config::Config;
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
-use super::{Cancellation, ToolError, ToolRuntime, now_ms};
+use super::{Cancellation, ToolError, ToolRuntime};
 use crate::store::{BuildCacheIdentity, BuildCacheLease, StoreError};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
@@ -1031,10 +1031,10 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         cache.validate(&task.intent, &task.config)?;
     }
     verify_intent_runtime_grants(&task.intent, &task.config)?;
-    if !task.intent.valid()
+    if task.intent.target != crate::session::worker::EffectTarget::Workspace
+        || !task.intent.valid()
         || task.intent.call.facts().site != Site::Guard
         || task.intent.policy_digest != task.config.digest()
-        || task.intent.expires_at_ms <= now_ms()
         || !task.config.allows(&task.intent.call)
         || task.intent.enforcement_digest != task.enforcement_digest()?
         || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
@@ -1211,7 +1211,8 @@ pub(super) fn helper_main() -> ExitCode {
             .read_exact(&mut go)
             .map_err(|_| ToolError::Operation)?;
         let runtime_started = runtime_start_at_go();
-        if go != *b"GO\n" || task.intent.expires_at_ms <= now_ms() {
+        // Intent expiry ends the capacity wait; admitted preparation and GO have their own deadlines.
+        if go != *b"GO\n" {
             return Err(ToolError::Configuration);
         }
         verify_intent_runtime_grants(&task.intent, &task.config)?;
@@ -1824,6 +1825,7 @@ mod tests {
 
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::session::RunId::default(),
             agent_run_id: crate::session::AgentRunId::default(),
@@ -2284,6 +2286,7 @@ mod tests {
                 definition: None,
                 config: config.clone(),
                 intent: EffectIntent {
+                    target: crate::session::worker::EffectTarget::Workspace,
                     id: uuid::Uuid::now_v7(),
                     run_id: crate::session::RunId::new(),
                     agent_run_id: crate::session::AgentRunId::new(),
@@ -2293,7 +2296,7 @@ mod tests {
                     workspace_inode: 2,
                     call,
                     limits: ToolLimits::default(),
-                    expires_at_ms: now_ms() + 60_000,
+                    expires_at_ms: crate::tools::now_ms() + 60_000,
                     use_count: 1,
                 },
                 cache: None,
@@ -2313,13 +2316,17 @@ mod tests {
             task
         };
         let args = vec!["-c".to_owned(), "exit 7".to_owned()];
+        let command = ToolCall::Command {
+            program: "sh".into(),
+            args: args.clone(),
+            cwd: String::new(),
+        };
+        assert!(validate_task(&task(command.clone())).is_ok());
+        let mut admitted = task(command);
+        admitted.intent.expires_at_ms = 1;
         assert!(
-            validate_task(&task(ToolCall::Command {
-                program: "sh".into(),
-                args: args.clone(),
-                cwd: String::new(),
-            }))
-            .is_ok()
+            validate_task(&admitted).is_ok(),
+            "preparation after admission is not charged to the intent expiry"
         );
         assert!(matches!(
             validate_task(&task(ToolCall::CommandUnguarded {

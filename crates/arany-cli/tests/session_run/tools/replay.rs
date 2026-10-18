@@ -37,6 +37,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         unguarded_rules_digest: None,
     };
     let config = RunConfig {
+        worker_policy: None,
         agent_definitions: None,
         roster: None,
         providers: None,
@@ -67,6 +68,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         cwd: String::new(),
     };
     let intent = arany::EffectIntent {
+        target: arany::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: run,
         agent_run_id: primary,
@@ -102,6 +104,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         run_id: run,
         agent_run_id: primary,
         record: ProviderCallRecord {
+            delegation: None,
             phase: AgentPhase::RootPlan,
             disposition,
             response_id: None,
@@ -152,6 +155,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
         Event::AgentSpawned {
             profile: None,
+            assignment: None,
             definition: None,
             run_id: run,
             agent_run_id: primary,
@@ -206,6 +210,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
         record(ProviderCallDisposition::Finished),
         Event::AgentFinished {
+            worker: None,
             run_id: run,
             agent_run_id: primary,
             disposition: AgentDisposition::Finished,
@@ -532,6 +537,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         }
         denied.extend([
             Event::AgentFinished {
+                worker: None,
                 run_id: run,
                 agent_run_id: primary,
                 disposition: AgentDisposition::Failed,
@@ -589,8 +595,10 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let mut integration_intent = command_intent.clone();
     integration_intent.id = uuid::Uuid::now_v7();
     integration_intent.call = ToolCall::ApplyChangeset {
-        source_intent_digest: command_digest,
-        changeset: changeset.clone(),
+        source: arany::worker::ChangesetSource::CommandReceipt {
+            source_intent_digest: command_digest,
+            changeset: changeset.clone(),
+        },
     };
     let observed = |intent: arany::EffectIntent, disposition, output: String| Event::ToolFinished {
         run_id: run,
@@ -703,6 +711,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let mut unpublished = integrated[..COMMAND_FINISHED + 1].to_vec();
     unpublished.extend([
         Event::AgentFinished {
+            worker: None,
             run_id: run,
             agent_run_id: primary,
             disposition: AgentDisposition::Failed,
@@ -748,6 +757,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     }
     uncertain_cache.extend([
         Event::AgentFinished {
+            worker: None,
             run_id: run,
             agent_run_id: primary,
             disposition: AgentDisposition::Failed,
@@ -794,8 +804,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     unreachable!()
                 };
                 let ToolCall::ApplyChangeset {
-                    source_intent_digest,
-                    changeset,
+                    source:
+                        arany::worker::ChangesetSource::CommandReceipt {
+                            source_intent_digest,
+                            changeset,
+                        },
                 } = &mut intent.call
                 else {
                     unreachable!()
@@ -899,7 +912,10 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::ToolStarted { intent, .. } => intent.clone(),
         _ => unreachable!(),
     };
-    let ToolCall::ApplyChangeset { changeset, .. } = &mut out_of_plan_intent.call else {
+    let ToolCall::ApplyChangeset {
+        source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
+    } = &mut out_of_plan_intent.call
+    else {
         unreachable!()
     };
     changeset.files[0].path = "unselected/new.txt".into();
@@ -925,6 +941,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
         record(ProviderCallDisposition::Finished),
         Event::AgentFinished {
+            worker: None,
             run_id: run,
             agent_run_id: primary,
             disposition: AgentDisposition::Failed,
@@ -1332,8 +1349,11 @@ pub(super) async fn native_command_changeset_corpus(
             command.decide(true);
             let action = inbox.next().await.expect("separate integration approval");
             let ToolCall::ApplyChangeset {
-                source_intent_digest,
-                changeset,
+                source:
+                    arany::worker::ChangesetSource::CommandReceipt {
+                        source_intent_digest,
+                        changeset,
+                    },
             } = &action.intent.call
             else {
                 panic!("{case}: expected integration");
@@ -1612,8 +1632,11 @@ pub(super) async fn native_command_changeset_corpus(
             assert_eq!(result["stdout"], "payload-complete");
             assert_eq!(result["stderr"], "");
             let ToolCall::ApplyChangeset {
-                source_intent_digest,
-                changeset,
+                source:
+                    arany::worker::ChangesetSource::CommandReceipt {
+                        source_intent_digest,
+                        changeset,
+                    },
             } = &tools[1].intent.call
             else {
                 panic!("{case}: missing integration intent");

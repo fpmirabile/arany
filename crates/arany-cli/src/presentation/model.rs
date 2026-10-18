@@ -405,10 +405,12 @@ mod tests {
         assert!(!idle.status_line.contains("input "));
         let run_id = RunId::new();
         view.runs.push(RunView {
+            workers: Default::default(),
             id: run_id,
             objective: "task".into(),
             images: Vec::new(),
             config: Some(RunConfig {
+                worker_policy: None,
                 agent_definitions: None,
                 roster: None,
                 providers: None,
@@ -442,6 +444,7 @@ mod tests {
             }),
             agents: std::iter::once(AgentView {
                 profile: None,
+                assignment: None,
                 definition: None,
                 id: AgentRunId::new(),
                 role: AgentRole::Primary,
@@ -456,6 +459,7 @@ mod tests {
             })
             .chain((1..=5).map(|ordinal| AgentView {
                 profile: None,
+                assignment: None,
                 definition: None,
                 id: AgentRunId::new(),
                 role: AgentRole::Child,
@@ -491,6 +495,7 @@ mod tests {
         assert!(tool_capacity_notice(&view, Some(id)).is_none());
         let run = view.runs.last_mut().unwrap();
         let intent = arany::EffectIntent {
+            target: arany::worker::EffectTarget::Workspace,
             id,
             run_id,
             agent_run_id: run.agents[0].id,
@@ -671,6 +676,7 @@ mod tests {
         assert_eq!(model.activity_lines[3], "+3 more agents (use /agents)");
         let run = view.runs.last_mut().unwrap();
         let child_read = arany::EffectIntent {
+            target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: run.id,
             agent_run_id: run.agents[2].id,
@@ -814,6 +820,7 @@ mod tests {
                     | ProviderCallDisposition::InvalidResponse
             );
             ProviderCallRecord {
+                delegation: None,
                 phase: arany::AgentPhase::RootPlan,
                 disposition,
                 response_id: reported.then(|| "PRIVATE_RESPONSE_ID".into()),

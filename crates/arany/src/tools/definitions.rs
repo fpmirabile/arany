@@ -289,6 +289,18 @@ impl AgentDefinition {
             })
     }
 
+    pub(crate) fn allows_worker(&self, call: &ToolCall) -> bool {
+        crate::session::worker::WorkerTool::of(call).is_some()
+            && self
+                .tools
+                .as_ref()
+                .is_none_or(|tools| tools.iter().any(|name| name == call.label()))
+            && !self
+                .disallowed_tools
+                .iter()
+                .any(|name| name == call.label())
+    }
+
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         call.is_child_research()
             && self

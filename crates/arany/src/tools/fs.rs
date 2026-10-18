@@ -43,10 +43,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
                 && !old.is_empty()
                 && old.len() + new.len() <= 8 * 1024
         }
-        ToolCall::ApplyChangeset {
-            source_intent_digest,
-            changeset,
-        } => *source_intent_digest != [0; 32] && !changeset.files.is_empty() && changeset.valid(),
+        ToolCall::ApplyChangeset { source } => source.valid(),
         _ => false,
     }
 }
@@ -1090,7 +1087,9 @@ pub(super) fn native(
             }
             replace(&root, path, Some(expected_digest), replacement.as_bytes())
         }
-        ToolCall::ApplyChangeset { changeset, .. } => {
+        ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+        } => {
             config.validate()?;
             if !config.allows(call) {
                 return Err(ToolError::Path);

@@ -270,6 +270,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         .join("\n");
                     let run_id = RunId::new();
                     view.runs.push(arany::RunView {
+                        workers: Default::default(),
                         id: run_id,
                         objective: "Synthetic long response".into(),
                         images: Vec::new(),
@@ -1620,6 +1621,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .await
             .expect("pending objective");
         let mut config = RunConfig {
+            worker_policy: None,
             agent_definitions: None,
             roster: None,
             providers: None,
@@ -2220,6 +2222,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
             let interrupted_run = RunId::new();
             let primary = AgentRunId::new();
             let config = RunConfig {
+                worker_policy: None,
                 agent_definitions: None,
                 roster: None,
                 providers: None,
@@ -2278,6 +2281,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 },
                 Event::AgentSpawned {
                     profile: None,
+                    assignment: None,
                     definition: None,
                     run_id: interrupted_run,
                     agent_run_id: primary,
@@ -2296,6 +2300,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     run_id: interrupted_run,
                     agent_run_id: primary,
                     record: arany::ProviderCallRecord {
+                        delegation: None,
                         phase: arany::AgentPhase::RootPlan,
                         disposition: arany::ProviderCallDisposition::Finished,
                         response_id: Some("synthetic-response".into()),
@@ -2309,6 +2314,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     },
                 },
                 Event::AgentFinished {
+                    worker: None,
                     run_id: interrupted_run,
                     agent_run_id: primary,
                     disposition: arany::AgentDisposition::Finished,
@@ -2491,6 +2497,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     session_id,
                     Event::AgentSpawned {
                         profile: None,
+                        assignment: None,
                         definition: None,
                         run_id: next_run,
                         agent_run_id: AgentRunId::new(),

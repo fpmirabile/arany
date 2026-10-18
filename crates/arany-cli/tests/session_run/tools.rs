@@ -417,7 +417,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     assert_eq!(command["stderr"], "");
     assert_eq!(command["changeset"]["files"].as_array().unwrap().len(), 3);
     assert!(
-        matches!(&observations[7].intent.call, ToolCall::ApplyChangeset { changeset, .. } if changeset.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>() == ["src/command-output.txt", "src/deleted.txt", "src/generated/note.txt"])
+        matches!(&observations[7].intent.call, ToolCall::ApplyChangeset { source: arany::worker::ChangesetSource::CommandReceipt {  changeset, ..  } } if changeset.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>() == ["src/command-output.txt", "src/deleted.txt", "src/generated/note.txt"])
     );
     let fresh: Value = serde_json::from_str(&observations[8].output).unwrap();
     assert_eq!(fresh["stdout"], "fresh-snapshot");

@@ -550,6 +550,7 @@ impl Segment {
         let agent_run_id = AgentRunId::new();
         self.commit(Event::AgentSpawned {
             profile: profile.map(str::to_owned),
+            assignment: None,
             definition: None,
             run_id: self.run_id,
             agent_run_id,
@@ -584,6 +585,7 @@ impl Segment {
 
     fn finish_agent(&mut self, agent_run_id: AgentRunId, disposition: AgentDisposition) {
         self.commit(Event::AgentFinished {
+            worker: None,
             run_id: self.run_id,
             agent_run_id,
             disposition,
@@ -615,6 +617,7 @@ fn child_routes() -> ProviderRoutes {
 
 fn run_config(providers: Option<ProviderRoutes>) -> crate::session::RunConfig {
     crate::session::RunConfig {
+        worker_policy: None,
         agent_definitions: None,
         roster: None,
         providers,
@@ -647,6 +650,7 @@ fn provider_record(
     usage: (Option<u32>, Option<u32>),
 ) -> ProviderCallRecord {
     ProviderCallRecord {
+        delegation: None,
         phase,
         disposition,
         requested_tools: 0,
@@ -2015,6 +2019,7 @@ fn assigned_child_telemetry_uses_its_pinned_profile_instead_of_the_child_default
         grant: Some(crate::ChildGrant::NoTools),
         definition: None,
         profile: Some("spare".into()),
+        assignment: None,
     });
     let sibling = segment.spawn_as(AgentRole::Child, Some("child"));
     let (selected, _) = segment.call(

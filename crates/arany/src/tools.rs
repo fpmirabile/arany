@@ -542,6 +542,7 @@ impl ToolRuntime {
             self.enforcement_digest
         };
         EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
             agent_run_id,
@@ -568,7 +569,9 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
-        if !self.config.allows(&intent.call) {
+        if intent.target != crate::session::worker::EffectTarget::Workspace
+            || !self.config.allows(&intent.call)
+        {
             return ToolObservation {
                 enforcement_cause: None,
                 intent,
@@ -657,7 +660,8 @@ impl ToolRuntime {
             .as_ref()
             .map(|reads| std::sync::Arc::clone(&reads.root))
             .ok_or(ToolError::ProtectionUnavailable)?;
-        if !intent.valid()
+        if intent.target != crate::session::worker::EffectTarget::Workspace
+            || !intent.valid()
             || intent.policy_digest != self.config.digest()
             || intent.expires_at_ms <= now_ms()
         {
