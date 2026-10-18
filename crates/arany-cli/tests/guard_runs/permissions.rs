@@ -58,6 +58,7 @@ struct Fixture {
     deny_humans: bool,
     command_maximum: Option<u32>,
     max_children: u8,
+    expected_unconsumed: usize,
     settings: Option<Value>,
 }
 
@@ -107,6 +108,7 @@ impl Fixture {
             deny_humans: false,
             command_maximum: None,
             max_children: 1,
+            expected_unconsumed: 0,
             settings: settings.cloned(),
         }
     }
@@ -175,7 +177,7 @@ impl Fixture {
         let requests = provider.requests.lock().unwrap().clone();
         let unconsumed = provider.responses.lock().unwrap().len();
         assert!(
-            unconsumed == 0 || result.run.status == RunStatus::StoppedByHook,
+            unconsumed == self.expected_unconsumed,
             "all expected calls consumed: {unconsumed} left, fixture settings {:?}, run {:?}, tools (operation, attested, outcome, hook outcomes) {:?}",
             self.settings,
             result.run.status,
@@ -3320,6 +3322,7 @@ mod lifecycle_hooks {
         use arany::test_support::{MAX_TOOL_CONTEXT_BYTES, tool_context_bytes};
 
         const THRESHOLD: usize = (MAX_TOOL_CONTEXT_BYTES * 2).div_ceil(3);
+        const STOPPED_UNCONSUMED: usize = 3;
         // Half-size pages leave room for shrinking result grants near the threshold.
         let page = arany::ToolLimits::default().result_bytes / 2;
         let reads = THRESHOLD.div_ceil(usize::try_from(page).unwrap()) + 2;
@@ -3342,7 +3345,13 @@ mod lifecycle_hooks {
         ] {
             let settings =
                 json!({"hooks":{"PreCompact":[{"matcher":"auto","hooks":[shell_hook(script)]}]}});
-            let fixture = Fixture::new(Some(&settings), false);
+            let mut fixture = Fixture::new(Some(&settings), false);
+            // The stop lands at the first compaction pressure; every later scripted call stays unused.
+            fixture.expected_unconsumed = if matches!(expected, HookResult::Stopped { .. }) {
+                STOPPED_UNCONSUMED
+            } else {
+                0
+            };
             std::fs::write(
                 fixture.workspace.join("notes/data.txt"),
                 "x".repeat(usize::try_from(page).unwrap()),
@@ -3389,7 +3398,7 @@ mod lifecycle_hooks {
             if matches!(expected, HookResult::Stopped { .. }) {
                 assert_eq!(result.run.status, RunStatus::StoppedByHook);
                 assert_eq!(provider.compact_requests.lock().unwrap().len(), 0);
-                assert!(requests.len() <= reads);
+                assert_eq!(requests.len(), reads + 1 - STOPPED_UNCONSUMED);
                 continue;
             }
             assert_eq!(result.run.status, RunStatus::Finished, "{expected:?}");
