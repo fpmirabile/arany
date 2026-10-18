@@ -1818,7 +1818,6 @@ async fn resumed_goal_keeps_its_stored_phase() {
 
 const AUTONOMOUS_OBJECTIVE: &str = "Verify the facts file";
 
-/// The Goal facts one call carries: on its newest step, or in the request head when it has none.
 fn call_facts(request: &arany::ProviderRequest) -> Option<arany::GoalContextFacts> {
     request
         .input
@@ -1829,7 +1828,6 @@ fn call_facts(request: &arany::ProviderRequest) -> Option<arany::GoalContextFact
         .or(request.input.goal_context_facts)
 }
 
-/// Every steering note one call carries, in the order they were recorded.
 fn call_steering_notes(request: &arany::ProviderRequest) -> Vec<String> {
     request
         .input
@@ -1862,7 +1860,6 @@ fn facts_read() -> arany::ToolCall {
     }
 }
 
-/// A plan whose only success evidence is a verified read of `notes/facts.txt` with `sha256`.
 fn facts_plan(sha256: String) -> arany::GoalPlanContract {
     arany::GoalPlanContract {
         mission: AUTONOMOUS_OBJECTIVE.into(),
@@ -1885,7 +1882,6 @@ fn write_facts(workspace: &Path, text: &'static str) -> impl Fn() + Send + Sync 
     move || std::fs::write(&path, text).expect("updated facts file")
 }
 
-/// Opens the Engine whose `ToolGrant::Configured` submissions Read `notes/facts.txt` through the Guard.
 pub(super) fn facts_engine(state: StateRoot, state_path: &Path) -> Engine {
     facts_engine_with_telemetry(state, state_path, arany::Telemetry::disabled())
 }
@@ -1926,7 +1922,6 @@ fn autonomous_input(workspace: &Path) -> RunRequest {
     input
 }
 
-/// Interrupts an autonomous Goal after its second Run starts. Returns the Session and Goal IDs.
 async fn interrupted_autonomous_goal(
     state_path: &Path,
     workspace: &Path,
@@ -2190,7 +2185,6 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
     assert!(goal.report.is_some(), "exhausted Goal keeps its report");
 }
 
-/// Reports the same input-token count for every call, so a token cap can land on an exact boundary.
 struct MeteredProvider {
     tokens: u32,
     responses: std::sync::Mutex<VecDeque<ProviderOutcome>>,
@@ -2416,12 +2410,10 @@ async fn plain_prompt_is_one_run_even_when_its_criterion_is_unsatisfied() {
     assert_eq!(goal.run_ids, [outcome.run.id]);
 }
 
-/// Action taken once a Run's Finish is committed and tapped.
 enum AfterFinish {
     Cancel(RunCancellation),
 }
 
-/// Drives an admitted Run and applies `after` as soon as its Finished Run becomes visible.
 async fn run_observing_finish(
     engine: &Engine,
     provider: &Arc<ScriptedProvider>,
@@ -2502,7 +2494,6 @@ async fn autonomous_goal_cancelled_after_a_finished_run_keeps_that_outcome_and_s
     );
 }
 
-/// A Finish whose call spends the Goal's active budget is refused; its Run fails and the Goal closes with a report.
 #[tokio::test]
 async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_report() {
     let temp = tempfile::tempdir().expect("temporary root");
@@ -2579,7 +2570,6 @@ async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_r
     );
 }
 
-/// Accepts OTLP trace POSTs on a loopback listener until `done` is set after the final flush.
 fn collect_trace_bodies(
     listener: std::net::TcpListener,
     done: Arc<std::sync::atomic::AtomicBool>,
@@ -2641,7 +2631,6 @@ fn read_trace_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
     }
 }
 
-/// The string value of `key` on every exported Goal segment span, in export order.
 fn goal_segment_attribute(bodies: &[Vec<u8>], key: &str) -> Vec<String> {
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
@@ -3879,7 +3868,6 @@ async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
     assert_eq!(view.runs[1].id, outcome.run.id);
 }
 
-/// Parses the catalog a child Tool request carried; the catalog is pinned JSON data.
 fn child_catalog(request: &arany::ProviderRequest) -> serde_json::Value {
     let tools = request.input.tools.as_ref().expect("research catalog");
     serde_json::from_str(&tools.catalog).expect("catalog JSON")
@@ -4383,7 +4371,6 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
     assert_action_bounds(&events, false, false);
 }
 
-/// The child's last call is its observed Tool request; no Tool starts and the Goal is interrupted.
 async fn assert_paused_child_stopped(
     state_path: &Path,
     session_id: arany::SessionId,
@@ -5155,8 +5142,6 @@ struct SteeredRun {
     events: Vec<arany::EventEnvelope>,
 }
 
-/// Runs a Read-then-Finish Run whose second primary call carries a steering note, in a Session
-/// padded so that `free_at_second_call` Event slots remain when that call is admitted. `None` pads nothing.
 async fn steered_run(
     root: &Path,
     tag: &str,

@@ -478,7 +478,6 @@ fn assert_trace_call(actual: &ProviderRequest, phase: AgentPhase, objective: &st
     assert_eq!(actual.max_output_tokens, 4096, "trace call output cap");
 }
 
-/// A Goal segment fed synthetic committed Events; Event `n` commits at `1_000 + 10 n` ms.
 struct Segment {
     trace: RunTrace,
     session_id: SessionId,
@@ -492,7 +491,6 @@ impl Segment {
         Self::routed(telemetry, context, None)
     }
 
-    /// Commits the segment's opening Events; `routes` pins per-role Providers in `RunStarted`.
     fn routed(
         telemetry: &Telemetry,
         context: (SystemTime, SystemTime),
@@ -611,7 +609,6 @@ fn identity(profile: &str, model: &str) -> ProviderIdentity {
     ProviderIdentity::new(profile, model, Provenance::native())
 }
 
-/// Primary, review and compaction stay on the default route; children use another Provider.
 fn child_routes() -> ProviderRoutes {
     let mut routes = Providers::all(vec![identity("other", "model-1")]);
     routes.child = vec![identity("anthropic", "child-model")];
@@ -2146,4 +2143,41 @@ fn assigned_child_telemetry_uses_its_pinned_profile_instead_of_the_child_default
             .unwrap();
         assert!(has_attribute(span, "gen_ai.request.model", model.into()));
     }
+}
+
+#[test]
+fn worker_recovery_history_and_lineage_export_only_closed_metadata() {
+    let f = crate::session::worker_protocol_fixture();
+    let (telemetry, exporter) = in_memory();
+    let mut trace = telemetry
+        .trace_run(f.session, f.goal, unit_context())
+        .unwrap();
+    let mut events = f.envelopes();
+    let canary = "WORKER_PRIVATE_TRACE_CANARY_601";
+    for event in &mut events {
+        match &mut event.event {
+            Event::AgentSpawned {
+                objective: Some(text),
+                assignment: Some(pins),
+                ..
+            } => {
+                *text = canary.into();
+                pins.request.direction = canary.into();
+                pins.request.resumes = Some(AgentRunId::new());
+            }
+            Event::WorkerDataChunk { record, .. } => record.content = canary.into(),
+            Event::AgentFinished {
+                result: Some(text), ..
+            } => *text = canary.into(),
+            _ => {}
+        }
+        trace.committed(event);
+    }
+    trace.finish(None);
+    let spans = finished_spans(&telemetry, &exporter);
+    assert!(!spans.is_empty());
+    assert!(
+        !format!("{spans:?}").contains(canary),
+        "worker content leaked through telemetry"
+    );
 }

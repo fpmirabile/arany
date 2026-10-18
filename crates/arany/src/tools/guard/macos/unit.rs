@@ -39,6 +39,13 @@ const AVAILABILITY_DEADLINE: Duration = Duration::from_secs(3);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(5);
 const UNIT_ROOT_PARENT: &str = "/private/tmp";
 const UNIT_ROOT_PREFIX: &str = "arany-u-";
+
+pub(super) fn private_recovered(parent: &Path, id: uuid::Uuid) -> Result<(), ToolError> {
+    match std::fs::symlink_metadata(parent.join(format!("{UNIT_ROOT_PREFIX}{id}"))) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(ToolError::ProtectionUnavailable),
+    }
+}
 // A live unit holds an exclusive lock here; the kernel releases it when the owner exits.
 const UNIT_LIVENESS_LOCK: &str = "unit.lock";
 #[cfg(test)]
@@ -1995,7 +2002,6 @@ done
         ));
     }
 
-    /// Compiles the native actor and returns its entitlement-signed and plain copies.
     fn native_actors(directory: &Path) -> (PathBuf, PathBuf) {
         use crate::test_process::BoundedOutput;
 
@@ -2541,7 +2547,6 @@ done
         source
     }
 
-    /// Starts the helper as a launchd job in its own coalition and accepts its attestation.
     async fn launch_helper(
         unit: &mut Unit,
         phase: &str,

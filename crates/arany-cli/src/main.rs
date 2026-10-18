@@ -2,7 +2,7 @@
 
 mod accounts;
 mod cli;
-use arany_cli::{presentation, terminal};
+use arany_cli::{presentation, terminal, terminal::report_error};
 
 #[cfg(all(test, unix))]
 use arany::test_support::process as test_process;
@@ -160,10 +160,6 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-fn report_error(message: impl std::fmt::Display) {
-    let _ = writeln!(std::io::stderr().lock(), "error: {message}");
 }
 
 fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {

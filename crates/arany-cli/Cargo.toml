@@ -13,11 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 arany = { path = "../arany" }
-async-trait.workspace = true
 aws-lc-rs.workspace = true
 base64.workspace = true
-cap-fs-ext.workspace = true
-cap-std.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 getrandom.workspace = true
@@ -42,10 +39,13 @@ rustix.workspace = true
 nix.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+cap-fs-ext.workspace = true
+cap-std.workspace = true
 security-framework.workspace = true
 
 [dev-dependencies]
 arany = { path = "../arany", features = ["test-support"] }
+async-trait.workspace = true
 jsonschema.workspace = true
 opentelemetry-proto.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
