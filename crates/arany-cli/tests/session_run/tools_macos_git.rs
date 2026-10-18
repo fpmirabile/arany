@@ -224,7 +224,7 @@ async fn native_git_journey_helper() {
     let provider = Arc::new(GitJourney {
         requests: requests.clone(),
     });
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         state,
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),

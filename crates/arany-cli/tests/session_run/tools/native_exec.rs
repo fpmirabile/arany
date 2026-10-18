@@ -404,7 +404,7 @@ async fn selected_cache_canary_helper_inner() {
         stage: "seed",
         resource_class: arany::ToolResourceClass::Default,
     });
-    let seed_engine = Engine::open(
+    let seed_engine = arany::test_support::engine::open(
         StateRoot::admit(&state_path).unwrap(),
         EngineConfig {
             guard_executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_arany"))),
@@ -549,7 +549,7 @@ async fn selected_cache_canary_helper_inner() {
         stage: "selected",
         resource_class: arany::ToolResourceClass::Build,
     });
-    let engine = Engine::open(
+    let engine = arany::test_support::engine::open(
         state,
         EngineConfig {
             guard_executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_arany"))),
@@ -782,7 +782,7 @@ async fn selected_cache_canary_helper_inner() {
         stage: "verify",
         resource_class: arany::ToolResourceClass::Default,
     });
-    let verify_engine = Engine::open(
+    let verify_engine = arany::test_support::engine::open(
         StateRoot::open_existing(&state_path).unwrap(),
         EngineConfig {
             guard_executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_arany"))),

@@ -249,7 +249,7 @@ done
                 requests: requests.clone(),
                 outcomes,
             });
-            let engine = Engine::open(
+            let engine = arany::test_support::engine::open(
                 state,
                 EngineConfig {
                     guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
