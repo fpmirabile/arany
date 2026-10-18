@@ -5757,7 +5757,8 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
     }
 }
 
-#[tokio::test]
+// A paused clock keeps rendered active-time digits equal across both Runs; they set each Read's result cap.
+#[tokio::test(start_paused = true)]
 async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_outcome() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = facts_workspace(temp.path(), "stable");
