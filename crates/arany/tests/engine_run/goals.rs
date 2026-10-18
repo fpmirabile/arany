@@ -4397,7 +4397,7 @@ async fn assert_paused_child_stopped(
 }
 
 #[tokio::test]
-async fn near_deadline_child_tool_stops_before_tool_started() {
+async fn near_deadline_child_tool_journals_limit_without_dispatch() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
@@ -4442,7 +4442,17 @@ async fn near_deadline_child_tool_stops_before_tool_started() {
 
     let (events, view) = replayed(&state_path, outcome.session_id).await;
     let child = view.runs[0].agents[1].id;
-    assert_eq!(child_tool_starts(&events, child), 0);
+    assert_eq!(child_tool_starts(&events, child), 1);
+    let tool = &view.runs[0].agents[1].tools[0];
+    let observation = tool.observation.as_ref().expect("deadline observation");
+    assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+    assert_eq!(
+        observation.output,
+        "Delegation deadline reached; no operation was dispatched"
+    );
+    assert!(observation.attestation.is_none());
+    assert!(tool.hooks.is_empty());
+    assert_action_bounds(&events, false, false);
     assert!(events.iter().any(|event| matches!(
         &event.event,
         Event::ProviderCallRecorded { agent_run_id, record, .. }

@@ -73,6 +73,11 @@ impl Grant<'_> {
     }
 }
 
+enum SizingRefusal {
+    DelegationDeadline,
+    Unavailable,
+}
+
 enum Verdict {
     Dispatch {
         intent: EffectIntent,
@@ -240,10 +245,16 @@ impl RunLoop<'_> {
             hook_feedback: Default::default(),
         };
         loop {
-            let Some(intent) = self.sized_intent(&grant, runtime, &step, call, &source_call)?
-            else {
-                return Ok(false);
-            };
+            let intent =
+                match self.sized_intent(&grant, runtime, &step, call.clone(), &source_call)? {
+                    Ok(intent) => intent,
+                    Err(SizingRefusal::DelegationDeadline) => {
+                        self.record_delegation_deadline(&grant, runtime, call)
+                            .await?;
+                        return Ok(false);
+                    }
+                    Err(SizingRefusal::Unavailable) => return Ok(false),
+                };
             let command = matches!(intent.call, ToolCall::Command { .. });
             let source_intent_digest = intent.digest();
             let narrowable =
@@ -336,15 +347,16 @@ impl RunLoop<'_> {
         step: &ToolStep,
         call: ToolCall,
         post_call: &ToolCall,
-    ) -> Result<Option<EffectIntent>, EngineError> {
+    ) -> Result<Result<EffectIntent, SizingRefusal>, EngineError> {
         let intent = match grant {
             Grant::Primary { .. } => self.primary_intent(runtime, call)?,
             Grant::Researcher { child, deadline } => {
-                let mut intent =
-                    self.researcher_intent(runtime, child.agent_run_id, call, *deadline);
-                if child.editor
-                    && let Some(intent) = &mut intent
-                {
+                let Some(mut intent) =
+                    self.researcher_intent(runtime, child.agent_run_id, call, *deadline)
+                else {
+                    return Ok(Err(SizingRefusal::DelegationDeadline));
+                };
+                if child.editor {
                     intent.target = self.worker_target(child.agent_run_id)?;
                     intent.limits.cache_requested_bytes = 0;
                     intent.limits.cache_bytes = 0;
@@ -363,16 +375,16 @@ impl RunLoop<'_> {
                         .runtime_ms
                         .min(u32::try_from(duration_ms(remaining) / 4).unwrap_or(u32::MAX));
                     if intent.limits.runtime_ms < 1_000 {
-                        return Ok(None);
+                        return Ok(Err(SizingRefusal::DelegationDeadline));
                     }
                     intent.expires_at_ms =
                         crate::tools::now_ms().saturating_add(u64::from(intent.limits.runtime_ms));
                 }
-                intent
+                Some(intent)
             }
         };
         let Some(mut intent) = intent else {
-            return Ok(None);
+            return Ok(Err(SizingRefusal::Unavailable));
         };
         // The PreToolUse hooks run before dispatch, so the authorization outlives them.
         intent.expires_at_ms = intent
@@ -393,14 +405,84 @@ impl RunLoop<'_> {
             0
         } + self.feedback_reserve(runtime, post_call);
         let Some(capacity) = runtime.result_capacity(overhead, integration_capacity) else {
-            return Ok(None);
+            return Ok(Err(SizingRefusal::Unavailable));
         };
         intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
             128
         } else {
             capacity.min(MAX_TOOL_RESULT_BYTES) as u32
         };
-        Ok(Some(intent))
+        Ok(Ok(intent))
+    }
+
+    async fn record_delegation_deadline(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        call: ToolCall,
+    ) -> Result<(), EngineError> {
+        let Grant::Researcher { child, .. } = grant else {
+            return Err(EngineError::CoordinatorFailed);
+        };
+        let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
+        if child.editor {
+            intent.target = self.worker_target(child.agent_run_id)?;
+            intent.limits.cache_requested_bytes = 0;
+            intent.limits.cache_bytes = 0;
+            intent.limits.cache_candidate_bytes = 0;
+        }
+        let permission = self
+            .permission(grant, runtime, &intent.call)
+            .narrow_terminal(self.terminal_mode(), &intent.call);
+        self.admit_tool(grant, runtime, &intent, permission, 0, false)
+            .await?;
+        self.append(Event::ToolStarted {
+            run_id: self.run_id,
+            agent_run_id: child.agent_run_id,
+            intent: intent.clone(),
+            active_ceiling_ms: self.ledger().active_ceiling(0)?,
+        })
+        .await?;
+        if child.editor {
+            self.worker
+                .lock()
+                .await
+                .get_mut(&child.agent_run_id)
+                .ok_or(EngineError::CoordinatorFailed)?
+                .note_intent(&intent);
+        }
+        if let Some(mode) = effective_permission_mode(runtime.permissions(), grant) {
+            self.append(Event::ToolPermissionDecided {
+                run_id: self.run_id,
+                agent_run_id: child.agent_run_id,
+                verdict: PermissionVerdict {
+                    intent_digest: intent.digest(),
+                    mode: Some(mode),
+                    decision: permission.decision,
+                    basis: permission.basis,
+                    source: if permission.decision == Decision::Ask {
+                        PermissionSource::UnavailableApproval
+                    } else {
+                        permission.basis
+                    },
+                    approved: false,
+                    hook_restriction: None,
+                    hooks: 0,
+                    narrowed: false,
+                },
+            })
+            .await?;
+        }
+        self.append(Event::ToolFinished {
+            run_id: self.run_id,
+            agent_run_id: child.agent_run_id,
+            observation: not_dispatched(
+                intent,
+                ToolDisposition::Limit,
+                "Delegation deadline reached; no operation was dispatched",
+            ),
+        })
+        .await
     }
 
     pub(super) fn primary_intent(
@@ -506,7 +588,7 @@ impl RunLoop<'_> {
             .limits
             .runtime_ms
             .min(u32::try_from(duration_ms(available) / 2).unwrap_or(u32::MAX));
-        if runtime_ms == 0 {
+        if runtime_ms < 1_000 {
             return None;
         }
         intent.limits.runtime_ms = runtime_ms;

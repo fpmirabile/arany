@@ -376,7 +376,14 @@ impl ForegroundWorkerProvider {
                 lease: vec!["notes".into()],
                 criterion: self.plan().success_criterion,
                 mode: crate::worker::WorkerMode::Foreground,
-                max_turns: 17,
+                max_turns: if matches!(
+                    self.case,
+                    "hook_stop_last_turn" | "hook_stop_deadline_last_turn"
+                ) {
+                    1
+                } else {
+                    17
+                },
                 wave: 1,
                 resumes: None,
                 supersedes: None,
@@ -396,7 +403,21 @@ impl crate::Provider for ForegroundWorkerProvider {
             std::sync::LazyLock::new(|| {
                 crate::ProviderIdentity::new("scripted", "test-model", crate::Provenance::native())
             });
-        &IDENTITY
+        static DEADLINE_IDENTITY: std::sync::LazyLock<crate::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                let mut identity = crate::ProviderIdentity::new(
+                    "scripted",
+                    "test-model",
+                    crate::Provenance::native(),
+                );
+                identity.limits.deadline = std::time::Duration::from_secs(1200);
+                identity
+            });
+        if self.case.contains("deadline") {
+            &DEADLINE_IDENTITY
+        } else {
+            &IDENTITY
+        }
     }
 
     async fn invoke(
@@ -422,6 +443,38 @@ impl crate::Provider for ForegroundWorkerProvider {
                 Some(Box::new(self.plan())),
             ),
             (AgentPhase::RootPlan, 1) => self.delegation(&request),
+            (AgentPhase::ChildWork, 0) if self.case == "tool_deadline" => {
+                tokio::time::pause();
+                tokio::time::advance(std::time::Duration::from_secs(1192)).await;
+                tokio::time::resume();
+                super::scenario::tool_outcome(
+                    ToolCall::Write {
+                        path: "notes/a".into(),
+                        expected_digest: None,
+                        content: "too late".into(),
+                    },
+                    None,
+                )
+            }
+            (AgentPhase::ChildWork, 0)
+                if matches!(
+                    self.case,
+                    "hook_stop_last_turn"
+                        | "hook_stop_tokens"
+                        | "hook_stop_deadline"
+                        | "hook_stop_deadline_last_turn"
+                ) =>
+            {
+                if matches!(
+                    self.case,
+                    "hook_stop_deadline" | "hook_stop_deadline_last_turn"
+                ) {
+                    tokio::time::pause();
+                    tokio::time::advance(std::time::Duration::from_secs(1192)).await;
+                    tokio::time::resume();
+                }
+                finish_with("Candidate worker result")
+            }
             (AgentPhase::ChildWork, 0) if self.case == "calls" => {
                 finish_with("No Tool allowance remains")
             }
