@@ -18,6 +18,8 @@ enum Fault {
     ),
     #[cfg_attr(not(test), expect(dead_code, reason = "read only by test fixtures"))]
     CandidateSync(String),
+    #[cfg(test)]
+    CandidateSyncGate(String, oneshot::Sender<()>, oneshot::Receiver<()>),
     #[cfg_attr(not(test), expect(dead_code, reason = "read only by test fixtures"))]
     CommitMarker(String),
 }
@@ -66,6 +68,20 @@ impl FaultPlan {
         plan().push(Fault::CandidateSync(identity.token()));
     }
 
+    #[cfg(test)]
+    pub(crate) fn gate_candidate_sync(
+        identity: &BuildCacheIdentity,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, wait_entered) = oneshot::channel();
+        let (release, wait_release) = oneshot::channel();
+        plan().push(Fault::CandidateSyncGate(
+            identity.token(),
+            entered,
+            wait_release,
+        ));
+        (wait_entered, release)
+    }
+
     /// Makes the next committed-marker write for this cache token fail once.
     #[cfg(test)]
     pub(crate) fn fail_commit_marker(identity: &BuildCacheIdentity) {
@@ -101,7 +117,16 @@ impl FaultPlan {
         }
     }
 
-    pub(crate) fn candidate_sync(token: &str) -> io::Result<()> {
+    pub(crate) async fn candidate_sync(token: &str) -> io::Result<()> {
+        #[cfg(test)]
+        if let Some(Fault::CandidateSyncGate(_, entered, release)) =
+            take(|fault| matches!(fault, Fault::CandidateSyncGate(key, ..) if key == token))
+        {
+            let _ = entered.send(());
+            release
+                .await
+                .map_err(|_| io::Error::other("candidate sync gate closed"))?;
+        }
         match take(|fault| matches!(fault, Fault::CandidateSync(key) if key == token)) {
             Some(_) => Err(io::Error::other("injected candidate sync failure")),
             None => Ok(()),
