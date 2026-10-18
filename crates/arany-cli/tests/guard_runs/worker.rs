@@ -278,17 +278,15 @@ pub(super) async fn worker_case(case: &'static str) {
         assert_eq!(child_calls, 1, "{case}: no reprompt");
         let outcome = &worker.outcome.as_ref().unwrap().1;
         assert_eq!(outcome.disposition, WorkerDisposition::Failed, "{case}");
-        if case != "tool_deadline" {
-            assert_eq!(
-                outcome.cause,
-                if case == "hook_stop_last_turn" {
-                    arany::worker::WorkerCause::TurnLimit
-                } else {
-                    arany::worker::WorkerCause::Budget
-                },
-                "{case}"
-            );
-        }
+        assert_eq!(
+            outcome.cause,
+            match case {
+                "tool_deadline" => arany::worker::WorkerCause::ToolFailed,
+                "hook_stop_last_turn" => arany::worker::WorkerCause::TurnLimit,
+                _ => arany::worker::WorkerCause::Budget,
+            },
+            "{case}"
+        );
         assert!(worker.handover.is_none(), "{case}");
         assert!(worker.released.is_some(), "{case}");
         if case == "tool_deadline" {
