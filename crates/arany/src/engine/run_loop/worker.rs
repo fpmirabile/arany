@@ -117,17 +117,24 @@ impl RunLoop<'_> {
     }
 
     pub(super) fn wave_settled(&self) -> Result<bool, EngineError> {
+        self.ledger()
+            .view(|v| v.runs.last().is_some_and(crate::session::wave_settled))
+    }
+
+    pub(super) fn coordination_ready(&self) -> Result<bool, EngineError> {
         self.ledger().view(|v| {
             v.runs.last().is_some_and(|r| {
-                r.agents.iter().skip(1).all(|a| {
-                    a.assignment
-                        .as_ref()
-                        .map_or(a.status == crate::session::AgentStatus::Finished, |w| {
-                            a.status != crate::session::AgentStatus::Active && w.settled()
-                        })
-                })
+                crate::session::coordination_ready(r)
+                    && r.agents.iter().any(|a| {
+                        a.status == crate::session::AgentStatus::Active && a.assignment.is_some()
+                    })
             })
         })
+    }
+
+    pub(super) fn worker_stopped(&self) -> Result<bool, EngineError> {
+        self.ledger()
+            .view(|v| v.runs.last().is_some_and(|r| r.workers.stop.is_some()))
     }
 
     pub(super) fn editor_grant(&self, a: &EditorAssignment) -> Result<WorkerGrant, EngineError> {
@@ -153,23 +160,19 @@ impl RunLoop<'_> {
         Ok(grant)
     }
 
-    pub(super) fn proposed_editor(
-        &self,
-        id: Option<AgentRunId>,
-    ) -> Result<EditorAssignment, EngineError> {
-        self.ledger().view(|v| {
-            let run = v.runs.last()?;
-            if let Some(id) = id && let Some(w) = run.agents.iter().find(|a| a.id == id).and_then(|a| a.assignment.as_ref()) {
-                return Some(w.pins.request.clone());
-            }
-            let proposals: Vec<_> = run.primary()?.provider_calls.iter().filter_map(|r| r.delegation.as_ref()).collect();
-            let prior: usize = proposals.iter().rev().skip(1).map(|p| p.len()).sum();
-            let refused = run.tools.iter().filter(|t| matches!(&t.intent.call, ToolCall::PrepareWorker { preparation: p } if p.purpose == WorkerDataPurpose::Base && !run.agents.iter().any(|a| a.id == p.assignment_id)) && t.observation.as_ref().is_some_and(|o| o.disposition != ToolDisposition::Succeeded)).count();
-            match proposals.last()?.get(run.agents.len().saturating_sub(1) + refused - prior)? {
-                crate::session::worker::ChildAssignment::Editor { assignment } => Some(*assignment.clone()),
-                _ => None,
-            }
-        })?.ok_or(EngineError::InvalidHistory)
+    pub(super) fn proposed_editor(&self, id: AgentRunId) -> Result<EditorAssignment, EngineError> {
+        self.ledger()
+            .view(|v| {
+                v.runs
+                    .last()?
+                    .agents
+                    .iter()
+                    .find(|a| a.id == id)?
+                    .assignment
+                    .as_ref()
+                    .map(|w| w.pins.request.clone())
+            })?
+            .ok_or(EngineError::InvalidHistory)
     }
 
     pub(super) fn worker_allowance(&self, id: AgentRunId) -> Result<u32, EngineError> {
@@ -287,7 +290,13 @@ impl RunLoop<'_> {
         let ToolCall::PrepareWorker { preparation } = &intent.call else {
             return Err(EngineError::InvalidRequest);
         };
-        let a = self.proposed_editor(None)?;
+        let a = self
+            .worker_requests
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .get(&preparation.assignment_id)
+            .cloned()
+            .ok_or(EngineError::CoordinatorFailed)?;
         let capture_runtime = runtime.clone();
         let run_id = self.run_id;
         let id = preparation.assignment_id;
@@ -435,11 +444,8 @@ impl RunLoop<'_> {
             children: 1,
             research: true,
         }) {
-            if self.ledger().remaining_calls() == Some(0) {
-                self.observe_worker_stop().await?;
-                return Err(EngineError::GoalBudgetExhausted);
-            }
-            return Ok(None);
+            self.record_capacity_stop().await?;
+            return Err(EngineError::GoalBudgetExhausted);
         }
         let mut allowance = WORKER_DATA_BYTES;
         loop {
@@ -473,6 +479,10 @@ impl RunLoop<'_> {
             .lock()
             .map_err(|_| EngineError::CoordinatorFailed)?
             .insert(id, allowance);
+        self.worker_requests
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .insert(id, (*assignment).clone());
         let observation = match self.prepare_worker_base(root, id, allowance).await {
             Ok(observation) => observation,
             Err(EngineError::GoalBudgetExhausted) => {
@@ -674,7 +684,7 @@ impl RunLoop<'_> {
                 },
                 WorkerCause::Finished,
             )
-        } else if cancelled || self.controls.cancellation.is_cancelled() {
+        } else if cancelled || self.controls.cancellation.is_cancelled() || self.pause_requested() {
             (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
         } else {
             (
@@ -1044,7 +1054,8 @@ impl RunLoop<'_> {
             None
         };
         if let Some(reason) = reason {
-            self.admit_worker_action(0).await?;
+            // The stop fact is one Event; a refused admission must not relabel a cancel, pause or budget stop.
+            let _ = self.admit_worker_action(0).await;
             self.append(Event::WorkerStopObserved {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
@@ -1118,8 +1129,8 @@ impl RunLoop<'_> {
                 })
                 .collect::<Vec<_>>()
         })?;
-        if !records.is_empty() {
-            self.admit_worker_action(0).await?;
+        if !records.is_empty() && self.admit_worker_action(0).await.is_err() {
+            return self.record_capacity_stop().await;
         }
         for record in records {
             self.append(Event::WorkerVerificationRecorded {

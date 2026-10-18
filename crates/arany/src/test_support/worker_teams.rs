@@ -120,7 +120,12 @@ impl TeamProvider {
                         },
                         mode: if matches!(
                             self.case,
-                            "background" | "command" | "leased_edit" | "cancel_background"
+                            "background"
+                                | "command"
+                                | "leased_edit"
+                                | "defer_finish"
+                                | "budget_calls"
+                                | "cancel_background"
                         ) {
                             WorkerMode::Background
                         } else {
@@ -267,7 +272,14 @@ impl TeamProvider {
         }
         observations.drain(..(*stale).min(observations.len()));
         drop(stale);
-        if matches!(self.case, "leased_edit" | "background" | "command") && prior == 1 {
+        if self.case == "defer_finish" && prior == 1 {
+            return finish_with("Too early");
+        }
+        if matches!(
+            self.case,
+            "leased_edit" | "background" | "command" | "budget_calls"
+        ) && prior == 1
+        {
             return tool_outcome(
                 if self.case == "command" {
                     ToolCall::Command {
@@ -427,7 +439,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     )
     .unwrap();
     let budget = GoalBudget {
-        max_provider_calls: Some(64),
+        max_provider_calls: Some(if case == "budget_calls" { 9 } else { 64 }),
         max_tokens: (case == "tokens").then_some(1024),
         ..Default::default()
     };
@@ -503,7 +515,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                     if case.starts_with("cancel_") { cancellation.cancel(); }
                     else if case == "c1_failure" { provider.gates[7].add_permits(1); }
                     else if case == "failure" { provider.gates[0].add_permits(1); }
-                    else if matches!(case, "background" | "command" | "leased_edit") { if primary_seen { for gate in &provider.gates { gate.add_permits(1); } } }
+                    else if matches!(case, "background" | "command" | "leased_edit" | "defer_finish" | "budget_calls") { if primary_seen { for gate in &provider.gates { gate.add_permits(1); } } }
                     else { provider.gates[1].add_permits(1); if case == "mixed" { provider.gates[7].add_permits(1); } }
                 }
             },
@@ -514,6 +526,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                         if integrated.len() == 1 && matches!(case, "order" | "conflict" | "mixed" | "fallback") { provider.gates[0].add_permits(1); }
                     }
                     Event::AgentFinished { worker: Some(outcome), .. } if outcome.disposition == crate::worker::WorkerDisposition::Failed && case == "failure" => provider.gates[1].add_permits(1),
+                    Event::ProviderCallRecorded { record, .. } if matches!(case, "leased_edit" | "defer_finish") && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::InvalidResponse => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
                     Event::ToolFinished { observation, .. } if matches!(&observation.intent.call, ToolCall::Write { path, .. } if path == "notes/free") => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
                     Event::ProviderCallRecorded { record, agent_run_id, .. } if case == "command" && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::ToolRequested => {
                         assert_ne!(*agent_run_id, provider.requests.lock().unwrap().iter().find(|r| r.phase == AgentPhase::ChildWork).unwrap().agent_run_id);
@@ -550,7 +563,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let run = &view.runs[0];
     let failed = matches!(
         case,
-        "failure" | "c1_failure" | "leased_edit" | "cap" | "hard_cap"
+        "failure" | "c1_failure" | "cap" | "hard_cap" | "budget_calls"
     );
     assert_eq!(
         run.status,
@@ -572,6 +585,25 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     );
     if matches!(case, "cap" | "hard_cap") {
         assert_eq!(run.agents.len(), 9, "total attempts differ from active cap");
+    }
+    if matches!(case, "leased_edit" | "defer_finish") {
+        assert!(
+            run.agents[0]
+                .provider_calls
+                .iter()
+                .any(|c| c.disposition == ProviderCallDisposition::InvalidResponse)
+        );
+        assert_eq!(
+            run.agents
+                .iter()
+                .skip(1)
+                .filter(|a| a
+                    .assignment
+                    .as_ref()
+                    .is_some_and(|w| w.integration.is_some()))
+                .count(),
+            2
+        );
     }
     if case == "leased_edit" {
         assert!(

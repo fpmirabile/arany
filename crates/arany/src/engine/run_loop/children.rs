@@ -56,6 +56,8 @@ struct ChildQueue {
     tool_allowance: usize,
     primary_step: Option<(Vec<ToolRequest>, ProviderTurn)>,
     primary_pending: bool,
+    deferred_at: Option<usize>,
+    refusal: Option<&'static str>,
     budget_stopped: bool,
 }
 
@@ -84,6 +86,8 @@ impl ChildQueue {
             tool_allowance: 0,
             primary_step: None,
             primary_pending: false,
+            deferred_at: None,
+            refusal: None,
             budget_stopped: false,
         }
     }
@@ -303,16 +307,14 @@ impl RunLoop<'_> {
         if abort_reason.is_none() && self.ledger().active_time_exhausted() {
             abort_reason = Some(AbortReason::Budget);
         }
+        if abort_reason.is_none() && self.worker_stopped()? {
+            abort_reason = Some(AbortReason::Budget);
+        }
         if abort_reason.is_none() && !pending.is_empty() {
             abort_reason = Some(AbortReason::Failed);
         }
         if let Some(reason) = abort_reason {
-            if self
-                .controls
-                .tools
-                .and_then(|r| r.worker_policy())
-                .is_some()
-            {
+            if children.iter().any(|c| c.editor) {
                 self.observe_worker_stop().await?;
             }
             for index in pending {
@@ -322,7 +324,7 @@ impl RunLoop<'_> {
                             &mut children[index],
                             None,
                             deadline,
-                            matches!(reason, AbortReason::Failed | AbortReason::Cancelled),
+                            !matches!(reason, AbortReason::Budget),
                         )
                         .await?;
                     self.settle_worker_handover(root_request, &children[index], completed)
@@ -368,6 +370,18 @@ impl RunLoop<'_> {
             self.verify_workers().await?;
         }
         self.begin_synthesis(root_request).await
+    }
+
+    fn settled_agents(&self) -> Result<usize, EngineError> {
+        self.ledger().view(|v| {
+            v.runs.last().map_or(0, |r| {
+                r.agents
+                    .iter()
+                    .skip(1)
+                    .filter(|a| a.status != crate::session::AgentStatus::Active)
+                    .count()
+            })
+        })
     }
 
     async fn spawn_researchers(
@@ -670,22 +684,36 @@ impl RunLoop<'_> {
                             }
                             let request = self.begin_tool_step(requests).await?;
                             let continues = if let Some(request) = request {
-                                Box::pin(self.execute_step(
+                                match Box::pin(self.execute_step(
                                     Grant::Primary {
                                         request: root_request,
-                                        review_allowed: true,
+                                        review_allowed: false,
                                     },
                                     request,
                                     turn,
                                 ))
-                                .await?
+                                .await
+                                {
+                                    Ok(continues) => continues,
+                                    Err(
+                                        EngineError::GoalBudgetExhausted
+                                        | EngineError::Tool(crate::tools::ToolError::Limit),
+                                    ) => {
+                                        queue.budget_stopped = true;
+                                        self.observe_worker_stop().await?;
+                                        true
+                                    }
+                                    Err(error) => return Err(error),
+                                }
                             } else {
                                 false
                             };
                             if !continues {
                                 abort_reason = Some(AbortReason::Failed);
                             }
-                            self.verify_workers().await?;
+                            if !queue.budget_stopped {
+                                self.verify_workers().await?;
+                            }
                             *segments = match self.reserve_active_segment(
                                 deadline.saturating_duration_since(Instant::now()),
                             ) {
@@ -698,6 +726,24 @@ impl RunLoop<'_> {
                             };
                             queue.primary_pending = false;
                         }
+                    }
+                    CallResult::Response(ProviderResponse { outcome, .. })
+                        if self.ledger().tokens_within_limit()
+                            && !self.controls.cancellation.is_cancelled() =>
+                    {
+                        queue.refusal = Some(match outcome {
+                            ProviderOutcome::Finish(_) => {
+                                "Finish deferred: workers are still active; answer again after they settle."
+                            }
+                            ProviderOutcome::Delegate(_) => {
+                                "Delegate refused: workers are still active."
+                            }
+                            ProviderOutcome::Tools(_) => {
+                                "Tool request refused: it was malformed or edits inside a live worker lease."
+                            }
+                        });
+                        queue.deferred_at = Some(self.settled_agents()?);
+                        queue.primary_pending = false;
                     }
                     _ => {
                         abort_reason = Some(if self.controls.cancellation.is_cancelled() {
@@ -1224,6 +1270,7 @@ impl RunLoop<'_> {
             && self.ledger().can_start_provider_call()
             && self.ledger().remaining_calls() != Some(0)
             && !queue.budget_stopped
+            && !self.worker_stopped()?
         {
             if queue.pending.is_empty()
                 && self
@@ -1329,7 +1376,7 @@ impl RunLoop<'_> {
             Some(format!(
                 "{}\n\nUntrusted worker assignment: {}",
                 guidance.as_deref().unwrap_or_default(),
-                serde_json::to_string(&self.proposed_editor(Some(child.agent_run_id))?)
+                serde_json::to_string(&self.proposed_editor(child.agent_run_id)?)
                     .map_err(|_| EngineError::InvalidRequest)?
             ))
         } else {
@@ -1425,35 +1472,27 @@ impl RunLoop<'_> {
         root_request: &mut ProviderRequest,
         deadline: Instant,
     ) -> Result<bool, EngineError> {
+        if queue
+            .deferred_at
+            .is_some_and(|at| self.settled_agents().is_ok_and(|n| n > at))
+        {
+            queue.deferred_at = None;
+        }
         if !queue.primary_pending
+            && queue.deferred_at.is_none()
+            && !queue.budget_stopped
             && self.controls.tools.is_some()
-            && queue.unspawned.iter().all(|a| {
-                a.editor
-                    .as_ref()
-                    .is_some_and(|e| e.mode == crate::worker::WorkerMode::Background)
-            })
-            && self.ledger().view(|v| {
-                v.runs.last().is_some_and(|r| {
-                    r.agents.len() > 1
-                        && r.agents.iter().skip(1).all(|a| {
-                            a.assignment.as_ref().map_or(
-                                a.status == crate::session::AgentStatus::Finished,
-                                |w| {
-                                    a.status != crate::session::AgentStatus::Active
-                                        && w.released.is_some()
-                                        || w.pins.request.mode
-                                            == crate::worker::WorkerMode::Background
-                                },
-                            )
-                        })
-                        && r.agents.iter().any(|a| {
-                            a.status == crate::session::AgentStatus::Active
-                                && a.assignment.is_some()
-                        })
-                })
-            })?
+            && self.coordination_ready()?
         {
             self.refresh_team_context(root_request)?;
+            if let (Some(note), Some(tools)) =
+                (queue.refusal.take(), root_request.input.tools.as_mut())
+            {
+                let mut catalog: serde_json::Value = serde_json::from_str(&tools.catalog)
+                    .map_err(|_| EngineError::InvalidRequest)?;
+                catalog["last_answer_refused"] = serde_json::json!(note);
+                tools.catalog = catalog.to_string();
+            }
             root_request.phase = AgentPhase::RootSynthesis;
             let mut request = root_request.clone();
             self.routing.bind(
@@ -1502,7 +1541,7 @@ impl RunLoop<'_> {
             && child.tool_calls_remaining > 0 && child.turns_remaining > 0
             && request.call.valid()
             && (if child.editor {
-                self.proposed_editor(Some(child.agent_run_id))
+                self.proposed_editor(child.agent_run_id)
                     .and_then(|a| self.editor_grant(&a))
                     .is_ok_and(|g| g.allows(&request.call))
             } else {

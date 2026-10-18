@@ -42,7 +42,9 @@ pub(crate) use reducer::worker_tests::completed_fixture as worker_protocol_fixtu
 pub use reducer::{
     AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,
 };
-pub(crate) use reducer::{ForkInheritance, evidence_admitted, verification_passed};
+pub(crate) use reducer::{
+    ForkInheritance, coordination_ready, evidence_admitted, verification_passed, wave_settled,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionListItem {

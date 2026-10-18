@@ -29,6 +29,8 @@ async fn worker_teams_completion_failure_caps_leases_background_waves_and_cancel
         "tokens",
         "leased_edit",
         "background",
+        "defer_finish",
+        "budget_calls",
         "command",
         "waves",
         "reassign",

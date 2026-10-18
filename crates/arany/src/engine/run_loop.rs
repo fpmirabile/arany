@@ -112,6 +112,8 @@ pub(super) struct RunLoop<'a> {
     ledger: &'a GoalLedger,
     hints: Option<&'a HintPublisher>,
     worker_data_bytes: std::sync::Mutex<std::collections::HashMap<AgentRunId, u32>>,
+    worker_requests:
+        std::sync::Mutex<std::collections::HashMap<AgentRunId, crate::worker::EditorAssignment>>,
     worker: tokio::sync::Mutex<std::collections::HashMap<AgentRunId, crate::tools::worker::View>>,
     handover: std::sync::Mutex<std::collections::HashMap<AgentRunId, std::sync::Arc<[u8]>>>,
     definitions: std::sync::OnceLock<
@@ -153,6 +155,7 @@ impl<'a> RunLoop<'a> {
                 publisher: hints,
             },
             worker_data_bytes: Default::default(),
+            worker_requests: Default::default(),
             worker: Default::default(),
             handover: Default::default(),
             definitions: std::sync::OnceLock::new(),

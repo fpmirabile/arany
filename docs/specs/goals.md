@@ -48,7 +48,7 @@ After integration and lease release, the primary obtains fresh Workspace Tool ev
 
 Call, token, active-time or journal-headroom exhaustion prevents the next dependent action and settles already acknowledged facts. Pause/cancellation discard unpublished private work and preserve published effects; a positively contained private unknown is a local worker disposition, while an unknown Workspace publication remains a fatal continuation/recovery block. Reports retain private loss, conflict and unresolved verification before optional positive evidence. No worker private state is resurrected by replay or explicit Goal resume; existing recovery restrictions remain in force.
 
-Evidence owners: the [Engine Goal corpus](../../crates/arany/tests/engine_run/goals.rs), [native foreground journey](../../crates/arany-cli/tests/guard_runs/worker.rs), [worker replay corpus](../../crates/arany/src/session/reducer/worker_tests.rs) the [gated team scenarios](../../crates/arany/tests/engine_run/worker_teams.rs) and shared `assert_action_bounds`.
+Evidence owners: the [Engine Goal corpus](../../crates/arany/tests/engine_run/goals.rs), [native foreground journey](../../crates/arany-cli/tests/guard_runs/worker.rs), [worker replay corpus](../../crates/arany/src/session/reducer/worker_tests.rs), the [gated team scenarios](../../crates/arany/tests/engine_run/worker_teams.rs) and shared `assert_action_bounds`.
 
 ## Autonomous Goals
 

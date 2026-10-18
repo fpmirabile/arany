@@ -231,7 +231,7 @@ fn valid_delta(
     Ok(changes.to_vec())
 }
 
-pub(super) fn coordination_ready(run: &RunView) -> bool {
+pub(crate) fn coordination_ready(run: &RunView) -> bool {
     let admitted = run.agents.len().saturating_sub(1)
         + run.tools.iter().filter(|t| refused_capture(run, t)).count();
     run.primary().into_iter().flat_map(|a| &a.provider_calls).filter_map(|r| r.delegation.as_ref()).flatten().skip(admitted).all(|p| matches!(p, ChildAssignment::Editor { assignment } if assignment.mode == WorkerMode::Background))
@@ -245,7 +245,7 @@ pub(super) fn coordination_ready(run: &RunView) -> bool {
     })
 }
 
-pub(super) fn wave_settled(run: &RunView) -> bool {
+pub(crate) fn wave_settled(run: &RunView) -> bool {
     let proposed: usize = run
         .primary()
         .into_iter()
