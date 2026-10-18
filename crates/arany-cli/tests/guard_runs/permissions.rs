@@ -2534,7 +2534,10 @@ async fn hook_post_tool_use_denies_a_researcher_tool_before_dispatch() {
             vec![
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
-                    children: vec!["Inspect facts".into()],
+                    children: vec![arany::ChildAssignment {
+                        objective: "Inspect facts".into(),
+                        profile: None,
+                    }],
                 }),
                 tool_outcome(call("read"), None),
                 finish("report"),
