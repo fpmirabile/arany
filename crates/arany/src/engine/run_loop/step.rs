@@ -360,10 +360,7 @@ impl RunLoop<'_> {
                     return Ok(Err(SizingRefusal::DelegationDeadline));
                 };
                 if child.editor {
-                    intent.target = self.worker_target(child.agent_run_id)?;
-                    intent.limits.cache_requested_bytes = 0;
-                    intent.limits.cache_bytes = 0;
-                    intent.limits.cache_candidate_bytes = 0;
+                    self.shape_worker_intent(&mut intent, child.agent_run_id)?;
                     let remaining = deadline
                         .saturating_duration_since(Instant::now())
                         .saturating_sub(
@@ -429,10 +426,7 @@ impl RunLoop<'_> {
         };
         let mut intent = runtime.intent(self.run_id, child.agent_run_id, call);
         if child.editor {
-            intent.target = self.worker_target(child.agent_run_id)?;
-            intent.limits.cache_requested_bytes = 0;
-            intent.limits.cache_bytes = 0;
-            intent.limits.cache_candidate_bytes = 0;
+            self.shape_worker_intent(&mut intent, child.agent_run_id)?;
         }
         let permission = self
             .permission(grant, runtime, &intent.call)

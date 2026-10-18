@@ -203,6 +203,18 @@ impl RunLoop<'_> {
             .ok_or(EngineError::CoordinatorFailed)
     }
 
+    pub(super) fn shape_worker_intent(
+        &self,
+        intent: &mut EffectIntent,
+        id: AgentRunId,
+    ) -> Result<(), EngineError> {
+        intent.target = self.worker_target(id)?;
+        intent.limits.cache_requested_bytes = 0;
+        intent.limits.cache_bytes = 0;
+        intent.limits.cache_candidate_bytes = 0;
+        Ok(())
+    }
+
     pub(super) fn worker_call_chunks(
         &self,
         id: AgentRunId,
@@ -871,10 +883,7 @@ impl RunLoop<'_> {
         }
         intent.expires_at_ms =
             crate::tools::now_ms().saturating_add(u64::from(intent.limits.runtime_ms));
-        intent.target = self.worker_target(child.agent_run_id)?;
-        intent.limits.cache_requested_bytes = 0;
-        intent.limits.cache_bytes = 0;
-        intent.limits.cache_candidate_bytes = 0;
+        self.shape_worker_intent(&mut intent, child.agent_run_id)?;
         let observation = self
             .run_intent(
                 &Grant::Researcher { child, deadline },
