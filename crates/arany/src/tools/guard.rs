@@ -1073,7 +1073,14 @@ fn bootstrap_locations(
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), ToolError> {
     *stage = BootstrapStage::Capabilities;
     let root = macos::install(task, stage)?;
-    let workspace = if task.intent.call.is_process() || task.worker.is_some() {
+    let workspace = if task.worker.is_some() {
+        // A fresh HFS+ volume gains root metadata, so the image gets its own owner-only directory.
+        let tree = root.join("workspace/tree");
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+            .create(&tree)
+            .map_err(|_| ToolError::Path)?;
+        tree
+    } else if task.intent.call.is_process() {
         root.join("workspace")
     } else {
         task.workspace.clone()

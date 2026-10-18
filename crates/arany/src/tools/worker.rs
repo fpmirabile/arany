@@ -463,6 +463,7 @@ impl View {
             observation.attestation = None;
             observation.enforcement_cause = None;
             self.stopped = true;
+            self.pending = None;
             return Err(Box::new(observation));
         }
         let checked: Result<Candidate, ToolError> = (|| {
@@ -486,6 +487,7 @@ impl View {
             Ok(candidate) => Ok(candidate),
             Err(_) => {
                 self.stopped = true;
+                self.pending = None;
                 Err(Box::new(super::uncertain_observation(
                     observation.intent,
                     ToolError::Uncertain,
@@ -553,7 +555,7 @@ impl View {
     }
 
     pub(crate) fn dispose(self) -> Result<WorkerCleanupReceipt, ToolError> {
-        if !self.contained {
+        if !self.contained || self.pending.is_some() {
             return Err(ToolError::Uncertain);
         }
         Ok(WorkerCleanupReceipt {
@@ -1370,6 +1372,13 @@ mod tests {
             std::fs::read(dir.path().join("owned/a")).unwrap(),
             b"original"
         );
+    }
+
+    #[test]
+    fn dispose_refuses_a_view_with_a_dropped_pending_dispatch() {
+        let (_dir, _runtime, mut view) = fixture();
+        view.pending = Some(uuid::Uuid::nil());
+        assert!(matches!(view.dispose(), Err(ToolError::Uncertain)));
     }
 
     #[test]
