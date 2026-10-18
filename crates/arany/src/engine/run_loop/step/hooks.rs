@@ -4,9 +4,9 @@ use crate::engine::run_loop::{RunLoop, TOOL_CLEANUP_OVERHEAD};
 use crate::engine::{EngineError, STORE_ACTION_OVERHEAD};
 use crate::session::Event;
 use crate::tools::permissions::{
-    CommandHook, ConfigError, Decision, HOOK_RESULT_BYTES, HookEvent, HookInvocation, HookOutcome,
-    HookResult, MAX_HOOK_FEEDBACK_BYTES, MAX_HOOK_INPUT_BYTES, PermissionConfig, feedback_lines,
-    narrows, peer_name, post_tool_use_input, pre_tool_use_input,
+    CommandHook, ConfigError, Decision, HOOK_RESULT_BYTES, HookEvent, HookIgnoreReason,
+    HookInvocation, HookOutcome, HookResult, MAX_HOOK_FEEDBACK_BYTES, MAX_HOOK_INPUT_BYTES,
+    PermissionConfig, feedback_lines, narrows, peer_name, post_tool_use_input, pre_tool_use_input,
 };
 use crate::tools::types::model_observation;
 use crate::tools::{EffectIntent, ToolCall, ToolDisposition, ToolObservation, ToolRuntime};
@@ -505,16 +505,8 @@ impl RunLoop<'_> {
         if event != HookEvent::PreCompact && continuations >= MAX_STOP_CONTINUATIONS {
             return Ok(None);
         }
-        let existing = self.ledger().view(|view| {
-            view.runs.iter().any(|run| {
-                run.id == self.run_id
-                    && run.lifecycle_hooks.iter().any(|hook| {
-                        hook.invocation.event == event && hook.invocation.subject_digest == digest
-                    })
-            })
-        })?;
-        if existing {
-            return Ok(Some("hook occurrence already attempted".into()));
+        if let Some(reused) = self.recorded_occurrence(event, digest)? {
+            return Ok(reused);
         }
         let plans = config
             .matched_hooks(event, |group| group.matches(subject))
@@ -625,6 +617,43 @@ impl RunLoop<'_> {
             }
         }
         Ok(None)
+    }
+
+    // An occurrence runs once: a retry reuses its journaled outcome and never reruns a hook.
+    fn recorded_occurrence(
+        &self,
+        event: HookEvent,
+        digest: [u8; 32],
+    ) -> Result<Option<Option<String>>, EngineError> {
+        let recorded = self.ledger().view(|view| {
+            view.runs
+                .iter()
+                .find(|run| run.id == self.run_id)
+                .map(|run| {
+                    run.lifecycle_hooks
+                        .iter()
+                        .filter(|hook| {
+                            hook.invocation.event == event
+                                && hook.invocation.subject_digest == digest
+                        })
+                        .map(|hook| hook.outcome.as_ref().map(|outcome| outcome.result.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })?;
+        if recorded.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(recorded.iter().find_map(|result| match result {
+            Some(result @ HookResult::Blocked { .. }) => {
+                Some(crate::tools::permissions::stop_feedback([result]))
+            }
+            Some(HookResult::Ignored {
+                why: HookIgnoreReason::NotCompleted,
+            })
+            | None => Some("hook occurrence already attempted".into()),
+            Some(_) => None,
+        })))
     }
 
     // A SubagentStop shares the delegation's admission with its siblings, so it reserves a researcher's tail.

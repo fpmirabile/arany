@@ -3176,4 +3176,46 @@ mod lifecycle_hooks {
         assert!(view.goals.is_empty());
         store.close().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn a_passed_pre_compact_occurrence_is_reused_not_reported_as_blocked() {
+        let settings = json!({"hooks":{"PreCompact":[{"hooks":[shell_hook("exit 0")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let (result, _, _) = fixture.run(vec![finish("done")], None, false).await;
+        let scripted = ScriptedProvider::new(vec![]);
+        scripted.compact_responses.lock().unwrap().extend([
+            Err(arany::ProviderError::Unavailable),
+            Err(arany::ProviderError::Unavailable),
+        ]);
+        let providers = arany::AdmittedProviders::single(Arc::new(scripted));
+        for _ in 0..2 {
+            let attempt = fixture
+                .engine
+                .compact_session(&providers, result.session_id, fixture.workspace.clone())
+                .await;
+            assert!(
+                !matches!(attempt, Err(arany::EngineError::CompactionBlockedByHook)),
+                "{attempt:?}"
+            );
+        }
+        let (_, view) = fixture.reopen(result.session_id).await;
+        assert_eq!(view.runs[0].lifecycle_hooks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pre_compact_continue_false_skips_compaction() {
+        let settings = json!({"hooks":{"PreCompact":[{"hooks":[shell_hook(
+            r#"printf '{"continue":false,"stopReason":"halt"}'"#
+        )]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let (result, _, _) = fixture.run(vec![finish("done")], None, false).await;
+        let providers = arany::AdmittedProviders::single(Arc::new(ScriptedProvider::new(vec![])));
+        assert!(matches!(
+            fixture
+                .engine
+                .compact_session(&providers, result.session_id, fixture.workspace.clone())
+                .await,
+            Err(arany::EngineError::CompactionBlockedByHook)
+        ));
+    }
 }

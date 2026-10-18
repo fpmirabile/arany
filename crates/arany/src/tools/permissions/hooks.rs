@@ -690,9 +690,18 @@ pub(super) fn parse_lifecycle_output(
     else {
         return HookResult::Passed;
     };
-    // The peer stops instead of continuing, so it never becomes feedback; a Run-wide stop outcome is not built.
-    if event != HookEvent::PreCompact && output.get("continue") == Some(&Value::Bool(false)) {
-        HookResult::Passed
+    // The peer stops instead of continuing: a finishing actor may finish, while compaction is skipped (the narrowing reading). A Run-wide stop outcome is not built.
+    if output.get("continue") == Some(&Value::Bool(false)) {
+        if event == HookEvent::PreCompact {
+            HookResult::Blocked {
+                reason: output
+                    .get("stopReason")
+                    .and_then(Value::as_str)
+                    .and_then(bounded_reason),
+            }
+        } else {
+            HookResult::Passed
+        }
     } else if output.get("decision").and_then(Value::as_str) == Some("block") {
         HookResult::Blocked {
             reason: output
