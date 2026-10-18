@@ -872,7 +872,7 @@ pub(super) async fn execute_inner(
 }
 
 impl Task {
-    fn new(
+    pub(super) fn new(
         runtime: &ToolRuntime,
         intent: &EffectIntent,
         cache: Option<super::BuildCacheTransfer>,

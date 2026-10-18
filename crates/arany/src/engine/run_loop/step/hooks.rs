@@ -201,6 +201,15 @@ impl RunLoop<'_> {
         let input_digest = crate::tools::types::digest(input.as_bytes());
         let subject_digest = intent.digest();
         let runtime = runtime.with_hook_stdin(&input);
+        // The complete Guard task must encode before any hook starts; a rejected task would strand it.
+        for plan in &plans {
+            let mut probe = runtime.intent(self.run_id, intent.agent_run_id, plan.call.clone());
+            probe.limits.runtime_ms = u32::MAX;
+            probe.expires_at_ms = u64::MAX;
+            if !runtime.hook_task_fits(&probe) {
+                return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
+            }
+        }
         let mut fold = HookFold::none();
         for plan in plans {
             let fixed_ms = duration_ms(

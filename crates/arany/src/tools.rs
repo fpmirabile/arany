@@ -188,6 +188,10 @@ impl ToolRuntime {
         runtime
     }
 
+    pub(crate) fn hook_task_fits(&self, intent: &EffectIntent) -> bool {
+        guard::task_fits(self, intent)
+    }
+
     pub(crate) async fn begin_active_action(
         &self,
         admitted_at: tokio::time::Instant,

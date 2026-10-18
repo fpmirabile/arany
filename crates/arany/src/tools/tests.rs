@@ -2501,3 +2501,25 @@ async fn in_process_reads_are_refused_before_dispatch_when_every_slot_is_held() 
     assert!(!refused.stops_run());
     assert!(!refused.output.contains("fn main"));
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn hook_task_fit_check_matches_the_encoded_task_ceiling() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = in_process_runtime(
+        temp.path(),
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let intent = runtime.intent(
+        crate::session::RunId::new(),
+        crate::session::AgentRunId::new(),
+        ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "true".into()],
+            cwd: String::new(),
+        },
+    );
+    assert!(runtime.with_hook_stdin("{}").hook_task_fits(&intent));
+    let padded = "x".repeat(super::guard::TASK_BYTES_CAP);
+    assert!(!runtime.with_hook_stdin(&padded).hook_task_fits(&intent));
+}

@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 const CAPTURE_BYTES: usize = 48 * 1024;
-const TASK_BYTES_CAP: usize = 96 * 1024;
+pub(super) const TASK_BYTES_CAP: usize = 96 * 1024;
 pub(super) const RUNTIME_ROOT: &str = "/usr";
 // Loaded CI hosts stall teardown for seconds; one shared bound only widens the wait for termination evidence.
 pub(super) const TEARDOWN_WAIT: Duration = Duration::from_secs(10);
@@ -525,6 +525,32 @@ fn attest_runtime_mounts(
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     return Err(ToolError::ProtectionUnavailable);
     Ok(())
+}
+
+// Whether the complete Guard task of this intent encodes within the task ceiling.
+pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        profile::Namespaces::read().is_ok_and(|parent_namespaces| {
+            encode_task(&Task {
+                config: runtime.config.clone(),
+                intent: intent.clone(),
+                cache: None,
+                hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
+                parent_namespaces,
+            })
+            .is_ok()
+        })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        encode_task(&Task::new(runtime, intent, None)).is_ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (runtime, intent);
+        false
+    }
 }
 
 pub(super) async fn execute(
