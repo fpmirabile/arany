@@ -72,7 +72,7 @@ impl FaultPlan {
         plan().push(Fault::CommitMarker(identity.token()));
     }
 
-    pub(crate) fn lose_worker_receipt(intent: uuid::Uuid) {
+    pub fn lose_guard_receipt(intent: uuid::Uuid) {
         plan().push(Fault::WorkerReceipt(intent));
     }
 

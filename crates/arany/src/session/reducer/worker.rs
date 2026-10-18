@@ -710,6 +710,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                     .is_some_and(|o| o.disposition != ToolDisposition::Succeeded)
             })
             || !reviewing
+                && !matches!(event, Event::ProviderCallRecorded { .. })
                 && a.provider_calls
                     .iter()
                     .filter(|r| r.phase == AgentPhase::ChildWork)
@@ -1267,6 +1268,11 @@ pub(super) fn apply(
                 }
                 ToolDisposition::Conflict => WorkerIntegrationOutcome::Conflict,
                 ToolDisposition::Denied => WorkerIntegrationOutcome::Denied,
+                ToolDisposition::Failed | ToolDisposition::Limit | ToolDisposition::Cancelled
+                    if o.attestation.is_none() =>
+                {
+                    WorkerIntegrationOutcome::Denied
+                }
                 ToolDisposition::Uncertain => WorkerIntegrationOutcome::Uncertain,
                 _ => return Err(ReplayError::InvalidTransition),
             };

@@ -323,14 +323,18 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             }
             let run = active_run(current, *run_id)?;
             let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
-            let valid_profile = match &config.roster {
-                Some(roster) => match role {
-                    AgentRole::Primary => profile.as_ref() == Some(&roster.providers.primary),
-                    AgentRole::Child => profile
-                        .as_ref()
-                        .is_some_and(|name| roster.child_profiles.contains(name)),
-                },
-                None => profile.is_none(),
+            let valid_profile = if assignment.is_some() {
+                profile.is_none()
+            } else {
+                match &config.roster {
+                    Some(roster) => match role {
+                        AgentRole::Primary => profile.as_ref() == Some(&roster.providers.primary),
+                        AgentRole::Child => profile
+                            .as_ref()
+                            .is_some_and(|name| roster.child_profiles.contains(name)),
+                    },
+                    None => profile.is_none(),
+                }
             };
             if !valid_profile {
                 return Err(ReplayError::InvalidTransition);

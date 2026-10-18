@@ -36,10 +36,12 @@ fn team_two_core_latency_on_named_host() {
                     agent: None,
                     children: vec![
                         arany::ChildAssignment {
+                            editor: None,
                             objective: "A".into(),
                             profile: None,
                         },
                         arany::ChildAssignment {
+                            editor: None,
                             objective: "B".into(),
                             profile: None,
                         },

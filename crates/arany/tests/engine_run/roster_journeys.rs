@@ -30,6 +30,7 @@ fn delegate(children: &[(&str, Option<&str>)]) -> ProviderOutcome {
         children: children
             .iter()
             .map(|(objective, profile)| arany::ChildAssignment {
+                editor: None,
                 objective: (*objective).into(),
                 profile: profile.map(Into::into),
             })

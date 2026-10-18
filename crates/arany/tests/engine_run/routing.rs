@@ -15,6 +15,7 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
                     children: vec![arany::ChildAssignment {
+                        editor: None,
                         objective: "Inspect".into(),
                         profile: None,
                     }],
@@ -190,10 +191,12 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
                 agent: None,
                 children: vec![
                     arany::ChildAssignment {
+                        editor: None,
                         objective: "Inspect".into(),
                         profile: None,
                     },
                     arany::ChildAssignment {
+                        editor: None,
                         objective: "Compare".into(),
                         profile: None,
                     },
@@ -822,14 +825,17 @@ async fn assignment_profiles_keep_shared_first_routes_distinct_and_finish_in_ass
                 agent: None,
                 children: vec![
                     arany::ChildAssignment {
+                        editor: None,
                         objective: "A".into(),
                         profile: None,
                     },
                     arany::ChildAssignment {
+                        editor: None,
                         objective: "B".into(),
                         profile: Some("spare".into()),
                     },
                     arany::ChildAssignment {
+                        editor: None,
                         objective: "C".into(),
                         profile: Some("spare".into()),
                     },
@@ -1050,22 +1056,27 @@ async fn invalid_last_assignment_rejects_the_whole_plan_without_spawns_or_repair
     for named in [false, true] {
         for bad in [
             arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect".into(),
                 profile: Some("unknown".into()),
             },
             arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect".into(),
                 profile: Some("review".into()),
             },
             arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect".into(),
                 profile: Some("../escape".into()),
             },
             arany::ChildAssignment {
+                editor: None,
                 objective: " ".into(),
                 profile: None,
             },
             arany::ChildAssignment {
+                editor: None,
                 objective: "x".repeat(2049),
                 profile: None,
             },
@@ -1079,6 +1090,7 @@ async fn invalid_last_assignment_rejects_the_whole_plan_without_spawns_or_repair
                     agent: None,
                     children: vec![
                         arany::ChildAssignment {
+                            editor: None,
                             objective: "Valid first".into(),
                             profile: None,
                         },
@@ -1193,6 +1205,7 @@ async fn child_preview_follows_the_assigned_chain_not_the_default_child_chain() 
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
                     children: vec![arany::ChildAssignment {
+                        editor: None,
                         objective: "Inspect".into(),
                         profile: Some("spare".into()),
                     }],
@@ -1240,10 +1253,12 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
             agent: None,
             children: vec![
                 arany::ChildAssignment {
+                    editor: None,
                     objective: "A".into(),
                     profile: None,
                 },
                 arany::ChildAssignment {
+                    editor: None,
                     objective: "B".into(),
                     profile: Some("spare".into()),
                 },

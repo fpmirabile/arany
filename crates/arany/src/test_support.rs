@@ -450,7 +450,7 @@ pub async fn exercise_private_guard_target(
     lost_intent.limits.cache_requested_bytes = 0;
     lost_intent.limits.cache_bytes = 0;
     lost_intent.limits.cache_candidate_bytes = 0;
-    crate::fault::FaultPlan::lose_worker_receipt(lost_intent.id);
+    crate::fault::FaultPlan::lose_guard_receipt(lost_intent.id);
     let unknown = lost
         .edit(&runtime, lost_intent.clone(), Cancellation::new())
         .await

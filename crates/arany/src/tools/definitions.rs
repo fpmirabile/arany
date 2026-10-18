@@ -315,7 +315,7 @@ impl AgentDefinition {
     }
 
     pub(crate) fn decision(&self, call: &ToolCall) -> Decision {
-        if self.allows(call) {
+        if self.allows(call) || self.editor() && self.allows_worker(call) {
             Decision::Allow
         } else {
             Decision::Deny

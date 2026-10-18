@@ -44,6 +44,9 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
 fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
     let prompt = match request.input.role {
         PromptRole::Primary => prompts::PRIMARY_INSTRUCTIONS,
+        PromptRole::Editor => {
+            "Edit only the assigned private files using the offered Tools. Finish with a bounded report. Your changes remain private until the primary integrates and verifies them. Never delegate or request commands."
+        }
         PromptRole::Researcher => prompts::RESEARCH_INSTRUCTIONS,
         PromptRole::ReadOnly => prompts::READ_ONLY_INSTRUCTIONS,
         PromptRole::ToolReview => prompts::TOOL_REVIEW_INSTRUCTIONS,

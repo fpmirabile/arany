@@ -230,6 +230,7 @@ done
             let mut outcomes = vec![ProviderOutcome::Delegate(arany::Delegate {
                 agent: None,
                 children: vec![arany::ChildAssignment {
+                    editor: None,
                     objective: "Inspect native facts".into(),
                     profile: None,
                 }],

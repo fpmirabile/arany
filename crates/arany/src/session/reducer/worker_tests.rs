@@ -313,9 +313,11 @@ impl Fixture {
         let outcome = match disposition {
             ToolDisposition::Succeeded => WorkerIntegrationOutcome::Integrated,
             ToolDisposition::Conflict => WorkerIntegrationOutcome::Conflict,
-            ToolDisposition::Denied => WorkerIntegrationOutcome::Denied,
+            ToolDisposition::Denied
+            | ToolDisposition::Failed
+            | ToolDisposition::Limit
+            | ToolDisposition::Cancelled => WorkerIntegrationOutcome::Denied,
             ToolDisposition::Uncertain => WorkerIntegrationOutcome::Uncertain,
-            _ => unreachable!(),
         };
         self.push(Event::WorkerIntegrationRecorded {
             run_id: self.run,
@@ -1774,6 +1776,9 @@ fn worker_protocol_no_change_conflict_and_denial_settle_without_publication() {
     for (disposition, reason) in [
         (ToolDisposition::Conflict, WorkerSettlementReason::Conflict),
         (ToolDisposition::Denied, WorkerSettlementReason::Denied),
+        (ToolDisposition::Failed, WorkerSettlementReason::Denied),
+        (ToolDisposition::Limit, WorkerSettlementReason::Denied),
+        (ToolDisposition::Cancelled, WorkerSettlementReason::Denied),
     ] {
         let mut f = fixture();
         f.mutation();
