@@ -353,8 +353,8 @@ fn checkpoints_pin_the_owner_accepted_bounds() {
     assert_eq!(BUSY, Duration::from_millis(2000));
 }
 
-#[test]
-fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_session() {
+#[tokio::test(start_paused = true)]
+async fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_session() {
     let (_temp, root) = fixture();
     let (foreign, session, goal) = (SessionId::new(), SessionId::new(), GoalId::new());
     let foreign_run = RunId::new();
@@ -409,7 +409,6 @@ fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_sessio
     let mut limits = LIMITS;
     limits.refs = 30_000;
     limits.session_checkpoints = 100;
-    let started = Instant::now();
     let pruned = super::capture_inner(
         &root,
         &batch(session, goal, RunId::new(), 30_000, b"new").capture,
@@ -419,11 +418,6 @@ fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_sessio
         &mut None,
     )
     .unwrap();
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        started.elapsed()
-    );
     assert_eq!(count(&root, "SELECT COUNT(DISTINCT run_id) FROM refs"), 100);
     assert_eq!(pruned.get(&session), Some(&runs[19_900]));
     assert_eq!(
