@@ -934,19 +934,9 @@ struct MountedRuntimeImage(Option<std::path::PathBuf>);
 
 impl Drop for MountedRuntimeImage {
     fn drop(&mut self) {
-        use crate::process::BoundedOutput;
-
-        let Some(mountpoint) = self.0.take() else {
-            return;
-        };
-        let _ = std::process::Command::new("/usr/bin/hdiutil")
-            .args(["detach", "-force", "-quiet"])
-            .arg(mountpoint)
-            .env_clear()
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .bounded_output_for(Duration::from_secs(20), 4096);
+        if let Some(image) = self.0.take() {
+            let _ = crate::process::detach_disk_image(&image, Duration::from_secs(30));
+        }
     }
 }
 
@@ -1029,7 +1019,7 @@ async fn native_runtime_mount_journey_helper() {
         .bounded_output_for(Duration::from_secs(30), 4096)
         .unwrap();
     assert!(attached.status.success(), "hdiutil attach: {attached:?}");
-    let mut mounted = MountedRuntimeImage(Some(mountpoint.clone()));
+    let mut mounted = MountedRuntimeImage(Some(image.clone()));
 
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
@@ -1152,19 +1142,13 @@ async fn native_runtime_mount_journey_helper() {
     assert_eq!(replay.runs.len(), 1);
     assert_eq!(replay.runs[0], refused.run, "closed runtime refusal replay");
     assert_eq!(replay.runs[0].status, RunStatus::Failed);
-    // One best-effort forced cleanup runs after diagnostics are captured; it is not a retry of the test.
-    let mountpoint = mounted.0.as_ref().expect("mounted runtime fixture");
-    let detached = std::process::Command::new("/usr/bin/hdiutil")
-        .args(["detach", "-force", "-quiet"])
-        .arg(mountpoint)
-        .env_clear()
-        .current_dir(root)
-        .bounded_output_for(Duration::from_secs(20), 4096)
-        .unwrap();
+    // Fixture cleanup after the product assertions; its bounded retry is not a retry of the test.
+    let fixture_image = mounted.0.as_ref().expect("mounted runtime fixture");
+    let detached = crate::process::detach_disk_image(fixture_image, Duration::from_secs(30));
     assert!(
-        detached.status.success(),
+        detached.is_ok(),
         "hdiutil detach: {detached:?}; mount and backing image references (current-user visibility only): {}",
-        runtime_mount_diagnostics(root, mountpoint, &image)
+        runtime_mount_diagnostics(root, &mountpoint, &image)
     );
     let _ = mounted.0.take();
     drop(mounted);
@@ -1801,7 +1785,8 @@ int main(void) {
                 action.decide(false);
             }
         };
-        let mut progress = arany::RunProgress::new();
+        let mut events = engine.subscribe();
+        let mut hints = arany::RunHints::new();
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(Duration::from_secs(30), async {
             tokio::join!(
@@ -1822,7 +1807,7 @@ int main(void) {
                         tools: ToolGrant::Configured,
                         approvals: granted,
                         cancellation,
-                        progress: Some(progress.clone()),
+                        hints: Some(hints.clone()),
                         ..Default::default()
                     }
                 ),
@@ -1833,22 +1818,22 @@ int main(void) {
         let (outcome, ()) = match result {
             Ok(outcome) => outcome,
             Err(_) => {
-                let update = tokio::time::timeout(Duration::from_millis(10), progress.changed())
+                let event = tokio::time::timeout(Duration::from_millis(10), events.next())
                     .await
                     .ok();
                 let waiting =
-                    tokio::time::timeout(Duration::from_millis(10), progress.waiting_changed())
+                    tokio::time::timeout(Duration::from_millis(10), hints.waiting_changed())
                         .await
                         .ok()
                         .flatten();
                 panic!(
                     "bounded stopped native command {case}: elapsed_ms={}, progress={:?}, queued={}, trace={}",
                     started.elapsed().as_millis(),
-                    update.map(|update| (
-                        update.sequence,
-                        update.run.status,
-                        update.run.tools.len()
-                    )),
+                    event.flatten().map(|event| match event {
+                        arany::Tapped::Committed(event) =>
+                            format!("{}:{}", event.sequence, event.event.kind()),
+                        arany::Tapped::Resync { missed } => format!("missed:{missed}"),
+                    }),
                     waiting.is_some(),
                     trace_snapshot(root)
                 );

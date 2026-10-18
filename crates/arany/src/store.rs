@@ -477,7 +477,7 @@ impl Store {
             .await
     }
 
-    pub(crate) async fn load_open_view(
+    pub async fn load_open_view(
         &self,
         session_id: SessionId,
     ) -> Result<Option<SessionView>, StoreError> {

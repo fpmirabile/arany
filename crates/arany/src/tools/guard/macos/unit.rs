@@ -1910,14 +1910,7 @@ done
 
         impl Drop for MountedImage {
             fn drop(&mut self) {
-                let _ = std::process::Command::new("/usr/bin/hdiutil")
-                    .args(["detach", "-force", "-quiet"])
-                    .arg(&self.0)
-                    .env_clear()
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .bounded_output_for(Duration::from_secs(20), 4096);
+                let _ = crate::test_process::detach_disk_image(&self.0, Duration::from_secs(30));
             }
         }
 
@@ -1963,7 +1956,7 @@ done
             .bounded_output_for(Duration::from_secs(30), 4096)
             .unwrap();
         assert!(attached.status.success(), "hdiutil attach: {attached:?}");
-        let _mounted = MountedImage(mountpoint.clone());
+        let _mounted = MountedImage(image.clone());
 
         let metadata = std::fs::metadata(&runtime).unwrap();
         let grant = RuntimeGrant {

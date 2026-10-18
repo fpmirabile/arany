@@ -4,7 +4,7 @@ use arany::{
     CollaborationPolicy, CompactionFailure, CompactionItem, CompactionRequest, CompactionResponse,
     CompactionStatus, ContextUsage, Delegate, Effort, Engine, EngineConfig, EngineError, Event,
     Finish, OutputTokenBound, Provider, ProviderCallDisposition, ProviderError, ProviderOutcome,
-    ProviderRequest, ProviderResponse, RunCancellation, RunControls, RunHandle, RunId, RunProgress,
+    ProviderRequest, ProviderResponse, RunCancellation, RunControls, RunHandle, RunHints, RunId,
     RunRequest, RunResult, RunStatus, RunSteering, SessionId, SessionView, StateRoot, Store,
     ToolGrant, UnansweredStatus, rename_session,
 };
@@ -39,6 +39,13 @@ mod permissions;
 pub use arany::test_support::process;
 
 use arany::test_support::engine as engine_support;
+
+async fn next_committed(events: &mut arany::Subscription, what: &str) -> Arc<arany::EventEnvelope> {
+    match tokio::time::timeout(Duration::from_secs(5), events.next()).await {
+        Ok(Some(arany::Tapped::Committed(event))) => event,
+        _ => panic!("{what}"),
+    }
+}
 use engine_support::{run_to_end, run_with};
 
 #[test]
@@ -1173,7 +1180,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             });
             let controls = RunControls {
                 tools: if tools { ToolGrant::Configured } else { ToolGrant::None },
-                progress: previews.then(RunProgress::with_previews),
+                hints: previews.then(RunHints::with_previews),
                 ..Default::default()
             };
             let result = run_with(&engine, &provider, next, controls).await;
@@ -3468,7 +3475,7 @@ async fn provisional_text_is_reconciled_before_an_answer_can_commit() {
             objective,
             RunControls {
                 cancellation: RunCancellation::new(),
-                progress: Some(RunProgress::with_previews()),
+                hints: Some(RunHints::with_previews()),
                 ..Default::default()
             },
         )
@@ -3545,8 +3552,8 @@ fn preview_checkpoint_survives_abrupt_process_death() {
             .unwrap();
             let mut objective = request(&root.join("workspace"), "interrupted question");
             objective.include_paths.clear();
-            let mut progress = RunProgress::with_previews();
-            let observed = progress.clone();
+            let mut events = engine.subscribe();
+            let observed = RunHints::with_previews();
             let observer =
                 Store::open_read_only(StateRoot::open_existing(&root.join("state")).unwrap())
                     .unwrap();
@@ -3557,17 +3564,17 @@ fn preview_checkpoint_survives_abrupt_process_death() {
                     objective,
                     RunControls {
                         cancellation: RunCancellation::new(),
-                        progress: Some(observed),
+                        hints: Some(observed),
                         ..Default::default()
                     },
                 )
                 .await
             });
             loop {
-                let update = progress.changed().await;
-                if !update.run.display.is_empty() {
+                let event = next_committed(&mut events, "committed checkpoint").await;
+                if matches!(event.event, Event::AssistantDisplayRecorded { .. }) {
                     let id = observer
-                        .session_for_run(update.run.id)
+                        .session_for_run(event.run_id.unwrap())
                         .await
                         .unwrap()
                         .unwrap();
@@ -3719,7 +3726,7 @@ async fn display_limits_preserve_a_maximal_answer_and_record_omitted_commentary(
         objective,
         RunControls {
             cancellation: RunCancellation::new(),
-            progress: Some(RunProgress::with_previews()),
+            hints: Some(RunHints::with_previews()),
             ..Default::default()
         },
     )
@@ -4455,10 +4462,9 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
         .expect("engine");
         let cancellation = RunCancellation::new();
         let run_cancellation = cancellation.clone();
-        let mut progress = RunProgress::new();
-        let run_progress = progress.clone();
+        let mut events = engine.subscribe();
         let mut run_task = tokio::spawn(async move {
-            let outcome = run_with(&engine, &provider, request(&workspace, "Question"), RunControls { cancellation: run_cancellation, progress: Some(run_progress), ..Default::default() })
+            let outcome = run_with(&engine, &provider, request(&workspace, "Question"), RunControls { cancellation: run_cancellation, ..Default::default() })
                 .await;
             let close = engine.close().await;
             (outcome, close)
@@ -4470,10 +4476,10 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
             panic!("direct Provider call did not start within the test deadline");
         }
         assert_eq!(started.expect("started signal"), Some(()));
-        let active = progress.changed().await;
-        assert_eq!(active.run.status, RunStatus::Active);
-        assert_eq!(active.run.agents.len(), 1);
-        assert!(active.run.assistant_message.is_none());
+        loop {
+            let event = next_committed(&mut events, "committed active Run").await;
+            if matches!(event.event, Event::AgentSpawned { .. }) { break; }
+        }
         assert!(cancellation.cancel());
         assert!(!cancellation.cancel());
         let joined = tokio::time::timeout(Duration::from_secs(5), &mut run_task).await;
@@ -4514,8 +4520,13 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
         assert_eq!(outcome.run.agents[0].provider_calls[0].response_id, None);
         assert_eq!(outcome.run.agents[0].provider_calls[0].input_tokens, None);
         assert_eq!(outcome.run.agents[0].provider_calls[0].output_tokens, None);
-        let terminal = progress.changed().await;
-        assert_eq!(terminal.run, outcome.run);
+        loop {
+            let event = next_committed(&mut events, "committed cancellation").await;
+            if matches!(event.event, Event::RunFinished { .. }) {
+                assert_eq!(Some(event.sequence), outcome.run.finished_sequence);
+                break;
+            }
+        }
 
         let store = Store::open(StateRoot::admit(&state_path).expect("state readmission"))
             .expect("reopened store");
@@ -4580,10 +4591,10 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     let provider = Arc::new(provider);
                     let engine = engine_support::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
                     .expect("Engine");
-                    let mut progress = RunProgress::new();
+                    let mut tapped = engine.subscribe();
                     let outcome = tokio::time::timeout(
                         Duration::from_secs(5),
-                        run_with(&engine, &provider, run_request, RunControls { cancellation, progress: Some(progress.clone()), ..Default::default() }),
+                        run_with(&engine, &provider, run_request, RunControls { cancellation, ..Default::default() }),
                     )
                     .await
                     .unwrap_or_else(|_| {
@@ -4648,10 +4659,10 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         expected_phases,
                         "no retry or extra call"
                     );
-                    let terminal = tokio::time::timeout(Duration::from_secs(5), progress.changed())
-                        .await
-                        .expect("terminal progress deadline");
-                    assert_eq!(terminal.run, outcome.run);
+                    let terminal = loop {
+                        let event = next_committed(&mut tapped, "committed terminal Event").await;
+                        if matches!(event.event, Event::RunFinished { .. }) { break event; }
+                    };
                     let store = Store::open_read_only(
                         StateRoot::open_existing(&state_path).expect("existing state"),
                     )
@@ -4738,10 +4749,10 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
     let mut objective = request(&workspace, "question");
     objective.include_paths.clear();
     let cancel = RunCancellation::new();
-    let mut progress = RunProgress::with_previews();
+    let mut tapped = engine.subscribe();
     let observer = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
     let cancellation = cancel.clone();
-    let run_progress = progress.clone();
+    let run_hints = RunHints::with_previews();
     let task = tokio::spawn(async move {
         let outcome = run_with(
             &engine,
@@ -4749,7 +4760,7 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
             objective,
             RunControls {
                 cancellation,
-                progress: Some(run_progress),
+                hints: Some(run_hints),
                 ..Default::default()
             },
         )
@@ -4759,9 +4770,9 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
     });
     let session_id = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let update = progress.changed().await;
-            if update.run.display.iter().any(|chunk| chunk.category == arany::DisplayCategory::Answer) {
-                let session_id = observer.session_for_run(update.run.id).await.unwrap().unwrap();
+            let event = next_committed(&mut tapped, "committed checkpoint").await;
+            if matches!(&event.event, Event::AssistantDisplayRecorded { chunk, .. } if chunk.category == arany::DisplayCategory::Answer) {
+                let session_id = event.session_id;
                 let events = observer.load_session(session_id).await.unwrap();
                 assert!(events.iter().any(|event| matches!(&event.event, Event::AssistantDisplayRecorded { chunk, .. } if chunk.text.len() == 2048)));
                 break events[0].session_id;

@@ -2342,14 +2342,15 @@ async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
     )
     .unwrap();
     let cancellation = arany::RunCancellation::new();
-    let mut progress = arany::RunProgress::new();
+    let mut events = engine.subscribe();
     let outcome = tokio::time::timeout(Duration::from_secs(30), async {
-        let running = run_with(&engine, &provider, proposal_request(&workspace), RunControls { tools: ToolGrant::Configured, cancellation: cancellation.clone(), progress: Some(progress.clone()), ..Default::default() });
+        let running = run_with(&engine, &provider, proposal_request(&workspace), RunControls { tools: ToolGrant::Configured, cancellation: cancellation.clone(), ..Default::default() });
         tokio::pin!(running);
         let intent = loop {
             tokio::select! {
                 outcome = &mut running => panic!("Run ended before payload gate: {:?}", outcome.map(|outcome| outcome.run.status)),
-                update = progress.changed() => if let Some(tool) = update.run.tools.last() { break tool.intent.clone(); },
+                event = events.next() => if let Some(arany::Tapped::Committed(event)) = event
+                    && let arany::Event::ToolStarted { intent, .. } = &event.event { break intent.clone(); },
             }
         };
         let unit = format!("arany-tool-{}.service", intent.id);
@@ -2537,15 +2538,16 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
             },
         )
         .unwrap();
-        let mut progress = arany::RunProgress::new();
+        let mut events = engine.subscribe();
         let outcome = tokio::time::timeout(Duration::from_secs(25), async {
-            let running = run_with(&engine, &provider, proposal_request(&workspace), RunControls { tools: ToolGrant::Configured, cancellation: arany::RunCancellation::new(), progress: Some(progress.clone()), ..Default::default() });
+            let running = run_with(&engine, &provider, proposal_request(&workspace), RunControls { tools: ToolGrant::Configured, cancellation: arany::RunCancellation::new(), ..Default::default() });
             tokio::pin!(running);
             if mode == "memory" {
                 let intent = loop {
                     tokio::select! {
                         outcome = &mut running => panic!("Run ended before the OOM payload start gate: {:?}", outcome.map(|value| value.run.status)),
-                        update = progress.changed() => if let Some(tool) = update.run.tools.last() { break tool.intent.clone(); },
+                        event = events.next() => if let Some(arany::Tapped::Committed(event)) = event
+                    && let arany::Event::ToolStarted { intent, .. } = &event.event { break intent.clone(); },
                     }
                 };
                 let unit = format!("arany-tool-{}.service", intent.id);
@@ -2801,9 +2803,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
     if !super::isolation::enter_account_isolated_test() {
         return;
     }
-    use arany::{
-        ApprovalMode, ProviderCallDisposition, RunCancellation, RunProgress, ToolApprovals,
-    };
+    use arany::{ApprovalMode, ProviderCallDisposition, RunCancellation, RunHints, ToolApprovals};
     for (name, mode, review, decision, command) in [
         ("request-allow", ApprovalMode::Request, "", "allow", false),
         ("request-deny", ApprovalMode::Request, "", "deny", false),
@@ -2888,7 +2888,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                         tools: ToolGrant::Configured,
                         approvals: Some(approvals.clone()),
                         cancellation,
-                        progress: Some(RunProgress::new()),
+                        hints: Some(RunHints::new()),
                         ..Default::default()
                     }
                 ),
