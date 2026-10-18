@@ -13,11 +13,13 @@ pub(super) fn apply(
     prior: u64,
 ) -> Result<(), ReplayError> {
     if let Event::ToolFinished {
+        checkpoint,
         run_id,
         agent_run_id,
         observation,
     } = event
     {
+        super::super::checkpoint::validate_finished(current, observation, checkpoint.as_ref())?;
         let run = active_run(current, *run_id)?;
         let configured = run
             .config
@@ -450,6 +452,7 @@ pub(super) fn apply(
                 return Err(ReplayError::InvalidTransition);
             }
             run.tools.push(ToolView {
+                checkpoint: None,
                 intent: intent.clone(),
                 observation: None,
                 review_call_index: None,
@@ -461,13 +464,16 @@ pub(super) fn apply(
             record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
         }
         Event::ToolFinished {
+            checkpoint,
             run_id,
             agent_run_id,
             observation,
         } if names_child(current, *run_id, *agent_run_id) => {
+            debug_assert!(checkpoint.is_none());
             current.finish_child_tool(*run_id, *agent_run_id, observation, prior)?;
         }
         Event::ToolFinished {
+            checkpoint,
             run_id,
             agent_run_id,
             observation,
@@ -540,6 +546,7 @@ pub(super) fn apply(
                 if tool.intent != observation.intent || tool.observation.is_some() {
                     return Err(ReplayError::InvalidTransition);
                 }
+                tool.checkpoint = checkpoint.clone();
                 tool.observation = Some(observation.clone());
                 tool.finished_sequence = Some(prior);
                 if matches!(

@@ -753,6 +753,7 @@ fn unguarded_counts_retain_only_pending_digests_and_approval_flags() {
         );
         if let Some((disposition, attested)) = outcome {
             segment.commit(Event::ToolFinished {
+                checkpoint: None,
                 run_id: segment.run_id,
                 agent_run_id,
                 observation: crate::tools::ToolObservation {

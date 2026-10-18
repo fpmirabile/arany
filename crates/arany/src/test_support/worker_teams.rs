@@ -900,6 +900,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
                 })
                 .unwrap();
             prefix.push(Event::ToolFinished {
+                checkpoint: None,
                 run_id: intent.run_id,
                 agent_run_id: intent.agent_run_id,
                 observation: ToolObservation {

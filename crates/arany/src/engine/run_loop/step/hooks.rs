@@ -81,6 +81,7 @@ impl HookFold {
     pub(super) fn denial(&self, intent: EffectIntent, child: bool) -> Answer {
         match self.stop {
             HookStop::ActiveTime => Answer {
+                checkpoint: None,
                 observation: if child {
                     not_dispatched(
                         intent,
@@ -97,6 +98,7 @@ impl HookFold {
                 }),
             },
             HookStop::Uncertain | HookStop::Requested => Answer {
+                checkpoint: None,
                 observation: not_dispatched(
                     intent,
                     ToolDisposition::Denied,
@@ -110,6 +112,7 @@ impl HookFold {
                 active_time: None,
             },
             HookStop::None if self.narrowed.is_some() => Answer {
+                checkpoint: None,
                 observation: not_dispatched(
                     intent,
                     ToolDisposition::Denied,
@@ -139,6 +142,7 @@ impl HookFold {
                     format!("Hook denied this Tool: {reason}")
                 };
                 Answer {
+                    checkpoint: None,
                     observation: not_dispatched(intent, ToolDisposition::Denied, output),
                     refused: false,
                     active_time: None,
@@ -898,7 +902,9 @@ impl RunLoop<'_> {
     > {
         Ok(match clock {
             HookClock::Pause(pause) => {
-                Box::pin(self.dispatch_guard(runtime, hook_intent, pause)).await?
+                let (observation, segment, exhausted, _) =
+                    Box::pin(self.dispatch_guard(runtime, hook_intent, pause)).await?;
+                (observation, segment, exhausted)
             }
             HookClock::Deadline(deadline) => {
                 let cancellation = crate::engine::RunCancellation::new();
