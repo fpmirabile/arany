@@ -36,6 +36,8 @@ Roster selection displays the complete escaped [manifest](./provider.md#named-ro
 
 ## Conversation, progress and history
 
+Existing agent inspection and text `show` include historical worker identity/lineage, disposal and publication certainty, lease and verification facts from the [Session projection](./session.md#worker-replay). JSONL preserves canonical Events, including qualified lineage and refusal reasons; derived interruption facts add no fabricated Events or new terminal view.
+
 A Tool waiting for shared Guard capacity shows `queued · waiting for capacity` in classic, fullscreen and linear mode. The one-slot hint follows the current committed pending intent, clears when waiting or the Run ends, and never enters Events, history, replay or Provider context. It grants no authority and does not resume after restart; draft editing and Ctrl+C stay available.
 
 Classic mode uses native scrollback above a bounded viewport. On its first draw for a Session it projects the newest whole-Run suffix, stopping before a Run that would exceed 16 Runs, 64 KiB of escaped rendered row text (including trusted headings, rails and indents) or 4,096 rendered rows. Every native-visible objective, Tool summary and available answer is counted before rows are materialized. A width-safe cue points to `Ctrl+T` for the complete history. Omitted Runs stay in the journal and full-history find and export; they are not backfilled on redraw. Fullscreen uses an alternate screen with managed history and a bottom composer. Explicit detail panels may borrow the alternate screen in classic mode. No mode enables focus reporting or title/clipboard OSC.

@@ -573,7 +573,7 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
                         "mode":{"type":"string","enum":modes},
                         "max_turns":{"type":"integer","description":format!("At most {}",agent["max_turns"])},
                         "wave":{"type":"integer","minimum":1,"maximum":8},
-                        "resumes":{"type":"null"}, "supersedes":{"type":["string", "null"]}
+                        "resumes":{"type":["string", "null"], "description":"Exact terminal historical child ID in this Goal for a fresh assignment with bounded source context; never resumes private state or authority."}, "supersedes":{"type":["string", "null"]}
                     }, "required":["definition","definition_digest","mission","direction","lease","criterion","mode","max_turns","wave","resumes","supersedes"],"additionalProperties":false}
                 },"required":["objective","profile","editor"],"additionalProperties":false
             }));
@@ -872,6 +872,9 @@ pub enum ProviderFailureReason {
     ResponseContract,
     OutcomeContract,
     LocalOutputLimit,
+    WorkerFinishDeferred,
+    WorkerDelegateRefused,
+    WorkerToolRefused,
 }
 
 impl ProviderError {
