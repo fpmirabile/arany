@@ -69,6 +69,7 @@ pub(super) async fn worker_case(case: &'static str) {
         "headroom" => Some(9_920),
         "headroom_child" => Some(9_923),
         "headroom_background" => Some(9_922),
+        "headroom_race" => Some(9_926),
         _ => None,
     };
     arany::test_support::isolate_account_root();
@@ -213,7 +214,10 @@ pub(super) async fn worker_case(case: &'static str) {
             "source canary remained private"
         );
     }
-    if matches!(case, "headroom_child" | "headroom_background") {
+    if matches!(
+        case,
+        "headroom_child" | "headroom_background" | "headroom_race"
+    ) {
         assert!(
             matches!(
                 result,
@@ -266,6 +270,8 @@ pub(super) async fn worker_case(case: &'static str) {
             assert!(child_calls >= 2, "{case}: reach a worker continuation");
             assert_eq!(synthesis_calls, 0, "{case}");
             assert_ne!(*agent_run_id, run.agents[0].id, "{case}");
+        } else if case == "headroom_race" {
+            assert_eq!(child_calls, 1, "{case}");
         } else {
             assert_eq!(child_calls, 1, "{case}: drain the blocked worker call");
             assert!(synthesis_calls >= 1, "{case}: reach primary coordination");
@@ -397,6 +403,13 @@ async fn background_primary_capacity_stop_drains_workers_before_returning_the_st
     tokio::time::timeout(Duration::from_secs(30), worker_case("headroom_background"))
         .await
         .expect("capacity stop drains the pending worker call");
+}
+
+#[tokio::test]
+async fn child_capacity_stop_discards_a_completed_background_primary_response() {
+    tokio::time::timeout(Duration::from_secs(30), worker_case("headroom_race"))
+        .await
+        .expect("capacity stop settles the worker");
 }
 
 #[tokio::test]

@@ -682,6 +682,8 @@ impl RunLoop<'_> {
             self.settle_result(&result)?;
             if index.is_none() {
                 let valid = self.ledger().tokens_within_limit()
+                    && abort_reason.is_none()
+                    && !queue.budget_stopped
                     && matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tools(requests), .. }) if self.well_formed_tools(requests) && requests.iter().all(|r| r.call.is_process() || self.primary_lease_allows(&r.call)));
                 self.append(Event::ProviderCallRecorded {
                     run_id: self.run_id,

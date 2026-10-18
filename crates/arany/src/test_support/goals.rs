@@ -328,7 +328,7 @@ impl ForegroundWorkerProvider {
     pub fn new(workspace: &Path, case: &'static str, budget: crate::GoalBudget) -> Self {
         let mut identity =
             crate::ProviderIdentity::new("scripted", "test-model", crate::Provenance::native());
-        if case == "headroom_background" {
+        if matches!(case, "headroom_background" | "headroom_race") {
             identity.limits.concurrency = 2;
         }
         Self {
@@ -384,7 +384,7 @@ impl ForegroundWorkerProvider {
                 direction: "Return one whole changeset".into(),
                 lease: vec!["notes".into()],
                 criterion: self.plan().success_criterion,
-                mode: if self.case == "headroom_background" {
+                mode: if matches!(self.case, "headroom_background" | "headroom_race") {
                     crate::worker::WorkerMode::Background
                 } else {
                     crate::worker::WorkerMode::Foreground
@@ -431,6 +431,17 @@ impl crate::Provider for ForegroundWorkerProvider {
                 Some(Box::new(self.plan())),
             ),
             (AgentPhase::RootPlan, 1) => self.delegation(&request),
+            (AgentPhase::ChildWork, 0) if self.case == "headroom_race" => {
+                self.background_started.notify_one();
+                super::scenario::tool_outcome(
+                    ToolCall::Read {
+                        path: "notes/a".into(),
+                        offset: 0,
+                        limit: 128,
+                    },
+                    None,
+                )
+            }
             (AgentPhase::ChildWork, _) if self.case == "headroom_background" => {
                 self.background_started.notify_one();
                 std::future::pending().await
@@ -445,7 +456,9 @@ impl crate::Provider for ForegroundWorkerProvider {
                     None,
                 )
             }
-            (AgentPhase::RootSynthesis, _) if self.case == "headroom_background" => {
+            (AgentPhase::RootSynthesis, _)
+                if matches!(self.case, "headroom_background" | "headroom_race") =>
+            {
                 if step == 0 {
                     self.background_started.notified().await;
                 }
