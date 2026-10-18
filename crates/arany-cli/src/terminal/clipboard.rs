@@ -68,7 +68,10 @@ fn warn_cleanup_unconfirmed() {
         .name("arany-clipboard-warning".into())
         .spawn(|| {
             if let Ok(stderr) = rustix::io::dup(std::io::stderr()) {
-                let _ = rustix::io::write(stderr, format!("{CLEANUP_UNCONFIRMED}\n").as_bytes());
+                let message = CLEANUP_UNCONFIRMED;
+                #[cfg(test)]
+                let message = cleanup_tests::WarningMessage(message);
+                let _ = rustix::io::write(stderr, format!("{message}\n").as_bytes());
             }
         });
 }
@@ -572,6 +575,31 @@ mod cleanup_tests {
     use std::{sync::mpsc, time::Duration};
 
     #[cfg(unix)]
+    struct WarningWriteGate {
+        ready: mpsc::SyncSender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    #[cfg(unix)]
+    static WARNING_WRITE_GATE: Mutex<Option<WarningWriteGate>> = Mutex::new(None);
+
+    #[cfg(unix)]
+    pub(super) struct WarningMessage(pub(super) &'static str);
+
+    #[cfg(unix)]
+    impl std::fmt::Display for WarningMessage {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(self.0)?;
+            if let Some(gate) = WARNING_WRITE_GATE.lock().unwrap().take() {
+                // Formatting through Stderr would hold its lock across this gate.
+                gate.ready.send(()).unwrap();
+                gate.release.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn clipboard_cleanup_warning_never_waits_for_a_lock_or_full_pipe() {
         use arany::test_support::process::capture;
@@ -637,6 +665,8 @@ mod cleanup_tests {
     #[ignore = "blocked stderr fixture for the clipboard cleanup owner"]
     fn clipboard_warning_fixture() {
         let case = std::env::var("ARANY_CLIPBOARD_WARNING_TEST").unwrap();
+        let (ready, writing) = mpsc::sync_channel(1);
+        let (release, held) = mpsc::sync_channel(1);
         if case == "locked" {
             let (ready, locked) = mpsc::sync_channel(1);
             std::thread::spawn(move || {
@@ -649,6 +679,10 @@ mod cleanup_tests {
             locked.recv_timeout(Duration::from_secs(1)).unwrap();
         } else {
             assert_eq!(case, "full");
+            *WARNING_WRITE_GATE.lock().unwrap() = Some(WarningWriteGate {
+                ready,
+                release: held,
+            });
         }
         let _worker_lock = WORKER.task.lock().unwrap();
         let start = Instant::now();
@@ -657,32 +691,11 @@ mod cleanup_tests {
             start.elapsed() < CLEANUP_TIMEOUT,
             "warning blocked teardown"
         );
-        #[cfg(target_os = "linux")]
         if case == "full" {
             use std::io::{Read, Seek};
             use std::os::fd::AsRawFd;
 
-            let deadline = Instant::now() + CLEANUP_TIMEOUT;
-            loop {
-                let blocked = std::fs::read_dir("/proc/self/task")
-                    .unwrap()
-                    .take(256)
-                    .filter_map(Result::ok)
-                    .any(|entry| {
-                        std::fs::read_to_string(entry.path().join("comm"))
-                            .is_ok_and(|name| name.trim() == "arany-clipboard")
-                            && std::fs::read_to_string(entry.path().join("wchan"))
-                                .is_ok_and(|state| state.trim().ends_with("pipe_write"))
-                    });
-                if blocked {
-                    break;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "warning did not block on full pipe"
-                );
-                std::thread::yield_now();
-            }
+            writing.recv_timeout(CLEANUP_TIMEOUT).unwrap();
             // Keep the warning's pipe full while exercising the normal error reporter.
             let mut sink = tempfile::tempfile().unwrap();
             nix::unistd::dup2(sink.as_raw_fd(), std::io::stderr().as_raw_fd()).unwrap();
@@ -691,6 +704,7 @@ mod cleanup_tests {
             let mut reported = String::new();
             sink.read_to_string(&mut reported).unwrap();
             assert_eq!(reported, "error: clipboard shutdown failed\n");
+            release.send(()).unwrap();
         }
     }
 
