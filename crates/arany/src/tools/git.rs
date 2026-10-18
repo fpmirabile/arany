@@ -202,12 +202,17 @@ fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
             _ => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
         }
     }
-    let index = match read_optional(&git_dir, "index", MAX_SNAPSHOT_BYTES) {
-        Ok(Some(bytes)) => match git_dir.symlink_metadata("index").and_then(|m| m.modified()) {
-            Ok(modified) => Some((bytes, modified.into_std())),
-            Err(_) => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
-        },
-        Ok(None) => None,
+    let index = match open_optional(&git_dir, "index").and_then(|file| {
+        file.map(|file| {
+            let modified = file
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .map_err(|_| ToolError::Path)?;
+            Ok((super::fs::read_regular(file, MAX_SNAPSHOT_BYTES)?, modified))
+        })
+        .transpose()
+    }) {
+        Ok(index) => index,
         Err(ToolError::Path) => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
         Err(error) => return Err(error),
     };
@@ -215,13 +220,12 @@ fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
     std::fs::write(view.join("config"), VIEW_CONFIG).map_err(|_| ToolError::Operation)?;
     std::fs::write(view.join("HEAD"), &head).map_err(|_| ToolError::Operation)?;
     if let Some((index, modified)) = index {
-        let copy = view.join("index");
-        std::fs::write(&copy, index).map_err(|_| ToolError::Operation)?;
         // Git's racy-stat check compares entry times with the index mtime; a fresh mtime hides same-size edits.
-        std::fs::File::options()
-            .write(true)
-            .open(copy)
-            .and_then(|file| file.set_modified(modified))
+        std::fs::File::create_new(view.join("index"))
+            .and_then(|mut file| {
+                std::io::Write::write_all(&mut file, &index)?;
+                file.set_modified(modified)
+            })
             .map_err(|_| ToolError::Operation)?;
     }
     for name in links {
@@ -232,6 +236,12 @@ fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
 }
 
 fn read_optional(git_dir: &Dir, name: &str, cap: usize) -> Result<Option<Vec<u8>>, ToolError> {
+    open_optional(git_dir, name)?
+        .map(|file| super::fs::read_regular(file, cap))
+        .transpose()
+}
+
+fn open_optional(git_dir: &Dir, name: &str) -> Result<Option<std::fs::File>, ToolError> {
     use rustix::fs::{Mode, OFlags, openat};
     match openat(
         git_dir,
@@ -239,7 +249,7 @@ fn read_optional(git_dir: &Dir, name: &str, cap: usize) -> Result<Option<Vec<u8>
         OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
         Mode::empty(),
     ) {
-        Ok(fd) => super::fs::read_regular(std::fs::File::from(fd), cap).map(Some),
+        Ok(fd) => Ok(Some(std::fs::File::from(fd))),
         Err(rustix::io::Errno::NOENT) => Ok(None),
         Err(_) => Err(ToolError::Path),
     }
