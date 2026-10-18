@@ -2550,7 +2550,7 @@ mod tests {
         state: &crate::store::StateRoot,
         identity: &BuildCacheIdentity,
     ) -> BuildCacheSession {
-        let lease = crate::store::begin_released(state, identity.clone()).unwrap();
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
         let candidate_bytes = lease.candidate_limit();
         BuildCacheSession {
             lease: Arc::new(lease),
@@ -2569,6 +2569,9 @@ mod tests {
 
     #[tokio::test]
     async fn cache_publication_never_replaces_a_succeeded_command() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
 
@@ -2641,7 +2644,7 @@ mod tests {
         state: &crate::store::StateRoot,
         identity: &BuildCacheIdentity,
     ) -> Vec<u8> {
-        let lease = crate::store::begin_released(state, identity.clone()).unwrap();
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
         let (mut file, length) = lease.archive().unwrap().unwrap();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
@@ -2651,6 +2654,9 @@ mod tests {
 
     #[tokio::test]
     async fn uncertain_commit_marker_keeps_the_command_and_recovers_the_prior_archive() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
         let prior = captured_archive(temp.path(), &identity, b"prior");
@@ -2683,6 +2689,9 @@ mod tests {
 
     #[tokio::test]
     async fn candidate_sync_orders_publication_and_cancellation_keeps_the_prior_archive() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
         let prior = captured_archive(temp.path(), &identity, b"prior");
@@ -2857,6 +2866,9 @@ mod tests {
 
     #[tokio::test]
     async fn candidate_staging_failure_drains_the_archive_and_keeps_the_prior_archive() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
         let session = cache_session(&state, &identity);
@@ -2874,7 +2886,7 @@ mod tests {
         .await;
         assert_eq!(observation.cache_update, CacheUpdate::Published);
 
-        let lease = Arc::new(crate::store::begin_released(&state, identity.clone()).unwrap());
+        let lease = Arc::new(state.begin_build_cache(identity.clone()).unwrap());
         // Occupies the candidate name, so the create_new staging step fails.
         drop(lease.candidate_writer().unwrap());
 
@@ -2891,7 +2903,7 @@ mod tests {
         assert_eq!(trailer, "CACHE_DONE\n");
         drop(lease);
 
-        let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
         let (mut file, length) = lease.archive().unwrap().unwrap();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();

@@ -21,8 +21,6 @@ use replay::{
 };
 pub use state::HistoryReset;
 #[cfg(test)]
-pub(crate) use state::begin_released;
-#[cfg(test)]
 pub(crate) use state::capture_archive;
 pub(crate) use state::{
     BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock,
@@ -96,6 +94,49 @@ pub enum StoreError {
     Io(#[source] io::Error),
     #[error("SQLite operation failed")]
     Sqlite(#[source] rusqlite::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryRecovery {
+    InvalidHistory,
+    Damaged,
+    InvalidStateDirectory,
+    Inaccessible,
+    Busy,
+    Changed,
+    StorageFull,
+    Unavailable,
+}
+
+impl HistoryRecovery {
+    pub fn is_resettable(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidHistory | Self::Damaged | Self::InvalidStateDirectory
+        )
+    }
+}
+
+impl StoreError {
+    pub fn history_recovery(&self) -> HistoryRecovery {
+        match self {
+            Self::InvalidHistory => HistoryRecovery::InvalidHistory,
+            Self::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                ) =>
+            {
+                HistoryRecovery::Damaged
+            }
+            Self::InvalidStateDirectory => HistoryRecovery::InvalidStateDirectory,
+            Self::StateNotPrivate | Self::Io(_) => HistoryRecovery::Inaccessible,
+            Self::HistoryBusy => HistoryRecovery::Busy,
+            Self::HistoryChanged => HistoryRecovery::Changed,
+            Self::StorageFull => HistoryRecovery::StorageFull,
+            _ => HistoryRecovery::Unavailable,
+        }
+    }
 }
 
 impl From<io::Error> for StoreError {

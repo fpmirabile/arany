@@ -132,46 +132,50 @@ pub enum Reason {
     InvalidSelection,
 }
 
-const _: fn(&arany::EngineError) -> Reason = |error| match error {
-    arany::EngineError::IncompatibleProviderChain => Reason::IncompatibleProviderChain,
-    arany::EngineError::RosterSelectionMismatch | arany::EngineError::InvalidRequest => {
-        Reason::InvalidRequest
+impl From<&arany::EngineError> for Reason {
+    fn from(error: &arany::EngineError) -> Self {
+        match error {
+            arany::EngineError::IncompatibleProviderChain => Reason::IncompatibleProviderChain,
+            arany::EngineError::RosterSelectionMismatch | arany::EngineError::InvalidRequest => {
+                Reason::InvalidRequest
+            }
+            arany::EngineError::MissingSession => Reason::MissingSession,
+            arany::EngineError::NoSessionForWorkspace => Reason::NoSessionForWorkspace,
+            arany::EngineError::TooManySessions => Reason::TooManySessions,
+            arany::EngineError::SessionBusy => Reason::SessionBusy,
+            arany::EngineError::WorkspaceBusy => Reason::WorkspaceBusy,
+            arany::EngineError::GoalUnavailable => Reason::GoalUnavailable,
+            arany::EngineError::GoalAdmissionUncertain => Reason::GoalAdmissionUncertain,
+            arany::EngineError::GoalBudgetExhausted => Reason::GoalBudgetExhausted,
+            arany::EngineError::GoalNotContinuable => Reason::GoalNotContinuable,
+            arany::EngineError::Busy => Reason::Busy,
+            arany::EngineError::GuardUnavailable => Reason::GuardUnavailable,
+            arany::EngineError::SessionNotIdle => Reason::SessionNotIdle,
+            arany::EngineError::ForkNotAtRunBoundary => Reason::ForkNotAtRunBoundary,
+            arany::EngineError::WorkspaceMismatch => Reason::WorkspaceMismatch,
+            arany::EngineError::InvalidWorkspacePath => Reason::InvalidWorkspacePath,
+            arany::EngineError::InputNotRegular => Reason::InputNotRegular,
+            arany::EngineError::InputTooLarge => Reason::InputTooLarge,
+            arany::EngineError::InputNotUtf8 => Reason::InputNotUtf8,
+            arany::EngineError::MissingInclude => Reason::MissingInclude,
+            arany::EngineError::TooManyIncludes => Reason::TooManyIncludes,
+            arany::EngineError::StateOverlap => Reason::StateOverlap,
+            arany::EngineError::WorkspaceUnavailable => Reason::WorkspaceUnavailable,
+            arany::EngineError::InvalidHistory => Reason::InvalidHistory,
+            arany::EngineError::ContextTooLarge => Reason::ContextTooLarge,
+            arany::EngineError::ImagesNotAdmitted => Reason::ImagesNotAdmitted,
+            arany::EngineError::CompactionInputEmpty => Reason::CompactionInputEmpty,
+            arany::EngineError::CompactionBlockedByHook => Reason::CompactionBlockedByHook,
+            arany::EngineError::CompactionInputTooLarge => Reason::CompactionInputTooLarge,
+            arany::EngineError::CompactionNotIdle => Reason::CompactionNotIdle,
+            arany::EngineError::CancellationDrainTimeout => Reason::CancellationDrainTimeout,
+            arany::EngineError::CoordinatorFailed => Reason::CoordinatorFailed,
+            arany::EngineError::CancelledBeforeStart => Reason::CancelledBeforeStart,
+            arany::EngineError::Store(_) => Reason::Store,
+            arany::EngineError::Tool(_) => Reason::Tool,
+        }
     }
-    arany::EngineError::MissingSession => Reason::MissingSession,
-    arany::EngineError::NoSessionForWorkspace => Reason::NoSessionForWorkspace,
-    arany::EngineError::TooManySessions => Reason::TooManySessions,
-    arany::EngineError::SessionBusy => Reason::SessionBusy,
-    arany::EngineError::WorkspaceBusy => Reason::WorkspaceBusy,
-    arany::EngineError::GoalUnavailable => Reason::GoalUnavailable,
-    arany::EngineError::GoalAdmissionUncertain => Reason::GoalAdmissionUncertain,
-    arany::EngineError::GoalBudgetExhausted => Reason::GoalBudgetExhausted,
-    arany::EngineError::GoalNotContinuable => Reason::GoalNotContinuable,
-    arany::EngineError::Busy => Reason::Busy,
-    arany::EngineError::GuardUnavailable => Reason::GuardUnavailable,
-    arany::EngineError::SessionNotIdle => Reason::SessionNotIdle,
-    arany::EngineError::ForkNotAtRunBoundary => Reason::ForkNotAtRunBoundary,
-    arany::EngineError::WorkspaceMismatch => Reason::WorkspaceMismatch,
-    arany::EngineError::InvalidWorkspacePath => Reason::InvalidWorkspacePath,
-    arany::EngineError::InputNotRegular => Reason::InputNotRegular,
-    arany::EngineError::InputTooLarge => Reason::InputTooLarge,
-    arany::EngineError::InputNotUtf8 => Reason::InputNotUtf8,
-    arany::EngineError::MissingInclude => Reason::MissingInclude,
-    arany::EngineError::TooManyIncludes => Reason::TooManyIncludes,
-    arany::EngineError::StateOverlap => Reason::StateOverlap,
-    arany::EngineError::WorkspaceUnavailable => Reason::WorkspaceUnavailable,
-    arany::EngineError::InvalidHistory => Reason::InvalidHistory,
-    arany::EngineError::ContextTooLarge => Reason::ContextTooLarge,
-    arany::EngineError::ImagesNotAdmitted => Reason::ImagesNotAdmitted,
-    arany::EngineError::CompactionInputEmpty => Reason::CompactionInputEmpty,
-    arany::EngineError::CompactionBlockedByHook => Reason::CompactionBlockedByHook,
-    arany::EngineError::CompactionInputTooLarge => Reason::CompactionInputTooLarge,
-    arany::EngineError::CompactionNotIdle => Reason::CompactionNotIdle,
-    arany::EngineError::CancellationDrainTimeout => Reason::CancellationDrainTimeout,
-    arany::EngineError::CoordinatorFailed => Reason::CoordinatorFailed,
-    arany::EngineError::CancelledBeforeStart => Reason::CancelledBeforeStart,
-    arany::EngineError::Store(_) => Reason::Store,
-    arany::EngineError::Tool(_) => Reason::Tool,
-};
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 #[serde(untagged)]

@@ -159,6 +159,7 @@ mod account_roots {
         Ok(file)
     }
 
+    #[cfg(any(debug_assertions, test))]
     pub(super) fn inherit(path: &Path) -> io::Result<Option<File>> {
         if !path
             .file_name()

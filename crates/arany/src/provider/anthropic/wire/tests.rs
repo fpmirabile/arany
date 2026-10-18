@@ -988,6 +988,17 @@ fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewe
     assert_eq!(accepted.turn.items("anthropic").unwrap().len(), 2);
     for invalid in [
         vec![
+            json!({"type":"content_block_start","index":u64::MAX,"content_block":{"type":"text","text":""}}),
+        ],
+        vec![
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":u64::MAX,"delta":{"type":"text_delta","text":"unsafe"}}),
+        ],
+        vec![
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_stop","index":u64::MAX}),
+        ],
+        vec![
             json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}),
         ],
@@ -1012,7 +1023,10 @@ fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewe
         let mut events = vec![message_start()];
         events.extend(invalid);
         let (publisher, _) = ResponsePreview::new();
-        assert!(run_stream(&sse(&events), publisher).is_err());
+        assert!(matches!(
+            run_stream(&sse(&events), publisher),
+            Err(ProviderError::InvalidStream)
+        ));
     }
     let escaped = r#"{"path":"\u0073ynthetic-key"}"#;
     let events = [
