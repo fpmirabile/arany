@@ -94,7 +94,7 @@ impl RunLoop<'_> {
         grant.write_paths = a.lease.clone();
         grant.tools.retain(|tool| {
             !matches!(tool, WorkerTool::Skill | WorkerTool::McpList)
-                && def.allows_worker(&sample_call(*tool))
+                && def.allows_worker_tool(*tool)
         });
         grant.skills.clear();
         grant.mcp_servers.clear();
@@ -136,8 +136,8 @@ impl RunLoop<'_> {
             .ok_or(EngineError::CoordinatorFailed)
     }
 
-    pub(super) async fn admit_worker_action(&self, call: &ToolCall) -> Result<(), EngineError> {
-        let chunks = match call {
+    pub(super) fn worker_call_chunks(&self, call: &ToolCall) -> Result<usize, EngineError> {
+        Ok(match call {
             ToolCall::PrepareWorker { preparation } => usize::from(preparation.max_chunks),
             ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::Mkdir { .. } => (*self
                 .worker_data_bytes
@@ -146,13 +146,16 @@ impl RunLoop<'_> {
                 as usize)
                 .div_ceil(WORKER_CHUNK_BYTES),
             _ => 0,
-        };
+        })
+    }
+
+    pub(super) async fn admit_worker_action(&self, chunks: usize) -> Result<(), EngineError> {
         let action = Action::Worker { chunks };
         self.journal
             .admit(
                 self.session_id,
                 action.max_events_for_admitted(&self.routing.providers),
-                2,
+                action.tool_observations(),
             )
             .await
             .map_err(|error| match error {
@@ -463,7 +466,7 @@ impl RunLoop<'_> {
         })
         .await?;
         let remaining = self.ledger().remaining_calls().map_or(16, |n| {
-            usize::try_from(n.saturating_sub(2) / 2)
+            usize::try_from(n.saturating_sub(3) / 2)
                 .unwrap_or(16)
                 .min(16)
         });
@@ -740,11 +743,31 @@ impl RunLoop<'_> {
             .await?;
             let sequence = self.sequence()?;
             if !Box::pin(self.integrate_worker(root, id, sequence, data)).await? {
-                return if self.observe_worker_stop().await? {
-                    self.settle_stopped_primary().await
-                } else {
-                    self.fail_primary().await
+                if self.observe_worker_stop().await? {
+                    return self.settle_stopped_primary().await;
+                }
+                let outcome = self.ledger().view(|v| {
+                    v.runs
+                        .last()
+                        .and_then(|r| r.agents.iter().find(|a| a.id == id))
+                        .and_then(|a| a.assignment.as_ref())
+                        .and_then(|w| w.integration.as_ref().map(|(_, i)| i.outcome))
+                })?;
+                let Some(outcome) = outcome else {
+                    return self.fail_primary().await;
                 };
+                return Box::pin(self.synthesize(
+                    root,
+                    vec![Some(ChildResult {
+                        objective: child.objective.clone(),
+                        summary: "Worker handover was not published".into(),
+                        result: format!(
+                            "Integration {outcome:?}; the Workspace is unchanged by this worker"
+                        ),
+                    })],
+                    turn,
+                ))
+                .await;
             }
         }
         if stopped || self.observe_worker_stop().await? {
@@ -835,12 +858,7 @@ impl RunLoop<'_> {
                 &mut request.model,
                 &mut request.max_output_tokens,
             )?;
-            self.admit_worker_action(&ToolCall::Read {
-                path: child.objective.clone(),
-                offset: 0,
-                limit: 1,
-            })
-            .await?;
+            self.admit_worker_action(0).await?;
             self.reserve_provider_call(
                 child.agent_run_id,
                 Action::Child {
@@ -895,13 +913,12 @@ impl RunLoop<'_> {
                     {
                         return Ok(None);
                     }
-                    let continues = self
-                        .execute_step(
-                            Grant::Researcher { child, deadline },
-                            requests.pop().ok_or(EngineError::CoordinatorFailed)?,
-                            turn,
-                        )
-                        .await?;
+                    let continues = Box::pin(self.execute_step(
+                        Grant::Researcher { child, deadline },
+                        requests.pop().ok_or(EngineError::CoordinatorFailed)?,
+                        turn,
+                    ))
+                    .await?;
                     child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
                     let succeeded = self.ledger().view(|v| {
                         v.runs
@@ -1047,7 +1064,7 @@ impl RunLoop<'_> {
                 WorkerIntegrationOutcome::Denied
             }
             ToolDisposition::Uncertain => WorkerIntegrationOutcome::Uncertain,
-            _ => return Ok(false),
+            _ => return Err(crate::tools::ToolError::Uncertain.into()),
         };
         self.append(Event::WorkerIntegrationRecorded {
             run_id: self.run_id,
@@ -1278,38 +1295,4 @@ fn cleanup_base(loop_: &RunLoop<'_>, id: AgentRunId) -> Result<[u8; 32], EngineE
                 .map(|w| w.pins.base.sha256)
         })?
         .ok_or(EngineError::InvalidHistory)
-}
-
-fn sample_call(tool: WorkerTool) -> ToolCall {
-    match tool {
-        WorkerTool::List => ToolCall::List { path: ".".into() },
-        WorkerTool::Read => ToolCall::Read {
-            path: "file".into(),
-            offset: 0,
-            limit: 1,
-        },
-        WorkerTool::Search => ToolCall::Search {
-            path: ".".into(),
-            query: "x".into(),
-        },
-        WorkerTool::Mkdir => ToolCall::Mkdir { path: "dir".into() },
-        WorkerTool::Write => ToolCall::Write {
-            path: "file".into(),
-            expected_digest: None,
-            content: String::new(),
-        },
-        WorkerTool::Edit => ToolCall::Edit {
-            path: "file".into(),
-            expected_digest: "0".repeat(64),
-            old: "a".into(),
-            new: "b".into(),
-        },
-        WorkerTool::Skill => ToolCall::Skill {
-            name: "skill".into(),
-            resource: None,
-        },
-        WorkerTool::McpList => ToolCall::McpList {
-            server: "server".into(),
-        },
-    }
 }

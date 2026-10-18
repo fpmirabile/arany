@@ -823,16 +823,7 @@ impl<'a> RunLoop<'a> {
                 r.agents
                     .iter()
                     .filter_map(|a| a.assignment.as_ref())
-                    .all(|w| {
-                        w.released.is_some()
-                            && (w.outcome.as_ref().is_some_and(|(_, o)| {
-                                !matches!(
-                                    o.disposition,
-                                    crate::session::worker::WorkerDisposition::Ready
-                                        | crate::session::worker::WorkerDisposition::NoChange
-                                )
-                            }) || w.verification.as_ref().is_some_and(|(_, v)| v.passed))
-                    })
+                    .all(|w| w.settled())
             })
         })?;
         if !workers_verified {

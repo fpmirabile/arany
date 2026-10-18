@@ -627,7 +627,8 @@ impl RunLoop<'_> {
                     source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
                 }
         ) {
-            self.admit_worker_action(&intent.call).await?;
+            self.admit_worker_action(self.worker_call_chunks(&intent.call)?)
+                .await?;
         }
         let (tail, observations) = match grant {
             Grant::Primary { review_allowed, .. } => {

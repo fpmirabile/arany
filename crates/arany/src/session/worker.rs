@@ -32,6 +32,19 @@ pub enum WorkerTool {
 }
 
 impl WorkerTool {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Read => "read",
+            Self::Search => "search",
+            Self::Mkdir => "mkdir",
+            Self::Write => "write",
+            Self::Edit => "edit",
+            Self::Skill => "skill",
+            Self::McpList => "mcp_list",
+        }
+    }
+
     pub(crate) fn of(call: &ToolCall) -> Option<Self> {
         Some(match call {
             ToolCall::List { .. } => Self::List,

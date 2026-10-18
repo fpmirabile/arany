@@ -605,16 +605,7 @@ impl ToolRuntime {
             grant
                 .tools
                 .iter()
-                .map(|tool| match tool {
-                    crate::session::worker::WorkerTool::List => "list",
-                    crate::session::worker::WorkerTool::Read => "read",
-                    crate::session::worker::WorkerTool::Search => "search",
-                    crate::session::worker::WorkerTool::Mkdir => "mkdir",
-                    crate::session::worker::WorkerTool::Write => "write",
-                    crate::session::worker::WorkerTool::Edit => "edit",
-                    crate::session::worker::WorkerTool::Skill => "skill",
-                    crate::session::worker::WorkerTool::McpList => "mcp_list",
-                })
+                .map(|tool| tool.label())
                 .collect::<Vec<_>>()
         );
         context.catalog = catalog.to_string();

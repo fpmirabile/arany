@@ -249,6 +249,9 @@ async fn worker_case(case: &'static str) {
                     WorkerDisposition::PrivateUncertain
                 );
             }
+            if matches!(case, "conflict" | "integration_denial") {
+                assert_eq!(synthesis_calls, 1, "{case} reaches synthesis");
+            }
             if case == "conflict" {
                 assert_eq!(std::fs::read(workspace.join("notes/b")).unwrap(), b"host b");
                 assert_eq!(

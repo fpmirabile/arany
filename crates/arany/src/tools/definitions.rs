@@ -290,15 +290,16 @@ impl AgentDefinition {
     }
 
     pub(crate) fn allows_worker(&self, call: &ToolCall) -> bool {
-        crate::session::worker::WorkerTool::of(call).is_some()
-            && self
-                .tools
-                .as_ref()
-                .is_none_or(|tools| tools.iter().any(|name| name == call.label()))
-            && !self
-                .disallowed_tools
-                .iter()
-                .any(|name| name == call.label())
+        crate::session::worker::WorkerTool::of(call)
+            .is_some_and(|tool| self.allows_worker_tool(tool))
+    }
+
+    pub(crate) fn allows_worker_tool(&self, tool: crate::session::worker::WorkerTool) -> bool {
+        let label = tool.label();
+        self.tools
+            .as_ref()
+            .is_none_or(|tools| tools.iter().any(|name| name == label))
+            && !self.disallowed_tools.iter().any(|name| name == label)
     }
 
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
