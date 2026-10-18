@@ -704,7 +704,15 @@ impl RunLoop<'_> {
         };
         self.journal
             .admit(self.session_id, tail, observations)
-            .await?;
+            .await
+            .map_err(|error| match error {
+                crate::store::StoreError::StorageFull | crate::store::StoreError::ReplayLimit
+                    if worker =>
+                {
+                    EngineError::Tool(crate::tools::ToolError::Limit)
+                }
+                error => error.into(),
+            })?;
         Ok(true)
     }
 
