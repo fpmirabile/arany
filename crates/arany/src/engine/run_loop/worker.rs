@@ -512,7 +512,9 @@ impl RunLoop<'_> {
             role: AgentRole::Child,
             ordinal: self
                 .ledger()
-                .view(|v| v.runs.last().expect("Run").agents.len() as u8)?,
+                .view(|v| v.runs.last().expect("Run").agents.len())?
+                .try_into()
+                .map_err(|_| EngineError::CoordinatorFailed)?,
             objective: Some(assignment.mission.clone()),
             definition: Some(assignment.definition.clone()),
             profile: None,
@@ -609,13 +611,14 @@ impl RunLoop<'_> {
         let id = child.agent_run_id;
         let mut stopped = self.observe_worker_stop().await?;
         let data = if finish.is_some() && !stopped {
+            let allowance = self.worker_allowance(id)?;
             let call = ToolCall::PrepareWorker {
                 preparation: WorkerPreparation {
                     assignment_id: id,
                     purpose: WorkerDataPurpose::Handover,
-                    max_chunks: (self.worker_allowance(id)? as usize).div_ceil(WORKER_CHUNK_BYTES)
-                        as u16,
-                    max_bytes: self.worker_allowance(id)?,
+                    max_chunks: u16::try_from((allowance as usize).div_ceil(WORKER_CHUNK_BYTES))
+                        .map_err(|_| EngineError::CoordinatorFailed)?,
+                    max_bytes: allowance,
                 },
             };
             let captured = self.capture_handover(child, call, deadline).await;

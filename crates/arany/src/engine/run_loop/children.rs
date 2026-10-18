@@ -520,7 +520,9 @@ impl RunLoop<'_> {
             role: AgentRole::Child,
             ordinal: self
                 .ledger()
-                .view(|v| v.runs.last().expect("Run").agents.len() as u8)?,
+                .view(|v| v.runs.last().expect("Run").agents.len())?
+                .try_into()
+                .map_err(|_| EngineError::CoordinatorFailed)?,
             objective: Some(assignment.objective.clone()),
             definition: queue.definition.clone(),
             profile: assignment.profile.or_else(|| self.default_child_profile()),
@@ -1219,6 +1221,9 @@ impl RunLoop<'_> {
             }
             let mut catalog: serde_json::Value =
                 serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
+            if let Some(fields) = catalog.as_object_mut() {
+                fields.remove("last_answer_refused");
+            }
             catalog["pending_workers"] = serde_json::json!(pending);
             catalog["worker_coordination"] = serde_json::json!(
                 "While workers are pending, inspect or edit only paths outside their leases. Commands wait for lease quiescence. Finish or propose the next wave only after settlement and fresh primary verification."

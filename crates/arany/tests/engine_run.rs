@@ -26,10 +26,6 @@ mod performance;
 #[path = "engine_run/goals.rs"]
 mod goals;
 
-#[cfg(unix)]
-#[path = "engine_run/worker_teams.rs"]
-mod worker_teams;
-
 #[path = "engine_run/routing.rs"]
 mod routing;
 

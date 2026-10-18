@@ -310,6 +310,40 @@ fn pad_worker_session(state: &Path, id: SessionId) {
 }
 
 #[tokio::test]
+async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
+    for case in [
+        "order",
+        "fallback",
+        "failure",
+        "mixed",
+        "c1_failure",
+        "cap",
+        "hard_cap",
+        "tokens",
+        "leased_edit",
+        "background",
+        "defer_finish",
+        "budget_calls",
+        "command",
+        "waves",
+        "reassign",
+        "cancel_foreground",
+        "cancel_background",
+        "cancel_mixed",
+    ] {
+        tokio::time::timeout(
+            Duration::from_secs(180),
+            arany::test_support::worker_teams::run_case(
+                Path::new(env!("CARGO_BIN_EXE_arany")),
+                case,
+            ),
+        )
+        .await
+        .expect(case);
+    }
+}
+
+#[tokio::test]
 async fn worker_team_conflict_keeps_completion_order_in_closed_replay() {
     let observation = tokio::time::timeout(
         Duration::from_secs(180),
