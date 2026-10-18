@@ -714,7 +714,7 @@ impl RunLoop<'_> {
                                 false
                             };
                             if !continues {
-                                abort_reason = Some(AbortReason::Failed);
+                                abort_reason = self.hook_abort()?.or(Some(AbortReason::Failed));
                             }
                             if !queue.budget_stopped {
                                 self.verify_workers().await?;
@@ -970,7 +970,7 @@ impl RunLoop<'_> {
             record: call_record(AgentPhase::ChildWork, &result, valid_response, None),
         })
         .await?;
-        if matches!(abort_reason, Some(AbortReason::Hook)) {
+        if matches!(abort_reason, Some(AbortReason::Hook)) || self.hook_abort()?.is_some() {
             self.finish_child(agent_run_id, AgentDisposition::Cancelled, None, true)
                 .await?;
             return Ok(Some(AgentDisposition::Cancelled));

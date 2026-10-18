@@ -139,7 +139,9 @@ impl TeamProvider {
                 }
             })
             .collect::<Vec<_>>();
-        if matches!(self.case, "mixed" | "c1_failure" | "cancel_mixed") {
+        if self.case.starts_with("hook_")
+            || matches!(self.case, "mixed" | "c1_failure" | "cancel_mixed")
+        {
             children.push(ChildAssignment {
                 objective: "researcher".into(),
                 profile: None,
@@ -147,7 +149,8 @@ impl TeamProvider {
             });
         }
         ProviderOutcome::Delegate(Delegate {
-            agent: (self.case == "mixed").then(|| "researcher".into()),
+            agent: (self.case == "mixed" || self.case.starts_with("hook_"))
+                .then(|| "researcher".into()),
             children,
         })
     }
@@ -398,7 +401,10 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     }
     let state = directory.path().join("state");
     let root = StateRoot::admit(&state).unwrap();
-    let commands = if case == "command" {
+    let commands = if case.starts_with("hook_") {
+        let shell = std::fs::canonicalize("/bin/sh").unwrap();
+        serde_json::json!([{"name":"sh", "executable":shell, "sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}])
+    } else if case == "command" {
         let executable = std::fs::canonicalize("/usr/bin/true").unwrap();
         serde_json::json!([{"name":"verify", "executable":executable, "sha256":crate::tools::types::hex_digest(&std::fs::read(&executable).unwrap()),"interpreter":false,"inputs":[]}])
     } else {
@@ -421,7 +427,26 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         std::fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-    if case == "mixed" {
+    if case.starts_with("hook_") {
+        let command =
+            |script: &str| serde_json::json!({"type":"command","command":script,"timeout":5});
+        let hooks = if case == "hook_sibling_stop" {
+            serde_json::json!({"SubagentStop":[{"matcher":"researcher","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
+        } else {
+            serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("kill -9 $PPID; sleep 5")]}]})
+        };
+        std::fs::write(
+            state.join("permissions.json"),
+            serde_json::to_vec(&serde_json::json!({"hooks":hooks})).unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            state.join("permissions.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    if case == "mixed" || case.starts_with("hook_") {
         std::fs::write(state.join("agents/researcher.md"), "---\nname: researcher\ndescription: Inspect only\ntools: Read\n---\nReturn a bounded report.\n").unwrap();
         std::fs::set_permissions(
             state.join("agents/researcher.md"),
@@ -503,7 +528,8 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             Some(approval) = inbox.next() => { approval.decide(true); },
             Some(index) = arrivals.recv() => {
                 ready.push(index);
-                if case == "tokens" || case == "waves" || case == "reassign" { provider.gates[index].add_permits(1); }
+                if case.starts_with("hook_") { if index == 7 { provider.gates[7].add_permits(1); } }
+                else if case == "tokens" || case == "waves" || case == "reassign" { provider.gates[index].add_permits(1); }
                 else if matches!(case, "cap" | "hard_cap") {
                     let cap = if case == "hard_cap" { 8 } else { 4 };
                     if ready.len() == cap {
@@ -536,7 +562,30 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                 }
             }
         }
-    }.unwrap_or_else(|e| panic!("{case}: team Run: {e:?}"));
+    };
+    if case == "hook_uncertain_sibling" {
+        assert!(
+            matches!(result, Err(EngineError::Tool(ToolError::Uncertain))),
+            "{case}: {result:?}"
+        );
+        drop(handle);
+        let session = provider.requests.lock().unwrap()[0].session_id;
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state, session).await;
+        let run = &view.runs[0];
+        assert!(run.agents.iter().all(|a| {
+            a.assignment
+                .as_ref()
+                .is_none_or(|w| w.integration.is_none())
+        }));
+        return TeamObservation {
+            directory,
+            session,
+            events,
+            view,
+        };
+    }
+    let result = result.unwrap_or_else(|e| panic!("{case}: team Run: {e:?}"));
     drop(handle);
     assert!(result.stopped.is_none());
     assert!(
@@ -569,6 +618,8 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         run.status,
         if case.starts_with("cancel_") {
             RunStatus::Cancelled
+        } else if case == "hook_sibling_stop" {
+            RunStatus::StoppedByHook
         } else if failed {
             RunStatus::Failed
         } else {
@@ -583,6 +634,14 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             .all(|a| a.status != AgentStatus::Active
                 && a.assignment.as_ref().is_none_or(|w| w.released.is_some()))
     );
+    if case == "hook_sibling_stop" {
+        let researcher = run.agents.last().unwrap();
+        assert_eq!(researcher.status, AgentStatus::StoppedByHook);
+        for editor in &run.agents[1..run.agents.len() - 1] {
+            assert_eq!(editor.status, AgentStatus::Cancelled);
+            assert!(editor.assignment.as_ref().unwrap().integration.is_none());
+        }
+    }
     if matches!(case, "cap" | "hard_cap") {
         assert_eq!(run.agents.len(), 9, "total attempts differ from active cap");
     }

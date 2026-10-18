@@ -175,7 +175,7 @@ impl Fixture {
         let requests = provider.requests.lock().unwrap().clone();
         let unconsumed = provider.responses.lock().unwrap().len();
         assert!(
-            unconsumed == 0,
+            unconsumed == 0 || result.run.status == RunStatus::StoppedByHook,
             "all expected calls consumed: {unconsumed} left, fixture settings {:?}, run {:?}, tools (operation, attested, outcome, hook outcomes) {:?}",
             self.settings,
             result.run.status,
@@ -3335,7 +3335,7 @@ mod lifecycle_hooks {
             ),
             (
                 r#"printf '%s' '{"continue":false,"stopReason":"keep-context"}'"#,
-                HookResult::Blocked {
+                HookResult::Stopped {
                     reason: Some("keep-context".into()),
                 },
             ),
@@ -3386,6 +3386,12 @@ mod lifecycle_hooks {
                     },
                 )
                 .await;
+            if matches!(expected, HookResult::Stopped { .. }) {
+                assert_eq!(result.run.status, RunStatus::StoppedByHook);
+                assert_eq!(provider.compact_requests.lock().unwrap().len(), 0);
+                assert!(requests.len() <= reads);
+                continue;
+            }
             assert_eq!(result.run.status, RunStatus::Finished, "{expected:?}");
             assert_eq!(requests.len(), reads + 1);
             assert_eq!(humans, 0);

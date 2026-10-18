@@ -545,6 +545,8 @@ async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
         "cancel_foreground",
         "cancel_background",
         "cancel_mixed",
+        "hook_sibling_stop",
+        "hook_uncertain_sibling",
     ] {
         tokio::time::timeout(
             Duration::from_secs(180),
