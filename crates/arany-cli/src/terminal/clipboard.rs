@@ -1,10 +1,36 @@
 use arany::ImageAttachment;
 use std::sync::{
-    Arc,
+    Arc, LazyLock, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
 use tokio::sync::oneshot;
+
+const CLEANUP_UNCONFIRMED: &str =
+    "clipboard cleanup unconfirmed; restart Arany before another clipboard read";
+
+#[derive(Default)]
+struct ClipboardWorker {
+    task: Mutex<Option<JoinHandle<()>>>,
+    cleanup_unconfirmed: AtomicBool,
+}
+
+static WORKER: LazyLock<Arc<ClipboardWorker>> =
+    LazyLock::new(|| Arc::new(ClipboardWorker::default()));
+
+struct Cleanup {
+    child: Option<std::process::Child>,
+    timeout: std::time::Duration,
+}
+
+impl Default for Cleanup {
+    fn default() -> Self {
+        Self {
+            child: None,
+            timeout: std::time::Duration::from_secs(1),
+        }
+    }
+}
 
 pub(super) enum ClipboardContent {
     Text(String),
@@ -14,25 +40,60 @@ pub(super) enum ClipboardContent {
 pub(super) struct ClipboardRead {
     result: oneshot::Receiver<Result<ClipboardContent, &'static str>>,
     cancelled: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
 }
 
 impl ClipboardRead {
     pub(super) fn start() -> Result<Self, &'static str> {
+        Self::start_with(&WORKER, read)
+    }
+
+    fn start_with(
+        owner: &Arc<ClipboardWorker>,
+        read: impl FnOnce(&AtomicBool, &mut Cleanup) -> Result<ClipboardContent, &'static str>
+        + Send
+        + 'static,
+    ) -> Result<Self, &'static str> {
+        let mut task = owner
+            .task
+            .try_lock()
+            .map_err(|_| "clipboard worker unavailable")?;
+        if owner.cleanup_unconfirmed.load(Ordering::Acquire) {
+            return Err(CLEANUP_UNCONFIRMED);
+        }
+        if task.as_ref().is_some_and(|task| !task.is_finished()) {
+            return Err("clipboard read or cleanup already in progress");
+        }
         let (sender, result) = oneshot::channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&cancelled);
-        let worker = std::thread::Builder::new()
-            .name("arany-clipboard-read".into())
-            .spawn(move || {
-                let _ = sender.send(read(&stop));
-            })
-            .map_err(|_| "clipboard worker unavailable")?;
-        Ok(Self {
-            result,
-            cancelled,
-            worker: Some(worker),
-        })
+        let owner = Arc::clone(owner);
+        *task = Some(
+            std::thread::Builder::new()
+                .name("arany-clipboard-read".into())
+                .spawn(move || {
+                    let mut cleanup = Cleanup::default();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        read(&stop, &mut cleanup)
+                    }))
+                    .unwrap_or(Err("clipboard worker unavailable"));
+                    let result = if cleanup.child.is_some() {
+                        owner.cleanup_unconfirmed.store(true, Ordering::Release);
+                        Err(CLEANUP_UNCONFIRMED)
+                    } else {
+                        result
+                    };
+                    let _ = sender.send(result);
+                    while let Some(child) = &mut cleanup.child {
+                        if matches!(child.try_wait(), Ok(Some(_))) {
+                            cleanup.child = None;
+                        } else {
+                            std::thread::park_timeout(std::time::Duration::from_millis(5));
+                        }
+                    }
+                })
+                .map_err(|_| "clipboard worker unavailable")?,
+        );
+        Ok(Self { result, cancelled })
     }
 
     pub(super) async fn recv(&mut self) -> Result<ClipboardContent, &'static str> {
@@ -45,19 +106,16 @@ impl ClipboardRead {
 impl Drop for ClipboardRead {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
     }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn read(_cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
+fn read(_cancelled: &AtomicBool, _cleanup: &mut Cleanup) -> Result<ClipboardContent, &'static str> {
     Err("explicit clipboard access is unavailable on this platform")
 }
 
 #[cfg(target_os = "linux")]
-fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
+fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardContent, &'static str> {
     use super::composer::MAX_DRAFT_BYTES;
     use std::process::Command;
     use std::time::{Duration, Instant};
@@ -102,7 +160,7 @@ fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
                 .env("XDG_RUNTIME_DIR", runtime)
                 .env("WAYLAND_DISPLAY", display)
                 .arg("--list-types");
-            let types = run_process(&mut command, cancelled, deadline, 16 * 1024)?;
+            let types = run_process(&mut command, cancelled, deadline, 16 * 1024, cleanup)?;
             let types = std::str::from_utf8(&types).map_err(|_| "invalid clipboard types")?;
             let kind = selected_type(
                 types,
@@ -151,7 +209,7 @@ fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
                     _ => return Err("unsafe X11 authority file"),
                 }
             }
-            let types = run_process(&mut command, cancelled, deadline, 16 * 1024)?;
+            let types = run_process(&mut command, cancelled, deadline, 16 * 1024, cleanup)?;
             let types = std::str::from_utf8(&types).map_err(|_| "invalid clipboard types")?;
             let kind = selected_type(
                 types,
@@ -174,7 +232,7 @@ fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
     } else {
         MAX_DRAFT_BYTES
     };
-    let bytes = run_process(&mut command, cancelled, deadline, limit)?;
+    let bytes = run_process(&mut command, cancelled, deadline, limit, cleanup)?;
     if image {
         ImageAttachment::from_png(&bytes).map(ClipboardContent::Image)
     } else {
@@ -185,7 +243,7 @@ fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
 }
 
 #[cfg(target_os = "macos")]
-fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
+fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardContent, &'static str> {
     use std::time::{Duration, Instant};
 
     let mut command = native_command(None)?;
@@ -194,6 +252,7 @@ fn read(cancelled: &AtomicBool) -> Result<ClipboardContent, &'static str> {
         cancelled,
         Instant::now() + Duration::from_secs(2),
         super::composer::MAX_DRAFT_BYTES.max(arany::MAX_IMAGE_BYTES) + 2,
+        cleanup,
     )?;
     native_content(&bytes)
 }
@@ -287,6 +346,7 @@ fn run_process(
     cancelled: &AtomicBool,
     deadline: std::time::Instant,
     limit: usize,
+    cleanup: &mut Cleanup,
 ) -> Result<Vec<u8>, &'static str> {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process_group, waitid};
@@ -295,17 +355,51 @@ fn run_process(
     use std::process::{Child, Stdio};
     use std::time::{Duration, Instant};
 
-    struct OwnedChild {
-        child: Child,
+    struct OwnedChild<'a> {
+        child: Option<Child>,
         group: Option<Pid>,
+        cleanup: &'a mut Cleanup,
     }
-    impl Drop for OwnedChild {
-        fn drop(&mut self) {
-            if let Some(group) = self.group {
-                let _ = kill_process_group(group, Signal::KILL);
+    impl OwnedChild<'_> {
+        fn kill(&mut self) {
+            if let Some(child) = &mut self.child {
+                if let Some(group) = self.group {
+                    let _ = kill_process_group(group, Signal::KILL);
+                }
+                let _ = child.kill();
             }
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+        }
+
+        fn finish(mut self) -> Result<(), &'static str> {
+            let deadline = Instant::now() + self.cleanup.timeout;
+            self.kill();
+            while Instant::now() < deadline {
+                match self
+                    .child
+                    .as_mut()
+                    .expect("owned clipboard child")
+                    .try_wait()
+                {
+                    Ok(Some(_)) => {
+                        self.child = None;
+                        return Ok(());
+                    }
+                    Ok(None) => std::thread::park_timeout(
+                        Duration::from_millis(5)
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    ),
+                    Err(_) => break,
+                }
+            }
+            Err(CLEANUP_UNCONFIRMED)
+        }
+    }
+    impl Drop for OwnedChild<'_> {
+        fn drop(&mut self) {
+            self.kill();
+            if let Some(child) = self.child.take() {
+                self.cleanup.child = Some(child);
+            }
         }
     }
     if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
@@ -320,92 +414,251 @@ fn run_process(
         .spawn()
         .map_err(|_| "clipboard client unavailable")?;
     let group = child.id().try_into().ok().and_then(Pid::from_raw);
-    let mut owner = OwnedChild { child, group };
-    let group = owner.group.ok_or("clipboard process unavailable")?;
-    let mut stdout = owner
-        .child
-        .stdout
-        .take()
-        .ok_or("clipboard pipe unavailable")?;
-    let mut stderr = owner
-        .child
-        .stderr
-        .take()
-        .ok_or("clipboard pipe unavailable")?;
-    fcntl_setfl(
-        &stdout,
-        fcntl_getfl(&stdout).map_err(|_| "clipboard pipe unavailable")? | OFlags::NONBLOCK,
-    )
-    .map_err(|_| "clipboard pipe unavailable")?;
-    fcntl_setfl(
-        &stderr,
-        fcntl_getfl(&stderr).map_err(|_| "clipboard pipe unavailable")? | OFlags::NONBLOCK,
-    )
-    .map_err(|_| "clipboard pipe unavailable")?;
-    let mut output = Vec::new();
-    let mut output_bytes = 0;
-    let mut error_bytes = 0;
-    let mut stdout_closed = false;
-    let mut stderr_closed = false;
-    loop {
-        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            return Err("clipboard read cancelled or timed out");
-        }
-        let mut buffer = [0; 4096];
-        for (stream, closed, count, cap, collect) in [
-            (
-                &mut stdout as &mut dyn Read,
-                &mut stdout_closed,
-                &mut output_bytes,
-                limit,
-                true,
-            ),
-            (
-                &mut stderr as &mut dyn Read,
-                &mut stderr_closed,
-                &mut error_bytes,
-                4096,
-                false,
-            ),
-        ] {
-            if *closed {
-                continue;
-            }
-            match stream.read(&mut buffer) {
-                Ok(0) => *closed = true,
-                Ok(length) => {
-                    if length > cap.saturating_sub(*count) {
-                        return Err("clipboard output exceeds its limit");
-                    }
-                    *count += length;
-                    if collect {
-                        output.extend_from_slice(&buffer[..length]);
-                    }
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) => {}
-                Err(_) => return Err("clipboard read unavailable"),
-            }
-        }
-        // Keep the leader waitable until group cleanup to prevent process-ID reuse.
-        if let Some(status) = waitid(
-            WaitId::Pid(group),
-            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+    let mut owner = OwnedChild {
+        child: Some(child),
+        group,
+        cleanup,
+    };
+    let result = (|| {
+        let group = owner.group.ok_or("clipboard process unavailable")?;
+        let child = owner.child.as_mut().expect("owned clipboard child");
+        let mut stdout = child.stdout.take().ok_or("clipboard pipe unavailable")?;
+        let mut stderr = child.stderr.take().ok_or("clipboard pipe unavailable")?;
+        fcntl_setfl(
+            &stdout,
+            fcntl_getfl(&stdout).map_err(|_| "clipboard pipe unavailable")? | OFlags::NONBLOCK,
         )
-        .map_err(|_| "clipboard process unavailable")?
-            && stdout_closed
-            && stderr_closed
-        {
-            return if status.exit_status() == Some(0) {
-                Ok(output)
-            } else {
-                Err("clipboard read unavailable")
-            };
+        .map_err(|_| "clipboard pipe unavailable")?;
+        fcntl_setfl(
+            &stderr,
+            fcntl_getfl(&stderr).map_err(|_| "clipboard pipe unavailable")? | OFlags::NONBLOCK,
+        )
+        .map_err(|_| "clipboard pipe unavailable")?;
+        let mut output = Vec::new();
+        let mut output_bytes = 0;
+        let mut error_bytes = 0;
+        let mut stdout_closed = false;
+        let mut stderr_closed = false;
+        loop {
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err("clipboard read cancelled or timed out");
+            }
+            let mut buffer = [0; 4096];
+            for (stream, closed, count, cap, collect) in [
+                (
+                    &mut stdout as &mut dyn Read,
+                    &mut stdout_closed,
+                    &mut output_bytes,
+                    limit,
+                    true,
+                ),
+                (
+                    &mut stderr as &mut dyn Read,
+                    &mut stderr_closed,
+                    &mut error_bytes,
+                    4096,
+                    false,
+                ),
+            ] {
+                if *closed {
+                    continue;
+                }
+                match stream.read(&mut buffer) {
+                    Ok(0) => *closed = true,
+                    Ok(length) => {
+                        if length > cap.saturating_sub(*count) {
+                            return Err("clipboard output exceeds its limit");
+                        }
+                        *count += length;
+                        if collect {
+                            output.extend_from_slice(&buffer[..length]);
+                        }
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(_) => return Err("clipboard read unavailable"),
+                }
+            }
+            // Keep the leader waitable until group cleanup to prevent process-ID reuse.
+            if let Some(status) = waitid(
+                WaitId::Pid(group),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+            )
+            .map_err(|_| "clipboard process unavailable")?
+                && stdout_closed
+                && stderr_closed
+            {
+                return if status.exit_status() == Some(0) {
+                    Ok(output)
+                } else {
+                    Err("clipboard read unavailable")
+                };
+            }
+            std::thread::park_timeout(Duration::from_millis(5));
         }
-        std::thread::park_timeout(Duration::from_millis(5));
+    })();
+    owner.finish()?;
+    result
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn cancellation_does_not_wait_for_the_clipboard_worker() {
+        let (release, held) = mpsc::sync_channel::<()>(1);
+        let (progress, progressed) = mpsc::sync_channel(1);
+        let owner = Arc::new(ClipboardWorker::default());
+        let read = ClipboardRead::start_with(&owner, move |stop, _| {
+            held.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(stop.load(Ordering::Acquire));
+            Err("clipboard read cancelled or timed out")
+        })
+        .unwrap();
+        let reactor = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    drop(read);
+                    tokio::task::yield_now().await;
+                    progress.send(()).unwrap();
+                });
+        });
+        let responsive = progressed.recv_timeout(Duration::from_secs(1)).is_ok();
+        release.send(()).unwrap();
+        reactor.join().unwrap();
+        owner.task.lock().unwrap().take().unwrap().join().unwrap();
+        assert!(responsive, "clipboard cancellation blocked the reactor");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn clipboard_process_cleanup_preserves_reap_evidence_and_reports_deadline_faults() {
+        use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+        use std::{process::Command, time::Instant};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for (cancel, cleanup_timeout, expected) in [
+            (false, Duration::from_secs(1), None),
+            (
+                true,
+                Duration::from_secs(1),
+                Some("clipboard read cancelled or timed out"),
+            ),
+            (true, Duration::ZERO, Some(CLEANUP_UNCONFIRMED)),
+            (false, Duration::ZERO, Some(CLEANUP_UNCONFIRMED)),
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let socket = fixture.path().join("clipboard.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let owner = Arc::new(ClipboardWorker::default());
+            let (retained, child_retained) = oneshot::channel();
+            let mut read = ClipboardRead::start_with(&owner, move |cancelled, cleanup| {
+                cleanup.timeout = cleanup_timeout;
+                let mut command = Command::new(std::env::current_exe().unwrap());
+                command
+                    .env_clear()
+                    .env("ARANY_CLIPBOARD_TEST_SOCKET", socket)
+                    .args([
+                        "--exact",
+                        "terminal::clipboard::cleanup_tests::clipboard_child_fixture",
+                        "--ignored",
+                        "--nocapture",
+                    ]);
+                let result = run_process(
+                    &mut command,
+                    cancelled,
+                    Instant::now() + Duration::from_secs(5),
+                    16 * 1024,
+                    cleanup,
+                );
+                let _ = retained.send(cleanup.child.is_some());
+                result.map(|bytes| ClipboardContent::Text(String::from_utf8(bytes).unwrap()))
+            })
+            .unwrap();
+            let (mut gate, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let pid = tokio::time::timeout(Duration::from_secs(5), gate.read_u32_le())
+                .await
+                .unwrap()
+                .unwrap();
+            let pid = Pid::from_raw(pid.try_into().unwrap()).unwrap();
+            assert!(
+                ClipboardRead::start_with(&owner, |_, _| panic!("overlapping clipboard read"))
+                    .is_err()
+            );
+            if cancel {
+                read.cancelled.store(true, Ordering::Release);
+            } else {
+                gate.write_all(&[1]).await.unwrap();
+            }
+            let result = tokio::time::timeout(Duration::from_secs(5), read.recv())
+                .await
+                .unwrap();
+            match (result, expected) {
+                (Ok(ClipboardContent::Text(output)), None) => {
+                    assert!(output.contains("clipboard fixture payload"));
+                    assert!(output.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"));
+                }
+                (Err(actual), Some(expected)) => assert_eq!(actual, expected),
+                _ => panic!("unexpected clipboard process result"),
+            }
+            assert_eq!(child_retained.await.unwrap(), cleanup_timeout.is_zero());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !owner.task.lock().unwrap().as_ref().unwrap().is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            owner.task.lock().unwrap().take().unwrap().join().unwrap();
+            assert!(
+                matches!(
+                    waitid(
+                        WaitId::Pid(pid),
+                        WaitIdOptions::EXITED | WaitIdOptions::NOHANG
+                    ),
+                    Err(rustix::io::Errno::CHILD)
+                ),
+                "clipboard child was not reaped"
+            );
+            if cleanup_timeout.is_zero() {
+                assert_eq!(
+                    ClipboardRead::start_with(&owner, |_, _| panic!(
+                        "retry after unconfirmed cleanup"
+                    ))
+                    .err(),
+                    Some(CLEANUP_UNCONFIRMED)
+                );
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[ignore = "held subprocess fixture for the clipboard cleanup owner"]
+    fn clipboard_child_fixture() {
+        use std::{
+            io::{Read, Write},
+            os::unix::net::UnixStream,
+        };
+
+        let socket = std::env::var_os("ARANY_CLIPBOARD_TEST_SOCKET").unwrap();
+        let mut gate = UnixStream::connect(socket).unwrap();
+        gate.write_all(&std::process::id().to_le_bytes()).unwrap();
+        let mut release = [0];
+        gate.read_exact(&mut release).unwrap();
+        std::io::stdout()
+            .write_all(b"clipboard fixture payload")
+            .unwrap();
     }
 }
 
@@ -445,6 +698,7 @@ function run(args) {
                 &AtomicBool::new(false),
                 Instant::now() + Duration::from_secs(5),
                 1024,
+                &mut Cleanup::default(),
             )
         }
     }
@@ -532,6 +786,7 @@ function run(args) {
                 &AtomicBool::new(false),
                 Instant::now() + Duration::from_secs(5),
                 arany::MAX_IMAGE_BYTES + 2,
+                &mut Cleanup::default(),
             )
             .and_then(|bytes| native_content(&bytes));
             assert_eq!(result.is_ok(), accepted, "native clipboard case {kind}");
