@@ -1934,7 +1934,7 @@ done
             .bounded_output_for(Duration::from_secs(30), 4096)
             .unwrap();
         assert!(attached.status.success(), "hdiutil attach: {attached:?}");
-        let _mounted = MountedImage(mountpoint.clone());
+        let _mounted = MountedImage(image.clone());
 
         let metadata = std::fs::metadata(&runtime).unwrap();
         let grant = RuntimeGrant {

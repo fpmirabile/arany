@@ -934,8 +934,8 @@ struct MountedRuntimeImage(Option<std::path::PathBuf>);
 
 impl Drop for MountedRuntimeImage {
     fn drop(&mut self) {
-        if let Some(device) = self.0.take() {
-            let _ = crate::process::detach_disk_image(&device, Duration::from_secs(30));
+        if let Some(image) = self.0.take() {
+            let _ = crate::process::detach_disk_image(&image, Duration::from_secs(30));
         }
     }
 }
@@ -1009,7 +1009,7 @@ async fn native_runtime_mount_journey_helper() {
         .unwrap();
     assert!(created.status.success(), "hdiutil create: {created:?}");
     let attached = std::process::Command::new("/usr/bin/hdiutil")
-        .args(["attach", "-nobrowse", "-mountpoint"])
+        .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
         .arg(&mountpoint)
         .arg(&image)
         .env_clear()
@@ -1019,17 +1019,7 @@ async fn native_runtime_mount_journey_helper() {
         .bounded_output_for(Duration::from_secs(30), 4096)
         .unwrap();
     assert!(attached.status.success(), "hdiutil attach: {attached:?}");
-    // Detach by the whole-disk device so a retry still works after the volume unmounts.
-    let device = String::from_utf8_lossy(&attached.stdout)
-        .lines()
-        .find_map(|line| {
-            line.split_whitespace()
-                .next()
-                .filter(|word| word.starts_with("/dev/disk"))
-                .map(std::path::PathBuf::from)
-        })
-        .unwrap_or_else(|| panic!("hdiutil attach device: {attached:?}"));
-    let mut mounted = MountedRuntimeImage(Some(device));
+    let mut mounted = MountedRuntimeImage(Some(image.clone()));
 
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
@@ -1153,8 +1143,8 @@ async fn native_runtime_mount_journey_helper() {
     assert_eq!(replay.runs[0], refused.run, "closed runtime refusal replay");
     assert_eq!(replay.runs[0].status, RunStatus::Failed);
     // Fixture cleanup after the product assertions; its bounded retry is not a retry of the test.
-    let device = mounted.0.as_ref().expect("mounted runtime fixture");
-    let detached = crate::process::detach_disk_image(device, Duration::from_secs(30));
+    let fixture_image = mounted.0.as_ref().expect("mounted runtime fixture");
+    let detached = crate::process::detach_disk_image(fixture_image, Duration::from_secs(30));
     assert!(
         detached.is_ok(),
         "hdiutil detach: {detached:?}; mount and backing image references (current-user visibility only): {}",

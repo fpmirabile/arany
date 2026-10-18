@@ -148,38 +148,98 @@ pub trait BoundedOutput {
     fn bounded_output_with_input(&mut self) -> io::Result<Output>;
 }
 
-// `diskimage` can hold a just-used fixture image briefly: retry gracefully with backoff, force only last.
+// `diskimage` can hold a just-used fixture image briefly: retry gracefully, force only last, all within `deadline`.
+// Each attempt re-resolves the device from the image path, so a reused disk number is never detached.
 #[cfg(target_os = "macos")]
-pub fn detach_disk_image(target: &std::path::Path, deadline: Duration) -> Result<(), Output> {
+pub fn detach_disk_image(image: &std::path::Path, deadline: Duration) -> Result<(), Output> {
+    const FORCE_RESERVE: Duration = Duration::from_secs(8);
     let end = Instant::now() + deadline;
+    let wanted = std::fs::canonicalize(image).unwrap_or_else(|_| image.to_owned());
+    let hdiutil = |args: &[&std::ffi::OsStr], cap: Duration, until: Instant| {
+        let budget = cap.min(until.saturating_duration_since(Instant::now()));
+        if budget.is_zero() {
+            return None;
+        }
+        // A command past its bound panics inside the bounded runner; that attempt then just fails.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Command::new("/usr/bin/hdiutil")
+                .args(args)
+                .env_clear()
+                .bounded_output_for(budget, 64 * 1024)
+        }))
+        .ok()
+        .and_then(Result::ok)
+    };
+    let device = |until: Instant| {
+        hdiutil(&["info".as_ref()], Duration::from_secs(3), until)
+            .filter(|output| output.status.success())
+            .map(|output| attached_device(&String::from_utf8_lossy(&output.stdout), &wanted, image))
+    };
     let mut pause = Duration::from_millis(250);
-    loop {
-        let force = Instant::now() + pause >= end;
-        let mut command = Command::new("/usr/bin/hdiutil");
-        command.arg("detach");
-        if force {
-            command.arg("-force");
+    let graceful_end = end.checked_sub(FORCE_RESERVE).unwrap_or(end);
+    while Instant::now() < graceful_end {
+        match device(graceful_end) {
+            Some(None) => return Ok(()),
+            Some(Some(attached)) => {
+                let detach = ["detach".as_ref(), "-quiet".as_ref(), attached.as_os_str()];
+                if hdiutil(&detach, Duration::from_secs(10), graceful_end)
+                    .is_some_and(|output| output.status.success())
+                {
+                    continue;
+                }
+            }
+            None => {}
         }
-        let output = command
-            .arg("-quiet")
-            .arg(target)
-            .env_clear()
-            .bounded_output_for(Duration::from_secs(20), 4096)
-            .map_err(|error| Output {
-                status: std::os::unix::process::ExitStatusExt::from_raw(1 << 8),
-                stdout: Vec::new(),
-                stderr: error.to_string().into_bytes(),
-            })?;
-        // A device node that disappeared after a failed attempt was detached by that attempt.
-        if output.status.success() || (target.starts_with("/dev") && !target.exists()) {
-            return Ok(());
-        }
-        if force {
-            return Err(output);
-        }
-        std::thread::sleep(pause);
+        std::thread::sleep(pause.min(graceful_end.saturating_duration_since(Instant::now())));
         pause = (pause * 2).min(Duration::from_secs(4));
     }
+    let failed = |stderr: &str| Output {
+        status: std::os::unix::process::ExitStatusExt::from_raw(1 << 8),
+        stdout: Vec::new(),
+        stderr: stderr.as_bytes().to_vec(),
+    };
+    let Some(attached) = device(end).ok_or_else(|| failed("hdiutil info unavailable"))? else {
+        return Ok(());
+    };
+    let detach = [
+        "detach".as_ref(),
+        "-force".as_ref(),
+        "-quiet".as_ref(),
+        attached.as_os_str(),
+    ];
+    match hdiutil(&detach, Duration::from_secs(20), end) {
+        Some(output) if output.status.success() => Ok(()),
+        Some(output) => Err(output),
+        None => Err(failed("forced detach exceeded the deadline")),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn attached_device(
+    info: &str,
+    wanted: &std::path::Path,
+    given: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let mut ours = false;
+    for line in info.lines() {
+        if line.starts_with("====") {
+            ours = false;
+        } else if let Some(path) = line
+            .strip_prefix("image-path")
+            .and_then(|rest| rest.trim_start().strip_prefix(':'))
+        {
+            let path = std::path::Path::new(path.trim());
+            ours = path == wanted || path == given;
+        } else if ours
+            && let Some(device) = line
+                .split_whitespace()
+                .next()
+                .filter(|word| word.starts_with("/dev/disk"))
+        {
+            return Some(device.into());
+        }
+    }
+    None
 }
 
 impl BoundedOutput for Command {
@@ -501,5 +561,48 @@ pub fn decline_workspace_consent(
             .write_all(b"\x1b")
             .expect("dismiss initial inline consent without authority");
         *declined = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attached_device;
+    use std::path::Path;
+
+    #[test]
+    fn a_fixture_image_resolves_only_to_its_own_listed_device() {
+        let info = "framework       : 1\n\
+================================================\n\
+image-path      : /private/tmp/other/storage.dmg\n\
+image-type      : read/write\n\
+/dev/disk4\tGUID_partition_scheme\t\n\
+/dev/disk4s1\tApple_HFS\t/private/tmp/other/mnt\n\
+================================================\n\
+image-path      : /private/tmp/x/runtime.sparseimage\n\
+image-type      : sparse disk image\n\
+/dev/disk5\tGUID_partition_scheme\t\n\
+/dev/disk5s1\tApple_HFS\t/private/tmp/x/mounted-image\n";
+        let wanted = Path::new("/private/tmp/x/runtime.sparseimage");
+        assert_eq!(
+            attached_device(info, wanted, Path::new("/tmp/x/runtime.sparseimage")),
+            Some("/dev/disk5".into())
+        );
+        assert_eq!(
+            attached_device(
+                info,
+                Path::new("/private/var/a.dmg"),
+                Path::new("/var/a.dmg")
+            ),
+            None,
+            "a detached image is no longer listed"
+        );
+        let reused = "================================================\n\
+image-path      : /private/tmp/other/storage.dmg\n\
+/dev/disk5\tGUID_partition_scheme\t\n";
+        assert_eq!(
+            attached_device(reused, wanted, wanted),
+            None,
+            "a reused disk number backs another image"
+        );
     }
 }
