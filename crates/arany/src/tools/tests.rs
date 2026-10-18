@@ -21,6 +21,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         version: 1,
         workspace_paths: vec![".agents/skills".into()],
         write: false,
+        child_unguarded: crate::tools::UnguardedGrant::Denied,
         commands: Vec::new(),
         skills: vec![Skill {
             name: "review".into(),
@@ -56,6 +57,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         queue_wait: None,
         active_action_gate: None,
         hook_stdin: None,
+        checkpoint_gate: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
         process_enforcement_digest: [1; 32],
@@ -230,6 +232,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         version: 1,
         workspace_paths: vec!["nested/file".into(), "empty".into(), "script".into()],
         write: true,
+        child_unguarded: crate::tools::UnguardedGrant::Denied,
         commands: vec![pinned, copied_program],
         skills: Vec::new(),
         mcp: Vec::new(),
@@ -1082,6 +1085,20 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
     let config: Config = serde_json::from_value(value.clone()).unwrap();
     config.validate().unwrap();
     assert!(config.receipt().valid());
+    assert_eq!(config.child_unguarded, UnguardedGrant::Denied);
+    let mut widened = value.clone();
+    widened["child_unguarded"] = json!("human_only");
+    assert!(
+        serde_json::from_value::<Config>(widened)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    for invalid in [json!(true), json!(null), json!("automatic")] {
+        let mut row = value.clone();
+        row["child_unguarded"] = invalid;
+        assert!(serde_json::from_value::<Config>(row).is_err());
+    }
     for roots in [
         json!([]),
         json!(["src", "src/child"]),
@@ -2069,6 +2086,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         queue_wait: None,
         active_action_gate: None,
         hook_stdin: None,
+        checkpoint_gate: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
         process_enforcement_digest: [1; 32],
@@ -2181,6 +2199,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         queue_wait: None,
         active_action_gate: None,
         hook_stdin: None,
+        checkpoint_gate: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
         process_enforcement_digest: [1; 32],
@@ -2242,6 +2261,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         queue_wait: None,
         active_action_gate: None,
         hook_stdin: None,
+        checkpoint_gate: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
         process_enforcement_digest: [1; 32],

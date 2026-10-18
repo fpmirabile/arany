@@ -114,7 +114,13 @@ impl AgentInspectorModel {
             choices,
             lines: lines
                 .into_iter()
-                .map(|line| safe_truncate(&line, width))
+                .map(|line| {
+                    if line.starts_with("Supervisor (shadow):") {
+                        line
+                    } else {
+                        safe_truncate(&line, width)
+                    }
+                })
                 .collect(),
         }
     }
@@ -169,6 +175,13 @@ fn agent_lines(
             lines.push(format!("Supersedes: {source}"));
         }
     }
+    lines.extend(
+        run.supervisor
+            .verdicts()
+            .iter()
+            .filter(|(actor, _)| *actor == agent.id)
+            .map(|(_, verdict)| super::supervisor_line(verdict)),
+    );
     if let Some(call) = agent.provider_calls.last() {
         let input = call
             .input_tokens
@@ -278,6 +291,38 @@ mod tests {
             lifecycle_hook_sequence: None,
             provider_sequences: Default::default(),
             provider_fallbacks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn supervisor_inspection_is_scoped_to_the_selected_actor() {
+        let mut view = view();
+        let mut run = run(0);
+        run.supervisor = crate::presentation::supervisor_fixture(run.agents[0].id, 256);
+        view.runs.push(run);
+        for width in [80, 120, 200] {
+            let primary = AgentInspectorModel::from_session(&view, 0, width, false);
+            let lines: Vec<_> = primary
+                .lines
+                .iter()
+                .filter(|line| line.starts_with("Supervisor (shadow):"))
+                .collect();
+            assert_eq!(lines.len(), 256);
+            assert_eq!(
+                lines[0].as_str(),
+                "Supervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken"
+            );
+            assert_eq!(
+                lines[255].as_str(),
+                "Supervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken; verdict limit reached"
+            );
+            let child = AgentInspectorModel::from_session(&view, 1, width, false);
+            assert!(
+                !child
+                    .lines
+                    .iter()
+                    .any(|line| line.starts_with("Supervisor (shadow):"))
+            );
         }
     }
 

@@ -90,7 +90,7 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
         .filter_map(|envelope| match &envelope.event {
             Event::AgentSpawned {
                 agent_run_id,
-                grant: Some(crate::ChildGrant::ReadOnly),
+                grant: Some(crate::ChildGrant::ReadOnly { .. }),
                 ..
             } => Some(*agent_run_id),
             _ => None,
@@ -166,7 +166,9 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                     index,
                     Action::Delegation {
                         children: spawned.len(),
-                        research: spawned.contains(&Some(crate::ChildGrant::ReadOnly)),
+                        research: spawned
+                            .iter()
+                            .any(|grant| matches!(grant, Some(crate::ChildGrant::ReadOnly { .. }))),
                     },
                     Some(end),
                 ));
@@ -320,16 +322,25 @@ pub struct ForegroundWorkerProvider {
     pub budget: crate::GoalBudget,
     pub requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     pub violations: std::sync::Mutex<Vec<&'static str>>,
+    background_started: tokio::sync::Notify,
+    identity: crate::ProviderIdentity,
 }
 
 impl ForegroundWorkerProvider {
     pub fn new(workspace: &Path, case: &'static str, budget: crate::GoalBudget) -> Self {
+        let mut identity =
+            crate::ProviderIdentity::new("scripted", "test-model", crate::Provenance::native());
+        if matches!(case, "headroom_background" | "headroom_race") {
+            identity.limits.concurrency = 2;
+        }
         Self {
             workspace: workspace.into(),
             case,
             budget,
             requests: Default::default(),
             violations: Default::default(),
+            background_started: Default::default(),
+            identity,
         }
     }
 
@@ -376,7 +387,11 @@ impl ForegroundWorkerProvider {
                 direction: "Return one whole changeset".into(),
                 lease: vec!["notes".into()],
                 criterion: self.plan().success_criterion,
-                mode: crate::worker::WorkerMode::Foreground,
+                mode: if matches!(self.case, "headroom_background" | "headroom_race") {
+                    crate::worker::WorkerMode::Background
+                } else {
+                    crate::worker::WorkerMode::Foreground
+                },
                 max_turns: 17,
                 wave: 1,
                 resumes: None,
@@ -393,11 +408,7 @@ impl ForegroundWorkerProvider {
 #[async_trait::async_trait]
 impl crate::Provider for ForegroundWorkerProvider {
     fn identity(&self) -> &crate::ProviderIdentity {
-        static IDENTITY: std::sync::LazyLock<crate::ProviderIdentity> =
-            std::sync::LazyLock::new(|| {
-                crate::ProviderIdentity::new("scripted", "test-model", crate::Provenance::native())
-            });
-        &IDENTITY
+        &self.identity
     }
 
     async fn invoke(
@@ -413,6 +424,7 @@ impl crate::Provider for ForegroundWorkerProvider {
             .filter(|r| r.phase == request.phase)
             .count();
         self.requests.lock().unwrap().push(request.clone());
+        let mut release_child = None;
         let outcome = match (request.phase, step) {
             (AgentPhase::RootPlan, 0) => super::scenario::tool_outcome(
                 ToolCall::Read {
@@ -423,6 +435,60 @@ impl crate::Provider for ForegroundWorkerProvider {
                 Some(Box::new(self.plan())),
             ),
             (AgentPhase::RootPlan, 1) => self.delegation(&request),
+            (AgentPhase::ChildWork, 0) if self.case == "headroom_race" => {
+                self.background_started.notified().await;
+                super::scenario::tool_outcome(
+                    ToolCall::Read {
+                        path: "notes/a".into(),
+                        offset: 0,
+                        limit: 128,
+                    },
+                    None,
+                )
+            }
+            (AgentPhase::ChildWork, _) if self.case == "headroom_background" => {
+                self.background_started.notify_one();
+                std::future::pending().await
+            }
+            (AgentPhase::ChildWork, _) if self.case == "headroom_child" => {
+                super::scenario::tool_outcome(
+                    ToolCall::Read {
+                        path: "notes/a".into(),
+                        offset: 0,
+                        limit: 128,
+                    },
+                    None,
+                )
+            }
+            (AgentPhase::RootSynthesis, _)
+                if matches!(self.case, "headroom_background" | "headroom_race") =>
+            {
+                if self.case == "headroom_race" && step == 0 {
+                    let (entered, release) = crate::FaultPlan::gate_goal_append_acknowledgment(
+                        request.session_id,
+                        |event| {
+                            matches!(event, Event::ProviderCallRecorded { record, .. }
+                            if record.phase == AgentPhase::ChildWork)
+                        },
+                    );
+                    self.background_started.notify_one();
+                    tokio::time::timeout(std::time::Duration::from_secs(30), entered)
+                        .await
+                        .expect("child response reaches the coordinator")
+                        .expect("child response commits");
+                    release_child = Some(release);
+                } else if step == 0 {
+                    self.background_started.notified().await;
+                }
+                super::scenario::tool_outcome(
+                    ToolCall::Read {
+                        path: "notes/a".into(),
+                        offset: 0,
+                        limit: 128,
+                    },
+                    None,
+                )
+            }
             (AgentPhase::ChildWork, 0) if self.case == "calls" => {
                 finish_with("No Tool allowance remains")
             }
@@ -536,7 +602,7 @@ impl crate::Provider for ForegroundWorkerProvider {
                 })
             }
         };
-        Ok(crate::ProviderResponse {
+        let response = crate::ProviderResponse {
             turn: crate::ProviderTurn::scripted(),
             outcome,
             response_id: None,
@@ -546,6 +612,13 @@ impl crate::Provider for ForegroundWorkerProvider {
                 ..Default::default()
             },
             wire_provenance: None,
-        })
+        };
+        if let Some(release) = release_child {
+            // Complete this response in the same poll before the child continuation resumes.
+            release
+                .send(())
+                .expect("release the committed child response");
+        }
+        Ok(response)
     }
 }

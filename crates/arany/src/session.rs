@@ -1,3 +1,5 @@
+pub(crate) mod checkpoint;
+pub use checkpoint::{Checkpoint, CheckpointReason, CheckpointStatus};
 mod compaction;
 mod context;
 mod events;

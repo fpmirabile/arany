@@ -149,7 +149,9 @@ impl Event {
                                 name.len() <= 64 && crate::tools::types::valid_name(name)
                             }) =>
                     {
-                        if (*grant == Some(ChildGrant::EditOnly)) != assignment.is_some() {
+                        if (matches!(*grant, Some(ChildGrant::EditOnly { .. })))
+                            != assignment.is_some()
+                        {
                             return Err(ReplayError::InvalidPayload);
                         }
                         if let Some(p) = assignment
@@ -211,11 +213,15 @@ impl Event {
                 }
             }
             Self::ToolFinished {
+                checkpoint,
                 run_id,
                 agent_run_id,
                 observation,
             } => {
-                if observation.valid()
+                if checkpoint
+                    .as_ref()
+                    .is_none_or(|checkpoint| checkpoint.valid())
+                    && observation.valid()
                     && !(observation.cache_update == crate::tools::CacheUpdate::NotAttempted
                         && observation.disposition == crate::tools::ToolDisposition::Succeeded)
                     && observation.intent.run_id == *run_id

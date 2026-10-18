@@ -84,6 +84,7 @@ pub(super) fn goal_report(
     }
     push_cache_facts(&mut report, view, goal, &mut omitted_facts);
     push_unguarded_facts(&mut report, view, goal, &mut omitted_facts);
+    push_checkpoint_facts(&mut report, view, goal, &mut omitted_facts);
     for (index, (_, fallback)) in view
         .runs
         .iter()
@@ -131,6 +132,37 @@ pub(super) fn goal_report(
         append_goal_report_omission(&mut report, protected_unresolved_count);
     }
     report
+}
+
+fn push_checkpoint_facts(
+    report: &mut GoalReport,
+    view: &crate::session::SessionView,
+    goal: &crate::session::GoalView,
+    omitted_facts: &mut bool,
+) {
+    let mut checkpoint_skipped = false;
+    let mut checkpoints_pruned = false;
+    for checkpoint in view
+        .runs
+        .iter()
+        .filter(|run| goal.run_ids.contains(&run.id))
+        .flat_map(|run| &run.tools)
+        .filter_map(|tool| tool.checkpoint.as_ref())
+    {
+        if !checkpoint_skipped && let Some(notice) = checkpoint.notice() {
+            push_goal_report_item(report, GoalReportSection::Unresolved, notice, omitted_facts);
+            checkpoint_skipped = true;
+        }
+        if !checkpoints_pruned && let Some(run) = checkpoint.pruned_before_run {
+            push_goal_report_item(
+                report,
+                GoalReportSection::Unresolved,
+                &format!("Older checkpoints pruned; code restore unavailable before Run {run}"),
+                omitted_facts,
+            );
+            checkpoints_pruned = true;
+        }
+    }
 }
 
 fn push_cache_facts(

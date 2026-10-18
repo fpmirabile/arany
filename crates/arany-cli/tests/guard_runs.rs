@@ -2467,6 +2467,262 @@ mod goals {
         )));
         assert_action_bounds(&events, false, false);
     }
+    #[tokio::test]
+    async fn a_stalled_checkpoint_capture_is_skipped_and_the_edit_still_publishes() {
+        use arany::test_support::goals::*;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "original");
+        let state_path = temp.path().join("state");
+        let engine = engine_support::open(
+            StateRoot::admit(&state_path).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        let config = state_path.join("tools.json");
+        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut plan = write_plan();
+        plan.paths = vec!["notes/facts.txt".into()];
+        plan.budget = arany::GoalBudget::default();
+        plan.success_criterion = arany::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "notes/facts.txt".into(),
+            content: "one".into(),
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            crate::tool_outcome(
+                arany::ToolCall::Write {
+                    path: "notes/facts.txt".into(),
+                    expected_digest: Some(
+                        Sha256::digest(b"original")
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect(),
+                    ),
+                    content: "one".into(),
+                },
+                Some(Box::new(plan)),
+            ),
+            finish_with("one"),
+        ]));
+        arany::FaultPlan::stall_checkpoint(session);
+        let mut input = request(&workspace, "Change the facts");
+        input.session_id = Some(session);
+        input.title = None;
+        input.include_paths.clear();
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        let tool = &outcome.run.tools[0];
+        assert_eq!(
+            tool.observation.as_ref().unwrap().disposition,
+            arany::ToolDisposition::Succeeded
+        );
+        let checkpoint = tool.checkpoint.as_ref().unwrap();
+        assert_eq!(checkpoint.status, arany::CheckpointStatus::Skipped);
+        assert_eq!(
+            checkpoint.reason,
+            Some(arany::CheckpointReason::StoreUnavailable)
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("notes/facts.txt")).unwrap(),
+            b"one"
+        );
+        engine.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoints_commit_before_go_skip_repeats_capture_gaps_and_preserve_replay() {
+        use arany::test_support::goals::*;
+        use std::os::unix::fs::PermissionsExt;
+        for unavailable in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = facts_workspace(temp.path(), "original");
+            let state_path = temp.path().join("state");
+            let engine = engine_support::open(
+                StateRoot::admit(&state_path).unwrap(),
+                EngineConfig {
+                    guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let session = engine
+                .create_session(workspace.clone(), None)
+                .await
+                .unwrap();
+            let config = state_path.join("tools.json");
+            std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+            if unavailable {
+                std::fs::write(state_path.join("checkpoints.sqlite"), b"malformed").unwrap();
+            }
+            let write = |before: &str, after: &str, plan| {
+                crate::tool_outcome(
+                    arany::ToolCall::Write {
+                        path: "notes/facts.txt".into(),
+                        expected_digest: Some(
+                            Sha256::digest(before.as_bytes())
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect(),
+                        ),
+                        content: after.into(),
+                    },
+                    plan,
+                )
+            };
+            let mut plan = write_plan();
+            plan.paths = vec!["notes/facts.txt".into()];
+            plan.budget = arany::GoalBudget::default();
+            plan.success_criterion = arany::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "notes/facts.txt".into(),
+                content: "three".into(),
+            };
+            let path = workspace.join("notes/facts.txt");
+            let external = path.clone();
+            let provider = Arc::new(
+                ScriptedProvider::new(vec![
+                    write("original", "one", Some(Box::new(plan))),
+                    write("one", "two", None),
+                    write("external", "three", None),
+                    finish_with("three"),
+                ])
+                .with_before_call(2, move || std::fs::write(&external, b"external").unwrap()),
+            );
+            let mut input = request(&workspace, "Change the facts");
+            input.session_id = Some(session);
+            input.title = None;
+            input.include_paths.clear();
+            let outcome = {
+                let gate = (!unavailable).then(|| arany::FaultPlan::gate_checkpoint(session));
+                let execution = run_with(
+                    &engine,
+                    &provider,
+                    input,
+                    RunControls {
+                        tools: ToolGrant::Configured,
+                        ..Default::default()
+                    },
+                );
+                tokio::pin!(execution);
+                if let Some((entered, release)) = gate {
+                    tokio::select! {
+                        result = &mut execution => panic!("Run completed before the pre-GO checkpoint gate: {result:?}"),
+                        result = tokio::time::timeout(Duration::from_secs(120), entered) => result.unwrap().unwrap(),
+                    }
+                    assert_eq!(
+                        std::fs::read(&path).unwrap(),
+                        b"original",
+                        "GO has not published yet"
+                    );
+                    let _ = release.send(());
+                }
+                execution.await.unwrap()
+            };
+            assert_eq!(outcome.run.status, RunStatus::Finished);
+            let statuses: Vec<_> = outcome
+                .run
+                .tools
+                .iter()
+                .map(|t| t.checkpoint.as_ref().unwrap().status)
+                .collect();
+            let captured = if unavailable {
+                arany::CheckpointStatus::Skipped
+            } else {
+                arany::CheckpointStatus::Captured
+            };
+            assert_eq!(
+                statuses,
+                [captured, arany::CheckpointStatus::NotNeeded, captured]
+            );
+            assert_eq!(provider.requests.lock().unwrap().len(), 4);
+            assert_eq!(std::fs::read(&path).unwrap(), b"three");
+            engine.close().await.unwrap();
+            let (events, view) = replayed(&state_path, session).await;
+            assert_action_bounds(&events, false, false);
+            if unavailable {
+                assert!(
+                    view.goals[0]
+                        .report
+                        .as_ref()
+                        .unwrap()
+                        .unresolved
+                        .iter()
+                        .any(|fact| fact.contains("cannot be rewound"))
+                );
+            } else {
+                let store =
+                    Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+                for bytes in [b"original".as_slice(), b"external".as_slice()] {
+                    assert_eq!(
+                        store
+                            .checkpoint_blob(Sha256::digest(bytes).into())
+                            .await
+                            .unwrap()
+                            .as_deref(),
+                        Some(bytes)
+                    );
+                }
+                store.close().await.unwrap();
+                let checkpoints = rusqlite::Connection::open_with_flags(
+                    state_path.join("checkpoints.sqlite"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .unwrap();
+                let sequence: i64 = checkpoints
+                    .query_row(
+                        "SELECT tool_sequence FROM refs WHERE session_id=?1 AND digest=?2",
+                        rusqlite::params![
+                            session.to_string(),
+                            Sha256::digest(b"original").as_slice()
+                        ],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let sequence = u64::try_from(sequence).unwrap();
+                let Event::ToolStarted { intent, .. } = &events
+                    .iter()
+                    .find(|event| event.sequence == sequence)
+                    .unwrap()
+                    .event
+                else {
+                    panic!("checkpoint ref must name ToolStarted");
+                };
+                let finished = events
+                    .iter()
+                    .find(|event| matches!(&event.event, Event::ToolFinished { observation, .. } if observation.intent.id == intent.id))
+                    .unwrap();
+                assert!(sequence < finished.sequence);
+            }
+            std::fs::write(&path, b"after exit").unwrap();
+            assert_eq!(
+                SessionView::replay(session, &events).unwrap().unwrap(),
+                view
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                b"after exit",
+                "strict replay never re-executes"
+            );
+        }
+    }
 }
 
 mod routing {
@@ -2643,7 +2899,12 @@ mod routing {
         let (events, view) = reopen(&state, result.session_id).await;
         let child = &view.runs[0].agents[1];
         assert_eq!(child.profile.as_deref(), Some("spare"));
-        assert_eq!(child.grant, Some(arany::ChildGrant::ReadOnly));
+        assert_eq!(
+            child.grant,
+            Some(arany::ChildGrant::ReadOnly {
+                unguarded: arany::UnguardedGrant::Denied
+            })
+        );
         assert_eq!(child.tools.len(), 1);
         assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
         assert_eq!(first.requests.lock().unwrap().len(), 2);

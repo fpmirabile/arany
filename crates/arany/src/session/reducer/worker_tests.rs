@@ -81,7 +81,38 @@ impl Fixture {
         attestation: Option<Attestation>,
         output: &str,
     ) -> u64 {
+        let checkpoint = if crate::session::checkpoint::publication(intent)
+            && (attestation.is_some() || disposition == ToolDisposition::Uncertain)
+        {
+            let view = self.view();
+            let needed = crate::session::checkpoint::before_versions(&view.runs[0], &intent.call)
+                .iter()
+                .any(|(path, before)| {
+                    before.as_ref().is_some_and(|digest| {
+                        crate::session::checkpoint::capture_needed(&view, self.run, path, digest)
+                    })
+                });
+            Some(
+                if needed
+                    && matches!(
+                        disposition,
+                        ToolDisposition::Succeeded | ToolDisposition::Uncertain
+                    )
+                {
+                    crate::Checkpoint {
+                        status: crate::CheckpointStatus::Captured,
+                        reason: None,
+                        pruned_before_run: None,
+                    }
+                } else {
+                    crate::Checkpoint::not_needed()
+                },
+            )
+        } else {
+            None
+        };
         self.push(Event::ToolFinished {
+            checkpoint,
             run_id: self.run,
             agent_run_id: intent.agent_run_id,
             observation: ToolObservation {
@@ -537,6 +568,8 @@ fn fixture_with_manifest(
             permissions_digest: None,
             max_context_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES as u32,
             unguarded_rules_digest: None,
+            unguarded: crate::tools::UnguardedGrant::HumanOnly,
+            child_unguarded: crate::tools::UnguardedGrant::Denied,
         }),
     };
     let mut f = Fixture {
@@ -733,7 +766,9 @@ fn fixture_with_manifest(
         role: AgentRole::Child,
         ordinal: 1,
         objective: Some(pins.request.mission.clone()),
-        grant: Some(ChildGrant::EditOnly),
+        grant: Some(ChildGrant::EditOnly {
+            unguarded: crate::tools::UnguardedGrant::Denied,
+        }),
         definition: Some("editor".into()),
         profile: None,
         assignment: Some(pins),
@@ -910,6 +945,13 @@ fn worker_protocol_refuses_widened_stale_and_unsettled_transitions() {
         }
         refused(&f, event, case);
     }
+    let mut widened = spawn.clone();
+    if let Event::AgentSpawned { grant, .. } = &mut widened {
+        *grant = Some(ChildGrant::EditOnly {
+            unguarded: crate::tools::UnguardedGrant::HumanOnly,
+        });
+    }
+    refused(&f, widened, "child unguarded grant");
     f.push(spawn);
     refused(
         &f,
@@ -1266,7 +1308,9 @@ fn worker_protocol_researcher_spawn_must_match_its_proposed_profile() {
                 ordinal: 2,
                 role: AgentRole::Child,
                 objective: Some("Research".into()),
-                grant: Some(ChildGrant::ReadOnly),
+                grant: Some(ChildGrant::ReadOnly {
+                    unguarded: crate::tools::UnguardedGrant::Denied,
+                }),
                 definition: None,
                 profile: spawned.map(str::to_owned),
                 assignment: None,
@@ -1297,7 +1341,9 @@ fn worker_protocol_private_loss_is_local_and_c1_failure_remains_fatal() {
             ordinal: 2,
             role: AgentRole::Child,
             objective: Some("Research".into()),
-            grant: Some(ChildGrant::ReadOnly),
+            grant: Some(ChildGrant::ReadOnly {
+                unguarded: crate::tools::UnguardedGrant::Denied,
+            }),
             definition: None,
             profile: None,
             assignment: None,
@@ -1458,12 +1504,12 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         },
     });
     let expected = [
-        ("RunStarted", 15),
-        ("AgentSpawned", 10),
+        ("RunStarted", 16),
+        ("AgentSpawned", 11),
         ("ProviderCallRecorded", 9),
         ("AgentFinished", 10),
         ("ToolStarted", 11),
-        ("ToolFinished", 12),
+        ("ToolFinished", 14),
         ("WorkerStopObserved", 1),
         ("WorkerHandoverDiscarded", 1),
         ("WorkerDataChunk", 1),
@@ -1765,7 +1811,9 @@ fn worker_protocol_nonoverlap_and_completion_order() {
         role: AgentRole::Child,
         ordinal: 2,
         objective: Some(pins.request.mission.clone()),
-        grant: Some(ChildGrant::EditOnly),
+        grant: Some(ChildGrant::EditOnly {
+            unguarded: crate::tools::UnguardedGrant::Denied,
+        }),
         definition: Some("editor".into()),
         profile: None,
         assignment: Some(pins),
@@ -2192,6 +2240,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
     refused(
         &f,
         Event::ToolFinished {
+            checkpoint: None,
             run_id: f.run,
             agent_run_id: f.child,
             observation: ToolObservation {
@@ -2398,7 +2447,9 @@ fn worker_protocol_refused_base_capture_spends_its_slot_and_other_workers_procee
         role: AgentRole::Child,
         ordinal: 1,
         objective: Some(second.mission.clone()),
-        grant: Some(ChildGrant::EditOnly),
+        grant: Some(ChildGrant::EditOnly {
+            unguarded: crate::tools::UnguardedGrant::Denied,
+        }),
         definition: Some("editor".into()),
         profile: None,
         assignment: Some(WorkerAssignment {
@@ -2443,6 +2494,7 @@ fn worker_protocol_private_reads_require_the_worker_read_attestation() {
     );
     f.started(&intent);
     let finished = |attestation| Event::ToolFinished {
+        checkpoint: None,
         run_id: f.run,
         agent_run_id: f.child,
         observation: ToolObservation {
@@ -2640,7 +2692,9 @@ fn worker_protocol_lineage_accepts_only_released_children_of_the_goal() {
             role: AgentRole::Child,
             ordinal: 2,
             objective: Some(request.mission.clone()),
-            grant: Some(ChildGrant::EditOnly),
+            grant: Some(ChildGrant::EditOnly {
+                unguarded: crate::tools::UnguardedGrant::Denied,
+            }),
             definition: Some("editor".into()),
             profile: None,
             assignment: Some(WorkerAssignment {
@@ -3236,6 +3290,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
             append(
                 &mut view,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: f.run,
                     agent_run_id: actor,
                     observation: ToolObservation {
@@ -3349,7 +3404,9 @@ fn worker_protocol_researcher_only_run_rejects_a_call_after_an_invalid_synthesis
         ordinal: 1,
         role: AgentRole::Child,
         objective: Some("Research".into()),
-        grant: Some(ChildGrant::ReadOnly),
+        grant: Some(ChildGrant::ReadOnly {
+            unguarded: crate::tools::UnguardedGrant::Denied,
+        }),
         definition: None,
         profile: None,
         assignment: None,
@@ -3641,6 +3698,7 @@ impl Fixture {
         );
         self.started(&intent);
         self.push(Event::ToolFinished {
+            checkpoint: None,
             run_id: self.run,
             agent_run_id: self.child,
             observation: ToolObservation {
@@ -3748,6 +3806,7 @@ fn worker_protocol_command_authority_revision_generation_and_capture_order() {
     ] {
         let mut f = command_fixture();
         if ["parent", "plan", "assignment", "grant", "definition"].contains(&case) {
+            let mut definition_digest = None;
             for e in &mut f.events {
                 match (case, e) {
                     ("parent", Event::RunStarted { config, .. }) => config
@@ -3784,9 +3843,33 @@ fn worker_protocol_command_authority_revision_generation_and_capture_order() {
                             serde_json::from_str(&observation.output).unwrap();
                         value["Definition"]["definition"]["disallowed_tools"] =
                             serde_json::json!(["command"]);
+                        let definition: crate::tools::definitions::AgentDefinition =
+                            serde_json::from_value(value["Definition"]["definition"].clone())
+                                .unwrap();
+                        definition_digest = Some(crate::tools::types::digest(
+                            &serde_json::to_vec(&definition).unwrap(),
+                        ));
                         observation.output = value.to_string();
                     }
                     _ => (),
+                }
+            }
+            if let Some(digest) = definition_digest {
+                for e in &mut f.events {
+                    match e {
+                        Event::ProviderCallRecorded { record, .. } => {
+                            if let Some(assignments) = &mut record.delegation
+                                && let ChildAssignment::Editor { assignment } = &mut assignments[0]
+                            {
+                                assignment.definition_digest = digest;
+                            }
+                        }
+                        Event::AgentSpawned {
+                            assignment: Some(p),
+                            ..
+                        } => p.request.definition_digest = digest,
+                        _ => (),
+                    }
                 }
             }
             assert!(
@@ -3799,32 +3882,41 @@ fn worker_protocol_command_authority_revision_generation_and_capture_order() {
         let start = f.events.iter().position(|e| matches!(e, Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::Command { .. }))).unwrap();
         let observed = start + 1;
         match case {
-            "unknown" => {
+            "unknown" | "revision" | "generation" => {
+                let mutate = |intent: &mut crate::tools::EffectIntent| match case {
+                    "unknown" => {
+                        let ToolCall::Command { program, .. } = &mut intent.call else {
+                            unreachable!()
+                        };
+                        *program = "extra".into();
+                    }
+                    _ => {
+                        let EffectTarget::WorkerView {
+                            revision,
+                            cache_generation,
+                            ..
+                        } = &mut intent.target
+                        else {
+                            unreachable!()
+                        };
+                        if case == "revision" {
+                            *revision = 1;
+                        } else {
+                            *cache_generation = None;
+                        }
+                    }
+                };
                 let Event::ToolStarted { intent, .. } = &mut f.events[start] else {
                     unreachable!()
                 };
-                let ToolCall::Command { program, .. } = &mut intent.call else {
+                mutate(intent);
+                let Event::ToolFinished { observation, .. } = &mut f.events[observed] else {
                     unreachable!()
                 };
-                *program = "extra".into();
-            }
-            "revision" | "generation" => {
-                let Event::ToolStarted { intent, .. } = &mut f.events[start] else {
-                    unreachable!()
-                };
-                let EffectTarget::WorkerView {
-                    revision,
-                    cache_generation,
-                    ..
-                } = &mut intent.target
-                else {
-                    unreachable!()
-                };
-                if case == "revision" {
-                    *revision = 1;
-                } else {
-                    *cache_generation = None;
-                }
+                mutate(&mut observation.intent);
+                observation.attestation = Some(Attestation::WorkerCommand {
+                    receipt: receipt(&observation.intent),
+                });
             }
             "published" | "workspace receipt" => {
                 let Event::ToolFinished { observation, .. } = &mut f.events[observed] else {
@@ -4080,4 +4172,35 @@ fn worker_protocol_handover_requires_current_private_evidence_and_gate_is_bounde
         },
         "fourth gate continuation",
     );
+}
+
+#[test]
+fn worker_child_unguarded_grant_can_only_narrow_explicit_parent_permission() {
+    use crate::tools::UnguardedGrant::{Denied, HumanOnly};
+    for parent in [Denied, HumanOnly] {
+        for requested in [Denied, HumanOnly] {
+            let mut f = fixture();
+            for event in &mut f.events {
+                match event {
+                    Event::RunStarted { config, .. } => {
+                        config.tool_policy.as_mut().unwrap().child_unguarded = parent;
+                    }
+                    Event::AgentSpawned {
+                        role: AgentRole::Child,
+                        grant,
+                        ..
+                    } => {
+                        *grant = Some(ChildGrant::EditOnly {
+                            unguarded: requested,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                SessionView::replay_open(f.session, &f.envelopes()).is_ok(),
+                requested == Denied || parent == HumanOnly
+            );
+        }
+    }
 }

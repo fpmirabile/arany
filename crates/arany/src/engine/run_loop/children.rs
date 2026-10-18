@@ -60,6 +60,7 @@ struct ChildQueue {
     deferred_at: Option<usize>,
     refusal: Option<&'static str>,
     budget_stopped: bool,
+    capacity_error: Option<EngineError>,
 }
 
 struct ActiveChild {
@@ -90,6 +91,7 @@ impl ChildQueue {
             deferred_at: None,
             refusal: None,
             budget_stopped: false,
+            capacity_error: None,
         }
     }
 
@@ -252,15 +254,20 @@ impl RunLoop<'_> {
             Ok(drained) => drained,
             Err(error) => return Err(queue.abort_with(error).await),
         };
-        self.settle_delegation(
-            root_request,
-            children,
-            active_segment,
-            drained,
-            queue.primary_step.take(),
-            deadline,
-        )
-        .await
+        let continues = self
+            .settle_delegation(
+                root_request,
+                children,
+                active_segment,
+                drained,
+                queue.primary_step.take(),
+                deadline,
+            )
+            .await?;
+        match queue.capacity_error {
+            Some(error) => Err(error),
+            None => Ok(continues),
+        }
     }
 
     fn settle_delegation<'b>(
@@ -533,7 +540,14 @@ impl RunLoop<'_> {
             definition: queue.definition.clone(),
             profile: assignment.profile.or_else(|| self.default_child_profile()),
             grant: Some(if research {
-                ChildGrant::ReadOnly
+                ChildGrant::ReadOnly {
+                    unguarded: self
+                        .controls
+                        .tools
+                        .ok_or(EngineError::InvalidRequest)?
+                        .receipt()
+                        .child_unguarded,
+                }
             } else {
                 ChildGrant::NoTools
             }),
@@ -590,6 +604,17 @@ impl RunLoop<'_> {
         let mut drain_deadline = None;
 
         while !queue.active.is_empty() {
+            if queue.budget_stopped && abort_reason.is_none() {
+                abort_reason = Some(AbortReason::Budget);
+            }
+            // A pause lets in-flight child calls finish and be recorded; every other abort drains them.
+            if abort_reason.is_some()
+                && !matches!(abort_reason, Some(AbortReason::Paused))
+                && drain_deadline.is_none()
+            {
+                queue.calls.abort_all();
+                drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
+            }
             let joined = match drain_deadline {
                 Some(limit) => tokio::time::timeout_at(limit, queue.calls.join_next_with_id())
                     .await
@@ -671,6 +696,8 @@ impl RunLoop<'_> {
             self.settle_result(&result)?;
             if index.is_none() {
                 let valid = self.ledger().tokens_within_limit()
+                    && abort_reason.is_none()
+                    && !queue.budget_stopped
                     && matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tools(requests), .. }) if self.well_formed_tools(requests) && requests.iter().all(|r| r.call.is_process() || self.primary_lease_allows(&r.call)));
                 let mut record = call_record(AgentPhase::RootSynthesis, &result, valid, None);
                 if !valid
@@ -992,14 +1019,6 @@ impl RunLoop<'_> {
                 } else {
                     None
                 };
-            }
-            // A pause lets in-flight child calls finish and be recorded; every other abort drains them.
-            if abort_reason.is_some()
-                && !matches!(abort_reason, Some(AbortReason::Paused))
-                && drain_deadline.is_none()
-            {
-                queue.calls.abort_all();
-                drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
             }
             if abort_reason.is_none() {
                 if let Err(error) = self
@@ -1378,11 +1397,24 @@ impl RunLoop<'_> {
                 serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
             if let Some(fields) = catalog.as_object_mut() {
                 fields.remove("last_answer_refused");
+                fields.remove("hook_reruns");
             }
             catalog["pending_workers"] = serde_json::json!(pending);
             catalog["worker_coordination"] = serde_json::json!(
                 "While workers are pending, inspect or edit only paths outside their leases. Commands wait for lease quiescence. Finish or propose the next wave only after settlement and fresh primary verification."
             );
+            let proposals = self.ledger().view(|view| {
+                view.runs
+                    .last()
+                    .map_or_else(Vec::new, |run| run.hook_rerun_proposals(None))
+            })?;
+            if !proposals.is_empty() {
+                let mut offered = catalog.clone();
+                offered["hook_reruns"] = serde_json::json!(proposals);
+                if offered.to_string().len() <= crate::tools::types::MAX_TOOL_CATALOG_BYTES {
+                    catalog = offered;
+                }
+            }
             tools.catalog = catalog.to_string();
         }
         Ok(())
@@ -1439,6 +1471,9 @@ impl RunLoop<'_> {
             {
                 continue;
             }
+            if queue.budget_stopped {
+                break;
+            }
             let index = if let Some(index) = queue.pending.pop_front() {
                 index
             } else {
@@ -1473,8 +1508,9 @@ impl RunLoop<'_> {
                 &mut request.model,
                 &mut request.max_output_tokens,
             )?;
-            if child.editor {
-                self.admit_worker_action(0).await?;
+            if child.editor && !self.admit_worker_call(queue).await? {
+                queue.pending.push_front(index);
+                break;
             }
             self.reserve_provider_call(
                 child.agent_run_id,
@@ -1668,7 +1704,9 @@ impl RunLoop<'_> {
                 &mut request.model,
                 &mut request.max_output_tokens,
             )?;
-            self.admit_worker_action(0).await?;
+            if !self.admit_worker_call(queue).await? {
+                return Ok(false);
+            }
             self.reserve_provider_call(self.primary_id, self.primary_call(), 0)
                 .await?;
             self.primary_context(root_request).await?;
@@ -1699,6 +1737,23 @@ impl RunLoop<'_> {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    async fn admit_worker_call(&self, queue: &mut ChildQueue) -> Result<bool, EngineError> {
+        match self.admit_worker_action(0).await {
+            Ok(()) => Ok(true),
+            Err(
+                error @ EngineError::Store(
+                    crate::store::StoreError::ReplayLimit | crate::store::StoreError::StorageFull,
+                ),
+            ) => {
+                self.record_capacity_stop().await?;
+                queue.budget_stopped = true;
+                queue.capacity_error = Some(error);
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn valid_child_tools(&self, child: &ChildWork, requests: &[ToolRequest]) -> bool {

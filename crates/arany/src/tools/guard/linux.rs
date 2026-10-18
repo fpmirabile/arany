@@ -1009,10 +1009,9 @@ pub(super) async fn execute_inner(
         ready_bytes =
             worker_input(runtime, &mut stdin, &mut stdout, ready_bytes, go_deadline).await?;
         admit_ready(&mut unit, &ready_bytes, intent, &parent_namespaces).await?;
-        if go_cancellation.is_cancelled() {
-            return Err(ToolError::Operation);
-        }
-        runtime.before_dispatch(active_window, intent.limits.runtime_ms)?;
+        runtime
+            .before_dispatch(active_window, intent.limits.runtime_ms, &go_cancellation)
+            .await?;
         *dispatched = true;
         stdin
             .write_all(b"GO\n")

@@ -395,6 +395,26 @@ pub struct ToolPolicyReceipt {
     pub max_context_bytes: u32,
     #[serde(deserialize_with = "Option::deserialize")]
     pub unguarded_rules_digest: Option<[u8; 32]>,
+    pub unguarded: UnguardedGrant,
+    pub child_unguarded: UnguardedGrant,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnguardedGrant {
+    #[default]
+    Denied,
+    HumanOnly,
+}
+
+impl UnguardedGrant {
+    pub const fn narrows(self, parent: Self) -> bool {
+        matches!(self, Self::Denied) || matches!(parent, Self::HumanOnly)
+    }
+
+    pub(crate) fn is_denied(&self) -> bool {
+        *self == Self::Denied
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -411,6 +431,7 @@ impl ToolPolicyReceipt {
             && self.config_digest != [0; 32]
             && self.permissions_digest != Some([0; 32])
             && self.unguarded_rules_digest != Some([0; 32])
+            && self.child_unguarded.narrows(self.unguarded)
             && (MIN_TOOL_CONTEXT_BYTES as u32..=MAX_TOOL_CONTEXT_BYTES as u32)
                 .contains(&self.max_context_bytes)
     }
@@ -797,12 +818,14 @@ impl Attestation {
 #[serde(rename_all = "snake_case")]
 pub enum EnforcementCause {
     FilesystemDenied,
+    GuardBootstrap,
 }
 
 impl EnforcementCause {
     pub fn diagnostic(self) -> &'static str {
         match self {
             Self::FilesystemDenied => "Guard enforcement: protected path or set-ID entry refused",
+            Self::GuardBootstrap => "Guard enforcement: bootstrap failed before dispatch",
         }
     }
 }
@@ -880,6 +903,39 @@ pub(crate) fn qualifying_guard_failure<'a>(
         })
 }
 
+pub(crate) fn guarded_command_matches(call: &ToolCall, guarded: &ToolCall) -> bool {
+    matches!((call, guarded), (
+        ToolCall::CommandUnguarded { program, args, cwd, .. },
+        ToolCall::Command { program: p, args: a, cwd: c })
+        if program == p && args == a && cwd == c)
+}
+
+pub(crate) fn qualifying_hook_failure<'a>(
+    call: &ToolCall,
+    observations: impl Iterator<Item = &'a ToolObservation>,
+) -> Option<&'a ToolObservation> {
+    let ToolCall::CommandUnguarded {
+        program, args, cwd, ..
+    } = call
+    else {
+        return None;
+    };
+    if uses_guard_alias(args) {
+        return None;
+    }
+    observations.filter(|observation| {
+        matches!(&observation.intent.call, ToolCall::Command { program: p, args: a, cwd: c }
+            if p == program && a == args && c == cwd)
+    }).last().filter(|observation| {
+        observation.valid() && !observation.stops_run() && match observation.enforcement_cause {
+            Some(EnforcementCause::GuardBootstrap) => true,
+            Some(_) => matches!(&observation.attestation,
+                Some(attestation @ Attestation::Guard(_)) if attestation.valid_for(&observation.intent)),
+            None => false,
+        }
+    })
+}
+
 impl ToolObservation {
     pub(crate) fn attested_for(&self, intent: &EffectIntent) -> bool {
         self.intent == *intent && self.valid() && self.attestation.is_some()
@@ -898,6 +954,7 @@ impl ToolObservation {
             ToolDisposition::Uncertain | ToolDisposition::Cancelled
         ) || (self.disposition == ToolDisposition::Failed
             && self.attestation.is_none()
+            && self.enforcement_cause != Some(EnforcementCause::GuardBootstrap)
             && !matches!(&self.intent.call, ToolCall::PrepareWorker { preparation } if preparation.purpose == crate::session::worker::WorkerDataPurpose::Base))
             || self.cache_update == CacheUpdate::Uncertain
     }
@@ -934,8 +991,17 @@ impl ToolObservation {
                 .as_ref()
                 .is_none_or(|attestation| attestation.valid_for(&self.intent))
             && (self.disposition != ToolDisposition::Succeeded || self.attestation.is_some())
-            && (self.enforcement_cause.is_none()
-                || self.disposition == ToolDisposition::Denied && self.attestation.is_some())
+            && match self.enforcement_cause {
+                None => true,
+                Some(EnforcementCause::FilesystemDenied) => {
+                    self.disposition == ToolDisposition::Denied && self.attestation.is_some()
+                }
+                Some(EnforcementCause::GuardBootstrap) => {
+                    self.disposition == ToolDisposition::Failed
+                        && self.attestation.is_none()
+                        && self.intent.call.facts().site == super::catalog::Site::Guard
+                }
+            }
             && (!self.intent.call.is_unguarded()
                 || self.cache_update == CacheUpdate::NotApplicable
                     && self.enforcement_cause.is_none())
@@ -1391,6 +1457,33 @@ mod unguarded_vocabulary_tests {
             model_observation(&observation)["workspace_effect"],
             "uncertain"
         );
+    }
+
+    #[test]
+    fn hook_unguarded_evidence_needs_a_typed_cause_and_never_trusts_program_output() {
+        let call = unguarded(&["-c", "exit 7"], "");
+        let mut observation = guarded(
+            command(&["-c", "exit 7"], ""),
+            ToolDisposition::Failed,
+            None,
+        );
+        observation.attestation = None;
+        observation.output = "Guard bootstrap failed before dispatch".into();
+        assert!(qualifying_hook_failure(&call, std::iter::once(&observation)).is_none());
+        assert!(observation.stops_run());
+        observation.enforcement_cause = Some(EnforcementCause::GuardBootstrap);
+        assert!(observation.valid());
+        assert!(!observation.stops_run());
+        assert!(qualifying_hook_failure(&call, std::iter::once(&observation)).is_some());
+        for disposition in [
+            ToolDisposition::Uncertain,
+            ToolDisposition::Cancelled,
+            ToolDisposition::Limit,
+            ToolDisposition::Succeeded,
+        ] {
+            observation.disposition = disposition;
+            assert!(qualifying_hook_failure(&call, std::iter::once(&observation)).is_none());
+        }
     }
 
     #[test]

@@ -786,7 +786,12 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
         assert_eq!(humans, usize::from(human));
         let (events, view) = fixture.reopen(result.session_id).await;
         let child = &view.runs[0].agents[1];
-        assert_eq!(child.grant, Some(arany::ChildGrant::ReadOnly));
+        assert_eq!(
+            child.grant,
+            Some(arany::ChildGrant::ReadOnly {
+                unguarded: arany::UnguardedGrant::Denied
+            })
+        );
         assert_eq!(
             child.tools[0].observation.as_ref().unwrap().disposition,
             if denied {
@@ -1795,7 +1800,12 @@ async fn agent_definition_guard_registry_research_selection_and_replay() {
     let run = &view.runs[0];
     assert!(run.config.as_ref().unwrap().agent_definitions.is_some());
     assert_eq!(run.agents[1].definition.as_deref(), Some("reader"));
-    assert_eq!(run.agents[1].grant, Some(arany::ChildGrant::ReadOnly));
+    assert_eq!(
+        run.agents[1].grant,
+        Some(arany::ChildGrant::ReadOnly {
+            unguarded: arany::UnguardedGrant::Denied
+        })
+    );
     assert_eq!(run.tools.len(), 2);
     let parse = run.tools[0].observation.as_ref().unwrap();
     assert!(matches!(

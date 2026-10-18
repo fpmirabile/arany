@@ -13,11 +13,13 @@ pub(super) fn apply(
     prior: u64,
 ) -> Result<(), ReplayError> {
     if let Event::ToolFinished {
+        checkpoint,
         run_id,
         agent_run_id,
         observation,
     } = event
     {
+        super::super::checkpoint::validate_finished(current, observation, checkpoint.as_ref())?;
         let run = active_run(current, *run_id)?;
         let configured = run
             .config
@@ -115,13 +117,13 @@ pub(super) fn apply(
                         | crate::tools::permissions::PermissionSource::ExactCommandRule
                 ) || verdict.decision == crate::tools::permissions::Decision::Deny
                     || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
-                    || crate::tools::types::qualifying_guard_failure(
-                        &pending_call,
-                        run.tools
-                            .iter()
-                            .filter_map(|tool| tool.observation.as_ref()),
-                    )
-                    .is_none())
+                    || run
+                        .unguarded_failure(&pending_call)
+                        .is_none_or(|(_, hook)| {
+                            hook && (verdict.source
+                                != crate::tools::permissions::PermissionSource::Human
+                                || verdict.decision != Decision::Ask)
+                        }))
             {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -254,6 +256,7 @@ pub(super) fn apply(
                 return Err(ReplayError::InvalidTransition);
             }
             tool.hooks.push(HookView {
+                sequence: prior,
                 invocation: hook.clone(),
                 outcome: None,
                 idle: false,
@@ -461,6 +464,7 @@ pub(super) fn apply(
                 return Err(ReplayError::InvalidTransition);
             }
             run.tools.push(ToolView {
+                checkpoint: None,
                 intent: intent.clone(),
                 observation: None,
                 review_call_index: None,
@@ -472,13 +476,16 @@ pub(super) fn apply(
             record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
         }
         Event::ToolFinished {
+            checkpoint,
             run_id,
             agent_run_id,
             observation,
         } if names_child(current, *run_id, *agent_run_id) => {
+            debug_assert!(checkpoint.is_none());
             current.finish_child_tool(*run_id, *agent_run_id, observation, prior)?;
         }
         Event::ToolFinished {
+            checkpoint,
             run_id,
             agent_run_id,
             observation,
@@ -551,6 +558,7 @@ pub(super) fn apply(
                 if tool.intent != observation.intent || tool.observation.is_some() {
                     return Err(ReplayError::InvalidTransition);
                 }
+                tool.checkpoint = checkpoint.clone();
                 tool.observation = Some(observation.clone());
                 tool.finished_sequence = Some(prior);
                 if matches!(
@@ -817,7 +825,8 @@ fn start_lifecycle(
                 agent.role == AgentRole::Child
                     && matches!(
                         (agent.grant, agent.assignment.is_some()),
-                        (Some(ChildGrant::ReadOnly), false) | (Some(ChildGrant::EditOnly), true)
+                        (Some(ChildGrant::ReadOnly { .. }), false)
+                            | (Some(ChildGrant::EditOnly { .. }), true)
                     )
             };
             if run.status != RunStatus::Active
@@ -881,6 +890,7 @@ fn start_lifecycle(
         super::goal::record_active_ceiling(goal, ceiling);
     }
     run.lifecycle_hooks.push(HookView {
+        sequence,
         invocation: hook.clone(),
         outcome: None,
         idle: boundary,

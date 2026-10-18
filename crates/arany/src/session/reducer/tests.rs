@@ -28,6 +28,7 @@ mod goal_recovery_tests {
             use_count: 1,
         };
         let tool = ToolView {
+            checkpoint: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -188,6 +189,8 @@ mod goal_replay_tests {
                 config_digest: [1; 32],
                 max_context_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES as u32,
                 unguarded_rules_digest: None,
+                unguarded: crate::tools::UnguardedGrant::HumanOnly,
+                child_unguarded: crate::tools::UnguardedGrant::Denied,
             }),
         }
     }
@@ -945,6 +948,7 @@ mod goal_replay_tests {
         .expect("child Tool request");
         let mut elsewhere = view.clone();
         elsewhere.runs[0].tools.push(ToolView {
+            checkpoint: None,
             intent: child_intent(
                 run,
                 primary_agent,
@@ -979,6 +983,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: child,
                 observation: observation_for(read, b"ok"),
@@ -1252,6 +1257,7 @@ mod goal_replay_tests {
             use_count: 1,
         };
         review.runs[0].tools.push(ToolView {
+            checkpoint: None,
             permission_verdict: None,
             hooks: Vec::new(),
             hook_sequence: None,
@@ -1909,6 +1915,7 @@ mod goal_replay_tests {
             let mut unknown = base.clone();
             let intent = read_intent(run_id, agent_run_id, "src/lib.rs");
             unknown.runs[0].tools.push(ToolView {
+                checkpoint: None,
                 intent: intent.clone(),
                 observation: Some(ToolObservation {
                     intent,
@@ -1938,6 +1945,7 @@ mod goal_replay_tests {
         newer_goal.run_ids = vec![newer_run.id];
         let intent = read_intent(newer_run.id, agent_run_id, "src/lib.rs");
         newer_run.tools.push(ToolView {
+            checkpoint: None,
             intent: intent.clone(),
             observation: Some(ToolObservation {
                 intent,
@@ -1963,6 +1971,7 @@ mod goal_replay_tests {
         let mut cancelled = base.clone();
         let intent = read_intent(run_id, agent_run_id, "src/lib.rs");
         cancelled.runs[0].tools.push(ToolView {
+            checkpoint: None,
             intent: intent.clone(),
             observation: Some(ToolObservation {
                 intent,
@@ -2799,16 +2808,55 @@ mod goal_replay_tests {
             ));
             view
         };
+        use crate::tools::UnguardedGrant::{Denied, HumanOnly};
+        for parent in [Denied, HumanOnly] {
+            for requested in [Denied, HumanOnly] {
+                let mut view = session_with_tools(true);
+                view.runs[0]
+                    .config
+                    .as_mut()
+                    .unwrap()
+                    .tool_policy
+                    .as_mut()
+                    .unwrap()
+                    .child_unguarded = parent;
+                let result = apply_child_spawn(
+                    &mut view,
+                    ChildGrant::ReadOnly {
+                        unguarded: requested,
+                    },
+                );
+                assert_eq!(result.is_ok(), requested == Denied || parent == HumanOnly);
+            }
+        }
         let mut no_tools = session_with_tools(false);
         assert!(apply_child_spawn(&mut no_tools, ChildGrant::NoTools).is_ok());
         assert_eq!(no_tools.runs[0].agents[1].grant, Some(ChildGrant::NoTools));
-        assert!(apply_child_spawn(&mut session_with_tools(false), ChildGrant::ReadOnly).is_err());
+        assert!(
+            apply_child_spawn(
+                &mut session_with_tools(false),
+                ChildGrant::ReadOnly {
+                    unguarded: crate::tools::UnguardedGrant::Denied
+                }
+            )
+            .is_err()
+        );
 
         let mut with_tools = session_with_tools(true);
-        assert!(apply_child_spawn(&mut with_tools, ChildGrant::ReadOnly).is_ok());
+        assert!(
+            apply_child_spawn(
+                &mut with_tools,
+                ChildGrant::ReadOnly {
+                    unguarded: crate::tools::UnguardedGrant::Denied
+                }
+            )
+            .is_ok()
+        );
         assert_eq!(
             with_tools.runs[0].agents[1].grant,
-            Some(ChildGrant::ReadOnly)
+            Some(ChildGrant::ReadOnly {
+                unguarded: crate::tools::UnguardedGrant::Denied
+            })
         );
         assert!(apply_child_spawn(&mut session_with_tools(true), ChildGrant::NoTools).is_err());
     }
@@ -2851,7 +2899,13 @@ mod goal_replay_tests {
             },
             true,
         ));
-        apply_child_spawn(&mut view, ChildGrant::ReadOnly).expect("research child spawn");
+        apply_child_spawn(
+            &mut view,
+            ChildGrant::ReadOnly {
+                unguarded: crate::tools::UnguardedGrant::Denied,
+            },
+        )
+        .expect("research child spawn");
         let (goal, run, child) = (view.goals[0].id, view.runs[0].id, view.runs[0].agents[1].id);
         (view, goal, run, child)
     }
@@ -2958,12 +3012,18 @@ mod goal_replay_tests {
                 &mut view,
                 &mut envelopes,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: run,
                     agent_run_id: actor,
                     observation: observation_for(intent, b"ok"),
                 },
             );
             let pending = view.runs[0].supervisor.pending_event();
+            assert_eq!(
+                view.runs[0].supervisor.verdicts().len(),
+                verdict_count,
+                "pending verdicts are not display facts"
+            );
             if i == 0 {
                 let mut negative = view.clone();
                 let forged = Event::SupervisorVerdictRecorded {
@@ -3043,6 +3103,11 @@ mod goal_replay_tests {
                     assert_eq!(verdict.capped, verdict_count == 256);
                 }
                 append(&mut view, &mut envelopes, verdict.clone());
+                let (recorded_actor, recorded) = view.runs[0].supervisor.verdicts().last().unwrap();
+                assert_eq!(*recorded_actor, actor);
+                assert!(
+                    matches!(&verdict, Event::SupervisorVerdictRecorded { verdict, .. } if verdict == recorded)
+                );
                 assert!(
                     apply(&mut view.clone(), verdict).is_err(),
                     "duplicate verdict"
@@ -3050,6 +3115,7 @@ mod goal_replay_tests {
             }
         }
         assert_eq!(verdict_count, 256);
+        assert_eq!(view.runs[0].supervisor.verdicts().len(), 256);
         assert_eq!(
             SessionView::replay_open(session, &envelopes)
                 .unwrap()
@@ -3113,6 +3179,7 @@ mod goal_replay_tests {
             active_ceiling_ms: 0,
         };
         let finished = Event::ToolFinished {
+            checkpoint: None,
             run_id: run,
             agent_run_id: child,
             observation: observation_for(read.clone(), b"ok"),
@@ -3208,6 +3275,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: child,
                 observation: mismatched,
@@ -3270,6 +3338,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: child,
                 observation: observation_for(outside.clone(), b"x"),
@@ -3278,6 +3347,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: child,
                 observation: ToolObservation {
@@ -3327,6 +3397,7 @@ mod goal_replay_tests {
             apply(
                 &mut view,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: run,
                     agent_run_id: child,
                     observation: observation_for(read, b"ok"),
@@ -3388,6 +3459,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: child,
                 observation: observation_for(read, b"ok"),
@@ -3526,6 +3598,7 @@ mod goal_replay_tests {
                 accepted_sequence: 1,
                 finished_sequence: None,
                 tools: vec![ToolView {
+                    checkpoint: None,
                     permission_verdict: None,
                     hooks: Vec::new(),
                     hook_sequence: None,
@@ -3651,6 +3724,7 @@ mod goal_replay_tests {
                     accepted_sequence: 1,
                     finished_sequence: Some(1),
                     tools: vec![ToolView {
+                        checkpoint: None,
                         permission_verdict: None,
                         hooks: Vec::new(),
                         hook_sequence: None,
@@ -3884,6 +3958,7 @@ mod goal_replay_tests {
             apply(
                 &mut view,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: run,
                     agent_run_id: agent,
                     observation: denied,
@@ -4510,6 +4585,7 @@ mod goal_replay_tests {
             apply(
                 &mut view,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: run,
                     agent_run_id: agent,
                     observation,
@@ -4553,6 +4629,243 @@ mod goal_replay_tests {
             run,
             agent,
             started: true,
+        }
+    }
+
+    #[test]
+    fn hook_unguarded_replay_requires_exact_typed_failure_and_fresh_human_approval() {
+        use crate::tools::permissions::{
+            Decision, HookEvent, HookIgnoreReason, HookInvocation, HookOutcome, HookResult,
+            PermissionMode, PermissionSource,
+        };
+        use crate::tools::{EnforcementCause, UnguardedGrant};
+        for cause in [
+            EnforcementCause::FilesystemDenied,
+            EnforcementCause::GuardBootstrap,
+        ] {
+            let (mut view, goal, run, agent) = primary_tool_session(true);
+            view.goals[0]
+                .plan_contract
+                .as_mut()
+                .unwrap()
+                .commands
+                .push("sh".into());
+            let policy = view.runs[0]
+                .config
+                .as_mut()
+                .unwrap()
+                .tool_policy
+                .as_mut()
+                .unwrap();
+            policy.permissions_digest = Some([3; 32]);
+            policy.unguarded_rules_digest = Some([5; 32]);
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+            let intent = read_intent(run, agent, "src/lib.rs");
+            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            let hook = child_intent(
+                run,
+                agent,
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), "exit 7".into()],
+                    cwd: String::new(),
+                },
+            );
+            apply(
+                &mut view,
+                Event::HookStarted {
+                    run_id: run,
+                    agent_run_id: agent,
+                    hook: HookInvocation {
+                        active_ceiling_ms: None,
+                        event: HookEvent::PreToolUse,
+                        group: 0,
+                        handler: 0,
+                        subject_digest: intent.digest(),
+                        intent: hook.clone(),
+                        input_digest: [9; 32],
+                    },
+                },
+            )
+            .unwrap();
+            let mut observation = observation_for(hook, b"");
+            observation.enforcement_cause = Some(cause);
+            observation.disposition = if cause == EnforcementCause::GuardBootstrap {
+                observation.attestation = None;
+                ToolDisposition::Failed
+            } else {
+                ToolDisposition::Denied
+            };
+            let ignored = HookResult::Ignored {
+                why: HookIgnoreReason::NotCompleted,
+            };
+            apply(
+                &mut view,
+                Event::HookFinished {
+                    run_id: run,
+                    agent_run_id: agent,
+                    outcome: HookOutcome {
+                        boundary_active_ms: None,
+                        observation,
+                        result: ignored.clone(),
+                    },
+                },
+            )
+            .unwrap();
+            let mut verdict = verdict_event(
+                &intent,
+                Some(PermissionMode::Default),
+                Decision::Allow,
+                PermissionSource::Mode,
+                PermissionSource::Mode,
+                true,
+            );
+            if let Event::ToolPermissionDecided { verdict, .. } = &mut verdict {
+                verdict.hooks = 1;
+            }
+            apply(&mut view, verdict).unwrap();
+            apply(&mut view, tool_finished(run, agent, &intent, b"ok")).unwrap();
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+            let host = child_intent(
+                run,
+                agent,
+                ToolCall::CommandUnguarded {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), "exit 7".into()],
+                    cwd: String::new(),
+                    justification: "Run the exact hook".into(),
+                },
+            );
+            apply(&mut view, tool_started(run, agent, &host)).unwrap();
+            for source in [
+                PermissionSource::AiReview,
+                PermissionSource::ExactCommandRule,
+                PermissionSource::Mode,
+            ] {
+                assert!(rejected(
+                    &view,
+                    verdict_event(
+                        &host,
+                        Some(PermissionMode::Default),
+                        Decision::Ask,
+                        PermissionSource::Mode,
+                        source,
+                        true
+                    )
+                ));
+            }
+            let human = verdict_event(
+                &host,
+                Some(PermissionMode::Default),
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::Human,
+                true,
+            );
+            assert!(!rejected(&view, human.clone()));
+            let mut denied = view.clone();
+            apply(
+                &mut denied,
+                verdict_event(
+                    &host,
+                    Some(PermissionMode::Default),
+                    Decision::Ask,
+                    PermissionSource::Mode,
+                    PermissionSource::Human,
+                    false,
+                ),
+            )
+            .unwrap();
+            let mut ran = observation_for(host.clone(), b"ok");
+            ran.output =
+                r#"{"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]}}"#.into();
+            assert!(rejected(
+                &denied,
+                Event::ToolFinished {
+                    checkpoint: None,
+                    run_id: run,
+                    agent_run_id: agent,
+                    observation: ran.clone()
+                }
+            ));
+            for change in ["argv", "cwd", "program", "cause", "parent", "later"] {
+                let mut forged = view.clone();
+                let pending = &mut forged.runs[0].tools.last_mut().unwrap().intent;
+                if let ToolCall::CommandUnguarded {
+                    program, args, cwd, ..
+                } = &mut pending.call
+                {
+                    match change {
+                        "argv" => args.push("extra".into()),
+                        "cwd" => *cwd = "src".into(),
+                        "program" => *program = "other".into(),
+                        _ => {}
+                    }
+                }
+                if change == "cause" {
+                    forged.runs[0].tools[0].hooks[0]
+                        .outcome
+                        .as_mut()
+                        .unwrap()
+                        .observation
+                        .enforcement_cause = None;
+                }
+                if change == "later" {
+                    let mut later = forged.runs[0].tools[0].hooks[0].clone();
+                    later.sequence += 1;
+                    let observation = &mut later.outcome.as_mut().unwrap().observation;
+                    observation.enforcement_cause = None;
+                    observation.disposition = ToolDisposition::Succeeded;
+                    forged.runs[0].tools[0].hooks.push(later);
+                }
+                if change == "parent" {
+                    forged.runs[0]
+                        .config
+                        .as_mut()
+                        .unwrap()
+                        .tool_policy
+                        .as_mut()
+                        .unwrap()
+                        .unguarded = UnguardedGrant::Denied;
+                }
+                let pending = &forged.runs[0].tools.last().unwrap().intent;
+                assert!(
+                    rejected(
+                        &forged,
+                        verdict_event(
+                            pending,
+                            Some(PermissionMode::Default),
+                            Decision::Ask,
+                            PermissionSource::Mode,
+                            PermissionSource::Human,
+                            true
+                        )
+                    ),
+                    "{change}"
+                );
+            }
+            apply(&mut view, human).unwrap();
+            apply(
+                &mut view,
+                Event::ToolFinished {
+                    checkpoint: None,
+                    run_id: run,
+                    agent_run_id: agent,
+                    observation: ran,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                view.runs[0].tools[0].hooks[0]
+                    .outcome
+                    .as_ref()
+                    .unwrap()
+                    .result,
+                ignored
+            );
+            assert_eq!(view.runs[0].unguarded_tools(), 1);
         }
     }
 
@@ -4681,6 +4994,7 @@ mod goal_replay_tests {
                 apply(
                     &mut denied,
                     Event::ToolFinished {
+                        checkpoint: None,
                         run_id: scenario.run,
                         agent_run_id: scenario.agent,
                         observation: refusal,
@@ -4752,6 +5066,7 @@ mod goal_replay_tests {
         )
         .unwrap();
         let finish = |observation: ToolObservation| Event::ToolFinished {
+            checkpoint: None,
             run_id: good.run,
             agent_run_id: good.agent,
             observation,
@@ -4929,6 +5244,19 @@ mod goal_replay_tests {
         content: &[u8],
     ) -> Event {
         Event::ToolFinished {
+            checkpoint: crate::session::checkpoint::publication(intent).then(|| {
+                if matches!(
+                    intent.call,
+                    ToolCall::Write {
+                        expected_digest: None,
+                        ..
+                    }
+                ) {
+                    crate::Checkpoint::not_needed()
+                } else {
+                    crate::Checkpoint::skipped(crate::CheckpointReason::StoreUnavailable)
+                }
+            }),
             run_id: run,
             agent_run_id: agent,
             observation: observation_for(intent.clone(), content),
@@ -4964,6 +5292,7 @@ mod goal_replay_tests {
             "File path is unavailable or outside the admitted regular-file boundary".into();
         observation.enforcement_cause = Some(EnforcementCause::FilesystemDenied);
         let finished = |observation| Event::ToolFinished {
+            checkpoint: None,
             run_id: run,
             agent_run_id: agent,
             observation,
@@ -5054,6 +5383,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: run,
                 agent_run_id: agent,
                 observation: read_attested,
@@ -5354,6 +5684,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: intent.run_id,
                 agent_run_id: intent.agent_run_id,
                 observation: in_process
@@ -5362,6 +5693,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::ToolFinished {
+                checkpoint: None,
                 run_id: intent.run_id,
                 agent_run_id: intent.agent_run_id,
                 observation,
@@ -5423,6 +5755,7 @@ mod goal_replay_tests {
             apply(
                 &mut view,
                 Event::ToolFinished {
+                    checkpoint: None,
                     run_id: intent.run_id,
                     agent_run_id: intent.agent_run_id,
                     observation,
@@ -5908,5 +6241,83 @@ mod goal_replay_tests {
         assert_eq!(view.runs.len(), 2);
         assert!(!view.runs[0].hooks_settled());
         assert_eq!(view.goals[0].resume_usage(&view).active_ms, 1000);
+    }
+    #[test]
+    fn checkpoint_replay_requires_publication_status_and_tracks_first_touch_and_gaps() {
+        use crate::{Checkpoint, CheckpointReason, CheckpointStatus};
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        view.goals[0].plan_contract.as_mut().unwrap().paths = vec!["src".into()];
+        for (before, after, status) in [
+            ("original", "one", CheckpointStatus::Captured),
+            ("one", "two", CheckpointStatus::NotNeeded),
+            ("external", "three", CheckpointStatus::Captured),
+        ] {
+            let intent = child_intent(
+                run,
+                agent,
+                ToolCall::Write {
+                    path: "src/lib.rs".into(),
+                    expected_digest: Some(crate::tools::types::hex_digest(before.as_bytes())),
+                    content: after.into(),
+                },
+            );
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            let observation = observation_for(intent, after.as_bytes());
+            let finish = |checkpoint| Event::ToolFinished {
+                run_id: run,
+                agent_run_id: agent,
+                observation: observation.clone(),
+                checkpoint,
+            };
+            assert!(
+                rejected(&view, finish(None)),
+                "a GO publication requires checkpoint metadata"
+            );
+            let invalid = Checkpoint {
+                status: if status == CheckpointStatus::Captured {
+                    CheckpointStatus::NotNeeded
+                } else {
+                    CheckpointStatus::Captured
+                },
+                reason: None,
+                pruned_before_run: None,
+            };
+            assert!(rejected(&view, finish(Some(invalid))));
+            assert!(rejected(
+                &view,
+                finish(Some(Checkpoint {
+                    status,
+                    reason: Some(CheckpointReason::Quota),
+                    pruned_before_run: None
+                }))
+            ));
+            assert!(rejected(
+                &view,
+                finish(Some(Checkpoint {
+                    status,
+                    reason: None,
+                    pruned_before_run: Some(RunId::new()),
+                }))
+            ));
+            apply(
+                &mut view,
+                finish(Some(Checkpoint {
+                    status,
+                    reason: None,
+                    pruned_before_run: Some(run),
+                })),
+            )
+            .unwrap();
+        }
+        let last = view.runs[0]
+            .tools
+            .last()
+            .unwrap()
+            .checkpoint
+            .as_ref()
+            .unwrap();
+        assert_eq!(last.status, CheckpointStatus::Captured);
     }
 }
