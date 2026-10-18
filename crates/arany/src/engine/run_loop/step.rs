@@ -77,6 +77,27 @@ enum Verdict {
 
 const MAX_NARROWINGS_PER_STEP: usize = 1;
 
+enum Resolver<'a> {
+    AiReview { objective: &'a str },
+    Human,
+}
+
+enum AskSite {
+    Primary {
+        unguarded_prompt: Option<UnguardedPrompt>,
+    },
+    Delegated {
+        deadline: Instant,
+    },
+}
+
+struct Resolution {
+    approved: bool,
+    source: PermissionSource,
+    active_time_exhausted: bool,
+    unsaved_rule: bool,
+}
+
 #[derive(Clone, Copy)]
 struct Permission {
     decision: Decision,
@@ -928,51 +949,32 @@ impl RunLoop<'_> {
             && let Some(mode) = permission.approval
             && self.ledger().can_start_provider_call()
         {
-            approved = false;
-            source = PermissionSource::UnavailableApproval;
-            let initial_mode = self.terminal_mode();
-            if mode == ApprovalMode::Auto && review_allowed {
-                match self
-                    .review_tool(&request.input.objective, &intent, None)
-                    .await
-                {
-                    Ok(review_approved) => {
-                        approved = review_approved && self.terminal_mode() == initial_mode;
-                        source = if approved {
-                            PermissionSource::AiReview
-                        } else {
-                            PermissionSource::UnavailableApproval
-                        };
-                        active_time_exhausted = self.ledger().active_time_exhausted();
-                    }
-                    Err(EngineError::GoalBudgetExhausted)
-                        if self.ledger().active_time_exhausted() =>
-                    {
-                        active_time_exhausted = true;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            if !approved
-                && !active_time_exhausted
-                && !self.pause_at_boundary()
-                && let Some(approvals) = self.controls.approvals
-            {
-                match self.reserve_active_pause() {
-                    Ok(pause) => {
-                        let (reply, unsaved) = self
-                            .human_reply(runtime, approvals, &intent, unguarded_prompt.clone())
-                            .await;
-                        source = PermissionSource::Human;
-                        approved = reply != ApprovalReply::Deny && !unsaved;
-                        unsaved_rule = unsaved;
-                        let resume_at = approved.then(Instant::now);
-                        self.settle_active_pause(pause, resume_at)?;
-                    }
-                    Err(EngineError::GoalBudgetExhausted) => active_time_exhausted = true,
-                    Err(error) => return Err(error),
-                }
-            }
+            let resolvers;
+            let chain = if mode == ApprovalMode::Auto && review_allowed {
+                resolvers = [
+                    Resolver::AiReview {
+                        objective: &request.input.objective,
+                    },
+                    Resolver::Human,
+                ];
+                &resolvers[..]
+            } else {
+                &[Resolver::Human]
+            };
+            let resolution = self
+                .resolve_ask(
+                    runtime,
+                    &intent,
+                    chain,
+                    AskSite::Primary {
+                        unguarded_prompt: unguarded_prompt.clone(),
+                    },
+                )
+                .await?;
+            approved = resolution.approved;
+            source = resolution.source;
+            active_time_exhausted = resolution.active_time_exhausted;
+            unsaved_rule = resolution.unsaved_rule;
         }
         // An in-process read waits for no Guard capacity, so it reserves its action directly.
         let guard_site = intent.call.facts().site == crate::tools::catalog::Site::Guard;
@@ -1260,44 +1262,145 @@ impl RunLoop<'_> {
         if !runtime.allows(&intent.call) || !self.ledger().can_start_provider_call() {
             return Ok((false, PermissionSource::UnavailableApproval));
         }
+        let objective = if mode == ApprovalMode::Auto && self.ledger().admits(Action::Review) {
+            Some(
+                self.ledger()
+                    .view(|view| view.goal(self.goal_id).map(|goal| goal.objective.clone()))?
+                    .ok_or(EngineError::InvalidHistory)?,
+            )
+        } else {
+            None
+        };
+        let resolvers;
+        let chain = if let Some(objective) = &objective {
+            resolvers = [Resolver::AiReview { objective }, Resolver::Human];
+            &resolvers[..]
+        } else {
+            &[Resolver::Human]
+        };
+        let resolution = self
+            .resolve_ask(runtime, intent, chain, AskSite::Delegated { deadline })
+            .await?;
+        Ok((resolution.approved, resolution.source))
+    }
+
+    async fn resolve_ask(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+        chain: &[Resolver<'_>],
+        site: AskSite,
+    ) -> Result<Resolution, EngineError> {
         let initial_mode = self.terminal_mode();
-        if mode == ApprovalMode::Auto && self.ledger().admits(Action::Review) {
-            let objective = self
-                .ledger()
-                .view(|view| view.goal(self.goal_id).map(|goal| goal.objective.clone()))?
-                .ok_or(EngineError::InvalidHistory)?;
-            if self.review_tool(&objective, intent, Some(deadline)).await?
-                && self.terminal_mode() == initial_mode
-            {
-                return Ok((
-                    !self.pause_requested() && !self.controls.cancellation.is_cancelled(),
-                    PermissionSource::AiReview,
-                ));
+        let mut resolution = Resolution {
+            approved: false,
+            source: PermissionSource::UnavailableApproval,
+            active_time_exhausted: false,
+            unsaved_rule: false,
+        };
+        for resolver in chain {
+            match resolver {
+                Resolver::AiReview { objective } => {
+                    let review = match &site {
+                        AskSite::Primary { .. } => self.review_tool(objective, intent, None).await,
+                        AskSite::Delegated { deadline } => {
+                            self.review_tool(objective, intent, Some(*deadline)).await
+                        }
+                    };
+                    match review {
+                        Ok(review_approved) => {
+                            resolution.approved =
+                                review_approved && self.terminal_mode() == initial_mode;
+                            resolution.source = if resolution.approved {
+                                PermissionSource::AiReview
+                            } else {
+                                PermissionSource::UnavailableApproval
+                            };
+                            match &site {
+                                AskSite::Delegated { .. } => {
+                                    if resolution.approved {
+                                        resolution.approved = !self.pause_requested()
+                                            && !self.controls.cancellation.is_cancelled();
+                                        return Ok(resolution);
+                                    }
+                                }
+                                AskSite::Primary { .. } => {
+                                    resolution.active_time_exhausted =
+                                        self.ledger().active_time_exhausted();
+                                }
+                            }
+                        }
+                        Err(EngineError::GoalBudgetExhausted)
+                            if matches!(site, AskSite::Primary { .. })
+                                && self.ledger().active_time_exhausted() =>
+                        {
+                            resolution.active_time_exhausted = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Resolver::Human => match &site {
+                    AskSite::Delegated { deadline } => {
+                        let Some(approvals) = self.controls.approvals else {
+                            return Ok(resolution);
+                        };
+                        let mut cancellation = self.controls.cancellation.clone();
+                        let expires = Duration::from_millis(
+                            intent.expires_at_ms.saturating_sub(crate::tools::now_ms()),
+                        );
+                        // A sibling Provider call keeps the shared delegation interval active.
+                        let idle = self.ledger().in_flight_children() == 0;
+                        let started = Instant::now();
+                        let (approved, source) = tokio::select! {
+                            biased;
+                            () = cancellation.cancelled() => (false, PermissionSource::UnavailableApproval),
+                            result = tokio::time::timeout_at((*deadline).min(Instant::now() + expires), approvals.ask(intent)) => {
+                                (result.unwrap_or(false), PermissionSource::Human)
+                            }
+                        };
+                        if idle {
+                            self.ledger().exclude_idle_approval(started.elapsed())?;
+                        }
+                        resolution.approved = approved
+                            && !self.pause_requested()
+                            && !self.controls.cancellation.is_cancelled();
+                        resolution.source = source;
+                    }
+                    AskSite::Primary { unguarded_prompt } => {
+                        if !resolution.active_time_exhausted
+                            && !self.pause_at_boundary()
+                            && let Some(approvals) = self.controls.approvals
+                        {
+                            match self.reserve_active_pause() {
+                                Ok(pause) => {
+                                    let (reply, unsaved) = self
+                                        .human_reply(
+                                            runtime,
+                                            approvals,
+                                            intent,
+                                            unguarded_prompt.clone(),
+                                        )
+                                        .await;
+                                    resolution.source = PermissionSource::Human;
+                                    resolution.approved = reply != ApprovalReply::Deny && !unsaved;
+                                    resolution.unsaved_rule = unsaved;
+                                    let resume_at = resolution.approved.then(Instant::now);
+                                    self.settle_active_pause(pause, resume_at)?;
+                                }
+                                Err(EngineError::GoalBudgetExhausted) => {
+                                    resolution.active_time_exhausted = true;
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    }
+                },
+            }
+            if resolution.approved {
+                break;
             }
         }
-        let Some(approvals) = self.controls.approvals else {
-            return Ok((false, PermissionSource::UnavailableApproval));
-        };
-        let mut cancellation = self.controls.cancellation.clone();
-        let expires =
-            Duration::from_millis(intent.expires_at_ms.saturating_sub(crate::tools::now_ms()));
-        // A sibling Provider call keeps the shared delegation interval active.
-        let idle = self.ledger().in_flight_children() == 0;
-        let started = Instant::now();
-        let (approved, source) = tokio::select! {
-            biased;
-            () = cancellation.cancelled() => (false, PermissionSource::UnavailableApproval),
-            result = tokio::time::timeout_at(deadline.min(Instant::now() + expires), approvals.ask(intent)) => {
-                (result.unwrap_or(false), PermissionSource::Human)
-            }
-        };
-        if idle {
-            self.ledger().exclude_idle_approval(started.elapsed())?;
-        }
-        Ok((
-            approved && !self.pause_requested() && !self.controls.cancellation.is_cancelled(),
-            source,
-        ))
+        Ok(resolution)
     }
 
     async fn review_tool(
