@@ -806,6 +806,9 @@ pub(super) async fn execute(
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
     let mut cache = super::super::build_cache_session(runtime, intent)?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
+    if let Some(private) = &runtime.worker {
+        private.contained.store(false, Ordering::Release);
+    }
     let fallback_started = tokio::time::Instant::now();
     let preparation_deadline = active_window.map_or(
         fallback_started + CONNECT_DEADLINE + PREPARATION_DEADLINE,
@@ -2078,15 +2081,7 @@ done
     async fn verify_storage_ownership(fixture: &Path) {
         use super::super::storage::ImageIdentity;
         let mut unit = Unit::new(fixture).await.unwrap();
-        let limits = ToolLimits {
-            cache_requested_bytes: 0,
-            cache_bytes: 0,
-            cache_candidate_bytes: 0,
-            ..ToolLimits::default()
-        };
-        let _volumes = super::super::storage::prepare_worker_storage(&unit.root, &limits)
-            .await
-            .unwrap();
+        let _volumes = prepare_storage(&unit.root).await.unwrap();
         let mut image: ImageIdentity =
             read_record(&unit._directory.dir, "scratch.image.json").unwrap();
         image.inode = image.inode.wrapping_add(1);
@@ -2290,10 +2285,7 @@ done
 
     async fn verify_recovery_cancellation(gate: &Path, fixture: &Path) {
         let mut unit = Unit::new(fixture).await.unwrap();
-        let _volumes =
-            super::super::storage::prepare_worker_storage(&unit.root, &ToolLimits::default())
-                .await
-                .unwrap();
+        let _volumes = prepare_storage(&unit.root).await.unwrap();
         let record = unit._directory.dir.read(RECOVERY_RECORD).unwrap();
         write_record(
             &unit._directory.dir,

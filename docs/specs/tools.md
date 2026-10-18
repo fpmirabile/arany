@@ -131,6 +131,8 @@ If a hook fails because of Guard enforcement, the planned [NEXT_STEPS item 7 esc
 
 The hook receives one JSON object on stdin (closed field set): `session_id`, `cwd` (always `/workspace`, the Guard view, never a host path), `permission_mode`, `hook_event_name`, `tool_name` (the peer name), `tool_input` (the typed call) and `tool_use_id`. Exit codes and output follow the peer: exit 0 with empty or non-JSON stdout adds nothing; exit 0 with a JSON object may carry `hookSpecificOutput` (`hookEventName` must be `PreToolUse`) with `permissionDecision` and `permissionDecisionReason`, the legacy top-level `decision: "block"` with `reason`, or `continue: false` with `stopReason` (both deny); exit 2 denies and its stderr is the reason; any other exit is a non-blocking failure. Unknown fields are ignored, and stdout is never interpreted as instructions. Hook output is evidence and a reason string only: reasons are control-stripped and truncated to the reason limit below, and the model sees only `Hook denied this Tool` with that reason.
 
+A Guarded Command that is not a hook reads an empty stdin (immediate EOF), like the unguarded executor.
+
 | Peer behavior | Arany |
 |---|---|
 | Hooks run with the user's full permissions. | Hooks run in the Guard under the pinned grant; their Workspace changes are journaled in the observation but never integrated. |

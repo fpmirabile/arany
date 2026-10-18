@@ -914,6 +914,14 @@ fn task_bytes(
     })
 }
 
+fn mark_contained(runtime: &ToolRuntime, contained: bool) {
+    if let Some(private) = &runtime.worker {
+        private
+            .contained
+            .store(contained, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub(super) async fn execute_inner(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -959,11 +967,13 @@ pub(super) async fn execute_inner(
     let mut command = unit_command(runtime, intent, &unit.name, &runtime_path, filesystem);
     let parent_namespaces = profile::Namespaces::read()?;
     permit.launching()?;
+    mark_contained(runtime, false);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(_) => {
             permit.terminated()?;
             permit.cleanup().await?;
+            mark_contained(runtime, true);
             return Err(ToolError::ProtectionUnavailable);
         }
     };

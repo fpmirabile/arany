@@ -1013,16 +1013,7 @@ pub(super) fn inspect(
                     continue;
                 };
                 if let ToolCall::Search { query, .. } = call {
-                    if let Ok(text) = std::str::from_utf8(&content) {
-                        for (index, line) in text.lines().enumerate() {
-                            if line.contains(query) {
-                                rows.push(json!({"path":name,"line":index+1,"text":line.chars().take(512).collect::<String>()}));
-                            }
-                            if rows.len() == 64 {
-                                break;
-                            }
-                        }
-                    }
+                    search_rows(&name, &content, query, &mut rows);
                 } else {
                     rows.push(json!({"path":name,"bytes":content.len()}));
                 }
@@ -1034,6 +1025,20 @@ pub(super) fn inspect(
             fit_rows(rows, truncated, result_bytes)
         }
         _ => Err(ToolError::Operation),
+    }
+}
+
+pub(super) fn search_rows(name: &str, content: &[u8], query: &str, rows: &mut Vec<Value>) {
+    let Ok(text) = std::str::from_utf8(content) else {
+        return;
+    };
+    for (index, line) in text.lines().enumerate() {
+        if line.contains(query) {
+            rows.push(json!({"path":name,"line":index+1,"text":line.chars().take(512).collect::<String>()}));
+        }
+        if rows.len() == 64 {
+            break;
+        }
     }
 }
 

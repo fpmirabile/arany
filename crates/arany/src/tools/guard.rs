@@ -1309,6 +1309,7 @@ fn receive_bulk(
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn send_result(
     task: Task,
     workspace: &Path,

@@ -404,6 +404,31 @@ pub async fn exercise_private_guard_target(
         std::fs::read(workspace.join("owned/a")).unwrap() == original,
         "Workspace changed before private integration"
     );
+    let mut idle = View::capture(
+        &runtime,
+        run_id,
+        crate::AgentRunId::new(),
+        grant.clone(),
+        WORKER_DATA_BYTES as u32,
+    )?;
+    let mut idle_intent = runtime.intent(
+        run_id,
+        idle.assignment(),
+        ToolCall::Edit {
+            path: "owned/a".into(),
+            expected_digest: crate::tools::types::hex_digest(&original),
+            old: "original".into(),
+            new: "never".into(),
+        },
+    );
+    idle_intent.target = idle.target();
+    idle_intent.limits.cache_requested_bytes = 0;
+    idle_intent.limits.cache_bytes = 0;
+    idle_intent.limits.cache_candidate_bytes = 0;
+    let cancelled = Cancellation::new();
+    cancelled.cancel();
+    assert!(idle.edit(&runtime, idle_intent, cancelled).await.is_err());
+    assert_eq!(idle.dispose()?.revision, 0);
     let mut lost = View::capture(
         &runtime,
         run_id,

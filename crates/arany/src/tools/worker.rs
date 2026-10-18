@@ -435,7 +435,7 @@ impl View {
             },
             input: bytes.into(),
             output: Mutex::new(None),
-            contained: std::sync::atomic::AtomicBool::new(false),
+            contained: std::sync::atomic::AtomicBool::new(true),
         });
         let mut private = runtime.clone();
         private.worker = Some(action.clone());
@@ -706,6 +706,16 @@ fn edited_image(before: &Image, call: &ToolCall) -> Result<Image, ToolError> {
     if !before.entries.contains_key(path) && before.entries.len() >= WORKER_FILES {
         return Err(ToolError::Limit);
     }
+    if matches!(call, ToolCall::Mkdir { .. } | ToolCall::Write { .. })
+        && let Some((parent, _)) = path.rsplit_once('/')
+    {
+        let nested = format!("{parent}/");
+        if !(before.entries.get(parent) == Some(&Entry::Directory)
+            || before.entries.keys().any(|key| key.starts_with(&nested)))
+        {
+            return Err(ToolError::Path);
+        }
+    }
     let old = before.entries.get(path);
     let expected = match call {
         ToolCall::Mkdir { .. } if old.is_none_or(|e| *e == Entry::Absent) => Entry::Directory,
@@ -783,16 +793,7 @@ fn inspect(image: &Image, call: &ToolCall, result_bytes: usize) -> Result<String
                         rows.push(json!({"path":name,"bytes":content.len()}))
                     }
                     (ToolCall::Search { query, .. }, Entry::File { content, .. }) => {
-                        if let Ok(text) = std::str::from_utf8(content) {
-                            for (i, line) in
-                                text.lines().enumerate().filter(|(_, l)| l.contains(query))
-                            {
-                                rows.push(json!({"path":name,"line":i+1,"text":line.chars().take(512).collect::<String>()}));
-                                if rows.len() == 64 {
-                                    break;
-                                }
-                            }
-                        }
+                        fs::search_rows(name, content, query, &mut rows)
                     }
                     _ => {}
                 }
@@ -971,32 +972,33 @@ pub(super) fn materialize(image: &Image, root: &Dir) -> Result<(), ToolError> {
     Ok(())
 }
 
-pub(super) fn write_frame(writer: &mut impl std::io::Write, bytes: &[u8]) -> Result<(), ToolError> {
+fn encode_frame(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
     if bytes.is_empty() || bytes.len() > WORKER_DATA_BYTES {
         return Err(ToolError::Limit);
     }
-    writer
-        .write_all(
-            &u32::try_from(bytes.len())
+    let mut frame =
+        Vec::with_capacity(bytes.len() + 40 + 4 * bytes.len().div_ceil(WORKER_CHUNK_BYTES));
+    frame.extend_from_slice(
+        &u32::try_from(bytes.len())
+            .map_err(|_| ToolError::Limit)?
+            .to_le_bytes(),
+    );
+    frame.extend_from_slice(&digest(bytes));
+    for chunk in bytes.chunks(WORKER_CHUNK_BYTES) {
+        frame.extend_from_slice(
+            &u32::try_from(chunk.len())
                 .map_err(|_| ToolError::Limit)?
                 .to_le_bytes(),
-        )
-        .map_err(|_| ToolError::Operation)?;
-    writer
-        .write_all(&digest(bytes))
-        .map_err(|_| ToolError::Operation)?;
-    for chunk in bytes.chunks(WORKER_CHUNK_BYTES) {
-        writer
-            .write_all(
-                &u32::try_from(chunk.len())
-                    .map_err(|_| ToolError::Limit)?
-                    .to_le_bytes(),
-            )
-            .map_err(|_| ToolError::Operation)?;
-        writer.write_all(chunk).map_err(|_| ToolError::Operation)?;
+        );
+        frame.extend_from_slice(chunk);
     }
+    frame.extend_from_slice(&0u32.to_le_bytes());
+    Ok(frame)
+}
+
+pub(super) fn write_frame(writer: &mut impl std::io::Write, bytes: &[u8]) -> Result<(), ToolError> {
     writer
-        .write_all(&0u32.to_le_bytes())
+        .write_all(&encode_frame(bytes)?)
         .map_err(|_| ToolError::Operation)
 }
 
@@ -1043,37 +1045,8 @@ pub(super) async fn send_frame(
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     bytes: &[u8],
 ) -> Result<(), ToolError> {
-    if bytes.len() > WORKER_DATA_BYTES || bytes.is_empty() {
-        return Err(ToolError::Limit);
-    }
     writer
-        .write_all(
-            &u32::try_from(bytes.len())
-                .map_err(|_| ToolError::Limit)?
-                .to_le_bytes(),
-        )
-        .await
-        .map_err(|_| ToolError::Operation)?;
-    writer
-        .write_all(&digest(bytes))
-        .await
-        .map_err(|_| ToolError::Operation)?;
-    for chunk in bytes.chunks(WORKER_CHUNK_BYTES) {
-        writer
-            .write_all(
-                &u32::try_from(chunk.len())
-                    .map_err(|_| ToolError::Limit)?
-                    .to_le_bytes(),
-            )
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        writer
-            .write_all(chunk)
-            .await
-            .map_err(|_| ToolError::Operation)?;
-    }
-    writer
-        .write_all(&0u32.to_le_bytes())
+        .write_all(&encode_frame(bytes)?)
         .await
         .map_err(|_| ToolError::Operation)
 }
@@ -1400,11 +1373,43 @@ mod tests {
     }
 
     #[test]
+    fn private_creation_requires_an_existing_parent_directory_before_dispatch() {
+        let (_dir, _runtime, view) = fixture();
+        let write = |path: &str| ToolCall::Write {
+            path: path.into(),
+            content: "x".into(),
+            expected_digest: None,
+        };
+        for call in [
+            write("owned/missing/leaf"),
+            ToolCall::Mkdir {
+                path: "owned/missing/leaf".into(),
+            },
+            write("owned/a/leaf"),
+        ] {
+            assert!(edited_image(&view.current, &call).is_err());
+        }
+        assert!(edited_image(&view.current, &write("owned/leaf")).is_ok());
+        assert!(
+            edited_image(
+                &view.current,
+                &ToolCall::Mkdir {
+                    path: "owned/dir".into()
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn worker_snapshot_refuses_links_special_modes_case_aliases_protected_paths_and_root_drift() {
         use std::os::unix::fs::{PermissionsExt, symlink};
         for kind in ["symlink", "hardlink", "setid", "protected", "case", "fifo"] {
             let (dir, runtime, _) = fixture();
             let bad = dir.path().join("owned/bad");
+            if kind == "case" && dir.path().join("owned/A").exists() {
+                continue;
+            }
             match kind {
                 "symlink" => symlink("a", &bad).unwrap(),
                 "hardlink" => std::fs::hard_link(dir.path().join("owned/a"), &bad).unwrap(),

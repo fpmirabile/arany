@@ -1,7 +1,7 @@
 use super::{
-    BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, TASK_BYTES_CAP, TEARDOWN_WAIT,
-    Task, bootstrap_failure, drain_stderr, parse_ready, read_capped, read_line_capped,
-    read_observation,
+    BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, Ready, TASK_BYTES_CAP,
+    TEARDOWN_WAIT, Task, bootstrap_failure, drain_stderr, parse_ready, read_capped,
+    read_line_capped, read_observation,
 };
 use crate::session::WorkspaceIdentity;
 use crate::tools::Cancellation;
@@ -970,6 +970,40 @@ impl Task {
     }
 }
 
+async fn worker_ready(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    task: &[u8],
+    stdin: &mut tokio::process::ChildStdin,
+    stdout: &mut BufReader<tokio::process::ChildStdout>,
+) -> Result<Ready, ToolError> {
+    tokio::time::timeout(
+        (PREPARATION_DEADLINE + super::super::worker::transfer_time(intent))
+            .min(Duration::from_secs(120)),
+        async {
+            stdin
+                .write_all(task)
+                .await
+                .map_err(|_| ToolError::Operation)?;
+            let mut bytes = read_line_capped(stdout, 2048).await?;
+            if bytes == b"WORKER_READY\n" {
+                let input =
+                    super::super::worker::bulk_input(runtime).ok_or(ToolError::Configuration)?;
+                super::super::worker::send_frame(stdin, input).await?;
+                bytes = read_line_capped(stdout, 2048).await?;
+            }
+            parse_ready(&bytes, intent)
+        },
+    )
+    .await
+    .map_err(|_| {
+        ToolError::GuardBootstrap(BootstrapFailure {
+            stage: BootstrapStage::Handshake,
+            check: None,
+        })
+    })?
+}
+
 async fn execute_worker(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -1005,31 +1039,7 @@ async fn execute_worker(
     let (result, status) = {
         let execution = async {
             let capture = fixture::Span::begin(fixture::Stage::WorkerReady);
-            let ready = tokio::time::timeout(
-                (PREPARATION_DEADLINE + super::super::worker::transfer_time(intent))
-                    .min(Duration::from_secs(120)),
-                async {
-                    stdin
-                        .write_all(&task)
-                        .await
-                        .map_err(|_| ToolError::Operation)?;
-                    let mut bytes = read_line_capped(&mut stdout, 2048).await?;
-                    if bytes == b"WORKER_READY\n" {
-                        let input = super::super::worker::bulk_input(runtime)
-                            .ok_or(ToolError::Configuration)?;
-                        super::super::worker::send_frame(&mut stdin, input).await?;
-                        bytes = read_line_capped(&mut stdout, 2048).await?;
-                    }
-                    parse_ready(&bytes, intent)
-                },
-            )
-            .await
-            .map_err(|_| {
-                ToolError::GuardBootstrap(BootstrapFailure {
-                    stage: BootstrapStage::Handshake,
-                    check: None,
-                })
-            })??;
+            let ready = worker_ready(runtime, intent, &task, &mut stdin, &mut stdout).await?;
             if ready.pid != pid {
                 return Err(ToolError::ProtectionUnavailable);
             }

@@ -90,7 +90,7 @@ Internal `PrepareWorker` admits only base or handover capture with an exact assi
 | Base manifest metadata | 2,048 entries, 32 MiB declared file content, 3 MiB canonical serialized metadata | Reject unsupported entry kinds, protected paths, invalid digests, ordering or capacity |
 | Chunk | 45 KiB raw, canonical base64, hash/length/ordinal, assignment, purpose and producing Tool ID; complete envelope ≤64 KiB | Reject changed, duplicate, oversized, trailing or out-of-order data |
 | Transfer | At most 1,093 chunks for 48 MiB, or 69 for 3 MiB, then one seal | Exact ordered committed sequence range, count, length and SHA-256 must match |
-| Private image | 2,048 entries/32 MiB content, 1 MiB/file, depth 16, 8,192 scanned entries; each transfer ≤48 MiB; retained base plus overlay content ≤64 MiB/assignment | Whole refusal before materialization; snapshots cannot widen the admitted read grant |
+| Private image | 2,048 entries/32 MiB content, 1 MiB/file, depth 16, 2,048 scanned entries; each transfer ≤48 MiB; retained base plus overlay content ≤64 MiB/assignment | Whole refusal before materialization; snapshots cannot widen the admitted read grant |
 | Assignment metadata | Mission/direction 2 KiB each; criterion ≤8 KiB serialized under existing criterion limits; complete spawn/proposal Event ≤64 KiB including JSON escaping | Refuse rather than truncate |
 | Verification | At most eight positive, strictly increasing primary observation sequence references | Reject private, stale, duplicate, unrelated or integration-only evidence |
 
