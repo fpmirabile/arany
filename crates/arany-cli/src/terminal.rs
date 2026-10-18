@@ -388,6 +388,7 @@ pub struct AttachedTerminal {
     clipboard: Option<ClipboardRead>,
     clipboard_paste: Option<Result<ClipboardContent, &'static str>>,
     clipboard_preview: bool,
+    shutdown_clipboard_on_drop: bool,
     requested_screen_reader: bool,
     color_enabled: bool,
     #[cfg(unix)]
@@ -693,6 +694,7 @@ impl AttachedTerminal {
             clipboard: None,
             clipboard_paste: None,
             clipboard_preview: false,
+            shutdown_clipboard_on_drop: true,
             requested_screen_reader: screen_reader,
             color_enabled: std::env::var_os("NO_COLOR").is_none(),
             #[cfg(unix)]
@@ -1172,7 +1174,11 @@ impl AttachedTerminal {
     }
 
     pub fn restore(&mut self) -> Result<(), TerminalError> {
-        self.release().map_err(TerminalError::Io)
+        let mut first_error = self.release().err();
+        if let Err(error) = clipboard::shutdown() {
+            first_error.get_or_insert(error);
+        }
+        first_error.map_or(Ok(()), |error| Err(TerminalError::Io(error)))
     }
 
     pub fn reacquire_after_output(&mut self) -> Result<(), TerminalError> {
@@ -2095,9 +2101,6 @@ impl AttachedTerminal {
         {
             first_error.get_or_insert(error);
         }
-        if let Err(error) = clipboard::shutdown() {
-            first_error.get_or_insert(error);
-        }
         first_error.map_or(Ok(()), Err)
     }
 
@@ -2115,6 +2118,8 @@ impl AttachedTerminal {
             std::mem::swap(&mut self.hangup, &mut replacement.hangup);
             std::mem::swap(&mut self.terminate, &mut replacement.terminate);
         }
+        // The released owner is replaced during mode changes and suspension.
+        self.shutdown_clipboard_on_drop = false;
         *self = replacement;
     }
 }
@@ -2153,6 +2158,9 @@ fn insert_rows_scrolling_screen<'a, B: Backend>(
 impl Drop for AttachedTerminal {
     fn drop(&mut self) {
         let _ = self.release();
+        if self.shutdown_clipboard_on_drop {
+            let _ = clipboard::shutdown();
+        }
     }
 }
 

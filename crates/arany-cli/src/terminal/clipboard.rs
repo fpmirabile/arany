@@ -64,7 +64,7 @@ fn warn_cleanup_unconfirmed() {
         return;
     }
     // A blocked warning must never hold Rust's stderr lock during teardown or exit.
-    let _ = std::thread::Builder::new()
+    if std::thread::Builder::new()
         .name("arany-clipboard-warning".into())
         .spawn(|| {
             if let Ok(stderr) = rustix::io::dup(std::io::stderr()) {
@@ -73,7 +73,11 @@ fn warn_cleanup_unconfirmed() {
                 let message = cleanup_tests::WarningMessage(message);
                 let _ = rustix::io::write(stderr, format!("{message}\n").as_bytes());
             }
-        });
+        })
+        .is_err()
+    {
+        WARNED.store(false, Ordering::Relaxed);
+    }
 }
 
 static WORKER: LazyLock<Arc<ClipboardWorker>> =
@@ -610,7 +614,7 @@ mod cleanup_tests {
         };
         use std::process::{Command, Stdio};
 
-        for case in ["locked", "full"] {
+        for case in ["locked", "full", "transitions", "drop"] {
             let (reader, writer) = pipe().unwrap();
             if case == "full" {
                 let flags = fcntl_getfl(&writer).unwrap();
@@ -665,6 +669,71 @@ mod cleanup_tests {
     #[ignore = "blocked stderr fixture for the clipboard cleanup owner"]
     fn clipboard_warning_fixture() {
         let case = std::env::var("ARANY_CLIPBOARD_WARNING_TEST").unwrap();
+        if matches!(case.as_str(), "transitions" | "drop") {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let released = || super::super::AttachedTerminal {
+                        waiting_tool: None,
+                        terminal: None,
+                        parked_terminal: None,
+                        mode: super::super::TerminalMode::Classic,
+                        classic_pinned: false,
+                        alternate: None,
+                        transcript_open: false,
+                        native: Default::default(),
+                        active_run: None,
+                        history: Default::default(),
+                        classic_history: Default::default(),
+                        input: None,
+                        _raw_mode: None,
+                        mouse_capture: None,
+                        bracketed_paste: None,
+                        session_picker_area: None,
+                        agent_picker_area: None,
+                        linear: None,
+                        secret_echo: None,
+                        agent_panel: None,
+                        help_selected: None,
+                        clipboard: None,
+                        clipboard_paste: None,
+                        clipboard_preview: false,
+                        shutdown_clipboard_on_drop: true,
+                        requested_screen_reader: false,
+                        color_enabled: false,
+                        interrupt: tokio::signal::unix::signal(
+                            tokio::signal::unix::SignalKind::interrupt(),
+                        )
+                        .unwrap(),
+                        suspend: tokio::signal::unix::signal(
+                            tokio::signal::unix::SignalKind::from_raw(nix::libc::SIGTSTP),
+                        )
+                        .unwrap(),
+                        hangup: tokio::signal::unix::signal(
+                            tokio::signal::unix::SignalKind::hangup(),
+                        )
+                        .unwrap(),
+                        terminate: tokio::signal::unix::signal(
+                            tokio::signal::unix::SignalKind::terminate(),
+                        )
+                        .unwrap(),
+                    };
+                    let _worker_lock = WORKER.task.lock().unwrap();
+                    let mut terminal = released();
+                    terminal.release().unwrap();
+                    terminal.replace_released(released());
+                    assert!(!WORKER.cleanup_unconfirmed.load(Ordering::Acquire));
+                    if case == "transitions" {
+                        assert!(terminal.restore().is_err());
+                    } else {
+                        drop(terminal);
+                    }
+                    assert!(WORKER.cleanup_unconfirmed.load(Ordering::Acquire));
+                });
+            return;
+        }
         let (ready, writing) = mpsc::sync_channel(1);
         let (release, held) = mpsc::sync_channel(1);
         if case == "locked" {
@@ -770,9 +839,22 @@ mod cleanup_tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn clipboard_process_cleanup_preserves_reap_evidence_and_reports_deadline_faults() {
-        use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
-        use std::{process::Command, time::Instant};
+        use rustix::process::{Pid, WaitId, WaitIdOptions, test_kill_process, waitid};
+        use std::{
+            os::unix::process::{CommandExt, ExitStatusExt},
+            process::{Child, Command, Stdio},
+            time::Instant,
+        };
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        struct GroupPeer(Child);
+
+        impl Drop for GroupPeer {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
 
         for (cancel, cleanup_timeout, expected, shutdown) in [
             (false, Duration::from_secs(1), None, false),
@@ -797,12 +879,13 @@ mod cleanup_tests {
             let listener = tokio::net::UnixListener::bind(&socket).unwrap();
             let owner = Arc::new(ClipboardWorker::default());
             let (retained, child_retained) = oneshot::channel();
+            let worker_socket = socket.clone();
             let mut read = ClipboardRead::start_with(&owner, move |cancelled, cleanup| {
                 cleanup.timeout = cleanup_timeout;
                 let mut command = Command::new(std::env::current_exe().unwrap());
                 command
                     .env_clear()
-                    .env("ARANY_CLIPBOARD_TEST_SOCKET", socket)
+                    .env("ARANY_CLIPBOARD_TEST_SOCKET", worker_socket)
                     .args([
                         "--exact",
                         "terminal::clipboard::cleanup_tests::clipboard_child_fixture",
@@ -829,6 +912,36 @@ mod cleanup_tests {
                 .unwrap()
                 .unwrap();
             let pid = Pid::from_raw(pid.try_into().unwrap()).unwrap();
+            // A direct child in the same group gives deterministic reaping on both OSes.
+            let mut peer = GroupPeer(
+                Command::new(std::env::current_exe().unwrap())
+                    .current_dir("/")
+                    .env_clear()
+                    .env("ARANY_CLIPBOARD_TEST_SOCKET", &socket)
+                    .args([
+                        "--exact",
+                        "terminal::clipboard::cleanup_tests::clipboard_child_fixture",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .process_group(pid.as_raw_pid())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let (mut peer_gate, _) =
+                tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let peer_pid = tokio::time::timeout(Duration::from_secs(5), peer_gate.read_u32_le())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(peer_pid, peer.0.id());
+            let peer_pid = Pid::from_raw(peer_pid.try_into().unwrap()).unwrap();
             assert!(
                 ClipboardRead::start_with(&owner, |_, _| panic!("overlapping clipboard read"))
                     .is_err()
@@ -858,6 +971,18 @@ mod cleanup_tests {
                 (Err(actual), Some(expected)) => assert_eq!(actual, expected),
                 _ => panic!("unexpected clipboard process result"),
             }
+            let status = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(status) = peer.0.try_wait().unwrap() {
+                        break status;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("clipboard process-group peer survived cleanup");
+            assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+            assert_eq!(test_kill_process(peer_pid), Err(rustix::io::Errno::SRCH));
             assert_eq!(child_retained.await.unwrap(), cleanup_timeout.is_zero());
             tokio::time::timeout(Duration::from_secs(5), async {
                 while owner
