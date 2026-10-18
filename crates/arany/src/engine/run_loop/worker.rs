@@ -63,7 +63,13 @@ impl RunLoop<'_> {
                     return false;
                 };
                 usize::from(a.wave) == wave
-                    && a.resumes.is_none()
+                    && a.resumes.is_none_or(|id| {
+                        self.goal_id.is_some_and(|goal| {
+                            self.ledger()
+                                .view(|v| v.worker_resume_source(goal, id).is_some())
+                                .unwrap_or(false)
+                        })
+                    })
                     && a.supersedes.is_none_or(|id| {
                         self.ledger()
                             .view(|v| {
@@ -528,6 +534,32 @@ impl RunLoop<'_> {
                 .unwrap_or(16)
                 .min(16)
         });
+        let source_context = if let Some(source) = assignment.resumes {
+            Some(
+                self.ledger()
+                    .view(|v| {
+                        let (run, agent) = v.worker_resume_source(self.goal_id?, source)?;
+                        let mut report = agent.result.clone().unwrap_or_default();
+                        report.truncate(crate::tools::types::truncate_utf8(&report, 2048).len());
+                        let disposition = run
+                            .worker_history()
+                            .into_iter()
+                            .find(|w| w.assignment_id == source)
+                            .map_or_else(
+                                || format!("Child {}: {}", agent.id, agent.status),
+                                |w| w.description(),
+                            );
+                        Some(crate::provider::ChildResult {
+                            objective: agent.objective.clone().unwrap_or_default(),
+                            summary: agent.summary.clone().unwrap_or_else(|| disposition.clone()),
+                            result: format!("{disposition}\n{report}"),
+                        })
+                    })?
+                    .ok_or(EngineError::InvalidHistory)?,
+            )
+        } else {
+            None
+        };
         let child = ChildWork {
             agent_run_id: id,
             objective: assignment.mission.clone(),
@@ -537,6 +569,7 @@ impl RunLoop<'_> {
                 .and_then(|d| d.get(&assignment.definition))
                 .cloned(),
             editor: true,
+            source_context,
             turns_remaining: assignment.max_turns,
             stop_hook_feedback: Vec::new(),
             tools: Some(runtime.editor_context(&grant, remaining)?),
@@ -591,8 +624,9 @@ impl RunLoop<'_> {
         finish: Option<crate::provider::Finish>,
         deadline: tokio::time::Instant,
         cancelled: bool,
+        failure: WorkerCause,
     ) -> BoxedStep<'a, CompletedWorker> {
-        Box::pin(self.complete_worker_inner(child, finish, deadline, cancelled))
+        Box::pin(self.complete_worker_inner(child, finish, deadline, cancelled, failure))
     }
 
     async fn complete_worker_inner(
@@ -601,6 +635,7 @@ impl RunLoop<'_> {
         finish: Option<crate::provider::Finish>,
         deadline: tokio::time::Instant,
         cancelled: bool,
+        failure: WorkerCause,
     ) -> Result<CompletedWorker, EngineError> {
         let id = child.agent_run_id;
         let mut stopped = self.observe_worker_stop().await?;
@@ -689,7 +724,7 @@ impl RunLoop<'_> {
                 if stopped {
                     WorkerCause::Budget
                 } else {
-                    WorkerCause::ToolFailed
+                    failure
                 },
             )
         };
@@ -700,6 +735,11 @@ impl RunLoop<'_> {
                 AgentDisposition::Finished
             } else if disposition == WorkerDisposition::Cancelled {
                 AgentDisposition::Cancelled
+            } else if self
+                .ledger()
+                .view(|v| v.runs.last().is_some_and(|r| r.actor_stopped_by_hook(id)))?
+            {
+                AgentDisposition::StoppedByHook
             } else {
                 AgentDisposition::Failed
             },

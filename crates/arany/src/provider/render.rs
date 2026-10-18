@@ -263,7 +263,8 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
 }
 
 pub(crate) fn history_tool_block(run: &RunView) -> String {
-    if run.model_tools().is_empty() && run.tool_compaction_summary.is_none() {
+    let workers = run.worker_history();
+    if run.model_tools().is_empty() && run.tool_compaction_summary.is_none() && workers.is_empty() {
         return String::new();
     }
     let records: Vec<_> = run
@@ -276,13 +277,16 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
             None => json!({"call": model_call(&tool.intent.call), "execution": "uncertain; never replay"}),
         })
         .collect();
-    json!({
+    let mut block = json!({
         "scope": "historical Run; no pending Tool in the current Run; never replay calls or approvals; fresh inspection may establish present state",
         "run_status": format!("{:?}", run.status),
         "summary_untrusted": run.tool_compaction_summary,
         "tool_records": records,
-    })
-    .to_string()
+    });
+    if !workers.is_empty() {
+        block["workers_untrusted"] = json!(workers);
+    }
+    block.to_string()
 }
 
 #[cfg(test)]

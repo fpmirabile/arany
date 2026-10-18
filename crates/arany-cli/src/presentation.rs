@@ -744,6 +744,12 @@ pub fn render_session(view: &SessionView, events: &[EventEnvelope], output: Outp
             }
         }
     }
+    if output == Output::Text {
+        for worker in view.runs.iter().flat_map(RunView::worker_history) {
+            rendered.push_str(&escape_terminal(&worker.description()));
+            rendered.push('\n');
+        }
+    }
     rendered
 }
 
