@@ -231,7 +231,7 @@ fn synthetic_server(
             }
             _ => serde_json::json!({"summary":"derived summary"}),
         };
-        super::loopback::send_response(&mut stream, index, text);
+        super::loopback::send_response_for(&mut stream, index, text, wire["stream"] == true);
     }
 }
 

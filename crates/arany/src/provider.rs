@@ -456,7 +456,7 @@ impl ProviderRequest {
                     || input.goal_context_facts.is_some())
             || !input.steering_notes.is_empty() && !root
             || !root && !input.assignment_profiles.is_empty()
-            || input.assignment_profiles.len() > 8
+            || input.assignment_profiles.len() > MAX_ASSIGNMENT_PROFILES
             || input
                 .assignment_profiles
                 .iter()
@@ -616,21 +616,26 @@ pub struct ChildAssignment {
     pub profile: Option<String>,
 }
 
+const MAX_CHILD_OBJECTIVE_BYTES: usize = 2 * 1024;
+const MAX_CHILD_ASSIGNMENTS: usize = 8;
+const MAX_DELEGATION_BYTES: usize = 24 * 1024;
+const MAX_ASSIGNMENT_PROFILES: usize = 8;
+
 impl ChildAssignment {
     pub(crate) fn valid(&self) -> bool {
         !self.objective.trim().is_empty()
-            && self.objective.len() <= 2 * 1024
+            && self.objective.len() <= MAX_CHILD_OBJECTIVE_BYTES
             && self.profile.as_deref().is_none_or(valid_profile_name)
     }
 }
 
 pub(crate) fn valid_assignments(children: &[ChildAssignment], agent: Option<&str>) -> bool {
-    (1..=8).contains(&children.len())
+    (1..=MAX_CHILD_ASSIGNMENTS).contains(&children.len())
         && children.iter().all(ChildAssignment::valid)
         && serde_json::to_vec(
             &json!({"outcome": {"type": "delegate", "children": children, "agent": agent}}),
         )
-        .is_ok_and(|bytes| bytes.len() <= 24 * 1024)
+        .is_ok_and(|bytes| bytes.len() <= MAX_DELEGATION_BYTES)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

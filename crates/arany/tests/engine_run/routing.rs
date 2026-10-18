@@ -1159,6 +1159,115 @@ async fn invalid_last_assignment_rejects_the_whole_plan_without_spawns_or_repair
     }
 }
 
+struct PreviewGate {
+    identity: arany::ProviderIdentity,
+    failing: bool,
+}
+
+impl PreviewGate {
+    fn route(model: &str, failing: bool) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            identity: arany::ProviderIdentity::new("gate", model, arany::Provenance::native()),
+            failing,
+        })
+    }
+
+    fn done() -> Result<arany::ProviderResponse, ProviderError> {
+        Ok(arany::ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
+            outcome: finish("child done"),
+            response_id: None,
+            usage: arany::Usage {
+                input_tokens: None,
+                output_tokens: Some(8),
+                ..Default::default()
+            },
+            wire_provenance: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for PreviewGate {
+    fn identity(&self) -> &arany::ProviderIdentity {
+        &self.identity
+    }
+
+    async fn invoke(
+        &self,
+        _: arany::ProviderRequest,
+    ) -> Result<arany::ProviderResponse, ProviderError> {
+        if self.failing {
+            return Err(ProviderError::RemoteHttp(503));
+        }
+        Self::done()
+    }
+
+    async fn invoke_with_preview(
+        &self,
+        _: arany::ProviderRequest,
+        preview: arany::ResponsePreview,
+    ) -> Result<arany::ProviderResponse, ProviderError> {
+        assert!(
+            self.failing,
+            "a single-route chain must not stream previews"
+        );
+        preview.publish(arany::PreviewText {
+            answer: "partial".into(),
+            ..Default::default()
+        })?;
+        Err(ProviderError::RemoteHttp(503))
+    }
+}
+
+#[tokio::test]
+async fn child_preview_follows_the_assigned_chain_not_the_default_child_chain() {
+    for assigned_routes in [1, 2] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let primary = route(
+            ScriptedProvider::new(vec![
+                ProviderOutcome::Delegate(Delegate {
+                    agent: None,
+                    children: vec![arany::ChildAssignment {
+                        objective: "Inspect".into(),
+                        profile: Some("spare".into()),
+                    }],
+                }),
+                finish("done"),
+            ])
+            .with_profile("scripted", "primary"),
+        );
+        let fallback = route(
+            ScriptedProvider::new(vec![finish("fallback")]).with_profile("scripted", "fallback"),
+        );
+        let assigned = if assigned_routes == 1 {
+            vec![PreviewGate::route("single", false)]
+        } else {
+            vec![PreviewGate::route("first", true), fallback.clone()]
+        };
+        let mut bindings = routes(&primary);
+        pin_roster(&mut bindings, Some(assigned));
+        let engine = open(&temp.path().join("state"));
+        let mut request = input(&workspace);
+        request.policy = CollaborationPolicy::Team {
+            max_active_children: 1,
+        };
+        let result = run_routed(&engine, bindings, request, RunControls::default())
+            .await
+            .unwrap();
+        if assigned_routes == 1 {
+            assert_eq!(result.run.status, RunStatus::Finished);
+        } else {
+            assert_eq!(result.run.status, RunStatus::Failed);
+            assert!(result.run.provider_fallbacks.is_empty());
+            assert!(fallback.requests.lock().unwrap().is_empty());
+        }
+        engine.close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at_zero() {
     let temp = tempfile::tempdir().unwrap();

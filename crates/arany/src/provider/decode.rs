@@ -146,13 +146,13 @@ mod tests {
             assert!(structured_outcome(&json!({"outcome": {"type": "delegate", "children": [{"objective": "Inspect", "profile": profile}]}}).to_string()).is_err());
         }
         let mut children = vec![
-            super::super::ChildAssignment {
+            ChildAssignment {
                 objective: "x".repeat(2048),
                 profile: None
             };
             8
         ];
-        let size = |children: &[super::super::ChildAssignment]| {
+        let size = |children: &[ChildAssignment]| {
             serde_json::to_vec(
                 &json!({"outcome": {"type": "delegate", "children": children, "agent": null}}),
             )

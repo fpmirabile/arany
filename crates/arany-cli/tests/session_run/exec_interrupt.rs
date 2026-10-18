@@ -33,12 +33,17 @@ fn interrupted_exec_leaves_its_goal_resumable(
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     let port = listener.local_addr().expect("listener address").port();
     super::loopback::write_profile(&state, port);
+    listener.set_nonblocking(true).expect("bounded accept");
     let (held_tx, held_rx) = mpsc::channel();
 
     // Three conformance requests precede the Run; the Run request is held open until exec drops it.
     thread::spawn(move || {
         for index in 0..3 {
-            let (mut stream, _) = listener.accept().expect("conformance request");
+            let mut stream = crate::process::accept_with_deadline(
+                &listener,
+                Duration::from_secs(30),
+                "conformance request",
+            );
             let body: serde_json::Value =
                 serde_json::from_slice(&super::loopback::read_request(&mut stream))
                     .expect("request JSON");
@@ -52,7 +57,8 @@ fn interrupted_exec_leaves_its_goal_resumable(
             };
             super::loopback::send_response_for(&mut stream, index, text, streaming);
         }
-        let (mut stream, _) = listener.accept().expect("Run request");
+        let mut stream =
+            crate::process::accept_with_deadline(&listener, Duration::from_secs(30), "Run request");
         super::loopback::read_request(&mut stream);
         held_tx.send(()).expect("observed Run request");
         stream
