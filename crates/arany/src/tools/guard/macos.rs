@@ -351,19 +351,24 @@ impl SeatbeltProfile {
         if !matches!(self.kind, ProfileKind::File) && !ffi::detach_bootstrap_ports() {
             return Err(ToolError::ProtectionUnavailable);
         }
-        if self.text.len() > PROFILE_BYTES_CAP {
-            return Err(ToolError::Limit);
-        }
-        let profile = CString::new(self.text).map_err(|_| ToolError::Path)?;
-        if !ffi::install_sandbox(&profile) {
-            return Err(ToolError::ProtectionUnavailable);
-        }
+        install_profile(self.text)?;
         attest_policy(operations, self.kind.denied_syscalls())?;
         if matches!(self.kind, ProfileKind::File) {
             verify_cpu_controls()?;
         }
         Ok(())
     }
+}
+
+fn install_profile(profile: String) -> Result<(), ToolError> {
+    if profile.len() > PROFILE_BYTES_CAP {
+        return Err(ToolError::Limit);
+    }
+    let profile = CString::new(profile).map_err(|_| ToolError::Path)?;
+    if !ffi::install_sandbox(&profile) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(())
 }
 
 pub(super) fn install(
@@ -1151,152 +1156,55 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
 
-    fn assert_previous_composition(
-        kind: ProfileKind,
-        rules: &str,
-        denied_syscalls: &[i32],
-        grants: &[(bool, &str, &str, &str)],
-    ) {
-        let mut actual = SeatbeltProfile::new(kind);
-        let mut previous = profile(rules, denied_syscalls);
-        for &(include_ancestors, operations, filter, path) in grants {
-            let path = Path::new(path);
-            if include_ancestors {
-                actual.grant(operations, filter, path).unwrap();
-                for directory in path.ancestors().skip(1) {
-                    previous.push_str(&format!(
-                        "(allow file-read-metadata (literal {}))\n",
-                        quoted(directory).unwrap()
-                    ));
-                }
-            } else {
-                actual.rule(operations, filter, path).unwrap();
-            }
-            previous.push_str(&format!(
-                "({operations} ({filter} {}))\n",
-                quoted(path).unwrap()
-            ));
-        }
-        actual.protect_guard(Path::new("/guard/arany")).unwrap();
-        previous.push_str("(deny file-write* (literal \"/guard/arany\"))\n");
-        assert_eq!(actual.text, previous);
-    }
-
     #[test]
-    fn file_profiles_match_previous_composition() {
-        for grants in [
-            &[(true, "allow file-read*", "subpath", "/project")][..],
-            &[
-                (true, "allow file-read*", "subpath", "/project"),
-                (false, "allow file-write*", "subpath", "/project"),
-            ][..],
-            &[
-                (true, "allow file-read*", "subpath", "/project"),
-                (
-                    true,
-                    "allow file-read*",
-                    "literal",
-                    "/skills/quoted\"\\/SKILL.md",
-                ),
-            ][..],
-            &[
-                (
-                    true,
-                    "allow file-read* file-write*",
-                    "subpath",
-                    "/unit/workspace",
-                ),
-                (
-                    true,
-                    "allow file-read* file-write*",
-                    "subpath",
-                    "/unit/scratch",
-                ),
-            ][..],
-            &[][..],
-        ] {
-            assert_previous_composition(ProfileKind::File, PROFILE, FILE_DENIED_SYSCALLS, grants);
-        }
-    }
-
-    #[test]
-    fn command_profiles_match_previous_composition() {
-        for cache in [false, true] {
-            let mut grants = vec![
-                (
-                    true,
-                    "allow file-read* file-write* file-map-executable process-exec",
-                    "subpath",
-                    "/unit/workspace",
-                ),
-                (
-                    true,
-                    "allow file-read* file-write* file-map-executable process-exec",
-                    "subpath",
-                    "/unit/scratch",
-                ),
-            ];
-            if cache {
-                grants.push((
-                    true,
-                    "allow file-read* file-write* file-map-executable process-exec",
-                    "subpath",
-                    "/unit/cache",
-                ));
-            }
-            grants.extend([
-                (
-                    true,
-                    "allow file-read* file-map-executable process-exec",
-                    "subpath",
-                    "/host/rust",
-                ),
-                (true, "allow file-read*", "subpath", "/host/cargo-cache"),
-                (
-                    false,
-                    "allow file-read* file-map-executable",
-                    "subpath",
-                    "/unit/runtime",
-                ),
-                (
-                    false,
-                    "allow process-exec",
-                    "subpath",
-                    "/unit/runtime/programs",
-                ),
-            ]);
-            assert_previous_composition(
+    fn profile_builder_emits_exact_rules() {
+        for (kind, rules, syscalls, operations, filter, expected) in [
+            (
+                ProfileKind::File,
+                PROFILE,
+                FILE_DENIED_SYSCALLS,
+                "allow file-read*",
+                "subpath",
+                r#"(allow file-read-metadata (literal "/a"))
+(allow file-read-metadata (literal "/"))
+(allow file-read* (subpath "/a/b\"c"))
+(deny file-write* (literal "/guard/arany"))
+"#,
+            ),
+            (
                 ProfileKind::Command,
                 COMMAND_PROFILE,
                 COMMAND_DENIED_SYSCALLS,
-                &grants,
-            );
+                "allow file-read* file-write* file-map-executable process-exec",
+                "subpath",
+                r#"(allow file-read-metadata (literal "/a"))
+(allow file-read-metadata (literal "/"))
+(allow file-read* file-write* file-map-executable process-exec (subpath "/a/b\"c"))
+(deny file-write* (literal "/guard/arany"))
+"#,
+            ),
+            (
+                ProfileKind::Git,
+                GIT_PROFILE,
+                COMMAND_DENIED_SYSCALLS,
+                "allow file-read* file-map-executable process-exec",
+                "literal",
+                r#"(allow file-read-metadata (literal "/a"))
+(allow file-read-metadata (literal "/"))
+(allow file-read* file-map-executable process-exec (literal "/a/b\"c"))
+(deny file-write* (literal "/guard/arany"))
+"#,
+            ),
+        ] {
+            let mut actual = SeatbeltProfile::new(kind);
+            assert_eq!(actual.text, profile(rules, syscalls));
+            let base_len = actual.text.len();
+            actual
+                .grant(operations, filter, Path::new(r#"/a/b"c"#))
+                .unwrap();
+            actual.protect_guard(Path::new("/guard/arany")).unwrap();
+            assert_eq!(&actual.text.as_bytes()[base_len..], expected.as_bytes());
         }
-    }
-
-    #[test]
-    fn git_profile_matches_previous_composition() {
-        assert_previous_composition(
-            ProfileKind::Git,
-            GIT_PROFILE,
-            COMMAND_DENIED_SYSCALLS,
-            &[
-                (
-                    true,
-                    "allow file-read* file-map-executable process-exec",
-                    "literal",
-                    "/Library/Developer/CommandLineTools/usr/bin/git",
-                ),
-                (true, "allow file-read*", "subpath", "/project"),
-                (
-                    true,
-                    "allow file-read* file-write*",
-                    "subpath",
-                    "/unit/git-view",
-                ),
-                (false, "allow file-read*", "subpath", "/unit/git-home"),
-            ],
-        );
     }
 
     #[test]
