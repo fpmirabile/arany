@@ -321,10 +321,16 @@ pub struct ForegroundWorkerProvider {
     pub requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     pub violations: std::sync::Mutex<Vec<&'static str>>,
     background_started: tokio::sync::Notify,
+    identity: crate::ProviderIdentity,
 }
 
 impl ForegroundWorkerProvider {
     pub fn new(workspace: &Path, case: &'static str, budget: crate::GoalBudget) -> Self {
+        let mut identity =
+            crate::ProviderIdentity::new("scripted", "test-model", crate::Provenance::native());
+        if case == "headroom_background" {
+            identity.limits.concurrency = 2;
+        }
         Self {
             workspace: workspace.into(),
             case,
@@ -332,6 +338,7 @@ impl ForegroundWorkerProvider {
             requests: Default::default(),
             violations: Default::default(),
             background_started: Default::default(),
+            identity,
         }
     }
 
@@ -398,11 +405,7 @@ impl ForegroundWorkerProvider {
 #[async_trait::async_trait]
 impl crate::Provider for ForegroundWorkerProvider {
     fn identity(&self) -> &crate::ProviderIdentity {
-        static IDENTITY: std::sync::LazyLock<crate::ProviderIdentity> =
-            std::sync::LazyLock::new(|| {
-                crate::ProviderIdentity::new("scripted", "test-model", crate::Provenance::native())
-            });
-        &IDENTITY
+        &self.identity
     }
 
     async fn invoke(
