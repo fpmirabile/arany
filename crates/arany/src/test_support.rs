@@ -319,6 +319,240 @@ mod account_roots {
     }
 }
 
+pub async fn exercise_private_guard_command(
+    state: &crate::StateRoot,
+    workspace: &std::path::Path,
+    executable: std::path::PathBuf,
+    case: &str,
+) -> Result<(), crate::tools::ToolError> {
+    use crate::session::worker::*;
+    use crate::tools::{
+        Attestation, Cancellation, ToolCall, ToolDisposition, ToolRuntime, worker::View,
+    };
+    let runtime = ToolRuntime::admit(
+        crate::tools::config::Config::load(state)?,
+        None,
+        None,
+        workspace,
+        state,
+        executable,
+    )?;
+    let grant = WorkerGrant {
+        commands: vec!["sh".into()],
+        read_paths: vec!["owned".into()],
+        write_paths: vec!["owned".into()],
+        tools: vec![WorkerTool::Read, WorkerTool::Write, WorkerTool::Command],
+        skills: vec![],
+        mcp_servers: vec![],
+        permission_mode: None,
+    };
+    let identity = crate::store::BuildCacheIdentity::new(
+        workspace,
+        runtime.workspace_identity().device,
+        runtime.workspace_identity().inode,
+    )
+    .unwrap();
+    let cache_source = tempfile::tempdir().unwrap();
+    std::fs::create_dir(cache_source.path().join("target")).unwrap();
+    std::fs::write(
+        cache_source.path().join("target/marker"),
+        b"assignment-cache",
+    )
+    .unwrap();
+    let directory =
+        cap_std::fs::Dir::open_ambient_dir(cache_source.path(), cap_std::ambient_authority())
+            .unwrap();
+    let mut archive = Vec::new();
+    crate::store::capture_archive_with_limit(&directory, &identity, &[], &mut archive, 64 << 20)
+        .unwrap();
+    let mut primary = state
+        .begin_build_cache_with_limits(identity.clone(), 64 << 20, 64 << 20)
+        .unwrap();
+    primary.publish(&mut archive.as_slice(), &[]).unwrap();
+    drop(primary);
+    let run_id = crate::RunId::new();
+    let mut view = View::capture(
+        &runtime,
+        run_id,
+        crate::AgentRunId::new(),
+        grant.clone(),
+        WORKER_DATA_BYTES as u32,
+    )?;
+    view.pin_command_cache(&runtime, 64 << 20)?;
+    let mut sibling = View::capture(
+        &runtime,
+        run_id,
+        crate::AgentRunId::new(),
+        grant,
+        WORKER_DATA_BYTES as u32,
+    )?;
+    sibling.pin_command_cache(&runtime, 64 << 20)?;
+    assert!(matches!(
+        state.begin_build_cache_with_limits(identity.clone(), 64 << 20, 0),
+        Err(crate::StoreError::BuildCacheBusy)
+    ));
+    assert!(matches!(
+        state.clear_build_cache(identity.clone()),
+        Err(crate::StoreError::BuildCacheBusy)
+    ));
+    let script = match case {
+        "success" => {
+            "test ! -e .git && test \"$(cat owned/a)\" = original && test \"$(cat \"$CARGO_TARGET_DIR/marker\")\" = assignment-cache && printf poisoned >\"$CARGO_TARGET_DIR/marker\" && printf private >owned/a && (sleep 300 >/dev/null 2>&1 & echo $! >owned/daemon) && printf done"
+        }
+        "outside" => "printf private >owned/a; printf forbidden >outside",
+        "nonzero" => "printf private >owned/a; exit 7",
+        "link" => "printf private >owned/a; ln -s a owned/link",
+        "cancelled" | "lost" => "printf private >owned/a",
+        _ => unreachable!(),
+    };
+    let mut intent = runtime.intent(
+        run_id,
+        view.assignment(),
+        ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), script.into()],
+            cwd: ".".into(),
+        },
+    );
+    intent.target = view.target();
+    intent.limits.cache_requested_bytes = 64 << 20;
+    intent.limits.cache_bytes = 64 << 20;
+    intent.limits.cache_candidate_bytes = 0;
+    intent.limits.cache_transfer_ms = intent.limits.runtime_ms;
+    for stale_revision in [false, true] {
+        let mut stale = intent.clone();
+        let EffectTarget::WorkerView {
+            revision,
+            cache_generation,
+            ..
+        } = &mut stale.target
+        else {
+            unreachable!()
+        };
+        if stale_revision {
+            *revision += 1;
+        } else {
+            *cache_generation = Some([9; 32]);
+        }
+        let refused = view
+            .command(&runtime, stale, Cancellation::new())
+            .await
+            .err()
+            .expect("stale pin refused");
+        assert_eq!(refused.disposition, ToolDisposition::Denied);
+        assert!(refused.attestation.is_none());
+    }
+    if case == "lost" {
+        crate::fault::FaultPlan::lose_guard_receipt(intent.id);
+    }
+    let cancellation = Cancellation::new();
+    if case == "cancelled" {
+        cancellation.cancel();
+    }
+    match view.command(&runtime, intent.clone(), cancellation).await {
+        Ok(candidate) => {
+            assert_eq!(case, "success");
+            let reference = WorkerDataRef {
+                assignment_id: view.assignment(),
+                purpose: WorkerDataPurpose::Mutation,
+                first_sequence: 1,
+                seal_sequence: candidate.data.len().div_ceil(WORKER_CHUNK_BYTES) as u64 + 1,
+                chunks: candidate.data.len().div_ceil(WORKER_CHUNK_BYTES) as u16,
+                bytes: candidate.data.len() as u32,
+                sha256: crate::tools::types::digest(&candidate.data),
+            };
+            let observation = view.acknowledge(candidate, reference)?;
+            assert!(observation.valid());
+            assert!(matches!(
+                observation.attestation,
+                Some(Attestation::WorkerCommand { .. })
+            ));
+        }
+        Err(observation) => match case {
+            "lost" => {
+                assert_eq!(observation.disposition, ToolDisposition::Uncertain);
+                assert!(
+                    view.command(&runtime, intent, Cancellation::new())
+                        .await
+                        .is_err()
+                );
+            }
+            "cancelled" => assert!(observation.attestation.is_none()),
+            _ => {
+                assert!(observation.valid(), "{case}: {observation:?}");
+                let result: WorkerCommandResult =
+                    serde_json::from_str(&observation.output).unwrap();
+                if case == "nonzero" {
+                    assert_eq!(result.exit_code, Some(7));
+                    assert_eq!(result.private_capture, PrivateCapture::None {});
+                } else {
+                    assert_eq!(
+                        result.private_capture,
+                        PrivateCapture::Rejected {
+                            cause: if case == "outside" {
+                                PrivateCaptureRejection::OutOfLease
+                            } else {
+                                PrivateCaptureRejection::UnsupportedEntry
+                            }
+                        }
+                    );
+                }
+            }
+        },
+    }
+    if case == "success" {
+        let mut check = runtime.intent(run_id, view.assignment(), ToolCall::Command {
+            program: "sh".into(), args: vec!["-c".into(),
+                "test \"$(cat owned/a)\" = private && test -s owned/daemon && test \"$(cat \"$CARGO_TARGET_DIR/marker\")\" = assignment-cache".into()], cwd: ".".into() });
+        check.target = view.target();
+        check.limits.cache_requested_bytes = 64 << 20;
+        check.limits.cache_bytes = 64 << 20;
+        check.limits.cache_candidate_bytes = 0;
+        check.limits.cache_transfer_ms = check.limits.runtime_ms;
+        let observation = view
+            .command(&runtime, check, Cancellation::new())
+            .await
+            .err()
+            .expect("second command has no delta");
+        assert_eq!(
+            observation.disposition,
+            ToolDisposition::Succeeded,
+            "{observation:?}"
+        );
+        assert!(observation.valid());
+    }
+    assert_eq!(view.dispose()?.revision, u32::from(case == "success"));
+    assert_eq!(
+        std::fs::read(workspace.join("owned/a")).unwrap(),
+        b"original"
+    );
+    let mut check = runtime.intent(run_id, sibling.assignment(), ToolCall::Command { program: "sh".into(), args: vec!["-c".into(), "test \"$(cat owned/a)\" = original && test \"$(cat \"$CARGO_TARGET_DIR/marker\")\" = assignment-cache".into()], cwd: ".".into() });
+    check.target = sibling.target();
+    check.limits.cache_requested_bytes = 64 << 20;
+    check.limits.cache_bytes = 64 << 20;
+    check.limits.cache_candidate_bytes = 0;
+    check.limits.cache_transfer_ms = check.limits.runtime_ms;
+    let observation = sibling
+        .command(&runtime, check, Cancellation::new())
+        .await
+        .err()
+        .expect("empty command capture");
+    assert_eq!(
+        observation.disposition,
+        ToolDisposition::Succeeded,
+        "{observation:?}"
+    );
+    assert_eq!(sibling.dispose()?.revision, 0);
+    let primary = state
+        .begin_build_cache_with_limits(identity, 64 << 20, 0)
+        .unwrap();
+    let mut committed = primary.archive().unwrap().unwrap().0;
+    let mut unchanged = Vec::new();
+    std::io::Read::read_to_end(&mut committed, &mut unchanged).unwrap();
+    assert_eq!(unchanged, archive);
+    Ok(())
+}
+
 pub async fn exercise_private_guard_target(
     state: &crate::StateRoot,
     workspace: &std::path::Path,

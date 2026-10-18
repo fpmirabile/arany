@@ -885,32 +885,39 @@ pub(super) async fn execute(
         })
         .await
         .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
-        if bytes == b"CACHE_READY\n" {
-            let session = cache.as_ref().ok_or(ToolError::Operation)?;
-            let transfer_deadline =
-                super::super::cache_transfer_deadline(intent, Some(go_deadline));
-            tokio::time::timeout_at(
-                transfer_deadline,
-                super::super::send_cache_archive(stream.get_mut(), &session.lease),
-            )
-            .await
-            .map_err(|_| ToolError::Limit)??;
-            bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
-                .await
-                .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
-        }
-        if bytes == b"WORKER_READY\n" {
-            let input =
-                super::super::super::worker::bulk_input(runtime).ok_or(ToolError::Configuration)?;
-            tokio::time::timeout_at(
-                go_deadline,
-                super::super::super::worker::send_frame(stream.get_mut(), input),
-            )
-            .await
-            .map_err(|_| ToolError::Limit)??;
-            bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
+        let mut cache_sent = false;
+        let mut image_sent = false;
+        for _ in 0..2 {
+            if bytes == b"CACHE_READY\n" && !cache_sent {
+                cache_sent = true;
+                let session = cache.as_ref().ok_or(ToolError::Operation)?;
+                let transfer_deadline =
+                    super::super::cache_transfer_deadline(intent, Some(go_deadline));
+                tokio::time::timeout_at(
+                    transfer_deadline,
+                    super::super::send_cache_archive(stream.get_mut(), &session.lease),
+                )
                 .await
                 .map_err(|_| ToolError::Limit)??;
+                bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
+                    .await
+                    .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
+            } else if bytes == b"WORKER_READY\n" && !image_sent {
+                image_sent = true;
+                let input = super::super::super::worker::bulk_input(runtime)
+                    .ok_or(ToolError::Configuration)?;
+                tokio::time::timeout_at(
+                    go_deadline,
+                    super::super::super::worker::send_frame(stream.get_mut(), input),
+                )
+                .await
+                .map_err(|_| ToolError::Limit)??;
+                bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
+                    .await
+                    .map_err(|_| ToolError::Limit)??;
+            } else {
+                break;
+            }
         }
         if let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(&bytes) {
             return Err(ToolError::GuardBootstrap(failure));
@@ -942,7 +949,7 @@ pub(super) async fn execute(
                 .write_all(b"GO\n")
                 .await
                 .map_err(|_| ToolError::Operation)?;
-            if let Some(session) = cache.as_ref() {
+            if let Some(session) = cache.as_ref().filter(|_| runtime.worker.is_none()) {
                 let observation = super::super::read_observation_line(&mut stream, intent).await?;
                 let update_deadline = super::super::cache_transfer_deadline(
                     intent,
@@ -1144,7 +1151,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
-                storage = if runtime.worker.is_some() {
+                storage = if runtime.worker.is_some() && !intent.call.is_process() {
                     Some(
                         super::storage::prepare_worker_storage(
                             path.parent().ok_or(ToolError::Path)?,
@@ -1203,7 +1210,9 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     }
                     watched.cancel();
                 }));
-                if matches!(intent.call, crate::tools::ToolCall::Command { .. }) {
+                if runtime.worker.is_none()
+                    && matches!(intent.call, crate::tools::ToolCall::Command { .. })
+                {
                     command_before = Some(crate::tools::fs::command_snapshot(
                         &path.parent().ok_or(ToolError::Path)?.join("workspace"),
                     )?);
@@ -1229,7 +1238,9 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let cleanup = scope.stop_until(Some(std::process::id()), teardown).await;
             capture.finish(cleanup.is_ok());
             let result = result.and_then(|mut observation| {
-                observation.cache_update = if cache.is_some() {
+                observation.cache_update = if runtime.worker.is_some() && intent.call.is_process() {
+                    crate::tools::CacheUpdate::Discarded
+                } else if cache.is_some() {
                     crate::tools::CacheUpdate::NotAttempted
                 } else {
                     crate::tools::CacheUpdate::NotApplicable
@@ -1269,11 +1280,39 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         }
                     }
                 }
+                if cleanup.is_ok()
+                    && intent.call.is_process()
+                    && let Some(action) = &runtime.worker
+                {
+                    let before = action.transfer.decode(&action.input)?;
+                    let (image, capture) = if observation.disposition == ToolDisposition::Succeeded
+                    {
+                        crate::tools::worker::command_capture(
+                            &before,
+                            &crate::tools::fs::open_directory(
+                                &path.parent().ok_or(ToolError::Path)?.join("workspace/tree"),
+                            )?,
+                            &action.transfer.grant,
+                        )
+                    } else {
+                        (before, crate::session::worker::PrivateCapture::None {})
+                    };
+                    let mut command: crate::session::worker::WorkerCommandResult =
+                        serde_json::from_str(&observation.output)
+                            .map_err(|_| ToolError::Operation)?;
+                    command.private_capture = capture;
+                    observation.output =
+                        serde_json::to_string(&command).map_err(|_| ToolError::Operation)?;
+                    *action.output.lock().map_err(|_| ToolError::Operation)? =
+                        Some(image.encode()?);
+                }
                 Ok(observation)
             });
             let mut response_sent = false;
             let mut cache_transfer_failed = false;
-            if let (Some(cache), Some(volumes), Ok(observation)) = (&cache, &storage, &result) {
+            if let (Some(cache), Some(volumes), Ok(observation)) = (&cache, &storage, &result)
+                && runtime.worker.is_none()
+            {
                 let transfer = async {
                     let bytes =
                         serde_json::to_vec(observation).map_err(|_| ToolError::Operation)?;

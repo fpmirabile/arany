@@ -119,6 +119,7 @@ pub(super) fn command_snapshot(workspace: &Path) -> Result<CommandSnapshot, Tool
 enum SnapshotKind {
     Command,
     Worker,
+    WorkerCommand,
 }
 
 fn command_collect(
@@ -137,7 +138,7 @@ fn command_collect(
     let mut names = Vec::new();
     for entry in directory.entries().map_err(|_| ToolError::Path)? {
         budget.entry()?;
-        if kind == SnapshotKind::Worker && budget.entries > crate::session::worker::WORKER_FILES {
+        if kind != SnapshotKind::Command && budget.entries > crate::session::worker::WORKER_FILES {
             return Err(ToolError::Limit);
         }
         let name = entry
@@ -150,6 +151,9 @@ fn command_collect(
         } else {
             format!("{path}/{name}")
         };
+        if kind == SnapshotKind::WorkerCommand && selected.split('/').any(ignored_directory) {
+            return Err(ToolError::Path);
+        }
         if !valid_relative(&selected, false) {
             return Err(if selected.split('/').any(forbidden) {
                 ToolError::FilesystemDenied
@@ -191,7 +195,7 @@ fn command_collect(
             };
             #[cfg(not(unix))]
             let executable = false;
-            let cap = if kind == SnapshotKind::Worker {
+            let cap = if kind != SnapshotKind::Command {
                 MAX_FILE_BYTES.min(MAX_SNAPSHOT_BYTES.saturating_sub(budget.bytes))
             } else {
                 MAX_FILE_BYTES
@@ -1546,6 +1550,18 @@ pub(super) fn worker_image(
     root: &Dir,
     paths: &[String],
 ) -> Result<super::worker::Image, ToolError> {
+    worker_snapshot(root, paths, SnapshotKind::Worker)
+}
+
+pub(super) fn worker_command_image(root: &Dir) -> Result<super::worker::Image, ToolError> {
+    worker_snapshot(root, &[".".into()], SnapshotKind::WorkerCommand)
+}
+
+fn worker_snapshot(
+    root: &Dir,
+    paths: &[String],
+    kind: SnapshotKind,
+) -> Result<super::worker::Image, ToolError> {
     use super::worker::{Entry as WorkerEntry, Image};
     let mut entries = BTreeMap::new();
     let mut budget = ScanBudget::default();
@@ -1556,14 +1572,7 @@ pub(super) fn worker_image(
             continue;
         }
         if path == "." {
-            command_collect(
-                root,
-                "",
-                &mut entries,
-                &mut budget,
-                &mut retained,
-                SnapshotKind::Worker,
-            )?;
+            command_collect(root, "", &mut entries, &mut budget, &mut retained, kind)?;
         } else if !valid_relative(path, false) || path.split('/').count() > 16 {
             return Err(ToolError::Path);
         } else {
@@ -1588,7 +1597,7 @@ pub(super) fn worker_image(
                             &mut entries,
                             &mut budget,
                             &mut retained,
-                            SnapshotKind::Worker,
+                            kind,
                         )?;
                         entries.insert(
                             path.clone(),

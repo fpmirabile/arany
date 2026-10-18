@@ -167,6 +167,12 @@ pub(super) fn build_cache_session(
         return Ok(None);
     }
     let Some(state) = runtime.cache_state.as_ref() else {
+        if matches!(
+            intent.target,
+            crate::session::worker::EffectTarget::WorkerView { .. }
+        ) {
+            return Err(ToolError::Configuration);
+        }
         return Ok(None);
     };
     let identity = BuildCacheIdentity::new(
@@ -176,6 +182,26 @@ pub(super) fn build_cache_session(
     )
     .map_err(map_cache_error)?;
     let exclusions = cache_exclusions(&runtime.config.runtime_grants)?;
+    if let crate::session::worker::EffectTarget::WorkerView {
+        cache_generation, ..
+    } = intent.target
+    {
+        let lease = state
+            .read_build_cache(identity.clone(), intent.limits.cache_bytes)
+            .map_err(map_cache_error)?;
+        if lease.generation().map_err(map_cache_error)? != cache_generation {
+            return Err(ToolError::ChangedInput);
+        }
+        return Ok(Some(BuildCacheSession {
+            lease: Arc::new(lease),
+            transfer: BuildCacheTransfer {
+                identity,
+                exclusions,
+                view_bytes: intent.limits.cache_bytes,
+                candidate_bytes: 0,
+            },
+        }));
+    }
     let lease = match state.begin_build_cache_with_limits(
         identity.clone(),
         intent.limits.cache_bytes,
@@ -939,7 +965,9 @@ pub(super) async fn read_worker_observation<R: tokio::io::AsyncBufRead + Unpin>(
     tokio::time::timeout(super::worker::transfer_time(intent), async {
         let bytes = super::worker::receive_frame(reader).await?;
         let image = super::worker::Image::decode(&bytes, &action.transfer.grant)?;
-        if observation.disposition == ToolDisposition::Succeeded {
+        if observation.disposition == ToolDisposition::Succeeded
+            && !matches!(intent.call, ToolCall::Command { .. })
+        {
             let before = action.transfer.decode(&action.input)?;
             super::worker::validate_edit(&before, &image, &intent.call)?;
         }
@@ -1489,8 +1517,11 @@ fn send_result(
     result: Result<String, ToolError>,
     stdout: &mut impl Write,
     root: &Path,
+    before: Option<&super::worker::Image>,
 ) -> Result<(), ToolError> {
     let (disposition, output, enforcement_cause) = super::dispatch::outcome(&task.intent, result);
+    let private_command =
+        task.worker.is_some() && matches!(task.intent.call, ToolCall::Command { .. });
     let receipt = GuardReceipt {
         contract_version: 1,
         intent_digest: task.intent.digest(),
@@ -1503,12 +1534,38 @@ fn send_result(
         disposition,
         output,
         attestation: Some(Attestation::Guard(receipt)),
-        cache_update: if task.cache.is_some() {
+        cache_update: if private_command {
+            crate::tools::CacheUpdate::Discarded
+        } else if task.cache.is_some() {
             crate::tools::CacheUpdate::NotAttempted
         } else {
             crate::tools::CacheUpdate::NotApplicable
         },
     };
+    if private_command
+        && serde_json::from_str::<crate::session::worker::WorkerCommandResult>(&observation.output)
+            .is_err()
+    {
+        observation.output = serde_json::to_string(&crate::session::worker::WorkerCommandResult {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: observation.output,
+            private_capture: crate::session::worker::PrivateCapture::None {},
+        })
+        .map_err(|_| ToolError::Operation)?;
+    }
+    if private_command && observation.output.len() > observation.intent.limits.result_bytes as usize
+    {
+        observation.disposition = ToolDisposition::Limit;
+        observation.enforcement_cause = None;
+        observation.output = serde_json::to_string(&crate::session::worker::WorkerCommandResult {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            private_capture: crate::session::worker::PrivateCapture::None {},
+        })
+        .map_err(|_| ToolError::Operation)?;
+    }
     if task.worker.is_none() && !observation.valid() {
         observation.disposition = ToolDisposition::Limit;
         observation.enforcement_cause = None;
@@ -1518,10 +1575,42 @@ fn send_result(
         return Err(ToolError::Limit);
     }
     let candidate = if let Some(worker) = &task.worker {
-        let image = super::fs::worker_image(
-            &super::fs::open_directory(workspace)?,
-            &super::worker::capture_paths(&worker.grant),
-        )?;
+        let image = if matches!(observation.intent.call, ToolCall::Command { .. }) {
+            let before = before.ok_or(ToolError::Configuration)?;
+            #[cfg(target_os = "linux")]
+            let (image, private_capture) = if observation.disposition == ToolDisposition::Succeeded
+            {
+                super::worker::command_capture(
+                    before,
+                    &super::fs::open_directory(workspace)?,
+                    &worker.grant,
+                )
+            } else {
+                (
+                    before.clone(),
+                    crate::session::worker::PrivateCapture::None {},
+                )
+            };
+            #[cfg(not(target_os = "linux"))]
+            let (image, private_capture) = (
+                before.clone(),
+                crate::session::worker::PrivateCapture::None {},
+            );
+            if let Ok(mut result) = serde_json::from_str::<
+                crate::session::worker::WorkerCommandResult,
+            >(&observation.output)
+            {
+                result.private_capture = private_capture;
+                observation.output =
+                    serde_json::to_string(&result).map_err(|_| ToolError::Operation)?;
+            }
+            image
+        } else {
+            super::fs::worker_image(
+                &super::fs::open_directory(workspace)?,
+                &super::worker::capture_paths(&worker.grant),
+            )?
+        };
         image.validate(&worker.grant)?;
         Some(image.encode()?)
     } else {
@@ -1537,7 +1626,9 @@ fn send_result(
         stdout.flush().map_err(|_| ToolError::Operation)?;
     }
     #[cfg(target_os = "linux")]
-    if let Some(cache) = &task.cache {
+    if let Some(cache) = &task.cache
+        && task.worker.is_none()
+    {
         send_cache_candidate(cache, observation.disposition, stdout, root)?;
     }
     Ok(())
@@ -1584,7 +1675,7 @@ pub(super) fn helper_main() -> ExitCode {
         {
             stage = BootstrapStage::Capabilities;
             linux::harden()?;
-            if image.is_some() || handover.is_some() {
+            if (image.is_some() || handover.is_some()) && !task.intent.call.is_process() {
                 profile::install_non_spawning()?;
             }
         }
@@ -1641,7 +1732,7 @@ pub(super) fn helper_main() -> ExitCode {
             super::worker::materialize(image, &super::fs::open_directory(workspace)?)?;
         }
         #[cfg(not(target_os = "macos"))]
-        if task.intent.call.is_process() {
+        if task.intent.call.is_process() && task.worker.is_none() {
             super::fs::copy_seed()?;
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1663,7 +1754,7 @@ pub(super) fn helper_main() -> ExitCode {
         };
         let result = runtime.block_on(super::dispatch::run(&site));
         stage = BootstrapStage::Receipt;
-        send_result(task, workspace, result, &mut stdout, &root)?;
+        send_result(task, workspace, result, &mut stdout, &root, image.as_ref())?;
         Ok(())
     })();
     if result.is_ok() {

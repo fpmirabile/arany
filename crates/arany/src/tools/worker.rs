@@ -254,8 +254,11 @@ pub(crate) struct View {
     remaining_data: usize,
     retained_limit: usize,
     enforcement_digest: [u8; 32],
+    process_enforcement_digest: [u8; 32],
     last_intent_digest: Option<[u8; 32]>,
     sealed: Option<WorkerDataRef>,
+    _cache: Option<crate::store::BuildCacheLease>,
+    cache_generation: Option<[u8; 32]>,
 }
 
 #[cfg_attr(
@@ -319,8 +322,11 @@ impl View {
             pending: None,
             contained: true,
             enforcement_digest: runtime.enforcement_digest,
+            process_enforcement_digest: runtime.process_enforcement_digest,
             last_intent_digest: None,
             sealed: None,
+            _cache: None,
+            cache_generation: None,
             retained_limit: 64 * 1024 * 1024,
             remaining_data: (data_bytes as usize)
                 .checked_sub(manifest.len())
@@ -361,11 +367,56 @@ impl View {
 
     pub(crate) fn target(&self) -> EffectTarget {
         EffectTarget::WorkerView {
-            cache_generation: None,
+            cache_generation: self.cache_generation,
             assignment_id: self.assignment,
             base_digest: self.base_digest,
             revision: self.revision,
         }
+    }
+
+    pub(crate) fn pin_command_cache(
+        &mut self,
+        runtime: &ToolRuntime,
+        bytes: u64,
+    ) -> Result<(), ToolError> {
+        if self.revision != 0 || self.last_intent_digest.is_some() || self._cache.is_some() {
+            return Err(ToolError::Configuration);
+        }
+        if bytes == 0 {
+            return Ok(());
+        }
+        let state = runtime
+            .cache_state
+            .as_ref()
+            .ok_or(ToolError::Configuration)?;
+        let identity = crate::store::BuildCacheIdentity::new(
+            &runtime.workspace,
+            self.workspace_identity.device,
+            self.workspace_identity.inode,
+        )
+        .map_err(super::guard::map_cache_error)?;
+        let lease = state
+            .read_build_cache(identity, bytes)
+            .map_err(super::guard::map_cache_error)?;
+        self.cache_generation = lease.generation().map_err(super::guard::map_cache_error)?;
+        self._cache = Some(lease);
+        Ok(())
+    }
+
+    pub(crate) fn command<'a>(
+        &'a mut self,
+        runtime: &'a ToolRuntime,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Candidate, Box<ToolObservation>>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            if !matches!(intent.call, ToolCall::Command { .. }) {
+                return Err(Box::new(denied(intent)));
+            }
+            self.edit(runtime, intent, cancellation).await
+        })
     }
 
     pub(crate) fn read(&self, intent: EffectIntent) -> ToolObservation {
@@ -399,7 +450,12 @@ impl View {
             || intent.expires_at_ms <= super::now_ms()
             || intent.run_id != self.run_id
             || intent.policy_digest != self.policy_digest
-            || intent.enforcement_digest != self.enforcement_digest
+            || intent.enforcement_digest
+                != if intent.call.is_process() {
+                    self.process_enforcement_digest
+                } else {
+                    self.enforcement_digest
+                }
             || intent.workspace_device != self.workspace_identity.device
             || intent.workspace_inode != self.workspace_identity.inode
             || !intent.valid()
@@ -419,10 +475,16 @@ impl View {
         cancellation: Cancellation,
     ) -> Result<Candidate, Box<ToolObservation>> {
         if self.check(&intent).is_err()
+            || matches!(intent.call, ToolCall::Command { .. })
+                && intent.limits.cache_bytes > 0
+                && self._cache.is_none()
             || !(handover_call(&intent.call, self.assignment)
                 || matches!(
                     intent.call,
-                    ToolCall::Mkdir { .. } | ToolCall::Write { .. } | ToolCall::Edit { .. }
+                    ToolCall::Mkdir { .. }
+                        | ToolCall::Write { .. }
+                        | ToolCall::Edit { .. }
+                        | ToolCall::Command { .. }
                 ))
             || intent.call.mutates() && self.revision >= 16
             || !(runtime.config.allows(&intent.call)
@@ -431,6 +493,9 @@ impl View {
             return Err(Box::new(denied(intent)));
         }
         let proposed = (|| {
+            if matches!(intent.call, ToolCall::Command { .. }) {
+                return Ok(());
+            }
             let image = edited_image(&self.current, &intent.call)?;
             image.validate(&self.grant)?;
             if self.base.retained_bytes() + image.retained_bytes() > self.retained_limit {
@@ -494,6 +559,9 @@ impl View {
                 super::uncertain_observation(intent, error, super::CacheUpdate::NotApplicable)
             }
         };
+        if matches!(observation.intent.call, ToolCall::Command { .. }) {
+            return self.receive_command(observation, action);
+        }
         if observation.disposition != ToolDisposition::Succeeded {
             self.contained = action.contained.load(std::sync::atomic::Ordering::Acquire);
             observation.attestation = None;
@@ -521,6 +589,91 @@ impl View {
         })();
         match checked {
             Ok(candidate) => Ok(candidate),
+            Err(_) => {
+                self.stopped = true;
+                self.pending = None;
+                Err(Box::new(super::uncertain_observation(
+                    observation.intent,
+                    ToolError::Uncertain,
+                    super::CacheUpdate::NotApplicable,
+                )))
+            }
+        }
+    }
+
+    fn receive_command(
+        &mut self,
+        mut observation: ToolObservation,
+        action: &Action,
+    ) -> Result<Candidate, Box<ToolObservation>> {
+        self.contained = action.contained.load(std::sync::atomic::Ordering::Acquire);
+        if observation.disposition == ToolDisposition::Cancelled {
+            if let Some(Attestation::Guard(receipt)) = observation.attestation.take() {
+                observation.attestation = Some(Attestation::WorkerCommand { receipt });
+            }
+            self.stopped = true;
+            self.pending = None;
+            return Err(Box::new(observation));
+        }
+        let checked = (|| {
+            if observation.disposition == ToolDisposition::Uncertain || !self.contained {
+                return Err(ToolError::Uncertain);
+            }
+            let Some(Attestation::Guard(receipt)) = observation.attestation.take() else {
+                return Ok(None);
+            };
+            let mut result: WorkerCommandResult =
+                serde_json::from_str(&observation.output).map_err(|_| ToolError::Operation)?;
+            observation.attestation = Some(Attestation::WorkerCommand { receipt });
+            let bytes = action
+                .output
+                .lock()
+                .map_err(|_| ToolError::Operation)?
+                .take()
+                .ok_or(ToolError::Operation)?;
+            let image = Image::decode(&bytes, &self.grant)?;
+            if observation.disposition != ToolDisposition::Succeeded
+                || matches!(result.private_capture, PrivateCapture::Rejected { .. })
+            {
+                if image != self.current {
+                    return Err(ToolError::ChangedInput);
+                }
+                return Ok(None);
+            }
+            let data = validate_command_image(&self.current, &image, &self.grant)?;
+            let WorkerDataFacts::Changes(files) = decode_data(&data, WorkerDataPurpose::Mutation)
+                .map_err(|_| ToolError::Operation)?
+            else {
+                return Err(ToolError::Operation);
+            };
+            if files.is_empty() {
+                return Ok(None);
+            }
+            if self.revision >= 16
+                || data.len() > self.remaining_data
+                || self.base.retained_bytes() + image.retained_bytes() > self.retained_limit
+                || changes(&self.base, &image).is_err()
+            {
+                result.private_capture = PrivateCapture::Rejected {
+                    cause: PrivateCaptureRejection::Overflow,
+                };
+                observation.output =
+                    serde_json::to_string(&result).map_err(|_| ToolError::Operation)?;
+                return Ok(None);
+            }
+            Ok(Some((image, data)))
+        })();
+        match checked {
+            Ok(Some((image, data))) => Ok(Candidate {
+                observation,
+                image,
+                data,
+                target: self.target(),
+            }),
+            Ok(None) => {
+                self.pending = None;
+                Err(Box::new(observation))
+            }
             Err(_) => {
                 self.stopped = true;
                 self.pending = None;
@@ -575,7 +728,9 @@ impl View {
                 .ok_or(ToolError::Limit)?;
         }
         self.current = candidate.image;
-        if observation.intent.call.mutates() {
+        if observation.intent.call.mutates()
+            || matches!(observation.intent.call, ToolCall::Command { .. })
+        {
             self.revision += 1;
         }
         self.sealed = Some(data);
@@ -629,7 +784,7 @@ impl Candidate {
         }
         let mut observation = self.observation.clone();
         let Some(Attestation::Guard(receipt)) = observation.attestation.take() else {
-            return Err(ToolError::Configuration);
+            return self.command_observation(observation, data);
         };
         observation.attestation = Some(
             if handover_call(&observation.intent.call, data.assignment_id) {
@@ -654,6 +809,26 @@ impl Candidate {
         );
         if !observation.valid() {
             return Err(ToolError::Configuration);
+        }
+        Ok(observation)
+    }
+
+    fn command_observation(
+        &self,
+        mut observation: ToolObservation,
+        data: &WorkerDataRef,
+    ) -> Result<ToolObservation, ToolError> {
+        let Some(Attestation::WorkerCommand { receipt }) = self.observation.attestation.clone()
+        else {
+            return Err(ToolError::Configuration);
+        };
+        let mut result: WorkerCommandResult =
+            serde_json::from_str(&observation.output).map_err(|_| ToolError::Configuration)?;
+        result.private_capture = PrivateCapture::Sealed { data: data.clone() };
+        observation.output = serde_json::to_string(&result).map_err(|_| ToolError::Operation)?;
+        observation.attestation = Some(Attestation::WorkerCommand { receipt });
+        if !observation.valid() {
+            return Err(ToolError::Limit);
         }
         Ok(observation)
     }
@@ -718,6 +893,104 @@ fn changes(base: &Image, after: &Image) -> Result<Vec<u8>, ToolError> {
     let bytes = serde_json::to_vec(&WorkerChangeset { files }).map_err(|_| ToolError::Operation)?;
     decode_data(&bytes, WorkerDataPurpose::Mutation).map_err(|_| ToolError::Limit)?;
     Ok(bytes)
+}
+
+fn validate_command_image(
+    before: &Image,
+    after: &Image,
+    grant: &WorkerGrant,
+) -> Result<Vec<u8>, ToolError> {
+    after.validate(grant)?;
+    for (path, old) in &before.entries {
+        if matches!(
+            (old, after.entries.get(path)),
+            (Entry::Directory, Some(Entry::File { .. }))
+                | (Entry::File { .. }, Some(Entry::Directory))
+        ) {
+            return Err(ToolError::Path);
+        }
+    }
+    let data = changes(before, after)?;
+    let WorkerDataFacts::Changes(files) =
+        decode_data(&data, WorkerDataPurpose::Mutation).map_err(|_| ToolError::Limit)?
+    else {
+        return Err(ToolError::Operation);
+    };
+    if files
+        .iter()
+        .any(|file| !within(&file.path, &grant.write_paths))
+    {
+        return Err(ToolError::FilesystemDenied);
+    }
+    Ok(data)
+}
+
+pub(super) fn command_capture(
+    before: &Image,
+    root: &Dir,
+    grant: &WorkerGrant,
+) -> (Image, PrivateCapture) {
+    let captured = (|| {
+        let mut after = fs::worker_command_image(root).map_err(|error| {
+            if matches!(error, ToolError::Limit) {
+                ToolError::Limit
+            } else {
+                ToolError::Path
+            }
+        })?;
+        // Check lease membership before read-scope validation so an ordinary outside write is explicit.
+        let data = changes(before, &after)?;
+        let WorkerDataFacts::Changes(files) =
+            decode_data(&data, WorkerDataPurpose::Mutation).map_err(|_| ToolError::Limit)?
+        else {
+            return Err(ToolError::Operation);
+        };
+        if files
+            .iter()
+            .any(|file| !within(&file.path, &grant.write_paths))
+        {
+            return Err(ToolError::FilesystemDenied);
+        }
+        after.entries.retain(|path, entry| {
+            !matches!(entry, Entry::Directory) || within(path, &grant.read_paths)
+        });
+        for (path, entry) in &before.entries {
+            if *entry == Entry::Absent && !after.entries.contains_key(path) {
+                after.entries.insert(path.clone(), Entry::Absent);
+            }
+        }
+        validate_command_image(before, &after, grant)?;
+        let mut image = before.clone();
+        for file in files {
+            if let Some(entry @ Entry::File { .. }) = after.entries.get(&file.path) {
+                image.entries.insert(file.path.clone(), entry.clone());
+                let mut path = file.path.as_str();
+                while let Some((parent, _)) = path.rsplit_once('/') {
+                    if within(parent, &grant.read_paths) {
+                        image.entries.insert(parent.into(), Entry::Directory);
+                    }
+                    path = parent;
+                }
+            } else {
+                image.entries.remove(&file.path);
+            }
+        }
+        image.validate(grant)?;
+        Ok(image)
+    })();
+    match captured {
+        Ok(image) => (image, PrivateCapture::None {}),
+        Err(error) => (
+            before.clone(),
+            PrivateCapture::Rejected {
+                cause: match error {
+                    ToolError::Limit => PrivateCaptureRejection::Overflow,
+                    ToolError::FilesystemDenied => PrivateCaptureRejection::OutOfLease,
+                    _ => PrivateCaptureRejection::UnsupportedEntry,
+                },
+            },
+        ),
+    }
 }
 
 pub(super) fn validate_edit(
@@ -860,12 +1133,13 @@ impl Transfer {
         intent: &EffectIntent,
         config: &super::Config,
     ) -> Result<(), ToolError> {
-        if intent.limits.resource_class != super::ToolResourceClass::Default
+        let command = matches!(intent.call, ToolCall::Command { .. });
+        if !command && intent.limits.resource_class != super::ToolResourceClass::Default
             || intent.limits.project_bytes != SCRATCH_BYTES
             || intent.limits.scratch_bytes != SCRATCH_BYTES
-            || intent.limits.cache_bytes != 0
+            || !command && intent.limits.cache_bytes != 0
             || intent.limits.cache_candidate_bytes != 0
-            || intent.limits.runtime_ms > 120_000
+            || !command && intent.limits.runtime_ms > 120_000
             || !config.write
             || !self.grant.valid()
             || self.target != intent.target
@@ -875,7 +1149,8 @@ impl Transfer {
             || !(matches!(
                 intent.call,
                 ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::Mkdir { .. }
-            ) || handover_call(&intent.call, intent.agent_run_id))
+            ) || command
+                || handover_call(&intent.call, intent.agent_run_id))
             || self.bytes == 0
             || self.bytes as usize > WORKER_DATA_BYTES
             || self.sha256 == [0; 32]
@@ -984,7 +1259,21 @@ pub(super) fn capture_paths(grant: &WorkerGrant) -> Vec<String> {
 pub(super) fn wire_valid(observation: &ToolObservation, intent: &EffectIntent) -> bool {
     observation.intent == *intent
         && observation.output.len() <= intent.limits.result_bytes as usize
-        && observation.cache_update == super::CacheUpdate::NotApplicable
+        && (!matches!(intent.call, ToolCall::Command { .. })
+            || serde_json::from_str::<WorkerCommandResult>(&observation.output).is_ok_and(
+                |result| {
+                    result.valid()
+                        && !matches!(result.private_capture, PrivateCapture::Sealed { .. })
+                        && (observation.disposition == ToolDisposition::Succeeded
+                            || matches!(result.private_capture, PrivateCapture::None {}))
+                },
+            ))
+        && observation.cache_update
+            == if matches!(intent.call, ToolCall::Command { .. }) {
+                super::CacheUpdate::Discarded
+            } else {
+                super::CacheUpdate::NotApplicable
+            }
         && matches!(&observation.attestation, Some(Attestation::Guard(receipt)) if receipt.valid_for(intent))
 }
 
@@ -1437,6 +1726,206 @@ mod tests {
             std::fs::read(dir.path().join("owned/a")).unwrap(),
             b"original"
         );
+    }
+
+    #[test]
+    fn worker_command_capture_rejects_whole_unsafe_or_out_of_lease_deltas() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        for case in [
+            "inside",
+            "delete",
+            "outside",
+            "symlink",
+            "hardlink",
+            "fifo",
+            "setid",
+            "excluded",
+            "conversion",
+            "empty",
+            "overflow",
+        ] {
+            let (_host, _runtime, view) = fixture();
+            let root = tempfile::tempdir().unwrap();
+            let directory = fs::open_directory(root.path()).unwrap();
+            materialize(&view.current, &directory).unwrap();
+            std::fs::write(root.path().join("owned/a"), b"accepted only as a whole").unwrap();
+            let bad = root.path().join("owned/bad");
+            match case {
+                "inside" => {
+                    std::fs::write(&bad, vec![0xff; 16 * 1024]).unwrap();
+                    std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o700)).unwrap();
+                }
+                "delete" => std::fs::remove_file(root.path().join("owned/a")).unwrap(),
+                "outside" => std::fs::write(root.path().join("outside"), b"no lease").unwrap(),
+                "symlink" => symlink("a", &bad).unwrap(),
+                "hardlink" => std::fs::hard_link(root.path().join("owned/a"), &bad).unwrap(),
+                "fifo" => nix::unistd::mkfifo(&bad, nix::sys::stat::Mode::S_IRUSR).unwrap(),
+                "setid" => std::fs::set_permissions(
+                    root.path().join("owned/a"),
+                    std::fs::Permissions::from_mode(0o4600),
+                )
+                .unwrap(),
+                "excluded" => std::fs::create_dir(root.path().join("owned/target")).unwrap(),
+                "conversion" => {
+                    std::fs::remove_file(root.path().join("owned/a")).unwrap();
+                    std::fs::create_dir(root.path().join("owned/a")).unwrap();
+                }
+                "empty" => std::fs::create_dir(root.path().join("owned/empty")).unwrap(),
+                "overflow" => std::fs::write(&bad, vec![b'x'; MAX_FILE_BYTES + 1]).unwrap(),
+                _ => unreachable!(),
+            }
+            let (image, capture) = command_capture(&view.current, &directory, &view.grant);
+            let expected = match case {
+                "inside" | "empty" | "delete" => PrivateCapture::None {},
+                "outside" => PrivateCapture::Rejected {
+                    cause: PrivateCaptureRejection::OutOfLease,
+                },
+                "overflow" => PrivateCapture::Rejected {
+                    cause: PrivateCaptureRejection::Overflow,
+                },
+                _ => PrivateCapture::Rejected {
+                    cause: PrivateCaptureRejection::UnsupportedEntry,
+                },
+            };
+            assert_eq!(capture, expected, "{case}");
+            if matches!(capture, PrivateCapture::Rejected { .. }) {
+                assert_eq!(image, view.current, "{case}");
+            } else {
+                let data = changes(&view.current, &image).unwrap();
+                let WorkerDataFacts::Changes(files) =
+                    decode_data(&data, WorkerDataPurpose::Mutation).unwrap()
+                else {
+                    panic!("changes")
+                };
+                assert_eq!(files.len(), if case == "inside" { 2 } else { 1 });
+                assert!(!image.entries.contains_key("owned/empty"));
+            }
+        }
+    }
+
+    #[test]
+    fn worker_command_overlay_requires_acknowledgment_and_preserves_rejected_revisions() {
+        for case in [
+            "sealed",
+            "empty",
+            "rejected",
+            "allowance",
+            "retained",
+            "cumulative",
+            "uncertain",
+            "cancelled",
+        ] {
+            let (_dir, runtime, mut view) = fixture();
+            let intent = intent(
+                &runtime,
+                &view,
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: vec![],
+                    cwd: ".".into(),
+                },
+            );
+            let mut image = view.current.clone();
+            if matches!(case, "sealed" | "allowance" | "retained" | "cumulative") {
+                image
+                    .entries
+                    .insert("owned/a".into(), Entry::file(b"private", false));
+            }
+            if case == "allowance" {
+                view.remaining_data = 1;
+            }
+            if case == "retained" {
+                view.retained_limit = 1;
+            }
+            if case == "cumulative" {
+                for i in 0..32 {
+                    Arc::make_mut(&mut view.base).entries.insert(
+                        format!("owned/base-{i}"),
+                        Entry::file(&vec![0; MAX_FILE_BYTES], false),
+                    );
+                }
+            }
+            let observation = ToolObservation {
+                intent: intent.clone(),
+                disposition: if case == "uncertain" {
+                    ToolDisposition::Uncertain
+                } else if case == "cancelled" {
+                    ToolDisposition::Cancelled
+                } else {
+                    ToolDisposition::Succeeded
+                },
+                output: serde_json::to_string(&WorkerCommandResult {
+                    exit_code: Some(0),
+                    stdout: "ok".into(),
+                    stderr: String::new(),
+                    private_capture: if case == "rejected" {
+                        PrivateCapture::Rejected {
+                            cause: PrivateCaptureRejection::OutOfLease,
+                        }
+                    } else {
+                        PrivateCapture::None {}
+                    },
+                })
+                .unwrap(),
+                attestation: Some(Attestation::Guard(super::super::GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                })),
+                enforcement_cause: None,
+                cache_update: super::super::CacheUpdate::Discarded,
+            };
+            let action = Action {
+                transfer: Transfer {
+                    target: view.target(),
+                    grant: view.grant.clone(),
+                    bytes: 1,
+                    sha256: [1; 32],
+                },
+                input: vec![1].into(),
+                output: Mutex::new(Some(image.encode().unwrap())),
+                contained: std::sync::atomic::AtomicBool::new(true),
+            };
+            view.pending = Some(intent.id);
+            match view.receive_command(observation, &action) {
+                Ok(candidate) => {
+                    assert_eq!(case, "sealed");
+                    assert_eq!(view.revision, 0);
+                    assert!(view.handover().is_err());
+                    let reference = reference(&candidate);
+                    let observation = candidate.observation(&reference).unwrap();
+                    assert!(observation.valid());
+                    let observation = view.acknowledge(candidate, reference).unwrap();
+                    assert!(matches!(
+                        observation.attestation,
+                        Some(Attestation::WorkerCommand { .. })
+                    ));
+                    assert_eq!(view.revision, 1);
+                }
+                Err(observation) => {
+                    assert_ne!(case, "sealed");
+                    assert_eq!(view.revision, 0);
+                    if matches!(case, "uncertain" | "cancelled") {
+                        assert!(view.stopped);
+                        assert!(observation.valid());
+                    } else {
+                        assert!(observation.valid(), "{case}");
+                        assert!(!view.stopped);
+                        if matches!(case, "allowance" | "retained" | "cumulative") {
+                            let result: WorkerCommandResult =
+                                serde_json::from_str(&observation.output).unwrap();
+                            assert_eq!(
+                                result.private_capture,
+                                PrivateCapture::Rejected {
+                                    cause: PrivateCaptureRejection::Overflow
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
