@@ -152,6 +152,8 @@ pub trait BoundedOutput {
 // Each attempt re-resolves the device from the image path, so a reused disk number is never detached.
 #[cfg(target_os = "macos")]
 pub fn detach_disk_image(image: &std::path::Path, deadline: Duration) -> Result<(), Output> {
+    // The final 8 s are split into a 2 s lookup, a 4 s forced detach and a 2 s confirming lookup.
+    const LOOKUP: Duration = Duration::from_secs(2);
     const FORCE_RESERVE: Duration = Duration::from_secs(8);
     let end = Instant::now() + deadline;
     let wanted = std::fs::canonicalize(image).unwrap_or_else(|_| image.to_owned());
@@ -198,7 +200,10 @@ pub fn detach_disk_image(image: &std::path::Path, deadline: Duration) -> Result<
         stdout: Vec::new(),
         stderr: stderr.as_bytes().to_vec(),
     };
-    let Some(attached) = device(end).ok_or_else(|| failed("hdiutil info unavailable"))? else {
+    let confirm_from = end.checked_sub(LOOKUP).unwrap_or(end);
+    let lookup_end = (Instant::now() + LOOKUP).min(confirm_from);
+    let Some(attached) = device(lookup_end).ok_or_else(|| failed("hdiutil info unavailable"))?
+    else {
         return Ok(());
     };
     let detach = [
@@ -207,10 +212,11 @@ pub fn detach_disk_image(image: &std::path::Path, deadline: Duration) -> Result<
         "-quiet".as_ref(),
         attached.as_os_str(),
     ];
-    match hdiutil(&detach, Duration::from_secs(20), end) {
-        Some(output) if output.status.success() => Ok(()),
-        Some(output) => Err(output),
-        None => Err(failed("forced detach exceeded the deadline")),
+    let forced = hdiutil(&detach, FORCE_RESERVE, confirm_from);
+    // Only a fresh listing without the image confirms the detach, whatever the forced attempt reported.
+    match device(end) {
+        Some(None) => Ok(()),
+        _ => Err(forced.unwrap_or_else(|| failed("forced detach exceeded the deadline"))),
     }
 }
 
