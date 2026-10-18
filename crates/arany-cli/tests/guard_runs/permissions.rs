@@ -2842,7 +2842,7 @@ mod lifecycle_hooks {
     #[tokio::test]
     async fn stop_hook_blocks_at_most_eight_times_and_is_journaled() {
         for calls in [3_u32, 16] {
-            let settings = json!({"version":1,"hooks":{"Stop":[{"hooks":[shell_hook("echo finish-the-check >&2; exit 2")]}]}});
+            let settings = json!({"hooks":{"Stop":[{"hooks":[shell_hook("echo finish-the-check >&2; exit 2")]}]}});
             let fixture = Fixture::new(Some(&settings), false);
             let expected = usize::try_from(calls.min(9)).unwrap();
             let (result, requests, _) = fixture
@@ -2865,7 +2865,7 @@ mod lifecycle_hooks {
                     "finish-the-check"
                 );
             }
-            private_file(&fixture.state.join("permissions.json"), br#"{"version":1}"#);
+            private_file(&fixture.state.join("permissions.json"), b"{}");
             let (events, view) = fixture.reopen(result.session_id).await;
             assert_eq!(
                 view.runs[0].lifecycle_hooks.len(),
@@ -2906,7 +2906,7 @@ mod lifecycle_hooks {
 
     #[tokio::test]
     async fn subagent_stop_reprompts_child_within_deadline() {
-        let settings = json!({"version":1,"hooks":{"SubagentStop":[{"matcher":"researcher","hooks":[shell_hook("echo verify-child >&2; exit 2")]}]}});
+        let settings = json!({"hooks":{"SubagentStop":[{"matcher":"researcher","hooks":[shell_hook("echo verify-child >&2; exit 2")]}]}});
         let fixture = Fixture::new(Some(&settings), false);
         let mut outcomes = vec![ProviderOutcome::Delegate(arany::Delegate {
             children: vec![arany::ChildAssignment {
@@ -2943,7 +2943,7 @@ mod lifecycle_hooks {
             vec![shell_hook("printf forbidden > notes/x"); 9],
             vec![json!({"type":"command","command":"unconfigured","args":[]})],
         ] {
-            let settings = json!({"version":1,"hooks":{"Stop":[{"hooks":hooks}]}});
+            let settings = json!({"hooks":{"Stop":[{"hooks":hooks}]}});
             let fixture = Fixture::new(Some(&settings), false);
             let (result, requests, _) = fixture
                 .run_budgeted(
@@ -2978,7 +2978,7 @@ mod lifecycle_hooks {
     #[tokio::test]
     async fn pre_compact_block_skips_compaction_once() {
         for trigger in ["manual", "auto"] {
-            let settings = json!({"version":1,"hooks":{"PreCompact":[{"matcher":trigger,"hooks":[shell_hook("echo keep-context >&2; exit 2")]}]}});
+            let settings = json!({"hooks":{"PreCompact":[{"matcher":trigger,"hooks":[shell_hook("echo keep-context >&2; exit 2")]}]}});
             let fixture = Fixture::new(Some(&settings), false);
             let (result, _, _) = fixture.run(vec![finish("done")], None, false).await;
             let provider = Arc::new(ScriptedProvider::new(vec![]));

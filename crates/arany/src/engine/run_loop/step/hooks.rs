@@ -442,6 +442,18 @@ impl RunLoop<'_> {
         message: &str,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<Option<String>, EngineError> {
+        // Boxed so the hook state does not inflate the run loop's future.
+        Box::pin(self.run_lifecycle_hooks(agent, event, subject, message, deadline)).await
+    }
+
+    async fn run_lifecycle_hooks(
+        &self,
+        agent: crate::session::AgentRunId,
+        event: HookEvent,
+        subject: &str,
+        message: &str,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<Option<String>, EngineError> {
         use crate::tools::permissions::{
             MAX_STOP_CONTINUATIONS, compact_subject, lifecycle_input, stop_feedback, stop_subject,
         };

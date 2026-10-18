@@ -29,28 +29,19 @@ impl Action {
         match self {
             // Reserve terminal Events through the Goal receipt even when no further step runs.
             Self::ProviderCall { previews, steering } => {
-                6 + 2 * crate::tools::permissions::MAX_HOOKS_PER_OCCURRENCE
-                    + usize::from(steering)
-                    + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
+                6 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
             }
             Self::Child {
                 in_flight,
                 research,
-            } => (if research {
-                14_usize + 2 * crate::tools::permissions::MAX_HOOKS_PER_OCCURRENCE
-            } else {
-                9_usize
-            })
-            .saturating_add(
+            } => (if research { 14_usize } else { 9_usize }).saturating_add(
                 usize::try_from(in_flight)
                     .unwrap_or(usize::MAX)
                     .saturating_mul(2),
             ),
             Self::Tool | Self::Review => 8,
-            Self::Compaction => 6 + 2 * crate::tools::permissions::MAX_HOOKS_PER_OCCURRENCE,
-            Self::BoundaryCompaction { goal } => {
-                1 + usize::from(goal) + 2 * crate::tools::permissions::MAX_HOOKS_PER_OCCURRENCE
-            }
+            Self::Compaction => 6,
+            Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
             Self::Delegation { children, research } => {
                 if research {
                     children * (7 * MAX_CHILD_TOOL_CALLS + 4) + 8
