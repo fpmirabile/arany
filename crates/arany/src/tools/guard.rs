@@ -1446,6 +1446,19 @@ mod tests {
     }
 
     #[test]
+    fn task_reads_classify_eof_short_malformed_and_oversized_inputs() {
+        let read = |bytes: &[u8]| read_task(&mut std::io::BufReader::new(bytes));
+        assert!(matches!(read(b""), Err(ToolError::Operation)));
+        assert!(matches!(read(b"{\"config\""), Err(ToolError::Operation)));
+        assert!(matches!(read(b"{\n"), Err(ToolError::Configuration)));
+        assert!(matches!(read(b"{}\n{}\n"), Err(ToolError::Configuration)));
+        let mut oversized = vec![b' '; task_cap(true) + 1];
+        assert!(matches!(read(&oversized), Err(ToolError::Limit)));
+        oversized.push(b'\n');
+        assert!(matches!(read(&oversized), Err(ToolError::Limit)));
+    }
+
+    #[test]
     fn worker_failure_lines_keep_their_closed_stage() {
         let failure = br#"{"stage":"launcher_reap"}"#;
         assert!(matches!(
