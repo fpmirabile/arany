@@ -405,11 +405,13 @@ mod tests {
         assert!(!idle.status_line.contains("input "));
         let run_id = RunId::new();
         view.runs.push(RunView {
+            supervisor: Default::default(),
             workers: Default::default(),
             id: run_id,
             objective: "task".into(),
             images: Vec::new(),
             config: Some(RunConfig {
+                supervisor: None,
                 worker_policy: None,
                 agent_definitions: None,
                 roster: None,

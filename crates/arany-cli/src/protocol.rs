@@ -71,6 +71,7 @@ event_kinds!(
     AssistantDisplayRecorded,
     ToolStarted,
     ToolFinished,
+    SupervisorVerdictRecorded,
     ToolPermissionDecided,
     HookStarted,
     HookFinished,

@@ -32,6 +32,7 @@ pub(super) fn apply(
                 previous.interrupt();
             }
             current.runs.push(RunView {
+                supervisor: Default::default(),
                 workers: Default::default(),
                 id: *run_id,
                 objective: text.clone(),

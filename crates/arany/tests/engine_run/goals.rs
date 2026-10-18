@@ -1529,6 +1529,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                supervisor: None,
                 worker_policy: None,
                 agent_definitions: None,
                 roster: None,
@@ -4974,6 +4975,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                supervisor: None,
                 worker_policy: None,
                 agent_definitions: None,
                 roster: None,
@@ -5263,8 +5265,8 @@ async fn steered_run_near_the_event_cap_is_refused_up_front_never_stranded() {
     let steered_bound = arany::Action::ProviderCall {
         previews: false,
         steering: true,
-    }
-    .max_events();
+    };
+    let steered_bound = steered_bound.max_events() + steered_bound.verdict_slots();
     for free in steered_bound - 3..=steered_bound + 2 {
         let case = steered_run(temp.path(), &format!("free-{free}"), Some(free), run_offset).await;
         let count = |matches: fn(&Event) -> bool| {
@@ -5423,7 +5425,7 @@ async fn reviewed_tool_step_at_the_event_cap_closes_its_tool_and_leaves_no_tool_
     };
     let run_start = index_of(1, |event| matches!(event, Event::GoalStarted { .. }));
     let tool_start = index_of(1, |event| matches!(event, Event::ToolStarted { .. }));
-    let free = arany::Action::Tool.max_events() - 1;
+    let free = arany::Action::Tool.max_events() + arany::Action::Tool.verdict_slots() - 1;
     let (events, view) = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         reviewed_write_run(temp.path(), "capped", Some(free), tool_start - run_start),
@@ -5672,4 +5674,201 @@ async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable
         );
         assert_action_bounds(&events, false, false);
     }
+}
+
+#[tokio::test]
+async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
+    async fn run(root: &Path, free: Option<(usize, usize)>) -> Vec<arany::EventEnvelope> {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = facts_workspace(root, "stable");
+        let state_path = root.join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        let permissions = state_path.join("permissions.json");
+        std::fs::write(
+            &permissions,
+            br#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"unconfigured","args":[]}]}]}}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&permissions, std::fs::Permissions::from_mode(0o600)).unwrap();
+        engine.close().await.unwrap();
+        if let Some((offset, free)) = free {
+            let mut connection =
+                rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
+            let transaction = connection.transaction().unwrap();
+            for sequence in 2..=i64::try_from(10_000 - offset - free).unwrap() {
+                transaction.execute(
+                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)",
+                    rusqlite::params![sequence, session.to_string()],
+                ).unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        let engine = facts_engine(StateRoot::open_existing(&state_path).unwrap(), &state_path);
+        let provider = Arc::new(ScriptedProvider::new(vec![finish_with("candidate"); 9]));
+        let mut input = request(&workspace, "Finish after the Stop continuations");
+        input.include_paths.clear();
+        input.session_id = Some(session);
+        input.title = None;
+        let result = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await;
+        if free.is_some_and(|(_, free)| free == 9) {
+            assert!(matches!(
+                result,
+                Err(EngineError::Store(arany::StoreError::ReplayLimit))
+            ));
+        } else {
+            assert_eq!(result.unwrap().run.status, RunStatus::Finished);
+        }
+        engine.close().await.unwrap();
+        replayed(&state_path, session).await.0
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let dry = run(&temp.path().join("dry"), None).await;
+    let last_hook = dry
+        .iter()
+        .rposition(|e| matches!(e.event, Event::HookStarted { .. }))
+        .unwrap();
+    let initial = dry
+        .iter()
+        .position(|e| matches!(e.event, Event::GoalStarted { .. }))
+        .unwrap();
+    let offset = last_hook - initial;
+    for free in [9, 10] {
+        let events = run(
+            &temp.path().join(format!("free-{free}")),
+            Some((offset, free)),
+        )
+        .await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, Event::HookStarted { .. }))
+                .count(),
+            if free == 9 { 7 } else { 8 },
+            "free {free}: the last blocked hook needs its pair, verdict and complete continuation tail"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event, Event::SupervisorVerdictRecorded { .. }))
+        );
+    }
+}
+
+#[tokio::test]
+async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_outcome() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = facts_workspace(temp.path(), "stable");
+    let mut observations = Vec::new();
+    let normalized_run = arany::RunId::new();
+    let normalized_actor = arany::AgentRunId::new();
+    for enabled in [true, false] {
+        let state_path = temp.path().join(if enabled { "shadow" } else { "off" });
+        let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+        let session = engine
+            .create_session(workspace.clone(), Some("Supervisor".into()))
+            .await
+            .unwrap();
+        if !enabled {
+            arany::FaultPlan::supervisor_off(session);
+        }
+        let mut outcomes: Vec<_> = (0..4)
+            .map(|_| crate::tool_outcome(facts_read(), None))
+            .collect();
+        outcomes.push(finish_with("done"));
+        let provider = Arc::new(ScriptedProvider::new(outcomes));
+        let mut input = request(&workspace, "Inspect repeatedly");
+        input.include_paths.clear();
+        input.session_id = Some(session);
+        input.title = None;
+        let result = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        engine.close().await.unwrap();
+        let calls = provider.requests.lock().unwrap().clone();
+        assert_eq!(calls.len(), 5);
+        let (events, view) = replayed(&state_path, session).await;
+        assert_action_bounds(&events, false, false);
+        let verdicts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::SupervisorVerdictRecorded { verdict, .. } => Some((e.sequence, verdict)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verdicts.len(), if enabled { 2 } else { 0 });
+        for (sequence, verdict) in verdicts {
+            assert!(
+                verdict
+                    .signals
+                    .iter()
+                    .any(|signal| signal.signal == arany::supervisor::SignalKind::Loop)
+            );
+            assert_eq!(sequence, verdict.subject_sequence + 1);
+        }
+        assert_eq!(view.runs[0].status, RunStatus::Finished);
+        let inputs: Vec<_> = calls
+            .iter()
+            .map(|c| {
+                let mut input = c.input.clone();
+                // Elapsed and reserved time vary across live Runs; compare every other Goal fact.
+                let normalize_facts = |facts: &mut arany::GoalContextFacts| {
+                    facts.active_ms = 0;
+                    facts.reserved_active_ms = 0;
+                };
+                if let Some(facts) = &mut input.goal_context_facts {
+                    normalize_facts(facts);
+                }
+                let tools = input.tools.as_mut().unwrap();
+                // The catalog embeds the wall clock at each Run's start.
+                let mut catalog: serde_json::Value = serde_json::from_str(&tools.catalog).unwrap();
+                catalog["host_clock"]["unix_ms"] = 0.into();
+                tools.catalog = catalog.to_string();
+                for step in &mut tools.steps {
+                    if let Some(facts) = &mut step.facts {
+                        normalize_facts(facts);
+                    }
+                    for observation in &mut step.observations {
+                        // Normalize the per-run intent identities and expiry, which never enter model input.
+                        observation.intent.id = Uuid::nil();
+                        observation.intent.run_id = normalized_run;
+                        observation.intent.agent_run_id = normalized_actor;
+                        observation.intent.expires_at_ms = 0;
+                    }
+                }
+                input
+            })
+            .collect();
+        observations.push((
+            result.run.assistant_message.clone(),
+            result.run.agents[0].summary.clone(),
+            inputs,
+        ));
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            5,
+            "strict replay never calls the Provider"
+        );
+    }
+    assert_eq!(observations[0], observations[1]);
 }

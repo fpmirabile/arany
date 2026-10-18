@@ -54,6 +54,26 @@ impl Action {
         }
     }
 
+    // Shadow verdicts follow their subject Events, and only Runs pinned with a Supervisor reserve them.
+    pub fn verdict_slots(self) -> usize {
+        match self {
+            Self::ProviderCall { .. } => 1,
+            Self::Child { in_flight, .. } => usize::try_from(in_flight)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+            Self::Tool | Self::Review => 2,
+            Self::Worker { .. } => 12,
+            Self::Compaction | Self::BoundaryCompaction { .. } => 0,
+            Self::Delegation { children, research } => {
+                if research {
+                    children * (MAX_CHILD_TOOL_CALLS + 1)
+                } else {
+                    children + 1
+                }
+            }
+        }
+    }
+
     pub fn max_events_for<T>(self, providers: &Providers<Vec<T>>) -> usize {
         self.max_events_with_lengths(Providers {
             primary: providers.primary.len(),
@@ -228,6 +248,17 @@ impl GoalLedger {
         }
     }
 
+    pub(super) fn verdicts(&self, action: Action) -> usize {
+        match self.view(|v| {
+            v.runs
+                .last()
+                .is_some_and(|r| r.config.as_ref().is_some_and(|c| c.supervisor.is_some()))
+        }) {
+            Ok(false) => 0,
+            _ => action.verdict_slots(),
+        }
+    }
+
     pub(super) fn view<T>(&self, read: impl FnOnce(&SessionView) -> T) -> Result<T, EngineError> {
         let state = self
             .state
@@ -237,17 +268,27 @@ impl GoalLedger {
     }
 
     // The ledger is fed before any subscriber can see the Event.
-    pub(super) async fn append(
-        &self,
-        journal: &Journal,
+    pub(super) fn append<'a>(
+        &'a self,
+        journal: &'a Journal,
         session_id: SessionId,
         event: Event,
-    ) -> Result<u64, EngineError> {
-        let (committed, fed) = journal
-            .append_then(session_id, event, |envelope| self.committed(envelope))
-            .await?;
-        fed?;
-        Ok(committed.sequence)
+    ) -> super::run_loop::step::BoxedStep<'a, u64> {
+        Box::pin(async move {
+            let (committed, fed) = journal
+                .append_then(session_id, event, |envelope| self.committed(envelope))
+                .await?;
+            fed?;
+            if let Some(event) =
+                self.view(|v| v.runs.last().and_then(|r| r.supervisor.pending_event()))?
+            {
+                let (_, fed) = journal
+                    .append_then(session_id, event, |envelope| self.committed(envelope))
+                    .await?;
+                fed?;
+            }
+            Ok(committed.sequence)
+        })
     }
 
     fn committed(&self, envelope: &EventEnvelope) -> Result<(), EngineError> {
