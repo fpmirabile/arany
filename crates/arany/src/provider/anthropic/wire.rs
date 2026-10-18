@@ -116,7 +116,8 @@ impl<'a> MessageStream<'a> {
                 let index = event
                     .get("index")
                     .and_then(Value::as_u64)
-                    .ok_or_else(invalid)? as usize;
+                    .and_then(|index| usize::try_from(index).ok())
+                    .ok_or_else(invalid)?;
                 if index != self.closed.len()
                     || index >= MAX_CONTENT_BLOCKS
                     || self.closed.iter().any(|closed| !closed)
@@ -153,8 +154,9 @@ impl<'a> MessageStream<'a> {
                 let index = event
                     .get("index")
                     .and_then(Value::as_u64)
-                    .ok_or_else(invalid)? as usize;
-                if index + 1 != self.closed.len()
+                    .and_then(|index| usize::try_from(index).ok())
+                    .ok_or_else(invalid)?;
+                if index.checked_add(1) != Some(self.closed.len())
                     || self.closed.get(index) != Some(&false)
                     || self.delta_seen
                 {
@@ -216,10 +218,11 @@ impl<'a> MessageStream<'a> {
                 let index = event
                     .get("index")
                     .and_then(Value::as_u64)
-                    .ok_or_else(invalid)? as usize;
+                    .and_then(|index| usize::try_from(index).ok())
+                    .ok_or_else(invalid)?;
                 let count = self.closed.len();
                 let closed = self.closed.get_mut(index).ok_or_else(invalid)?;
-                if *closed || index + 1 != count {
+                if *closed || index.checked_add(1) != Some(count) {
                     return Err(ProviderError::InvalidStream);
                 }
                 *closed = true;

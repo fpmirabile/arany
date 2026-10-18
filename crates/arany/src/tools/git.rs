@@ -768,6 +768,7 @@ fn log_output(raw: &[u8], overflow: bool, budget: usize) -> Result<Value, ToolEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::process::BoundedOutput;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
@@ -788,7 +789,7 @@ mod tests {
             .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
             .env("GIT_AUTHOR_DATE", "1700000000 +0000")
             .env("GIT_COMMITTER_DATE", "1700000000 +0000")
-            .output()
+            .bounded_output()
             .expect("pinned git")
     }
 

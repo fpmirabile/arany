@@ -114,28 +114,6 @@ fn valid_identity_path(path: &Path) -> bool {
     normalized == value
 }
 
-// flock release can lag behind a drop while another test thread spawns a child.
-#[cfg(test)]
-fn retry_busy<T>(mut attempt: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreError> {
-    for _ in 1..50 {
-        match attempt() {
-            Err(StoreError::BuildCacheBusy) => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            result => return result,
-        }
-    }
-    attempt()
-}
-
-#[cfg(test)]
-pub(crate) fn begin_released(
-    state: &StateRoot,
-    identity: BuildCacheIdentity,
-) -> Result<BuildCacheLease, StoreError> {
-    retry_busy(|| state.begin_build_cache(identity.clone()))
-}
-
 pub(crate) struct BuildCacheLease {
     dir: Dir,
     _identity_lock: File,
@@ -175,10 +153,7 @@ impl BuildCacheLease {
         if self.candidate_limit == 0 {
             return Err(StoreError::StorageFull);
         }
-        #[cfg(not(test))]
         let _aggregate = lock_file(&self.dir, AGGREGATE_LOCK, true)?;
-        #[cfg(test)]
-        let _aggregate = retry_busy(|| lock_file(&self.dir, AGGREGATE_LOCK, true))?;
         let old = self.archive.as_ref().map(|_| archive_name(&self.token));
         let staged = stage_name(&self.token);
         let mut stage = create_private_file(&self.dir, &staged)?;
@@ -2167,6 +2142,9 @@ mod tests {
 
     #[test]
     fn ordinary_workspace_cache_admission_pins_identity_and_rejects_overlap() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().expect("fixture");
@@ -2185,7 +2163,8 @@ mod tests {
                 .begin_build_cache(admitted.clone())
                 .expect("ordinary Workspace cache admission"),
         );
-        retry_busy(|| state.clear_workspace_build_cache(&workspace))
+        state
+            .clear_workspace_build_cache(&workspace)
             .expect("clear ordinary Workspace cache");
 
         let drifting = temp.path().join("drifting-workspace");
@@ -2223,7 +2202,9 @@ mod tests {
         bytes: &[u8],
         exclusions: &[String],
     ) {
-        let mut lease = begin_released(state, identity).expect("cache lease and quota reservation");
+        let mut lease = state
+            .begin_build_cache(identity)
+            .expect("cache lease and quota reservation");
         let mut candidate_file = lease.candidate_writer().expect("candidate file");
         candidate_file.write_all(bytes).expect("candidate bytes");
         candidate_file.sync_all().expect("candidate sync");
@@ -2236,6 +2217,9 @@ mod tests {
 
     #[test]
     fn cache_stream_merge_preserves_only_selected_host_prefixes_and_clear_is_exact() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().expect("fixture");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
@@ -2272,7 +2256,9 @@ mod tests {
         let updated_bytes = archive(&first, &updated, &selected);
         publish(&state, first.clone(), &updated_bytes, &selected);
 
-        let lease = begin_released(&state, first.clone()).expect("reopen cache");
+        let lease = state
+            .begin_build_cache(first.clone())
+            .expect("reopen cache");
         let (mut stored, size) = lease.archive().expect("archive lookup").expect("archive");
         let mut stored_bytes = Vec::new();
         stored
@@ -2298,18 +2284,21 @@ mod tests {
 
         let second_bytes = archive(&second, &second_source, &[]);
         publish(&state, second.clone(), &second_bytes, &[]);
-        retry_busy(|| state.clear_workspace_build_cache(&workspace))
+        state
+            .clear_workspace_build_cache(&workspace)
             .expect("clear current Workspace cache");
         assert!(
-            begin_released(&state, first)
+            state
+                .begin_build_cache(first)
                 .unwrap()
                 .archive()
                 .unwrap()
                 .is_none()
         );
-        retry_busy(|| state.clear_all_build_caches()).expect("clear all caches");
+        state.clear_all_build_caches().expect("clear all caches");
         assert!(
-            begin_released(&state, second)
+            state
+                .begin_build_cache(second)
                 .unwrap()
                 .archive()
                 .unwrap()
@@ -2327,6 +2316,9 @@ mod tests {
 
     #[test]
     fn old_archive_is_restored_read_only_when_aggregate_headroom_cannot_stage_candidate() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().expect("fixture");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
@@ -2364,10 +2356,9 @@ mod tests {
             .expect("bounded cache capacity");
         assert_eq!(view_bytes, DEFAULT_ARCHIVE_BYTES);
         assert_eq!(candidate_bytes, 0);
-        let lease = retry_busy(|| {
-            state.begin_build_cache_with_limits(identity.clone(), view_bytes, candidate_bytes)
-        })
-        .expect("read-only restore lease");
+        let lease = state
+            .begin_build_cache_with_limits(identity.clone(), view_bytes, candidate_bytes)
+            .expect("read-only restore lease");
         let (mut preserved, size) = lease.archive().expect("archive lookup").expect("archive");
         let mut bytes = Vec::new();
         preserved.read_to_end(&mut bytes).expect("read old archive");
@@ -2379,12 +2370,12 @@ mod tests {
         ));
         drop(lease);
 
-        let (mut still_preserved, _) =
-            retry_busy(|| state.begin_build_cache_with_limits(identity.clone(), view_bytes, 0))
-                .expect("prior archive remains available")
-                .archive()
-                .expect("archive lookup")
-                .expect("archive");
+        let (mut still_preserved, _) = state
+            .begin_build_cache_with_limits(identity.clone(), view_bytes, 0)
+            .expect("prior archive remains available")
+            .archive()
+            .expect("archive lookup")
+            .expect("archive");
         let mut bytes = Vec::new();
         still_preserved
             .read_to_end(&mut bytes)
@@ -2395,6 +2386,9 @@ mod tests {
 
     #[test]
     fn interrupted_cache_swap_restores_the_previous_archive() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().expect("fixture");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
@@ -2414,7 +2408,9 @@ mod tests {
         let new = archive(&identity, &new_source, &[]);
         publish(&state, identity.clone(), &old, &[]);
 
-        let lease = begin_released(&state, identity.clone()).expect("cache lease");
+        let lease = state
+            .begin_build_cache(identity.clone())
+            .expect("cache lease");
         let mut candidate = lease.candidate_writer().expect("candidate");
         candidate.write_all(&new).expect("candidate bytes");
         candidate.sync_all().expect("candidate sync");
@@ -2443,7 +2439,7 @@ mod tests {
         }
         drop(lease);
 
-        let lease = begin_released(&state, identity).expect("recovered cache");
+        let lease = state.begin_build_cache(identity).expect("recovered cache");
         let (mut recovered, size) = lease.archive().expect("archive lookup").expect("archive");
         let mut bytes = Vec::new();
         recovered
@@ -2455,6 +2451,9 @@ mod tests {
 
     #[test]
     fn committed_cache_swap_keeps_the_new_archive_during_recovery() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().expect("fixture");
         let state_path = temp.path().join("state");
         let old_workspace = temp.path().join("old-workspace");
@@ -2480,7 +2479,9 @@ mod tests {
         publish(&state, old_identity.clone(), &old, &[]);
 
         let dir = cache_directory(&state, false).expect("cache directory");
-        let lease = begin_released(&state, old_identity.clone()).expect("replacement lease");
+        let lease = state
+            .begin_build_cache(old_identity.clone())
+            .expect("replacement lease");
         {
             let _aggregate = lock_file(&dir, AGGREGATE_LOCK, false).expect("aggregate lock");
             let token = old_identity.token();
@@ -2500,7 +2501,9 @@ mod tests {
                 .expect("commit record");
         }
         drop(lease);
-        let lease = begin_released(&state, old_identity.clone()).expect("recovered replacement");
+        let lease = state
+            .begin_build_cache(old_identity.clone())
+            .expect("recovered replacement");
         let (mut stored, _) = lease.archive().expect("archive lookup").expect("archive");
         let mut recovered = Vec::new();
         stored
@@ -2509,7 +2512,9 @@ mod tests {
         assert_eq!(recovered, new);
         drop(lease);
 
-        let lease = begin_released(&state, first_identity.clone()).expect("first cache lease");
+        let lease = state
+            .begin_build_cache(first_identity.clone())
+            .expect("first cache lease");
         {
             let _aggregate = lock_file(&dir, AGGREGATE_LOCK, false).expect("aggregate lock");
             let token = first_identity.token();
@@ -2527,7 +2532,9 @@ mod tests {
                 .expect("commit record");
         }
         drop(lease);
-        let lease = begin_released(&state, first_identity).expect("recovered first archive");
+        let lease = state
+            .begin_build_cache(first_identity)
+            .expect("recovered first archive");
         let (mut stored, _) = lease.archive().expect("archive lookup").expect("archive");
         let mut recovered = Vec::new();
         stored
@@ -2538,6 +2545,9 @@ mod tests {
 
     #[test]
     fn uncertain_commit_sync_preserves_both_archives_until_recovery() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().expect("fixture");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
@@ -2556,7 +2566,9 @@ mod tests {
         publish(&state, identity.clone(), &old, &[]);
 
         let dir = cache_directory(&state, false).expect("cache directory");
-        let mut lease = begin_released(&state, identity.clone()).expect("replacement lease");
+        let mut lease = state
+            .begin_build_cache(identity.clone())
+            .expect("replacement lease");
         let token = identity.token();
         {
             let _aggregate = lock_file(&dir, AGGREGATE_LOCK, false).expect("aggregate lock");
@@ -2617,6 +2629,9 @@ mod tests {
 
     #[test]
     fn leftover_transaction_next_record_does_not_block_another_workspace() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().expect("fixture");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
@@ -2635,7 +2650,9 @@ mod tests {
 
         let dir = cache_directory(&state, false).expect("cache directory");
         let token = identity.token();
-        let mut lease = begin_released(&state, identity.clone()).expect("torn-record lease");
+        let mut lease = state
+            .begin_build_cache(identity.clone())
+            .expect("torn-record lease");
         let mut pending =
             create_private_file(&dir, &transaction_next_name(&token)).expect("pending record");
         write!(
@@ -2649,8 +2666,14 @@ mod tests {
         lease.defer_recovery = true;
         drop(lease);
 
-        drop(begin_released(&state, other).expect("other Workspace cache admission"));
-        let lease = begin_released(&state, identity).expect("original identity recovery");
+        drop(
+            state
+                .begin_build_cache(other)
+                .expect("other Workspace cache admission"),
+        );
+        let lease = state
+            .begin_build_cache(identity)
+            .expect("original identity recovery");
         let (mut stored, _) = lease.archive().expect("archive lookup").expect("archive");
         let mut recovered = Vec::new();
         stored.read_to_end(&mut recovered).expect("archive bytes");
@@ -2660,6 +2683,9 @@ mod tests {
 
     #[test]
     fn one_workspace_cache_lease_excludes_a_second_command() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().expect("fixture");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
@@ -2677,15 +2703,14 @@ mod tests {
             Err(StoreError::BuildCacheBusy)
         ));
         let dir = cache_directory(&state, false).expect("cache directory");
-        let _aggregate =
-            retry_busy(|| lock_file(&dir, AGGREGATE_LOCK, true)).expect("aggregate lock");
+        let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true).expect("aggregate lock");
         assert!(matches!(
             state.begin_build_cache(identity(&other_workspace)),
             Err(StoreError::BuildCacheBusy)
         ));
         drop(_aggregate);
         drop(lease);
-        assert!(begin_released(&state, workspace_identity).is_ok());
+        assert!(state.begin_build_cache(workspace_identity).is_ok());
     }
 
     #[test]
@@ -2727,6 +2752,9 @@ mod tests {
 
     #[test]
     fn cache_reservation_refuses_whole_state_root_overflow() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().expect("fixture");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
@@ -2755,6 +2783,9 @@ mod tests {
 
     #[test]
     fn cache_identity_cap_is_independent_of_workspace_trust() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().expect("fixture");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
