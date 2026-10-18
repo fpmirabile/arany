@@ -78,7 +78,7 @@ All agent candidates, including unused eligible profiles, obey image and native 
 | Expanded selection | At most eight distinct profiles across defaults and eligibility, eight eligible names, three routes per profile / 24 route slots; reject excess |
 | Snapshot / manifest | Each at most 16 KiB serialized/rendered; complete RunStarted retains its 64 KiB Event ceiling; no truncation or quota increase |
 | Admission | Sequential, at most 24 slots and 120 seconds total, narrowing existing helper deadlines; cancellation or timeout refuses |
-| Delegation | At most eight assignments within policy; objective nonblank and at most 2 KiB; profile follows the name bound; complete encoded delegation at most 24 KiB; whole rejection before spawns |
+| Delegation | Count and objective bounds follow [researcher children](./execution.md#researcher-children); objective nonblank; profile follows the name bound; complete encoded delegation at most 24 KiB; whole rejection before spawns |
 
 Peer choice: copy [Codex named explicit profiles](https://learn.chatgpt.com/docs/config-file/config-advanced#profiles) and [OpenCode model inheritance](https://opencode.ai/docs/agents/#model). The assignment override/default/inherit precedence follows [Claude Code subagent model selection](https://code.claude.com/docs/en/sub-agents#choose-a-model). Arany uses its existing closed private JSON records, exact admitted identities, pre-disclosure all-candidate admission and durable non-executing replay to preserve its guarantees; no general configuration layering or task classifier is added. [Session](./session.md#roster-recovery-and-compaction) owns drift, recovery and pinned compaction.
 

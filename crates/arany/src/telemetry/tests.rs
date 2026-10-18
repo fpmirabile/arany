@@ -543,9 +543,13 @@ impl Segment {
     }
 
     fn spawn(&mut self, role: AgentRole) -> AgentRunId {
+        self.spawn_as(role, None)
+    }
+
+    fn spawn_as(&mut self, role: AgentRole, profile: Option<&str>) -> AgentRunId {
         let agent_run_id = AgentRunId::new();
         self.commit(Event::AgentSpawned {
-            profile: None,
+            profile: profile.map(str::to_owned),
             definition: None,
             run_id: self.run_id,
             agent_run_id,
@@ -1958,6 +1962,9 @@ fn assigned_child_telemetry_uses_its_pinned_profile_instead_of_the_child_default
     let (telemetry, exporter) = in_memory();
     let routes = child_routes();
     let mut config = run_config(Some(routes.clone()));
+    config.policy = CollaborationPolicy::Team {
+        max_active_children: 2,
+    };
     let mut roster = crate::RosterSnapshot {
         preset: "coding".into(),
         selection_digest: [0; 32],
@@ -1991,7 +1998,13 @@ fn assigned_child_telemetry_uses_its_pinned_profile_instead_of_the_child_default
         config,
         active_deadline_ms: None,
     });
-    let primary = segment.spawn(AgentRole::Primary);
+    let primary = segment.spawn_as(AgentRole::Primary, Some("main"));
+    segment.call(
+        primary,
+        AgentPhase::RootPlan,
+        ProviderCallDisposition::Finished,
+        (None, None),
+    );
     let child = AgentRunId::new();
     segment.commit(Event::AgentSpawned {
         run_id: segment.run_id,
@@ -2003,7 +2016,7 @@ fn assigned_child_telemetry_uses_its_pinned_profile_instead_of_the_child_default
         definition: None,
         profile: Some("spare".into()),
     });
-    let sibling = segment.spawn(AgentRole::Child);
+    let sibling = segment.spawn_as(AgentRole::Child, Some("child"));
     let (selected, _) = segment.call(
         child,
         AgentPhase::ChildWork,
