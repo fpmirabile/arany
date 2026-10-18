@@ -218,6 +218,15 @@ fn run_start_admission_reserves_the_current_version_payload_exceptions() {
 
 #[test]
 fn every_event_slot_admits_a_current_tool_observation() {
+    let supervisor = payload_version("SupervisorVerdictRecorded").unwrap();
+    assert_eq!(
+        event_payload_limit("SupervisorVerdictRecorded", supervisor),
+        2048
+    );
+    assert_eq!(
+        event_payload_limit("SupervisorVerdictRecorded", supervisor + 1),
+        crate::store::MAX_EVENT_BYTES
+    );
     let finished = payload_version("ToolFinished").expect("payload version");
     assert_eq!(
         event_payload_limit("ToolFinished", finished),

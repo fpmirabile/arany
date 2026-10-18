@@ -496,6 +496,7 @@ fn fixture_with_manifest(
         permission_mode: None,
     };
     let config = RunConfig {
+        supervisor: Some(crate::supervisor::SupervisorPolicy::all_off()),
         worker_policy: Some(WorkerPolicy {
             parent_grant: grant.clone(),
             concurrency: 4,
@@ -1457,7 +1458,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         },
     });
     let expected = [
-        ("RunStarted", 14),
+        ("RunStarted", 15),
         ("AgentSpawned", 10),
         ("ProviderCallRecorded", 9),
         ("AgentFinished", 10),
@@ -3389,6 +3390,87 @@ fn worker_protocol_researcher_only_run_rejects_a_call_after_an_invalid_synthesis
 }
 
 #[test]
+fn supervisor_handover_verdict_preserves_the_original_integration_subject() {
+    let mut f = fixture();
+    for event in &mut f.events {
+        match event {
+            Event::RunStarted { config, .. } => {
+                config.supervisor = Some(crate::supervisor::SupervisorPolicy::default())
+            }
+            Event::ProviderCallRecorded { record, .. } => {
+                if let Some(assignments) = &mut record.delegation
+                    && let ChildAssignment::Editor { assignment } = &mut assignments[0]
+                {
+                    assignment.lease = vec!["src".into()];
+                }
+            }
+            Event::AgentSpawned {
+                assignment: Some(pins),
+                ..
+            } => {
+                pins.request.lease = vec!["src".into()];
+                pins.grant.write_paths = vec!["src".into()];
+            }
+            _ => (),
+        }
+    }
+    let files: Vec<_> = (0..16)
+        .map(|i| FileChange {
+            path: if i == 0 {
+                "src/a".into()
+            } else {
+                format!("src/b{i:02}")
+            },
+            before: None,
+            after: Some(FileVersion::from_bytes(b"new", false)),
+        })
+        .collect();
+    for file in &files {
+        f.changes = WorkerChangeset {
+            files: vec![file.clone()],
+        };
+        f.mutation();
+    }
+    f.changes = WorkerChangeset { files };
+    let data = f.finish_worker();
+    let subject = f.handover(data.clone());
+    let verdict = f.view().runs[0]
+        .supervisor
+        .pending_event()
+        .expect("sixteen-file handover notice");
+    assert!(
+        matches!(&verdict,Event::SupervisorVerdictRecorded {verdict,..} if verdict.site==crate::supervisor::Site::Handover && verdict.subject_sequence==subject)
+    );
+    f.push(verdict);
+    let wrong = f.intent(
+        f.primary,
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::WorkerHandover {
+                assignment_id: f.child,
+                handover_sequence: subject + 1,
+                data: data.clone(),
+            },
+        },
+        EffectTarget::Workspace,
+    );
+    refused(
+        &f,
+        Event::ToolStarted {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            intent: wrong,
+            active_ceiling_ms: 0,
+        },
+        "verdict is not a handover",
+    );
+    let integration = f.integrate(subject, data, ToolDisposition::Succeeded);
+    f.release(Some(subject), integration);
+    f.verify();
+    f.close();
+    assert_eq!(f.view().runs[0].status, RunStatus::Finished);
+}
+
+#[test]
 fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hooks() {
     use crate::tools::permissions::{
         HookEvent, HookInvocation, HookOutcome, HookResult, stop_subject,
@@ -3962,6 +4044,8 @@ fn worker_protocol_handover_requires_current_private_evidence_and_gate_is_bounde
             f.changes.files.clear();
         }
         f.finish_worker();
+        let evidence = private_criterion_evidence(&f.view().runs[0], f.child).unwrap();
+        assert_eq!(evidence.is_empty(), case != "fresh", "{case}");
         let replay = SessionView::replay(f.session, &f.envelopes());
         assert!(replay.is_ok(), "command criteria are exempt: {case}");
     }

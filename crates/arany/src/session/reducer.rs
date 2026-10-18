@@ -219,6 +219,7 @@ pub struct AgentView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunView {
+    pub supervisor: crate::supervisor::SupervisorState,
     pub workers: WorkerState,
     pub id: RunId,
     pub objective: String,
@@ -817,6 +818,10 @@ impl SessionView {
         {
             return Err(ReplayError::InvalidTransition);
         }
+        if crate::supervisor::SupervisorState::before(self, envelope)? {
+            self.last_sequence = envelope.sequence;
+            return Ok(());
+        }
         let prior = envelope.sequence;
         let current = self;
         if current
@@ -880,6 +885,7 @@ impl SessionView {
         tool::before_lifecycle_event(current, &envelope.event)?;
         worker::before_event(current, &envelope.event)?;
         match &envelope.event {
+            Event::SupervisorVerdictRecorded { .. } => return Err(ReplayError::InvalidTransition),
             Event::SessionStarted { .. } | Event::SessionForked { .. } => {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -937,8 +943,15 @@ impl SessionView {
                 .insert(*agent_run_id, prior);
         }
         worker::after_event(current, &envelope.event, prior)?;
+        crate::supervisor::SupervisorState::after(current, envelope);
         current.last_sequence = prior;
         Ok(())
+    }
+
+    pub(crate) fn previous_subject_sequence(&self) -> u64 {
+        self.runs.last().map_or(self.last_sequence, |r| {
+            r.supervisor.previous_subject(self.last_sequence)
+        })
     }
 
     /// The Goal whose Run is live. At most one Goal is Running.

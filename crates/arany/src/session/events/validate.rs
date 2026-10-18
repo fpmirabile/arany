@@ -20,6 +20,13 @@ impl Event {
             return Err(ReplayError::InvalidPayload);
         }
         match self {
+            Self::SupervisorVerdictRecorded { verdict, .. } => {
+                if verdict.valid() {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
             Self::SessionStarted { title, .. } | Self::SessionRenamed { title } => {
                 bounded(title, 128)
             }

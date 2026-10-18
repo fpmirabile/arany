@@ -645,6 +645,7 @@ mod account_default_tests {
     #[test]
     fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         let mut config = RunConfig {
+            supervisor: None,
             worker_policy: None,
             agent_definitions: None,
             roster: None,
@@ -680,7 +681,7 @@ mod account_default_tests {
         };
         assert_eq!(
             event.payload().unwrap(),
-            r#"{"config":{"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
+            r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
         );
         let Event::RunStarted {
             config: ordinary, ..
@@ -753,10 +754,16 @@ mod account_default_tests {
         forged.providers = Some(main_routes);
         forged.providers.as_mut().unwrap().review = vec![other_identity];
         assert!(forged.validate().is_err());
+        let mut missing_supervisor = serde_json::to_value(ordinary).unwrap();
+        missing_supervisor
+            .as_object_mut()
+            .unwrap()
+            .remove("supervisor");
+        assert!(serde_json::from_value::<RunConfig>(missing_supervisor).is_err());
         let mut missing_roster = serde_json::to_value(ordinary).unwrap();
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(14));
+        assert_eq!(payload_version("RunStarted"), Some(15));
         assert_eq!(payload_version("ProviderCallRecorded"), Some(9));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
@@ -1550,6 +1557,7 @@ mod payload_version_tests {
             ("AgentFinished", 8),
             ("AgentFinished", 9),
             ("ProviderCallRecorded", 8),
+            ("RunStarted", 14),
             ("RunFinished", 7),
             ("ProviderCallRecorded", 7),
         ] {
@@ -1566,6 +1574,7 @@ mod payload_version_tests {
         let agent = AgentRunId::new();
         let goal_id = GoalId::new();
         let config = RunConfig {
+            supervisor: None,
             worker_policy: None,
             agent_definitions: None,
             roster: None,
@@ -1624,7 +1633,7 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 14,
+                Event::RunStarted { .. } => 15,
                 Event::ToolStarted { .. } => 11,
                 Event::RunFinished { .. } => 8,
                 _ => 7,
@@ -1808,17 +1817,22 @@ fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
             .unwrap();
         let mut value: serde_json::Value =
             serde_json::from_str(&e.event.payload().unwrap()).unwrap();
-        value["assignment"]["request"]["commands"] = serde_json::json!(commands);
-        assert!(
+        let decode = |v: &serde_json::Value| {
             Event::decode(
                 e.event.kind(),
                 e.event.version(),
-                &value.to_string(),
+                &v.to_string(),
                 e.run_id,
-                e.agent_run_id
+                e.agent_run_id,
             )
-            .is_err()
-        );
+        };
+        assert!(decode(&value).is_ok(), "unmutated command payload decodes");
+        *value
+            .pointer_mut("/assignment/request/commands")
+            .expect("fixture carries request commands") = serde_json::json!(["a", "b"]);
+        assert!(decode(&value).is_ok(), "a valid command list decodes");
+        *value.pointer_mut("/assignment/request/commands").unwrap() = serde_json::json!(commands);
+        assert!(decode(&value).is_err(), "commands {commands:?}");
     }
     let result = WorkerCommandResult {
         exit_code: Some(0),
@@ -1843,4 +1857,95 @@ fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
         value["private_capture"] = capture;
         assert!(serde_json::from_value::<WorkerCommandResult>(value).is_err());
     }
+}
+
+#[test]
+fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
+    use crate::supervisor::*;
+    let fixture = crate::session::worker_protocol_fixture();
+    let start = fixture
+        .events
+        .iter()
+        .find(|e| matches!(e, Event::RunStarted { .. }))
+        .unwrap();
+    for case in 0..5 {
+        let mut event = start.clone();
+        if let Event::RunStarted { config, .. } = &mut event {
+            let mut pin = SupervisorPolicy::default();
+            match case {
+                0 => (),
+                1 => pin.evaluator = 2,
+                2 => pin.window = 33,
+                3 => pin.digest[0] ^= 1,
+                _ => pin.floors.identical = 0,
+            }
+            config.supervisor = Some(pin);
+        }
+        assert_eq!(event.payload().is_ok(), case == 0, "policy pin {case}");
+    }
+
+    let verdict = SupervisorVerdict {
+        subject_sequence: 10,
+        site: Site::ToolOutcome,
+        evaluator: 1,
+        mode: Mode::Shadow,
+        capped: false,
+        signals: vec![Signal {
+            signal: SignalKind::Loop,
+            level: Level::Notice,
+            would_response: None,
+            features: Features::Loop(LoopFeatures {
+                repeat_identical: 3,
+                ..Default::default()
+            }),
+            evidence: vec![8, 9, 10],
+        }],
+    };
+    let event = Event::SupervisorVerdictRecorded {
+        run_id: RunId::new(),
+        agent_run_id: AgentRunId::new(),
+        verdict,
+    };
+    assert_eq!(event.version(), 1);
+    let (run, actor) = event.scope();
+    let payload = event.payload().unwrap();
+    assert_eq!(
+        Event::decode(event.kind(), 1, &payload, run, actor).unwrap(),
+        event
+    );
+    assert!(matches!(
+        Event::decode(event.kind(), 0, &payload, run, actor),
+        Err(ReplayError::UnknownEvent)
+    ));
+    for (field, value) in [
+        ("evaluator", serde_json::json!(2)),
+        ("site", serde_json::json!("unknown")),
+        ("mode", serde_json::json!("enforce")),
+        ("extra", serde_json::json!(null)),
+        ("signals", serde_json::json!([])),
+    ] {
+        let mut value_payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        value_payload[field] = value;
+        assert!(
+            Event::decode(event.kind(), 1, &value_payload.to_string(), run, actor).is_err(),
+            "{field}"
+        );
+    }
+    for field in ["would_response", "features"] {
+        let mut value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        value["signals"][0].as_object_mut().unwrap().remove(field);
+        assert!(
+            Event::decode(event.kind(), 1, &value.to_string(), run, actor).is_err(),
+            "missing {field}"
+        );
+    }
+    let padded = format!(
+        "{payload}{}",
+        " ".repeat(MAX_VERDICT_BYTES + 1 - payload.len())
+    );
+    assert!(matches!(
+        Event::decode(event.kind(), 1, &padded, run, actor),
+        Err(ReplayError::InvalidPayload)
+    ));
+    assert_eq!(payload_version("RunStarted"), Some(15));
 }

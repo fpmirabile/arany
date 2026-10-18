@@ -1331,6 +1331,8 @@ pub(super) fn after_event(
                 run.workers.pending = None;
             }
             if matches!(o.intent.call, ToolCall::Command { .. })
+                && matches!(o.intent.target, EffectTarget::WorkerView { .. })
+                && o.disposition == ToolDisposition::Succeeded
                 && let Ok(WorkerCommandResult {
                     private_capture: PrivateCapture::Sealed { data },
                     ..
