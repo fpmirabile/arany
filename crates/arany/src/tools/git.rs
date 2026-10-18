@@ -83,11 +83,10 @@ const MAX_GIT_RUNTIME: Duration = Duration::from_secs(20);
 pub(super) const VIEW: &str = "git-view";
 pub(super) const HOME: &str = "git-home";
 const VIEW_CONFIG: &[u8] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\thooksPath = /dev/null\n\tuntrackedCache = false\n";
-const LINKED: [(&str, bool, bool); 5] = [
+const LINKED: [(&str, bool, bool); 4] = [
     ("objects", true, true),
     ("refs", true, true),
     ("packed-refs", false, false),
-    ("index", false, false),
     ("shallow", false, false),
 ];
 const NO_REPOSITORY: &str = "The Workspace root has no .git directory; typed Git reads need a repository rooted at the Workspace.";
@@ -203,9 +202,17 @@ fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
             _ => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
         }
     }
+    let index = match read_optional(&git_dir, "index", MAX_SNAPSHOT_BYTES) {
+        Ok(index) => index,
+        Err(ToolError::Path) => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
+        Err(error) => return Err(error),
+    };
     std::fs::create_dir(view).map_err(|_| ToolError::Operation)?;
     std::fs::write(view.join("config"), VIEW_CONFIG).map_err(|_| ToolError::Operation)?;
     std::fs::write(view.join("HEAD"), &head).map_err(|_| ToolError::Operation)?;
+    if let Some(index) = index {
+        std::fs::write(view.join("index"), index).map_err(|_| ToolError::Operation)?;
+    }
     for name in links {
         std::os::unix::fs::symlink(workspace.join(".git").join(name), view.join(name))
             .map_err(|_| ToolError::Operation)?;
@@ -1269,6 +1276,15 @@ mod tests {
         names.sort();
         assert_eq!(names, ["HEAD", "config", "index", "objects", "refs"]);
         assert_eq!(std::fs::read(view.join("config")).unwrap(), VIEW_CONFIG);
+        assert!(
+            std::fs::symlink_metadata(view.join("index"))
+                .unwrap()
+                .is_file()
+        );
+        assert_eq!(
+            std::fs::read(view.join("index")).unwrap(),
+            std::fs::read(workspace.join(".git/index")).unwrap()
+        );
         assert_eq!(
             std::fs::read_to_string(view.join("HEAD")).unwrap(),
             "ref: refs/heads/main\n"
@@ -1277,6 +1293,26 @@ mod tests {
             std::fs::read_link(view.join("objects")).unwrap(),
             workspace.join(".git/objects")
         );
+    }
+
+    #[test]
+    fn oversized_index_is_a_typed_limit_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let git = workspace.join(".git");
+        std::fs::create_dir_all(git.join("objects")).unwrap();
+        std::fs::create_dir(git.join("refs")).unwrap();
+        std::fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        std::fs::File::create(git.join("index"))
+            .unwrap()
+            .set_len(MAX_SNAPSHOT_BYTES as u64 + 1)
+            .unwrap();
+        let view = temp.path().join(VIEW);
+        assert!(matches!(
+            prepare_view(&workspace, &view),
+            Err(ToolError::Limit)
+        ));
+        assert!(!view.exists());
     }
 
     #[test]
@@ -1592,13 +1628,46 @@ mod tests {
             &ToolCall::GitStatus { path: ".".into() },
         );
         assert!(status.get("failed").is_none(), "{status}");
-        // A write would rename a private file over the view's index symlink.
-        assert!(
-            std::fs::symlink_metadata(view_scratch.join(VIEW).join("index"))
-                .unwrap()
-                .file_type()
-                .is_symlink()
+        assert_eq!(
+            std::fs::read(view_scratch.join(VIEW).join("index")).unwrap(),
+            std::fs::read(workspace.join(".git/index")).unwrap()
         );
+        assert_eq!(tree(&workspace.join(".git")), before);
+        assert_eq!(std::fs::read_dir(markers).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn stale_stat_diff_never_writes_repository_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let markers = arm_hostile(temp.path(), &workspace);
+        std::fs::File::options()
+            .write(true)
+            .open(workspace.join("notes.md"))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        let before = tree(&workspace.join(".git"));
+        let diff = run_call(
+            &workspace,
+            &scratch(temp.path(), 0),
+            &ToolCall::GitDiff {
+                path: ".".into(),
+                base: None,
+                head: None,
+                staged: false,
+            },
+        );
+        assert!(diff.get("failed").is_none(), "{diff}");
+        assert_eq!(
+            diff["files"],
+            json!([
+                {"path": "src/a.txt", "added": 1, "deleted": 1},
+                {"path": "src/big.txt", "added": 40000, "deleted": 40000},
+            ])
+        );
+        let patch = diff["patch"].as_str().unwrap();
+        assert!(patch.contains("-bravo") && patch.contains("+delta"));
         assert_eq!(tree(&workspace.join(".git")), before);
         assert_eq!(std::fs::read_dir(markers).unwrap().count(), 0);
     }
