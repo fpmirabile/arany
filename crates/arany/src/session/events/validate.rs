@@ -203,11 +203,15 @@ impl Event {
                 }
             }
             Self::ToolFinished {
+                checkpoint,
                 run_id,
                 agent_run_id,
                 observation,
             } => {
-                if observation.valid()
+                if checkpoint
+                    .as_ref()
+                    .is_none_or(|checkpoint| checkpoint.valid())
+                    && observation.valid()
                     && !(observation.cache_update == crate::tools::CacheUpdate::NotAttempted
                         && observation.disposition == crate::tools::ToolDisposition::Succeeded)
                     && observation.intent.run_id == *run_id

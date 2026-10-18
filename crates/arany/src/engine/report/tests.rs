@@ -51,6 +51,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         cache_update: CacheUpdate::Failed,
     };
     let mut tools = vec![ToolView {
+        checkpoint: None,
         intent: command_intent,
         observation: Some(command_observation),
         review_call_index: None,
@@ -90,6 +91,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             cache_update: crate::tools::CacheUpdate::NotApplicable,
         };
         ToolView {
+            checkpoint: None,
             intent,
             observation: Some(observation),
             review_call_index: None,
@@ -241,6 +243,36 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     );
     assert!(serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES);
 
+    let mut checkpoint_view = view.clone();
+    let tool = &mut checkpoint_view.runs[0].tools[1];
+    tool.intent.call = ToolCall::Write {
+        path: "src/file.rs".into(),
+        expected_digest: Some(crate::tools::types::hex_digest(b"before")),
+        content: "after".into(),
+    };
+    let observation = tool.observation.as_mut().unwrap();
+    observation.intent = tool.intent.clone();
+    observation.attestation = Some(Attestation::for_site(&tool.intent));
+    tool.checkpoint = Some(crate::Checkpoint {
+        status: crate::CheckpointStatus::Skipped,
+        reason: Some(crate::CheckpointReason::Quota),
+        pruned_before_run: Some(run_id),
+    });
+    let checkpoint_report = goal_report(&checkpoint_view, &checkpoint_view.runs[0], &goal);
+    assert!(
+        checkpoint_report
+            .unresolved
+            .iter()
+            .any(|fact| fact == "This change cannot be rewound (checkpoint storage full)")
+    );
+    assert!(checkpoint_report.unresolved.iter().any(|fact| {
+        fact.starts_with("Older checkpoints pruned; code restore unavailable before Run")
+    }));
+    assert!(
+        serde_json::to_vec(&checkpoint_report).unwrap().len()
+            <= crate::session::MAX_GOAL_REPORT_BYTES
+    );
+
     let mut late_run = run.clone();
     let late_failed_command = late_run.tools.remove(0);
     let failed_cache_observation = late_failed_command
@@ -306,6 +338,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     assert!(uncertain_observation.valid());
     assert!(uncertain_observation.attested_for(&uncertain_intent));
     late_run.tools.push(ToolView {
+        checkpoint: None,
         intent: uncertain_intent.clone(),
         observation: Some(uncertain_observation),
         review_call_index: None,
@@ -394,6 +427,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     assert!(!failed_observation.attested_for(&failed_intent));
     assert!(!failed_observation.stops_run());
     byte_run.tools.push(ToolView {
+        checkpoint: None,
         observation: Some(failed_observation),
         intent: failed_intent,
         review_call_index: None,
@@ -486,6 +520,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             assert!(observation.valid());
             assert!(!observation.attested_for(&intent));
             tools.push(ToolView {
+                checkpoint: None,
                 observation: Some(observation),
                 intent,
                 review_call_index: None,
@@ -558,6 +593,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     assert!(timeout_observation.valid());
     let mut timeout_run = run.clone();
     timeout_run.tools = vec![ToolView {
+        checkpoint: None,
         intent: timeout_intent,
         observation: Some(timeout_observation),
         review_call_index: None,
@@ -656,6 +692,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         "An unguarded host run attested Unguarded command cargo."
     );
     let tool = ToolView {
+        checkpoint: None,
         intent,
         observation: Some(observation),
         review_call_index: None,

@@ -117,6 +117,7 @@ impl SessionView {
             .find(|agent| agent.id == agent_run_id)
             .ok_or(ReplayError::InvalidTransition)?;
         child.tools.push(ToolView {
+            checkpoint: None,
             intent: intent.clone(),
             observation: None,
             review_call_index: None,

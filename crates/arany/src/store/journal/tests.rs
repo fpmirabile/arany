@@ -221,7 +221,7 @@ fn every_event_slot_admits_a_current_tool_observation() {
     let finished = payload_version("ToolFinished").expect("payload version");
     assert_eq!(
         event_payload_limit("ToolFinished", finished),
-        crate::tools::types::MAX_TOOL_OBSERVATION_BYTES
+        crate::tools::types::MAX_TOOL_OBSERVATION_BYTES + 512
     );
     assert_eq!(
         event_payload_limit("ToolFinished", finished - 1),

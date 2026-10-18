@@ -24,6 +24,8 @@ pub use state::HistoryReset;
 pub(crate) use state::begin_released;
 #[cfg(test)]
 pub(crate) use state::capture_archive;
+pub(crate) use state::checkpoints::Capture as CheckpointCapture;
+pub use state::checkpoints::CheckpointReset;
 pub(crate) use state::{
     BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock,
     WorkspaceRunLock, archive_size_with_limit,
@@ -41,7 +43,7 @@ const MAX_ESCAPED_OBJECTIVE_BYTES: usize = 6 * crate::session::MAX_USER_MESSAGE_
 const MAX_GOAL_STARTED_BYTES: usize = MAX_ESCAPED_OBJECTIVE_BYTES + 16 * 1024;
 const MAX_MESSAGE_ACCEPTED_BYTES: usize =
     MAX_ESCAPED_OBJECTIVE_BYTES + crate::provider::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 16 * 1024;
-const MAX_TOOL_FINISHED_BYTES: usize = crate::tools::types::MAX_TOOL_OBSERVATION_BYTES;
+const MAX_TOOL_FINISHED_BYTES: usize = crate::tools::types::MAX_TOOL_OBSERVATION_BYTES + 512;
 // Run start needs extra headroom because GoalStarted and MessageAccepted exceed the ordinary Event bound.
 const RUN_START_EXTRA_BYTES: usize =
     MAX_GOAL_STARTED_BYTES + MAX_MESSAGE_ACCEPTED_BYTES - 2 * MAX_EVENT_BYTES;
@@ -49,8 +51,9 @@ fn event_payload_limit(kind: &str, version: i64) -> usize {
     match kind {
         "MessageAccepted" if payload_version(kind) == Some(version) => MAX_MESSAGE_ACCEPTED_BYTES,
         "GoalStarted" if payload_version(kind) == Some(version) => MAX_GOAL_STARTED_BYTES,
-        "ToolFinished" | "HookFinished" if payload_version(kind) == Some(version) => {
-            MAX_TOOL_FINISHED_BYTES
+        "ToolFinished" if payload_version(kind) == Some(version) => MAX_TOOL_FINISHED_BYTES,
+        "HookFinished" if payload_version(kind) == Some(version) => {
+            crate::tools::types::MAX_TOOL_OBSERVATION_BYTES
         }
         _ => MAX_EVENT_BYTES,
     }
@@ -76,6 +79,10 @@ pub enum StoreError {
     BuildCacheBusy,
     #[error("Workspace build cache is invalid or unsafe")]
     InvalidBuildCache,
+    #[error("checkpoint storage is unavailable")]
+    CheckpointUnavailable,
+    #[error("checkpoint storage changed during recovery; retry before resetting")]
+    CheckpointChanged,
     #[error("history is in use by another Arany process; close it and retry")]
     HistoryBusy,
     #[error("saved history changed during recovery; retry before resetting")]
@@ -179,6 +186,17 @@ enum Request {
         op: EvidenceOp,
         reply: oneshot::Sender<Result<Option<EvidenceRecord>, StoreError>>,
     },
+    CheckpointCapture {
+        capture: CheckpointCapture,
+        reply: oneshot::Sender<Result<crate::session::Checkpoint, StoreError>>,
+    },
+    CheckpointLoad {
+        digest: [u8; 32],
+        reply: oneshot::Sender<Result<Option<Vec<u8>>, StoreError>>,
+    },
+    CheckpointReset {
+        reply: oneshot::Sender<Result<CheckpointReset, StoreError>>,
+    },
     Close {
         reply: oneshot::Sender<()>,
     },
@@ -219,6 +237,14 @@ impl Store {
                 if ready_sender.send(Ok(())).is_err() {
                     return;
                 }
+                let pruned_on_open = if !read_only {
+                    state::checkpoints::sweep(
+                        &root,
+                        i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
+                    ).unwrap_or_default()
+                } else { None };
+                let mut pruning_notice_pending = pruned_on_open;
+                let mut pruning_notified_run = None;
                 let mut hot_session = None::<HotSession>;
                 while let Some(request) = receiver.blocking_recv() {
                     match request {
@@ -330,6 +356,43 @@ impl Store {
                         Request::Evidence { op, reply } => {
                             let _ = reply.send(evidence::apply(&mut connection, read_only, op));
                         }
+                        Request::CheckpointCapture { mut capture, reply } => {
+                            let result = if read_only {
+                                Err(StoreError::ReadOnly)
+                            } else {
+                                let started = connection.query_row(
+                                    "SELECT MAX(sequence) FROM events WHERE session_id=?1 AND run_id=?2 AND kind='ToolStarted' AND json_extract(payload,'$.intent.id')=?3",
+                                    rusqlite::params![capture.session.to_string(), capture.run.to_string(), capture.intent_id.to_string()],
+                                    |row| row.get::<_, Option<i64>>(0),
+                                );
+                                let Ok(Some(started)) = started else {
+                                    let _ = reply.send(Err(StoreError::InvalidHistory));
+                                    continue;
+                                };
+                                capture.sequence = u64::try_from(started).unwrap_or_default();
+                                let run = capture.run;
+                                let mut checkpoint = state::checkpoints::capture(
+                                    &root, capture, i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
+                                );
+                                if let Some(pruned) = pruning_notice_pending.take().or(checkpoint.pruned_before_run) {
+                                    if pruning_notified_run == Some(run) { checkpoint.pruned_before_run = None; }
+                                    else { checkpoint.pruned_before_run = Some(pruned); pruning_notified_run = Some(run); }
+                                }
+                                Ok(checkpoint)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Request::CheckpointLoad { digest, reply } => {
+                            let _ = reply.send(state::checkpoints::load(&root, digest));
+                        }
+                        Request::CheckpointReset { reply } => {
+                            let result = if read_only {
+                                Err(StoreError::ReadOnly)
+                            } else {
+                                state::checkpoints::prepare_reset(&root)
+                            };
+                            let _ = reply.send(result);
+                        }
                         Request::Close { reply } => {
                             let _ = reply.send(());
                             break;
@@ -351,6 +414,23 @@ impl Store {
                 Err(StoreError::Closed)
             }
         }
+    }
+
+    pub(crate) async fn capture_checkpoint(
+        &self,
+        capture: CheckpointCapture,
+    ) -> Result<crate::session::Checkpoint, StoreError> {
+        self.call(|reply| Request::CheckpointCapture { capture, reply })
+            .await
+    }
+
+    pub async fn checkpoint_blob(&self, digest: [u8; 32]) -> Result<Option<Vec<u8>>, StoreError> {
+        self.call(|reply| Request::CheckpointLoad { digest, reply })
+            .await
+    }
+
+    pub async fn prepare_checkpoint_reset(&self) -> Result<CheckpointReset, StoreError> {
+        self.call(|reply| Request::CheckpointReset { reply }).await
     }
 
     pub async fn append(

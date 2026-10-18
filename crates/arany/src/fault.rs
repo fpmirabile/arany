@@ -8,6 +8,7 @@ use tokio::sync::oneshot;
 type Admits = fn(&Event) -> bool;
 
 enum Fault {
+    Checkpoint(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
     WorkerReceipt(uuid::Uuid),
     GoalAppend(SessionId, Admits),
     GoalAcknowledgment(
@@ -38,6 +39,22 @@ fn take(mut matches: impl FnMut(&Fault) -> bool) -> Option<Fault> {
 pub struct FaultPlan;
 
 impl FaultPlan {
+    pub fn gate_checkpoint(session: SessionId) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, wait) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        plan().push(Fault::Checkpoint(session, entered, released));
+        (wait, release)
+    }
+
+    pub(crate) fn checkpoint_gate(
+        session: SessionId,
+    ) -> Option<(oneshot::Sender<()>, oneshot::Receiver<()>)> {
+        match take(|fault| matches!(fault, Fault::Checkpoint(id, ..) if *id == session)) {
+            Some(Fault::Checkpoint(_, entered, release)) => Some((entered, release)),
+            _ => None,
+        }
+    }
+
     /// Fails the next Event that `admits` accepts for the Session before it commits.
     pub fn fail_goal_append(session_id: SessionId, admits: Admits) {
         plan().push(Fault::GoalAppend(session_id, admits));

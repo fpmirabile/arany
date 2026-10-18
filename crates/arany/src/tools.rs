@@ -153,6 +153,7 @@ pub(crate) struct ToolRuntime {
     queue_wait: Option<std::sync::Arc<std::sync::Mutex<QueueWait>>>,
     active_action_gate: Option<tokio::sync::mpsc::Sender<ActiveActionRequest>>,
     hook_stdin: Option<std::sync::Arc<str>>,
+    checkpoint_gate: Option<tokio::sync::mpsc::Sender<CheckpointRequest>>,
     cache_state: Option<std::sync::Arc<StateRoot>>,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
@@ -162,6 +163,10 @@ pub(crate) struct ToolRuntime {
 struct QueueWait {
     waiting: Option<std::time::Instant>,
     elapsed: Duration,
+}
+
+pub(crate) struct CheckpointRequest {
+    pub(crate) reply: tokio::sync::oneshot::Sender<()>,
 }
 
 pub(crate) struct ActiveActionRequest {
@@ -216,6 +221,92 @@ impl ToolRuntime {
         runtime
     }
 
+    pub(crate) fn with_checkpoint_gate(
+        &self,
+        sender: tokio::sync::mpsc::Sender<CheckpointRequest>,
+    ) -> Self {
+        let mut runtime = self.clone();
+        runtime.checkpoint_gate = Some(sender);
+        runtime
+    }
+
+    pub(crate) fn checkpoint_bytes(
+        &self,
+        intent: &EffectIntent,
+        paths: &[(String, String)],
+    ) -> Result<Vec<(String, Vec<u8>)>, ToolError> {
+        let root = self.pinned_root(intent)?;
+        let _permit = self
+            .reads
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?
+            .slots
+            .try_acquire()
+            .map_err(|_| ToolError::Limit)?;
+        let files = match &intent.call {
+            ToolCall::Write { .. } | ToolCall::Edit { .. } => paths
+                .iter()
+                .map(|(path, expected)| {
+                    let bytes =
+                        fs::read_regular(fs::open_file(&root, path)?, types::MAX_FILE_BYTES)?;
+                    if types::hex_digest(&bytes) != *expected {
+                        return Err(ToolError::ChangedInput);
+                    }
+                    Ok((path.clone(), bytes))
+                })
+                .collect::<Result<Vec<_>, ToolError>>()?,
+            ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+            } => paths
+                .iter()
+                .map(|(path, expected)| {
+                    let before = changeset
+                        .files
+                        .iter()
+                        .find(|f| &f.path == path)
+                        .and_then(|f| f.before.as_ref())
+                        .ok_or(ToolError::ChangedInput)?;
+                    if &before.sha256 != expected {
+                        return Err(ToolError::ChangedInput);
+                    }
+                    Ok((path.clone(), before.bytes().ok_or(ToolError::ChangedInput)?))
+                })
+                .collect::<Result<Vec<_>, ToolError>>()?,
+            ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
+            } => {
+                let changes = worker::decode_handover(
+                    intent,
+                    self.handover.as_deref().ok_or(ToolError::ChangedInput)?,
+                    &self.config,
+                )?;
+                paths
+                    .iter()
+                    .map(|(path, expected)| {
+                        let before = changes
+                            .files
+                            .iter()
+                            .find(|f| &f.path == path)
+                            .and_then(|f| f.before.as_ref())
+                            .ok_or(ToolError::ChangedInput)?;
+                        if &before.sha256 != expected {
+                            return Err(ToolError::ChangedInput);
+                        }
+                        Ok((
+                            path.clone(),
+                            before
+                                .bytes_with_limit(types::MAX_FILE_BYTES)
+                                .ok_or(ToolError::ChangedInput)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, ToolError>>()?
+            }
+            _ => return Err(ToolError::Configuration),
+        };
+        self.pinned_root(intent)?;
+        Ok(files)
+    }
+
     pub(crate) fn with_hook_stdin(&self, stdin: &str) -> Self {
         let mut runtime = self.clone();
         runtime.hook_stdin = Some(stdin.into());
@@ -244,11 +335,34 @@ impl ToolRuntime {
             .and_then(|result| result.map(Some))
     }
 
-    pub(crate) fn before_dispatch(
+    pub(crate) async fn before_dispatch(
         &self,
         window: Option<ActiveToolWindow>,
         runtime_ms: u32,
+        cancellation: &Cancellation,
     ) -> Result<(), ToolError> {
+        if cancellation.is_cancelled() {
+            return Err(ToolError::Operation);
+        }
+        if let Some(sender) = &self.checkpoint_gate {
+            let (reply, receipt) = tokio::sync::oneshot::channel();
+            let deadline = window.map_or_else(
+                || tokio::time::Instant::now() + Duration::from_millis(u64::from(runtime_ms)),
+                |window| window.go_deadline,
+            );
+            tokio::time::timeout_at(deadline, async {
+                sender
+                    .send(CheckpointRequest { reply })
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+                receipt.await.map_err(|_| ToolError::Operation)
+            })
+            .await
+            .map_err(|_| ToolError::Limit)??;
+        }
+        if cancellation.is_cancelled() {
+            return Err(ToolError::Operation);
+        }
         if window.is_some_and(|window| {
             let now = tokio::time::Instant::now();
             now >= window.go_deadline
@@ -513,6 +627,7 @@ impl ToolRuntime {
             queue_wait: None,
             active_action_gate: None,
             hook_stdin: None,
+            checkpoint_gate: None,
             cache_state: Some(std::sync::Arc::new(
                 state
                     .try_clone()

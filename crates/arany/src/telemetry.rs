@@ -515,6 +515,7 @@ impl RunTrace {
             } => self.provider_call(*agent_run_id, record, at),
             Event::ToolStarted { intent, .. } if intent.call.is_unguarded() => {
                 self.unguarded.push(crate::session::ToolView {
+                    checkpoint: None,
                     intent: intent.clone(),
                     observation: None,
                     review_call_index: None,

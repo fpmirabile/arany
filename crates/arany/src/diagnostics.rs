@@ -556,6 +556,7 @@ mod tests {
             },
         });
         event_failure(&crate::session::Event::ToolFinished {
+            checkpoint: None,
             run_id: Default::default(),
             agent_run_id: Default::default(),
             observation: crate::tools::ToolObservation {

@@ -2470,6 +2470,171 @@ mod goals {
         )));
         assert_action_bounds(&events, false, false);
     }
+    #[tokio::test]
+    async fn checkpoints_commit_before_go_skip_repeats_capture_gaps_and_preserve_replay() {
+        use arany::test_support::goals::*;
+        use std::os::unix::fs::PermissionsExt;
+        for unavailable in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = facts_workspace(temp.path(), "original");
+            let state_path = temp.path().join("state");
+            let engine = engine_support::open(
+                StateRoot::admit(&state_path).unwrap(),
+                EngineConfig {
+                    guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let session = engine
+                .create_session(workspace.clone(), None)
+                .await
+                .unwrap();
+            let config = state_path.join("tools.json");
+            std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+            if unavailable {
+                std::fs::write(state_path.join("checkpoints.sqlite"), b"malformed").unwrap();
+            }
+            let write = |before: &str, after: &str, plan| {
+                crate::tool_outcome(
+                    arany::ToolCall::Write {
+                        path: "notes/facts.txt".into(),
+                        expected_digest: Some(
+                            Sha256::digest(before.as_bytes())
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect(),
+                        ),
+                        content: after.into(),
+                    },
+                    plan,
+                )
+            };
+            let mut plan = write_plan();
+            plan.paths = vec!["notes".into()];
+            plan.success_criterion = arany::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "notes/facts.txt".into(),
+                content: "three".into(),
+            };
+            let path = workspace.join("notes/facts.txt");
+            let external = path.clone();
+            let provider = Arc::new(
+                ScriptedProvider::new(vec![
+                    write("original", "one", Some(Box::new(plan))),
+                    write("one", "two", None),
+                    write("external", "three", None),
+                    finish_with("three"),
+                ])
+                .with_before_call(2, move || std::fs::write(&external, b"external").unwrap()),
+            );
+            let mut input = request(&workspace, "Change the facts");
+            input.session_id = Some(session);
+            input.include_paths.clear();
+            let outcome = {
+                let gate = (!unavailable).then(|| arany::FaultPlan::gate_checkpoint(session));
+                let execution = run_with(
+                    &engine,
+                    &provider,
+                    input,
+                    RunControls {
+                        tools: ToolGrant::Configured,
+                        ..Default::default()
+                    },
+                );
+                tokio::pin!(execution);
+                if let Some((entered, release)) = gate {
+                    tokio::select! {
+                        result = &mut execution => panic!("Run completed before the pre-GO checkpoint gate: {result:?}"),
+                        result = tokio::time::timeout(Duration::from_secs(120), entered) => result.unwrap().unwrap(),
+                    }
+                    assert_eq!(
+                        std::fs::read(&path).unwrap(),
+                        b"original",
+                        "GO has not published yet"
+                    );
+                    let store =
+                        Store::open_read_only(StateRoot::open_existing(&state_path).unwrap())
+                            .unwrap();
+                    assert_eq!(
+                        store
+                            .checkpoint_blob(Sha256::digest(b"original").into())
+                            .await
+                            .unwrap()
+                            .as_deref(),
+                        Some(b"original".as_slice())
+                    );
+                    assert!(
+                        !store
+                            .load_session(session)
+                            .await
+                            .unwrap()
+                            .iter()
+                            .any(|e| matches!(e.event, Event::ToolFinished { .. }))
+                    );
+                    store.close().await.unwrap();
+                    release.send(()).unwrap();
+                }
+                execution.await.unwrap()
+            };
+            assert_eq!(outcome.run.status, RunStatus::Finished);
+            let statuses: Vec<_> = outcome
+                .run
+                .tools
+                .iter()
+                .map(|t| t.checkpoint.as_ref().unwrap().status)
+                .collect();
+            let captured = if unavailable {
+                arany::CheckpointStatus::Skipped
+            } else {
+                arany::CheckpointStatus::Captured
+            };
+            assert_eq!(
+                statuses,
+                [captured, arany::CheckpointStatus::NotNeeded, captured]
+            );
+            assert_eq!(provider.requests.lock().unwrap().len(), 4);
+            assert_eq!(std::fs::read(&path).unwrap(), b"three");
+            engine.close().await.unwrap();
+            let (events, view) = replayed(&state_path, session).await;
+            assert_action_bounds(&events, false, false);
+            if unavailable {
+                assert!(
+                    view.goals[0]
+                        .report
+                        .as_ref()
+                        .unwrap()
+                        .unresolved
+                        .iter()
+                        .any(|fact| fact.contains("cannot be rewound"))
+                );
+            } else {
+                let store =
+                    Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+                for bytes in [b"original".as_slice(), b"external".as_slice()] {
+                    assert_eq!(
+                        store
+                            .checkpoint_blob(Sha256::digest(bytes).into())
+                            .await
+                            .unwrap()
+                            .as_deref(),
+                        Some(bytes)
+                    );
+                }
+                store.close().await.unwrap();
+            }
+            std::fs::write(&path, b"after exit").unwrap();
+            assert_eq!(
+                SessionView::replay(session, &events).unwrap().unwrap(),
+                view
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                b"after exit",
+                "strict replay never re-executes"
+            );
+        }
+    }
 }
 
 mod routing {

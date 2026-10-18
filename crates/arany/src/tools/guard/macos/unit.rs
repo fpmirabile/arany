@@ -925,10 +925,9 @@ pub(super) async fn execute(
             .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
         capture.complete();
         let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
-        if go_cancellation.is_cancelled() {
-            return Err(ToolError::Operation);
-        }
-        runtime.before_dispatch(active_window, intent.limits.runtime_ms)?;
+        runtime
+            .before_dispatch(active_window, intent.limits.runtime_ms, &go_cancellation)
+            .await?;
         dispatched.store(true, Ordering::Release);
         let observation = async {
             stream
@@ -1838,6 +1837,7 @@ done
             queue_progress: None,
             queue_wait: None,
             active_action_gate: None,
+            checkpoint_gate: None,
             hook_stdin: None,
             cache_state: None,
             config: crate::tools::config::Config {

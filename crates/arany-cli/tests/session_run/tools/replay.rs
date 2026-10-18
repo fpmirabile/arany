@@ -196,6 +196,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             active_ceiling_ms: 0,
         },
         Event::ToolFinished {
+            checkpoint: None,
             run_id: run,
             agent_run_id: primary,
             observation,
@@ -601,6 +602,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
     };
     let observed = |intent: arany::EffectIntent, disposition, output: String| Event::ToolFinished {
+        checkpoint: None,
         run_id: run,
         agent_run_id: primary,
         observation: arany::ToolObservation {

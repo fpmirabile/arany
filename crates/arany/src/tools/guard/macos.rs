@@ -950,6 +950,7 @@ impl Task {
             queue_wait: None,
             active_action_gate: None,
             hook_stdin: self.hook_stdin.map(Into::into),
+            checkpoint_gate: None,
             cache_state: None,
             config: self.config,
             workspace: self.workspace,

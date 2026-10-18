@@ -194,6 +194,7 @@ impl Permission {
 }
 
 struct Answer {
+    checkpoint: Option<crate::session::Checkpoint>,
     observation: ToolObservation,
     refused: bool,
     active_time: Option<ActiveTime>,
@@ -571,6 +572,7 @@ impl RunLoop<'_> {
                     self.dispatch_primary(runtime, intent, queue_pause).await?
                 }
                 Grant::Researcher { child, .. } => Answer {
+                    checkpoint: None,
                     observation: if child.editor {
                         let (observation, pending) = self.dispatch_worker(runtime, intent).await?;
                         candidate = pending;
@@ -584,6 +586,7 @@ impl RunLoop<'_> {
             },
         };
         self.append(Event::ToolFinished {
+            checkpoint: answer.checkpoint.clone(),
             run_id: self.run_id,
             agent_run_id,
             observation: answer.observation.clone(),
@@ -855,6 +858,7 @@ impl RunLoop<'_> {
         let (verdict, source) = if let Some((requested, maximum)) = timeout_limit {
             (
                 Verdict::Deny(Answer {
+                    checkpoint: None,
                     observation: not_dispatched(
                         intent,
                         ToolDisposition::Limit,
@@ -870,6 +874,7 @@ impl RunLoop<'_> {
                 hooks.denial(intent)
             } else {
                 Answer {
+                    checkpoint: None,
                     observation: not_dispatched(
                         intent,
                         ToolDisposition::Denied,
@@ -911,6 +916,7 @@ impl RunLoop<'_> {
                     if !intent.call.is_internal() && !self.ledger().allows_tool(&intent.call) {
                         (
                             Verdict::Deny(Answer {
+                                checkpoint: None,
                                 observation: outside_plan(intent),
                                 refused: false,
                                 active_time: None,
@@ -1087,6 +1093,7 @@ impl RunLoop<'_> {
         self.clear_tool_queue();
         Ok((
             Verdict::Deny(Answer {
+                checkpoint: None,
                 observation,
                 refused: !approved,
                 active_time: Some(ActiveTime {
@@ -1107,6 +1114,7 @@ impl RunLoop<'_> {
         self.clear_tool_queue();
         (
             Verdict::Deny(Answer {
+                checkpoint: None,
                 observation: not_dispatched(intent, ToolDisposition::Denied, message),
                 refused: false,
                 active_time: Some(ActiveTime {
@@ -1158,6 +1166,7 @@ impl RunLoop<'_> {
                 Ok(segment) => segment,
                 Err(EngineError::GoalBudgetExhausted) => {
                     return Ok(Answer {
+                        checkpoint: None,
                         observation: active_time_limit_observation(intent),
                         refused: false,
                         active_time: Some(ActiveTime {
@@ -1170,6 +1179,7 @@ impl RunLoop<'_> {
             };
             let observation = self.capture_worker_base(runtime, intent).await?;
             return Ok(Answer {
+                checkpoint: None,
                 observation,
                 refused: false,
                 active_time: Some(ActiveTime {
@@ -1194,7 +1204,7 @@ impl RunLoop<'_> {
             runtime.clone()
         };
         let runtime = &runtime;
-        let (observation, segment, exhausted) =
+        let (observation, segment, exhausted, checkpoint) =
             if intent.call.facts().site == crate::tools::catalog::Site::Guard {
                 let Some(queue_pause) = queue_pause else {
                     return Err(EngineError::CoordinatorFailed);
@@ -1206,15 +1216,17 @@ impl RunLoop<'_> {
                         execute_cancellable(runtime, intent, &self.controls.cancellation).await,
                         Some(segment),
                         false,
+                        None,
                     ),
                     Err(EngineError::GoalBudgetExhausted) => {
-                        (active_time_limit_observation(intent), None, true)
+                        (active_time_limit_observation(intent), None, true, None)
                     }
                     Err(error) => return Err(error),
                 }
             };
         self.clear_tool_queue();
         Ok(Answer {
+            checkpoint,
             observation,
             refused: false,
             active_time: Some(ActiveTime { segment, exhausted }),
@@ -1226,13 +1238,25 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: EffectIntent,
         queue_pause: ActivePause,
-    ) -> Result<(ToolObservation, Option<ActiveSegment>, bool), EngineError> {
+    ) -> Result<
+        (
+            ToolObservation,
+            Option<ActiveSegment>,
+            bool,
+            Option<crate::session::Checkpoint>,
+        ),
+        EngineError,
+    > {
         let mut queue_pause = Some(queue_pause);
         let mut active_time_exhausted = false;
         let runtime = runtime.with_queue_progress(self.hints.map(HintPublisher::tool_queue));
         let (active_sender, mut active_receiver) =
             tokio::sync::mpsc::channel::<ActiveActionRequest>(1);
         let runtime = runtime.with_active_action_gate(active_sender);
+        let (checkpoint_sender, mut checkpoint_receiver) = tokio::sync::mpsc::channel(1);
+        let runtime = runtime.with_checkpoint_gate(checkpoint_sender);
+        let checkpoint_intent = intent.clone();
+        let mut checkpoint = None;
         let worker_cancellation = RunCancellation::new();
         let mut run_cancellation = self.controls.cancellation.clone();
         let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
@@ -1245,6 +1269,8 @@ impl RunLoop<'_> {
             tokio::select! {
                 biased;
                 () = run_cancellation.cancelled() => {
+                    checkpoint_receiver.close();
+                    while checkpoint_receiver.try_recv().is_ok() {}
                     worker_cancellation.cancel();
                     break settle_cancelled(execution.as_mut(), &mut active_receiver).await;
                 }
@@ -1269,6 +1295,15 @@ impl RunLoop<'_> {
                         }
                     }
                 }
+                request = checkpoint_receiver.recv() => {
+                    if let Some(crate::tools::CheckpointRequest { reply }) = request {
+                        if crate::session::checkpoint::publication(&checkpoint_intent) {
+                            let deadline = active_segment.as_ref().map(|s| s.deadline()).unwrap_or_else(Instant::now);
+                            checkpoint = Some(self.capture_checkpoint(&runtime, &checkpoint_intent, deadline).await?);
+                        }
+                        let _ = reply.send(());
+                    }
+                }
                 observation = &mut execution => break observation,
             }
         };
@@ -1278,7 +1313,108 @@ impl RunLoop<'_> {
         if active_time_exhausted && observation.disposition != ToolDisposition::Limit {
             observation = active_time_limit_observation(observation.intent);
         }
-        Ok((observation, active_segment, active_time_exhausted))
+        let reached_go = observation.attestation.is_some()
+            || matches!(observation.disposition, ToolDisposition::Uncertain);
+        if !reached_go {
+            checkpoint = None;
+        }
+        if let Some(capture) = &mut checkpoint
+            && capture.status == crate::session::CheckpointStatus::Captured
+            && !matches!(
+                observation.disposition,
+                ToolDisposition::Succeeded | ToolDisposition::Uncertain
+            )
+        {
+            let pruned = capture.pruned_before_run;
+            *capture = crate::session::Checkpoint::skipped(
+                if observation.disposition == ToolDisposition::Conflict {
+                    crate::session::CheckpointReason::DigestMismatch
+                } else {
+                    crate::session::CheckpointReason::StoreUnavailable
+                },
+            );
+            capture.pruned_before_run = pruned;
+        }
+        Ok((
+            observation,
+            active_segment,
+            active_time_exhausted,
+            checkpoint,
+        ))
+    }
+
+    fn capture_checkpoint<'a>(
+        &'a self,
+        runtime: &'a ToolRuntime,
+        intent: &'a EffectIntent,
+        deadline: Instant,
+    ) -> BoxedStep<'a, crate::session::Checkpoint> {
+        Box::pin(async move {
+            use crate::session::{Checkpoint, CheckpointReason};
+            let (sequence, paths) = self.ledger().view(|view| {
+                let run = view
+                    .runs
+                    .iter()
+                    .find(|run| run.id == self.run_id)
+                    .ok_or(EngineError::InvalidHistory)?;
+                let paths = crate::session::checkpoint::before_versions(run, &intent.call)
+                    .into_iter()
+                    .filter_map(|(path, before)| {
+                        before
+                            .filter(|digest| {
+                                crate::session::checkpoint::capture_needed(
+                                    view,
+                                    self.run_id,
+                                    &path,
+                                    digest,
+                                )
+                            })
+                            .map(|digest| (path, digest))
+                    })
+                    .collect::<Vec<_>>();
+                Ok::<_, EngineError>((view.last_sequence, paths))
+            })??;
+            if paths.is_empty() {
+                return Ok(Checkpoint::not_needed());
+            }
+            let intent_id = intent.id;
+            let (runtime, intent) = (runtime.clone(), intent.clone());
+            let capture =
+                tokio::task::spawn_blocking(move || runtime.checkpoint_bytes(&intent, &paths));
+            let files = match tokio::time::timeout_at(deadline, capture).await {
+                Ok(Ok(Ok(files))) => files,
+                Ok(Ok(Err(ToolError::ChangedInput | ToolError::Path))) => {
+                    return Ok(Checkpoint::skipped(CheckpointReason::DigestMismatch));
+                }
+                Ok(Ok(Err(ToolError::Limit))) => {
+                    return Ok(Checkpoint::skipped(CheckpointReason::TooLarge));
+                }
+                _ => return Ok(Checkpoint::skipped(CheckpointReason::StoreUnavailable)),
+            };
+            let capture = crate::store::CheckpointCapture {
+                session: self.session_id,
+                goal: self.goal()?,
+                run: self.run_id,
+                sequence,
+                intent_id,
+                files,
+            };
+            let checkpoint = self
+                .journal
+                .store()
+                .capture_checkpoint(capture)
+                .await
+                .unwrap_or_else(|_| Checkpoint::skipped(CheckpointReason::StoreUnavailable));
+            #[cfg(any(test, feature = "test-support"))]
+            if checkpoint.status == crate::CheckpointStatus::Captured
+                && let Some((entered, release)) =
+                    crate::fault::FaultPlan::checkpoint_gate(self.session_id)
+            {
+                let _ = entered.send(());
+                let _ = tokio::time::timeout_at(deadline, release).await;
+            }
+            Ok(checkpoint)
+        })
     }
 
     fn clear_tool_queue(&self) {
@@ -1305,6 +1441,7 @@ impl RunLoop<'_> {
             }
         } else {
             Verdict::Deny(Answer {
+                checkpoint: None,
                 observation: not_dispatched(
                     intent,
                     ToolDisposition::Denied,

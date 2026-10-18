@@ -160,7 +160,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         "ToolPermissionDecided" => Some(4),
         "HookStarted" => Some(2),
         "HookFinished" => Some(3),
-        "ToolFinished" => Some(11),
+        "ToolFinished" => Some(12),
         "RunStarted" => Some(13),
         "RunFinished" => Some(8),
         "GoalProviderCallReserved" => Some(7),
@@ -333,6 +333,7 @@ pub enum Event {
         active_ceiling_ms: u64,
     },
     ToolFinished {
+        checkpoint: Option<super::Checkpoint>,
         run_id: RunId,
         agent_run_id: AgentRunId,
         observation: crate::tools::ToolObservation,
@@ -519,6 +520,14 @@ struct GoalFinishedPayload {
 struct GoalProviderCallPayload {
     goal_id: GoalId,
     active_ceiling_ms: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolFinishedPayload {
+    #[serde(flatten)]
+    observation: crate::tools::ToolObservation,
+    #[serde(deserialize_with = "Option::deserialize")]
+    checkpoint: Option<super::Checkpoint>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -915,7 +924,14 @@ impl Event {
                 intent: intent.clone(),
                 active_ceiling_ms: *active_ceiling_ms,
             }),
-            Self::ToolFinished { observation, .. } => serialize(observation),
+            Self::ToolFinished {
+                observation,
+                checkpoint,
+                ..
+            } => serialize(&ToolFinishedPayload {
+                observation: observation.clone(),
+                checkpoint: checkpoint.clone(),
+            }),
             Self::ToolPermissionDecided { verdict, .. } => serialize(verdict),
             Self::HookStarted { hook, .. } => serialize(hook),
             Self::HookFinished { outcome, .. } => serialize(outcome),
@@ -1189,11 +1205,15 @@ impl Event {
                     chunk: parse(payload)?,
                 }
             }
-            "ToolFinished" if run_id.is_some() && agent_run_id.is_some() => Self::ToolFinished {
-                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
-                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
-                observation: parse(payload)?,
-            },
+            "ToolFinished" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: ToolFinishedPayload = parse(payload)?;
+                Self::ToolFinished {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    observation: data.observation,
+                    checkpoint: data.checkpoint,
+                }
+            }
             "ToolPermissionDecided" if run_id.is_some() && agent_run_id.is_some() => {
                 Self::ToolPermissionDecided {
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,

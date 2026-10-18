@@ -36,7 +36,7 @@ Teams support read-only researchers (C1) and Run-scoped edit-only workers (C2); 
 
 CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; the Supervisor as loop code; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
 
-- **E4 checkpoints and rewind.** Remain frozen until item 11 lands. Set exact per-file/per-Goal checkpoint quotas before implementation when the freeze lifts.
+- **E4 checkpoints and rewind.** owner lifted the freeze for E4 checkpoints and rewind on 2026-10-18 (item 11 slice 6 in review). Owner accepted the content-addressed store, capture behavior and exact quotas in [Tools](./docs/specs/tools.md#checkpoints-and-rewind). Remaining slices: rewind planner and journal facts, guarded code restore, conversation fork, then terminal and serve surfaces. Native Linux/macOS capture journeys, the 1.5 MiB Guard stack canary, and private-state Store/Engine tests require the lead's unsandboxed verification; no native support claim follows from compilation.
 
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1). API-key billing is a separate route; another harness's implementation or credentials do not authorize Arany access.
 
@@ -48,7 +48,7 @@ CI stays green; no new features, spec sections or evidence gates for: terminal v
 - Goose -> `acp` subprocess adapter and `serve` loopback auth (`X-Secret-Key`, explicit allowed origins).
 - OpenHands -> sandbox-on-demand workspace adapter shape for a future container-backed Guard; `RemoteConversation` as the model for a remote client.
 - Aider -> repo map as a bounded, digest-pinned include (later).
-- Cline/Roo -> shadow-git checkpoints when E4 is unfrozen.
+- Cline/Roo -> copy Cline/Roo's restore choices and compare.
 
 ## Architecture follow-ups
 
