@@ -1962,11 +1962,25 @@ mod tests {
         ));
     }
 
+    #[test]
+    #[ignore = "pipe-gated child of the_launcher_never_shares_the_supervisor_process_group"]
+    fn launcher_group_child() {
+        use std::io::Read;
+        let mut sink = Vec::new();
+        let _ = std::io::stdin().read_to_end(&mut sink);
+    }
+
     #[tokio::test]
     async fn the_launcher_never_shares_the_supervisor_process_group() {
-        // The child blocks on the pipe this test holds, so it stays alive until the assertions finish.
-        let mut launcher = launcher_command(Path::new("/bin/sh"))
-            .args(["-c", "read _"])
+        // The child is this test binary blocked on the pipe the test holds, so no shell is needed.
+        let executable = std::env::current_exe().unwrap();
+        let mut launcher = launcher_command(&executable)
+            .args([
+                "--exact",
+                "tools::guard::tests::launcher_group_child",
+                "--ignored",
+                "--nocapture",
+            ])
             .stdin(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
