@@ -2741,9 +2741,10 @@ mod tests {
                     state.begin_build_cache(identity.clone()),
                     Err(StoreError::BuildCacheBusy)
                 ));
-                let (_, held_capacity) = state
-                    .effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
-                    .unwrap();
+                let (_, held_capacity) = crate::store::retry_busy(|| {
+                    state.effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
+                })
+                .unwrap();
                 release.send(()).unwrap();
                 tokio::time::timeout(Duration::from_secs(5), finished)
                     .await
@@ -2754,9 +2755,10 @@ mod tests {
                     !candidate_path.exists(),
                     "candidate retained after {action}"
                 );
-                let (_, released_capacity) = state
-                    .effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
-                    .unwrap();
+                let (_, released_capacity) = crate::store::retry_busy(|| {
+                    state.effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
+                })
+                .unwrap();
                 assert!(released_capacity > held_capacity);
                 assert_eq!(committed_archive(&state, &identity), prior);
                 continue;

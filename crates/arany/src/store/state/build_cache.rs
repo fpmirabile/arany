@@ -116,7 +116,9 @@ fn valid_identity_path(path: &Path) -> bool {
 
 // flock release can lag behind a drop while another test thread spawns a child.
 #[cfg(test)]
-fn retry_busy<T>(mut attempt: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreError> {
+pub(crate) fn retry_busy<T>(
+    mut attempt: impl FnMut() -> Result<T, StoreError>,
+) -> Result<T, StoreError> {
     for _ in 1..50 {
         match attempt() {
             Err(StoreError::BuildCacheBusy) => {
@@ -393,7 +395,8 @@ impl Drop for BuildCacheLease {
         if self.defer_recovery {
             return;
         }
-        if let Ok(_aggregate) = lock_file(&self.dir, AGGREGATE_LOCK, true) {
+        // A non-blocking lock would skip recovery whenever a holder or a forked child still has the lock.
+        if let Ok(_aggregate) = lock_file(&self.dir, AGGREGATE_LOCK, false) {
             let _ = recover_transaction(&self.dir, &self.token);
         }
     }
