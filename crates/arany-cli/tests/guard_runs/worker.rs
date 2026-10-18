@@ -158,9 +158,6 @@ async fn worker_case(case: &'static str) {
         }
     };
     drop(running);
-    if case == "time" {
-        tokio::time::resume();
-    }
     let violations = provider.violations.lock().unwrap().clone();
     assert!(violations.is_empty(), "{case}: {violations:?}");
     let calls = provider.requests.lock().unwrap().clone();
@@ -288,7 +285,6 @@ async fn foreground_worker_guard_journey_budgets_denials_and_private_vs_publicat
     for case in [
         "calls",
         "tokens",
-        "time",
         "denial",
         "no_channel",
         "integration_denial",
@@ -301,6 +297,12 @@ async fn foreground_worker_guard_journey_budgets_denials_and_private_vs_publicat
     ] {
         worker_case(case).await;
     }
+}
+
+// The case advances the paused clock by an hour; its own runtime keeps that offset from later cases.
+#[tokio::test]
+async fn foreground_worker_guard_journey_active_time_budget_closes_the_goal() {
+    worker_case("time").await;
 }
 
 fn pad_worker_session(state: &Path, id: SessionId) {
