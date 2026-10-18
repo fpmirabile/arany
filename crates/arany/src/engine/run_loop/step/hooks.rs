@@ -29,9 +29,9 @@ pub(super) struct HookFold {
     stop: HookStop,
 }
 
-pub(super) struct PostFold {
+pub(in crate::engine::run_loop) struct PostFold {
     pub(super) feedback: Vec<String>,
-    pub(super) stop: HookStop,
+    pub(in crate::engine::run_loop) stop: HookStop,
 }
 
 struct HookRun {
@@ -78,12 +78,20 @@ impl HookFold {
         self.stop == HookStop::ActiveTime
     }
 
-    pub(super) fn denial(&self, intent: EffectIntent) -> Answer {
+    pub(super) fn denial(&self, intent: EffectIntent, child: bool) -> Answer {
         match self.stop {
             HookStop::ActiveTime => Answer {
-                observation: active_time_limit_observation(intent),
-                refused: false,
-                active_time: Some(ActiveTime {
+                observation: if child {
+                    not_dispatched(
+                        intent,
+                        ToolDisposition::Limit,
+                        "Delegation deadline reached; no operation was dispatched",
+                    )
+                } else {
+                    active_time_limit_observation(intent)
+                },
+                refused: child,
+                active_time: (!child).then_some(ActiveTime {
                     segment: None,
                     exhausted: true,
                 }),
@@ -92,7 +100,11 @@ impl HookFold {
                 observation: not_dispatched(
                     intent,
                     ToolDisposition::Denied,
-                    "Hook outcome uncertain; no operation was dispatched",
+                    if self.stop == HookStop::Requested {
+                        "Hook stopped this Run; no operation was dispatched"
+                    } else {
+                        "Hook outcome uncertain; no operation was dispatched"
+                    },
                 ),
                 refused: true,
                 active_time: None,
@@ -212,9 +224,8 @@ impl RunLoop<'_> {
 
     // Upper bound of Events and active time one step's hooks can add: its own PreToolUse set plus the
     // PostToolUse set of the requested Tool, which runs after a Command's integration step.
-    pub(super) fn hook_admission(
+    pub(in crate::engine::run_loop) fn hook_admission(
         &self,
-        grant: &Grant<'_>,
         runtime: &ToolRuntime,
         call: &ToolCall,
         post_call: &ToolCall,
@@ -222,7 +233,7 @@ impl RunLoop<'_> {
         let Some(config) = runtime.permissions() else {
             return (0, 0, 0);
         };
-        if matches!(grant, Grant::Researcher { .. }) || call.is_internal() {
+        if call.is_internal() {
             return (0, 0, 0);
         }
         let (Ok(pre), Ok(post)) = (
@@ -247,6 +258,16 @@ impl RunLoop<'_> {
                 .min(self.ledger().active_remaining_ms().unwrap_or(u64::MAX))
         };
         (pre.len() + post.len(), active_ms(&pre), active_ms(&post))
+    }
+
+    pub(in crate::engine::run_loop) fn hook_time(
+        &self,
+        runtime: &ToolRuntime,
+        call: &ToolCall,
+        available: std::time::Duration,
+    ) -> std::time::Duration {
+        let (_, pre, post) = self.hook_admission(runtime, call, call);
+        std::time::Duration::from_millis(pre.saturating_add(post)).min(available / 2)
     }
 
     // Room the next request keeps for the feedback lines PostToolUse hooks may add.
@@ -284,12 +305,6 @@ impl RunLoop<'_> {
         if plans.is_empty() && post.is_empty() {
             return Ok(HookFold::none());
         }
-        if matches!(grant, Grant::Researcher { .. }) {
-            return Ok(HookFold::deny(
-                "hooks are unavailable to delegated research",
-                0,
-            ));
-        }
         if !post.is_empty() {
             // The bare form is the smallest stdin a post hook can get, so it must fit the Guard task.
             let Ok(bare) = post_tool_use_input(
@@ -299,7 +314,8 @@ impl RunLoop<'_> {
                 intent.id,
                 serde_json::json!("x".repeat(MAX_HOOK_INPUT_BYTES + 1)),
                 0,
-            ) else {
+            )
+            .and_then(|input| self.integration_hook_input(input, &intent.call)) else {
                 return Ok(HookFold::deny("hook input exceeds its limit", 0));
             };
             if !self.task_fits_all(&runtime.with_hook_stdin(&bare), intent.agent_run_id, &post) {
@@ -310,6 +326,7 @@ impl RunLoop<'_> {
             return Ok(HookFold::none());
         }
         let Ok(input) = pre_tool_use_input(self.session_id, config.mode(), &intent.call, intent.id)
+            .and_then(|input| self.integration_hook_input(input, &intent.call))
         else {
             return Ok(HookFold::deny("hook input exceeds its limit", 0));
         };
@@ -329,7 +346,7 @@ impl RunLoop<'_> {
                     HookEvent::PreToolUse,
                     &plan,
                     (subject_digest, input_digest),
-                    None,
+                    grant.deadline(),
                 )
                 .await?
             else {
@@ -354,6 +371,11 @@ impl RunLoop<'_> {
                 return Ok(fold);
             }
             match result {
+                HookResult::Stopped { .. } => {
+                    fold.stop = HookStop::Requested;
+                    fold.restriction = Some(Decision::Deny);
+                    return Ok(fold);
+                }
                 HookResult::Restricted {
                     decision: Decision::Deny,
                     reason,
@@ -366,7 +388,14 @@ impl RunLoop<'_> {
                 HookResult::Narrowed { call } => {
                     fold.restriction = Some(Decision::Deny);
                     if !narrowable {
-                        fold.reason = Some("hook narrowing limit".into());
+                        fold.reason = Some(
+                            if grant.deadline().is_some() {
+                                "delegated Tool input cannot be rewritten"
+                            } else {
+                                "hook narrowing limit"
+                            }
+                            .into(),
+                        );
                     } else if narrowing_holds(&runtime, config, &intent.call, &call) {
                         fold.narrowed = Some(call);
                     } else {
@@ -385,11 +414,12 @@ impl RunLoop<'_> {
     }
 
     // Runs after the Tool's `ToolFinished`: feedback never changes what the Tool did.
-    pub(super) async fn post_tool_use_hooks(
+    pub(in crate::engine::run_loop) async fn post_tool_use_hooks(
         &self,
         runtime: &ToolRuntime,
         config: &PermissionConfig,
         observation: &ToolObservation,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<PostFold, EngineError> {
         let mut fold = PostFold {
             feedback: Vec::new(),
@@ -414,7 +444,14 @@ impl RunLoop<'_> {
                 response.clone(),
                 budget,
             )
-            .map_err(|_| EngineError::InvalidRequest)?;
+            .and_then(|input| self.integration_hook_input(input, call));
+            let Ok(input) = input else {
+                if budget == 0 {
+                    return Err(EngineError::InvalidRequest);
+                }
+                budget = if budget < 2048 { 0 } else { budget / 2 };
+                continue;
+            };
             let sized = runtime.with_hook_stdin(&input);
             if self.task_fits_all(&sized, observation.intent.agent_run_id, &plans) {
                 break (input, sized);
@@ -435,7 +472,7 @@ impl RunLoop<'_> {
                     HookEvent::PostToolUse,
                     &plan,
                     (subject_digest, input_digest),
-                    None,
+                    deadline,
                 )
                 .await?
             else {
@@ -461,18 +498,16 @@ impl RunLoop<'_> {
         Ok(fold)
     }
 
-    pub(in crate::engine) async fn lifecycle_hooks(
-        &self,
+    pub(in crate::engine) fn lifecycle_hooks<'a>(
+        &'a self,
         agent: crate::session::AgentRunId,
         event: HookEvent,
-        subject: &str,
-        message: &str,
+        subject: &'a str,
+        message: &'a str,
         deadline: Option<tokio::time::Instant>,
         feedback_fits: bool,
-    ) -> Result<Option<String>, EngineError> {
-        // Boxed so the hook state does not inflate the run loop's future.
+    ) -> super::BoxedStep<'a, Option<String>> {
         Box::pin(self.run_lifecycle_hooks(agent, event, subject, message, deadline, feedback_fits))
-            .await
     }
 
     async fn run_lifecycle_hooks(
@@ -518,7 +553,7 @@ impl RunLoop<'_> {
             })
             .unwrap_or_default();
         if let Some(reused) = self.recorded_occurrence(event, digest, &matched)? {
-            return Ok(reused);
+            return Ok(self.idle_compact_stop(event, digest)?.or(reused));
         }
         let plans = config
             .matched_hooks(event, |group| group.matches(subject))
@@ -622,7 +657,7 @@ impl RunLoop<'_> {
                 return Err(crate::tools::ToolError::Uncertain.into());
             }
             if matches!(run.result, HookResult::Stopped { .. }) {
-                return Ok(None);
+                return self.idle_compact_stop(event, digest);
             }
             if run.exhausted && deadline.is_none() {
                 return Err(EngineError::GoalBudgetExhausted);
@@ -632,6 +667,27 @@ impl RunLoop<'_> {
             }
         }
         Ok(None)
+    }
+
+    fn idle_compact_stop(
+        &self,
+        event: HookEvent,
+        digest: [u8; 32],
+    ) -> Result<Option<String>, EngineError> {
+        self.ledger().view(|view| {
+            (event == HookEvent::PreCompact
+                && view.runs.last().is_some_and(|run| {
+                    run.status != crate::session::RunStatus::Active
+                        && run.lifecycle_hooks.iter().any(|hook| {
+                            hook.invocation.event == event
+                                && hook.invocation.subject_digest == digest
+                                && hook.outcome.as_ref().is_some_and(|outcome| {
+                                    matches!(outcome.result, HookResult::Stopped { .. })
+                                })
+                        })
+                }))
+            .then(|| "Hook stopped compaction".into())
+        })
     }
 
     // An occurrence runs once: a retry reuses its journaled outcome and never reruns a hook.
@@ -768,6 +824,51 @@ impl RunLoop<'_> {
         Ok(reason.into())
     }
 
+    fn integration_hook_input(
+        &self,
+        input: String,
+        call: &ToolCall,
+    ) -> Result<String, ConfigError> {
+        let ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::WorkerHandover { data, .. },
+        } = call
+        else {
+            return Ok(input);
+        };
+        let paths = self
+            .ledger()
+            .view(|view| {
+                view.runs
+                    .last()
+                    .and_then(|run| {
+                        run.workers
+                            .data
+                            .iter()
+                            .find(|sealed| &sealed.reference == data)
+                    })
+                    .and_then(|sealed| match &sealed.facts {
+                        crate::session::worker::WorkerDataFacts::Changes(files) => Some(
+                            files
+                                .iter()
+                                .map(|file| file.path.clone())
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+            })
+            .ok()
+            .flatten()
+            .ok_or(ConfigError::Limit("sealed hook files"))?;
+        let mut input: serde_json::Value =
+            serde_json::from_str(&input).map_err(|_| ConfigError::Limit("hook input"))?;
+        input["tool_input"]["files"] = serde_json::json!(paths);
+        let input = input.to_string();
+        if input.len() > MAX_HOOK_INPUT_BYTES {
+            return Err(ConfigError::Limit("32 KiB hook input"));
+        }
+        Ok(input)
+    }
+
     fn task_fits_all(
         &self,
         runtime: &ToolRuntime,
@@ -796,12 +897,13 @@ impl RunLoop<'_> {
         EngineError,
     > {
         Ok(match clock {
-            HookClock::Pause(pause) => self.dispatch_guard(runtime, hook_intent, pause).await?,
+            HookClock::Pause(pause) => {
+                Box::pin(self.dispatch_guard(runtime, hook_intent, pause)).await?
+            }
             HookClock::Deadline(deadline) => {
                 let cancellation = crate::engine::RunCancellation::new();
                 let mut parent = self.controls.cancellation.clone();
-                let execution = runtime.execute(hook_intent, cancellation.clone());
-                tokio::pin!(execution);
+                let mut execution = Box::pin(runtime.execute(hook_intent, cancellation.clone()));
                 let observation = tokio::select! {
                     observation = &mut execution => observation,
                     () = tokio::time::sleep_until(deadline) => { cancellation.cancel(); execution.await },
@@ -919,7 +1021,7 @@ impl RunLoop<'_> {
         })
         .await?;
         let (observation, segment, exhausted) =
-            self.dispatch_hook(runtime, hook_intent, clock).await?;
+            Box::pin(self.dispatch_hook(runtime, hook_intent, clock)).await?;
         self.clear_tool_queue();
         if let Some(segment) = segment {
             self.settle_active_segment(segment)?;

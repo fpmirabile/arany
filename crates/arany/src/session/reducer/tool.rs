@@ -137,9 +137,11 @@ pub(super) fn apply(
                 .len()
                 .checked_sub(2)
                 .is_some_and(|index| run.tools[index].narrowed_call().is_some());
+            let primary = run.primary().is_some_and(|agent| agent.id == *agent_run_id);
             let tool = pending_tool(run, *agent_run_id)?;
             let narrowing_holds = !verdict.narrowed
-                || !chained
+                || primary
+                    && !chained
                     && match tool.hooks.last().and_then(|hook| hook.outcome.as_ref()) {
                         Some(crate::tools::permissions::HookOutcome {
                             result: HookResult::Narrowed { call },
@@ -193,9 +195,7 @@ pub(super) fn apply(
             }
             let previous = current.previous_subject_sequence();
             let run = active_run(current, *run_id)?;
-            if !permissions_pinned(run)
-                || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
-            {
+            if !permissions_pinned(run) || hook.intent.agent_run_id != *agent_run_id {
                 return Err(ReplayError::InvalidTransition);
             }
             if hook.active_ceiling_ms.is_some() {
@@ -203,7 +203,8 @@ pub(super) fn apply(
             }
             let post = hook.event == HookEvent::PostToolUse;
             let (tool, state_allows) = if post {
-                let (tool, adjacent) = post_target(run, &hook.subject_digest, previous)?;
+                let (tool, adjacent) =
+                    post_target(run, *agent_run_id, &hook.subject_digest, previous)?;
                 let succeeded = tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == crate::tools::ToolDisposition::Succeeded
                 });
@@ -226,6 +227,7 @@ pub(super) fn apply(
                 .count();
             if !state_allows
                 || tool.intent.call.is_internal()
+                || tool.intent.agent_run_id != *agent_run_id
                 || hook.subject_digest != tool.intent.digest()
                 || hook.intent.policy_digest != tool.intent.policy_digest
                 || hook.intent.workspace_device != tool.intent.workspace_device
@@ -317,22 +319,22 @@ pub(super) fn apply(
             }
             let previous = current.previous_subject_sequence();
             let run = active_run(current, *run_id)?;
-            if !permissions_pinned(run)
-                || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
-            {
+            if !permissions_pinned(run) {
                 return Err(ReplayError::InvalidTransition);
             }
             if outcome.boundary_active_ms.is_some() {
                 return Err(ReplayError::InvalidTransition);
             }
-            let count = run.tools.len();
-            let tool = run
-                .tools
-                .iter_mut()
-                .skip(count.saturating_sub(2))
-                .rev()
-                .find(|tool| tool.hooks.last().is_some_and(|view| view.outcome.is_none()))
-                .ok_or(ReplayError::InvalidTransition)?;
+            let tool = if run.primary().is_some_and(|agent| agent.id == *agent_run_id) {
+                run.tools
+                    .iter_mut()
+                    .rev()
+                    .take(2)
+                    .find(|tool| tool.hooks.last().is_some_and(|view| view.outcome.is_none()))
+            } else {
+                Some(pending_tool(run, *agent_run_id)?)
+            }
+            .ok_or(ReplayError::InvalidTransition)?;
             let observed = tool.observation.is_some();
             let sequence = tool.hook_sequence;
             let view = tool
@@ -340,6 +342,7 @@ pub(super) fn apply(
                 .last_mut()
                 .filter(|view| {
                     view.outcome.is_none()
+                        && outcome.observation.intent.agent_run_id == *agent_run_id
                         && view.invocation.intent == outcome.observation.intent
                         && (view.invocation.event == HookEvent::PostToolUse) == observed
                         && (!observed || sequence == Some(previous))
@@ -600,22 +603,38 @@ fn permissions_pinned(run: &RunView) -> bool {
 // integrated. The hook must directly follow that Tool's latest journaled step.
 fn post_target<'a>(
     run: &'a mut RunView,
+    actor: crate::session::AgentRunId,
     subject: &[u8; 32],
     previous: u64,
 ) -> Result<(&'a mut ToolView, bool), ReplayError> {
-    let last = run
-        .tools
+    let tools = if run
+        .primary()
+        .is_some_and(|agent| agent.id == actor && agent.status == AgentStatus::Active)
+    {
+        &mut run.tools
+    } else {
+        &mut run
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == actor && agent.status == AgentStatus::Active)
+            .ok_or(ReplayError::InvalidTransition)?
+            .tools
+    };
+    let last = tools
         .len()
         .checked_sub(1)
         .ok_or(ReplayError::InvalidTransition)?;
-    let integration = &run.tools[last];
+    let integration = &tools[last];
     if matches!(
         integration.intent.call,
-        crate::tools::ToolCall::ApplyChangeset { .. }
+        crate::tools::ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt { .. }
+        }
     ) && integration.intent.digest() == *subject
     {
         return Err(ReplayError::InvalidTransition);
     }
+
     let integrated = matches!(
         &integration.intent.call,
         crate::tools::ToolCall::ApplyChangeset {
@@ -637,9 +656,9 @@ fn post_target<'a>(
             .is_some_and(|changeset| !changeset.files.is_empty());
     let tail = integration
         .finished_sequence
-        .max(run.tools[index].hook_sequence);
+        .max(tools[index].hook_sequence);
     let adjacent = !awaiting_integration && tail == Some(previous);
-    Ok((&mut run.tools[index], adjacent))
+    Ok((&mut tools[index], adjacent))
 }
 
 fn pending_tool(

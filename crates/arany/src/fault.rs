@@ -19,6 +19,13 @@ enum Fault {
     ),
     #[cfg_attr(not(test), expect(dead_code, reason = "read only by test fixtures"))]
     CandidateSync(String),
+    #[cfg(test)]
+    CandidateSyncGate(
+        String,
+        oneshot::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+        oneshot::Sender<()>,
+    ),
     #[cfg_attr(not(test), expect(dead_code, reason = "read only by test fixtures"))]
     CommitMarker(String),
 }
@@ -75,6 +82,26 @@ impl FaultPlan {
     }
 
     #[cfg(test)]
+    pub(crate) fn gate_candidate_sync(
+        identity: &BuildCacheIdentity,
+    ) -> (
+        oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+        oneshot::Receiver<()>,
+    ) {
+        let (entered, wait_entered) = oneshot::channel();
+        let (release, wait_release) = std::sync::mpsc::channel();
+        let (finished, wait_finished) = oneshot::channel();
+        plan().push(Fault::CandidateSyncGate(
+            identity.token(),
+            entered,
+            wait_release,
+            finished,
+        ));
+        (wait_entered, release, wait_finished)
+    }
+
+    #[cfg(test)]
     pub(crate) fn fail_commit_marker(identity: &BuildCacheIdentity) {
         plan().push(Fault::CommitMarker(identity.token()));
     }
@@ -108,10 +135,23 @@ impl FaultPlan {
         }
     }
 
-    pub(crate) fn candidate_sync(token: &str) -> io::Result<()> {
+    pub(crate) fn candidate_sync(token: &str) -> io::Result<Option<oneshot::Sender<()>>> {
+        let finished = None;
+        #[cfg(test)]
+        let finished = if let Some(Fault::CandidateSyncGate(_, entered, release, finished)) =
+            take(|fault| matches!(fault, Fault::CandidateSyncGate(key, ..) if key == token))
+        {
+            let _ = entered.send(());
+            release
+                .recv()
+                .map_err(|_| io::Error::other("candidate sync gate closed"))?;
+            Some(finished)
+        } else {
+            finished
+        };
         match take(|fault| matches!(fault, Fault::CandidateSync(key) if key == token)) {
             Some(_) => Err(io::Error::other("injected candidate sync failure")),
-            None => Ok(()),
+            None => Ok(finished),
         }
     }
 
