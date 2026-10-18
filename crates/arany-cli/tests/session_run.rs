@@ -138,6 +138,10 @@ fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+#[path = "session_run/roster.rs"]
+mod roster;
+
 #[cfg(unix)]
 #[path = "session_run/custom.rs"]
 mod custom;
@@ -1617,7 +1621,8 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .expect("pending objective");
         let mut config = RunConfig {
             agent_definitions: None,
-providers: None,
+            roster: None,
+            providers: None,
             provider: "scripted".into(),
             model: "test-model".into(),
             effort: None,
@@ -2216,6 +2221,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
             let primary = AgentRunId::new();
             let config = RunConfig {
                 agent_definitions: None,
+                roster: None,
                 providers: None,
                 provider: "scripted".into(),
                 model: "test-model".into(),
@@ -2815,7 +2821,13 @@ fn serve_stdio_initializes_refuses_missing_credentials_and_exits_cleanly() {
     assert_eq!(messages[0]["id"], 1);
     assert_eq!(
         messages[0]["result"]["capabilities"],
-        serde_json::json!(["threads_v1", "turns_v1", "items_v1", "interrupt_receipt_v1"])
+        serde_json::json!([
+            "threads_v1",
+            "turns_v1",
+            "items_v1",
+            "interrupt_receipt_v1",
+            "approvals_v1"
+        ])
     );
     assert_eq!(messages[1]["error"]["code"], -32001);
     assert_eq!(

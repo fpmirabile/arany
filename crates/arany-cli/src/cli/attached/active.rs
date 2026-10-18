@@ -88,6 +88,9 @@ pub(super) fn validate_objective_inputs(
     admission: &Admission,
     objective: &str,
 ) -> Result<(), String> {
+    if admission.roster.is_some() {
+        return Ok(());
+    }
     let paths = objective_includes(admission, objective)?;
     let root = arany::StateRoot::admit(&admission.state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
@@ -293,6 +296,17 @@ pub(super) fn preflight_idle_run(
             },
         );
     };
+    if let Some(name) = &admission.roster {
+        let selected =
+            crate::cli::provider::roster::load(&admission.state_dir, &admission.workspace, name)?;
+        selected.matches_selection(Selection {
+            workspace: &admission.workspace,
+            profile,
+            model,
+            effort: view.defaults.effort,
+            account_id: view.defaults.account_id,
+        })?;
+    }
     goal_request(view, start).map_err(|error| format!("Error: {error}"))?;
     if matches!(start, GoalStart::Resume | GoalStart::Continue) && has_images {
         return Err(
@@ -342,6 +356,17 @@ pub(super) async fn submit_objective(
         .model
         .clone()
         .ok_or("select /model before submitting")?;
+    let roster = admission
+        .roster
+        .as_ref()
+        .map(|name| {
+            crate::cli::provider::roster::load(&admission.state_dir, &admission.workspace, name)
+        })
+        .transpose()?;
+    let manifest = roster
+        .as_ref()
+        .map(|selected| selected.manifest())
+        .transpose()?;
     let starting_sequence = view.last_sequence;
     let autonomous = match goal {
         GoalStart::Resume => view
@@ -387,6 +412,11 @@ pub(super) async fn submit_objective(
     let steering = RunSteering::new();
     draw_active_snapshot(terminal, view, composer, false, ActiveStop::Running, None)
         .map_err(|error| error.to_string())?;
+    if let Some(manifest) = &manifest {
+        terminal
+            .draw_busy_notice(view, composer, Some(TerminalNotice::History(manifest)))
+            .map_err(|error| error.to_string())?;
+    }
     let future = run::run_selected(
         engine,
         &admission.state_dir,
@@ -406,6 +436,7 @@ pub(super) async fn submit_objective(
             approvals: &approvals,
         },
         steering.clone(),
+        roster,
     );
     tokio::pin!(future);
     let mut stop = ActiveStop::Running;
@@ -898,7 +929,13 @@ pub(super) async fn compact_current(
     composer: &mut Composer,
     pinned: Option<(&arany::RunConfig, arany::RunId)>,
 ) -> Result<CompactionOutcome, String> {
-    let (profile, model, effort, account_id) = if let Some((config, _)) = pinned {
+    let pinned_config = pinned.map(|(config, _)| config).or_else(|| {
+        view.runs
+            .last()
+            .and_then(|run| run.config.as_ref())
+            .filter(|config| config.roster.is_some())
+    });
+    let (profile, model, effort, account_id) = if let Some(config) = pinned_config {
         (
             config.provider.as_str(),
             config.model.as_str(),
@@ -954,6 +991,10 @@ pub(super) async fn compact_current(
         view.id,
         &admission.workspace,
         pinned.map(|(_, run_id)| run_id),
+        view.runs
+            .last()
+            .and_then(|run| run.config.as_ref())
+            .filter(|config| config.roster.is_some()),
     );
     tokio::pin!(future);
     loop {
@@ -1412,6 +1453,7 @@ mod goal_request_tests {
         view.defaults.provider = Some("openai".into());
         view.defaults.model = Some("gpt-5.4".into());
         let admission = Admission {
+            roster: None,
             telemetry: arany::Telemetry::disabled(),
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,

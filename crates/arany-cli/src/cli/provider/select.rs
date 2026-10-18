@@ -40,13 +40,7 @@ impl FromStr for ProviderArg {
             "chatgpt" => Ok(Self::Chatgpt),
             _ => {
                 let name = value.strip_prefix("custom:").ok_or("invalid Provider")?;
-                if name.is_empty()
-                    || name.len() > 64
-                    || !name.starts_with(|character: char| character.is_ascii_lowercase())
-                    || !name.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
-                    })
-                {
+                if !arany::valid_profile_name(name) {
                     return Err("invalid custom Provider name");
                 }
                 Ok(Self::Custom(name.to_owned()))

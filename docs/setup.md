@@ -169,6 +169,16 @@ API workspace; saved selections never inherit ambient workspace variables.
 [Provider account spec](./specs/provider.md#native-models-and-accounts)
 own workspace validation and admission.
 
+## Select a private roster preset
+
+Create a private `provider-roster.json` in the State directory outside the Workspace, using owner-only file permissions:
+
+```json
+{"version":1,"profiles":[{"name":"main","routes":[{"provider":"openai","model":"gpt-6.1-sol","effort":"medium","account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]}
+```
+
+With the selected route's existing credentials available, use `arany --profile coding` or `arany exec --profile coding "Inspect this project"`. Review the complete billing/route manifest; all candidates must admit before project input. Remove any competing `provider-routing.json` source explicitly. The [Provider contract](./specs/provider.md#named-roster-presets) owns the format, bounds and current fixed-role delivery boundary; this example makes no live-model support claim.
+
 ## Headless ChatGPT use and optional diagnostics
 
 After consenting to and connecting the intended account, list its models and

@@ -407,12 +407,19 @@ impl RunView {
     }
 
     pub(crate) fn compaction_matches(&self, record: &CompactionRecord) -> bool {
-        let Some(routes) = self
-            .config
-            .as_ref()
-            .and_then(|config| config.providers.as_ref())
-        else {
+        let Some(config) = &self.config else {
             return true;
+        };
+        let initial = config
+            .providers
+            .as_ref()
+            .and_then(|routes| routes.compaction.first())
+            .or_else(|| {
+                let roster = config.roster.as_ref()?;
+                roster.chain(&roster.providers.compaction)?.first()
+            });
+        let Some(initial) = initial else {
+            return config.roster.is_none();
         };
         let identity = self
             .provider_fallbacks
@@ -420,7 +427,7 @@ impl RunView {
             .rev()
             .find(|(_, fallback)| fallback.role == crate::provider::ProviderRole::Compaction)
             .map(|(_, fallback)| &fallback.to)
-            .unwrap_or(&routes.compaction[0]);
+            .unwrap_or(initial);
         record.output_tokens.is_none_or(|tokens| {
             tokens
                 <= identity

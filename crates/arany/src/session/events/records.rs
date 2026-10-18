@@ -116,6 +116,8 @@ impl ContextUsage {
 pub struct RunConfig {
     #[serde(deserialize_with = "Option::deserialize")]
     pub agent_definitions: Option<crate::tools::DefinitionRegistryPin>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub roster: Option<Box<crate::provider::RosterSnapshot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<crate::provider::ProviderRoutes>,
     pub provider: String,
@@ -191,6 +193,46 @@ impl RunConfig {
             .agent_definitions
             .as_ref()
             .is_some_and(|pin| !pin.valid() || self.tool_policy.is_none())
+            || self.roster.as_ref().is_some_and(|roster| {
+                !roster.valid()
+                    || std::iter::once(&roster.providers.primary)
+                        .chain(roster.child_profiles.iter())
+                        .any(|name| {
+                            roster.chain(name).is_none_or(|chain| {
+                                chain.iter().any(|identity| {
+                                    self.provider_concurrency > identity.limits.concurrency
+                                })
+                            })
+                        })
+                    || roster
+                        .role_routes()
+                        .is_none_or(|routes| match &self.providers {
+                            Some(pinned) => *pinned != routes,
+                            None => self.identity().is_none_or(|identity| {
+                                routes.values().iter().any(|chain| {
+                                    chain.len() != 1
+                                        || chain[0].profile != identity.profile
+                                        || chain[0].model != identity.model
+                                        || chain[0].effort != identity.effort
+                                        || chain[0].provenance != identity.provenance
+                                        || chain[0].limits.max_output_tokens
+                                            != identity.limits.max_output_tokens
+                                        || chain[0].limits.output_token_bound
+                                            != identity.limits.output_token_bound
+                                        || identity.limits.concurrency > chain[0].limits.concurrency
+                                })
+                            }),
+                        })
+                    || self.tool_policy.is_some()
+                        && roster.child_profiles.iter().any(|name| {
+                            roster.chain(name).is_none_or(|chain| {
+                                chain.iter().any(|identity| {
+                                    identity.custom_provenance().is_some()
+                                        || !identity.shares_account(&chain[0])
+                                })
+                            })
+                        })
+            })
             || self.providers.as_ref().is_some_and(|providers| {
                 !providers.valid()
                     || providers
@@ -208,6 +250,13 @@ impl RunConfig {
                                 != primary.limits.output_token_bound
                             || self.provider_concurrency > primary.limits.concurrency
                     })
+                    || self.tool_policy.is_some()
+                        && providers.values().iter().take(2).any(|chain| {
+                            chain.iter().any(|identity| {
+                                identity.custom_provenance().is_some()
+                                    || !identity.shares_account(&chain[0])
+                            })
+                        })
                     || self.tool_policy.is_some()
                         && providers.values().iter().take(2).any(|chain| {
                             chain.iter().any(|identity| {

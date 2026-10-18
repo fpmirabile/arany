@@ -5,7 +5,13 @@ use serde_json::Value;
 
 const MAX_ENCODED_IMAGE_BYTES: usize = arany::MAX_IMAGE_BYTES.div_ceil(3) * 4;
 
-pub const CAPABILITIES: &[&str] = &["threads_v1", "turns_v1", "items_v1", "interrupt_receipt_v1"];
+pub const CAPABILITIES: &[&str] = &[
+    "threads_v1",
+    "turns_v1",
+    "items_v1",
+    "interrupt_receipt_v1",
+    "approvals_v1",
+];
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

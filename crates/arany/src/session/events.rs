@@ -150,7 +150,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         "ProviderFallbackUsed" => Some(1),
         "ToolPermissionDecided" => Some(2),
         "ToolFinished" => Some(10),
-        "RunStarted" => Some(11),
+        "RunStarted" => Some(12),
         "RunFinished" => Some(7),
         "GoalProviderCallReserved" => Some(7),
         "GoalCompactionCallReserved" => Some(7),

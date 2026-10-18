@@ -65,6 +65,12 @@ Context compilation is a pure function of its inputs. It reads no clock, randomn
 
 Only the Provider renderer turns a typed request into the conversation: it alone decides what is `system` (a closed set), what is user input and what is labelled untrusted data. System prompt text is loaded byte-for-byte from `prompts/` files. Everything before a Run's loop is byte-stable for that Run; each later request is the previous one plus appended blocks, and compaction is the only rewrite.
 
+## Roster recovery and compaction
+
+Decision O7 (product/security): resuming a roster-bound interrupted Goal requires explicit `--profile` with the same normalized selection digest, plus fresh credential/consent/evidence admission. An omitted selector or drift refuses before Workspace content or inference, with guidance to restore the preset or start a new Goal. Compare selection metadata, never expiring evidence fingerprints. New Goals may choose another preset. Reopen reduces interrupted work without dispatch; explicit resume creates fresh Run/AgentRun IDs with chains starting at index zero. A trailing accepted Message without RunStarted does not erase the last pinned selection. No historical actor is hot-rebound and replay grants no consent.
+
+The [Provider roster contract](./provider.md#named-roster-presets) owns the submission snapshot and selector; no Session preset-default record exists. Automatic and manual compaction of a roster Run re-admit its exact pinned compaction role and provenance through current authorization/evidence rules, including when all role chains use the inherited representation. They never reread a changed roster to choose a destination or admit unrelated profiles. Ordinary inherited-mode compaction retains its existing selection behavior. Failure or cancellation preserves canonical history and the last good summary; exec adds no hidden maintenance call. The [routing corpus](../../crates/arany/tests/engine_run/routing.rs), [custom journey](../../crates/arany-cli/tests/session_run/custom.rs) and [automatic compaction journey](../../crates/arany-cli/tests/session_run/auto_compaction.rs) own snapshot tampering, explicit recovery and immutable selection evidence.
+
 ## Persistence facts
 
 - Every canonical Event carries `session_id`; Run and AgentRun scopes are optional where an Event is Session-only. Session lists may use rebuildable indexes, never as a second source of truth.

@@ -879,7 +879,7 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
             result: "continue later".into(),
         },
     )]));
-    let first_engine = arany::test_support::engine::open(
+    let first_engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -899,7 +899,7 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
         .expect("first Goal Run");
     first_engine.close().await.expect("first engine shutdown");
 
-    let engine = arany::test_support::engine::open(
+    let engine = engine_support::open(
         StateRoot::open_existing(&state_path).expect("reopened state"),
         EngineConfig::default(),
     )
@@ -1002,7 +1002,7 @@ async fn invalid_response_on_the_last_allowed_call_is_a_failure_not_a_budget_clo
             result: "invalid finish".into(),
         },
     )]));
-    let engine = arany::test_support::engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
@@ -1518,6 +1518,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
             run_id,
             config: arany::RunConfig {
                 agent_definitions: None,
+                roster: None,
                 providers: None,
                 provider: "scripted".into(),
                 model: "scripted-model".into(),
@@ -4813,6 +4814,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
             run_id,
             config: arany::RunConfig {
                 agent_definitions: None,
+                roster: None,
                 providers: None,
                 provider: "scripted".into(),
                 model: "scripted-model".into(),
@@ -5373,7 +5375,7 @@ async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
     let primary =
         Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("scripted", "primary"));
     let mut bindings = AdmittedProviders::single(primary.clone());
-    bindings.compaction = vec![failing.clone(), fallback.clone()];
+    bindings.roles.compaction = vec![failing.clone(), fallback.clone()];
     let engine = facts_engine(
         StateRoot::admit(&state_path).expect("private state"),
         &state_path,

@@ -18,6 +18,8 @@ mod native_check;
 mod openai;
 pub(crate) mod prompts;
 mod render;
+mod roster;
+pub use roster::{AdmittedRoster, NamedProviderRoutes, RosterSnapshot, valid_profile_name};
 mod routing;
 pub use routing::{
     AdmittedProviders, MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_SWITCHES, ProviderFallback,

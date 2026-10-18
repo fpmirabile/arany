@@ -211,7 +211,7 @@ pub(crate) fn display_commentary(run: &RunView) -> Vec<(u32, u8, String)> {
     items
 }
 
-pub(crate) fn unguarded_approval_lines(
+pub fn unguarded_approval_lines(
     intent: &arany::EffectIntent,
     prompt: &arany::UnguardedPrompt,
 ) -> Vec<String> {
@@ -273,7 +273,7 @@ pub(crate) fn unguarded_approval_lines(
     lines
 }
 
-pub(crate) fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
+pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
     use arany::ToolCall;
     let mut lines = vec!["Approve this action?".to_owned()];
     match &intent.call {

@@ -218,6 +218,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     run_id,
                     config: RunConfig {
                         agent_definitions: None,
+                        roster: None,
                         providers: None,
                         provider: "scripted".into(),
                         model: "test-model".into(),

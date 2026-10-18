@@ -1,3 +1,4 @@
+pub(crate) mod roster;
 pub(crate) mod routing;
 pub(crate) mod select;
 

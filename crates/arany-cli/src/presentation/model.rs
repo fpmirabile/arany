@@ -410,6 +410,7 @@ mod tests {
             images: Vec::new(),
             config: Some(RunConfig {
                 agent_definitions: None,
+                roster: None,
                 providers: None,
                 provider: "anthropic".into(),
                 model: "claude-sonnet-5".into(),

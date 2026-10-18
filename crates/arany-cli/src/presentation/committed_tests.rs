@@ -243,10 +243,10 @@ async fn fallback_feedback_names_the_committed_replacement_model() {
         ScriptedProvider::new(vec![finish("fallback answer")])
             .with_profile("scripted", "fallback-model"),
     );
-    let bindings = Providers::all(vec![
+    let bindings = arany::AdmittedProviders::from_roles(Providers::all(vec![
         Arc::new(primary) as Arc<dyn arany::Provider>,
         fallback as Arc<dyn arany::Provider>,
-    ]);
+    ]));
     let run = run_routed(
         &engine,
         bindings,

@@ -1732,6 +1732,7 @@ mod tests {
                         run_id,
                         config: RunConfig {
                             agent_definitions: None,
+                            roster: None,
                             providers: None,
                             provider: "scripted".into(),
                             model: "test-model".into(),

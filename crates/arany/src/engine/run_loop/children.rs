@@ -220,7 +220,14 @@ impl RunLoop<'_> {
         let waves = objectives.len().div_ceil(parallel.max(1));
         let active_bound = delegation_active_bound(
             research,
-            self.routing.providers.child[0].identity().limits.deadline,
+            self.routing
+                .providers
+                .child_chains()
+                .into_iter()
+                .flatten()
+                .map(|provider| provider.identity().limits.deadline)
+                .max()
+                .expect("admitted child chain"),
             waves,
         );
         // Covers every child's calls, Tools and terminal facts plus the largest later admission, so a refusal precedes AgentSpawned.

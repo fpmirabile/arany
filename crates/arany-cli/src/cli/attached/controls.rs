@@ -1262,6 +1262,7 @@ mod tests {
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
             agent_definitions: None,
+            roster: None,
             providers: None,
             provider: "openai".into(),
             model: "gpt-5.4".into(),
@@ -1538,6 +1539,7 @@ mod tests {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let admission = Admission {
+            roster: None,
             telemetry: arany::Telemetry::disabled(),
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
@@ -1676,6 +1678,7 @@ mod tests {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("Workspace");
         let admission = Admission {
+            roster: None,
             telemetry: arany::Telemetry::disabled(),
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,
@@ -1717,6 +1720,7 @@ mod tests {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("Workspace");
         let mut admission = Admission {
+            roster: None,
             telemetry: arany::Telemetry::disabled(),
             state_dir: temp.path().join("state"),
             explicit_state_dir: false,

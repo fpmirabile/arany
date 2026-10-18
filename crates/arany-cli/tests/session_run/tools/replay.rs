@@ -38,6 +38,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     };
     let config = RunConfig {
         agent_definitions: None,
+        roster: None,
         providers: None,
         provider: "scripted".into(),
         model: "replay-model".into(),

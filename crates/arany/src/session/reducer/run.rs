@@ -78,6 +78,22 @@ pub(super) fn apply(
             {
                 return Err(ReplayError::InvalidTransition);
             }
+            let previous = current
+                .runs
+                .iter()
+                .rev()
+                .filter(|run| run.id != *run_id && goal.run_ids.contains(&run.id))
+                .find_map(|run| run.config.as_ref())
+                .and_then(|config| config.roster.as_ref());
+            if previous.is_some_and(|roster| {
+                config
+                    .roster
+                    .as_ref()
+                    .map(|selected| selected.selection_digest)
+                    != Some(roster.selection_digest)
+            }) {
+                return Err(ReplayError::InvalidTransition);
+            }
             let goal_id = goal.id;
             let run = current_run(current, *run_id)?;
             if run.status != RunStatus::Pending || run.config.is_some() {
