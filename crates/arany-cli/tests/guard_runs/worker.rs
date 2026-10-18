@@ -149,6 +149,12 @@ pub(super) async fn worker_case(case: &'static str) {
             &serde_json::to_vec(&serde_json::json!({"hooks":hooks})).unwrap(),
         );
     }
+    if case == "subagent_stop" {
+        let shell = std::fs::canonicalize("/bin/sh").unwrap();
+        let command = serde_json::json!({"name":"sh","executable":shell,"sha256":Sha256::digest(std::fs::read(&shell).unwrap()).iter().map(|byte| format!("{byte:02x}")).collect::<String>(),"interpreter":true,"inputs":[]});
+        private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["notes"],"write":true,"commands":[command],"skills":[],"mcp":[]})).unwrap());
+        private_file(&state.join("permissions.json"), br#"{"hooks":{"SubagentStop":[{"matcher":"editor","hooks":[{"type":"command","command":"exit 0"}]}]}}"#);
+    }
     let engine = engine_support::open(
         root,
         EngineConfig {
@@ -183,7 +189,15 @@ pub(super) async fn worker_case(case: &'static str) {
         max_tokens: (case == "tokens").then_some(12),
         ..Default::default()
     };
-    let provider = Arc::new(ForegroundWorkerProvider::new(&workspace, case, budget));
+    let provider = Arc::new(ForegroundWorkerProvider::new(
+        &workspace,
+        if case == "subagent_stop" {
+            "success"
+        } else {
+            case
+        },
+        budget,
+    ));
     let mut input = request(&workspace, "Edit notes through one foreground worker");
     input.include_paths.clear();
     input.session_id = session;
@@ -331,11 +345,18 @@ pub(super) async fn worker_case(case: &'static str) {
                 | "hook_default_timeout"
                 | "hook_stop_block"
                 | "hook_handover_post"
+                | "subagent_stop"
         ) {
             assert_eq!(run.status, RunStatus::Finished);
             assert_eq!(child_calls, if case == "hook_stop_block" { 12 } else { 4 });
             if case == "hook_stop_block" {
                 assert_eq!(run.lifecycle_hooks.len(), 8);
+            }
+            if case == "subagent_stop" {
+                assert!(run.lifecycle_hooks.iter().any(|h| h.invocation.event
+                    == arany::permissions::HookEvent::SubagentStop
+                    && h.invocation.intent.agent_run_id == run.agents[1].id
+                    && h.outcome.is_some()));
             }
             if case == "hook_write" {
                 let tools = &run.agents[1].tools;
@@ -436,6 +457,7 @@ pub(super) async fn worker_case(case: &'static str) {
 #[tokio::test]
 async fn foreground_worker_guard_journey_publishes_only_the_eligible_handover_and_verifies() {
     worker_case("success").await;
+    worker_case("subagent_stop").await;
     worker_case("unverified").await;
     worker_case("conflict").await;
 }
@@ -549,6 +571,8 @@ async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
         // Killing the Guard parent proves an unknown outcome only on Linux, like the other Uncertain hook journeys.
         #[cfg(target_os = "linux")]
         "hook_uncertain_sibling",
+        "turn_limit",
+        "resume_unknown",
     ] {
         tokio::time::timeout(
             Duration::from_secs(180),
@@ -581,4 +605,40 @@ async fn worker_team_conflict_keeps_completion_order_in_closed_replay() {
     .await;
     assert_eq!(bundle.events, observation.events);
     assert_eq!(bundle.view, observation.view);
+}
+
+#[tokio::test]
+async fn worker_id_resume_uses_fresh_guard_authority_base_and_identity() {
+    Box::pin(arany::test_support::worker_teams::resume_by_id(Path::new(
+        env!("CARGO_BIN_EXE_arany"),
+    )))
+    .await;
+}
+
+#[tokio::test]
+async fn worker_recovery_handoff_is_honest_at_each_lifecycle_point() {
+    for checkpoint in [
+        "private_intent",
+        "private_unknown",
+        "private_result",
+        "handover",
+        "published",
+        "workspace_unknown",
+    ] {
+        Box::pin(arany::test_support::worker_teams::recover_by_id(
+            Path::new(env!("CARGO_BIN_EXE_arany")),
+            checkpoint,
+        ))
+        .await;
+    }
+}
+
+// The case advances the paused clock by an hour, so no wall-clock timeout can wrap it.
+#[tokio::test]
+async fn worker_primary_background_tool_active_time_exhaustion_settles_the_team() {
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "primary_time",
+    )
+    .await;
 }

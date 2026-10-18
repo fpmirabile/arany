@@ -51,6 +51,14 @@ pub(crate) fn selected_registration() -> Result<(Uuid, bool), AuthorizationError
     account::selected_registration()
 }
 
+pub(crate) async fn authenticate(
+    expected_account_id: Option<Uuid>,
+) -> Result<(), AuthorizationError> {
+    tokio::task::spawn_blocking(move || account::authenticate(expected_account_id))
+        .await
+        .map_err(|_| AuthorizationError::Unavailable)?
+}
+
 pub(crate) async fn sign_out_selected(
     workspace: PathBuf,
 ) -> Result<account::SignOutOutcome, AuthorizationError> {
@@ -375,10 +383,6 @@ impl VerifiedCredentials {
 }
 
 impl CodeExchange {
-    pub(crate) fn issued_client_id(&self) -> &str {
-        &self.client_id
-    }
-
     pub(crate) async fn redeem(
         self,
         workspace: &std::path::Path,
@@ -499,6 +503,7 @@ impl AuthorizationAttempt {
         AuthorizationUrl(url)
     }
 
+    #[cfg(test)]
     pub(crate) fn accept_callback(
         self,
         callback_url: &str,
@@ -877,7 +882,7 @@ mod tests {
         let accepted = callback(&first, "code=spent-code&client_id=oaiapp_issued");
         let exchange = first.accept_callback(&accepted).expect("issued client");
         let host_id = exchange.host_id;
-        let client_id = exchange.issued_client_id().to_owned();
+        let client_id = exchange.client_id.clone();
         assert_eq!(client_id, "oaiapp_issued");
         let retry = AuthorizationAttempt::for_new_registration_retry(host_id, client_id, 1456)
             .expect("fresh attempt with issued client");

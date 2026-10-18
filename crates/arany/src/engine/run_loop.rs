@@ -470,16 +470,25 @@ impl<'a> RunLoop<'a> {
         &self,
         root_request: &mut ProviderRequest,
     ) -> Result<(), EngineError> {
-        loop {
+        enum Exit {
+            Stopped,
+            Cancelled,
+            Finished(Finish),
+            Failed,
+            Budget,
+            Settled,
+        }
+
+        let exit = loop {
             let phase = root_request.phase;
             let planning = phase == AgentPhase::RootPlan;
             if self.pause_at_boundary() {
-                return self.settle_stopped_primary().await;
+                break Exit::Stopped;
             }
             let (first, active_segment) = match self.invoke_primary(root_request).await {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
-                    return self.settle_stopped_primary().await;
+                    break Exit::Stopped;
                 }
                 Err(error) => return Err(error),
             };
@@ -525,13 +534,13 @@ impl<'a> RunLoop<'a> {
             .await?;
             self.settle_active_segment(active_segment)?;
             if self.controls.cancellation.is_cancelled() {
-                return self.settle_stopped_primary().await;
+                break Exit::Stopped;
             }
             if matches!(&first, CallResult::Cancelled) {
-                return self.cancel_primary().await;
+                break Exit::Cancelled;
             }
             if self.ledger().active_time_exhausted() {
-                return self.settle_stopped_primary().await;
+                break Exit::Stopped;
             }
             match first {
                 CallResult::Response(ProviderResponse {
@@ -541,11 +550,11 @@ impl<'a> RunLoop<'a> {
                 }) if valid_response => {
                     match self.stop_primary(root_request, &finish, turn).await {
                         Ok(true) => continue,
-                        Ok(false) => return self.finish_primary(finish).await,
+                        Ok(false) => break Exit::Finished(finish),
                         Err(EngineError::GoalBudgetExhausted) => {
-                            return self.settle_stopped_primary().await;
+                            break Exit::Stopped;
                         }
-                        Err(EngineError::ContextTooLarge) => return self.fail_primary().await,
+                        Err(EngineError::ContextTooLarge) => break Exit::Failed,
                         Err(error) => return Err(error),
                     }
                 }
@@ -555,7 +564,7 @@ impl<'a> RunLoop<'a> {
                     ..
                 }) if valid_response => {
                     if self.pause_at_boundary() {
-                        return self.settle_stopped_primary().await;
+                        break Exit::Stopped;
                     }
                     if self
                         .run_children(root_request, delegation.children, delegation.agent, turn)
@@ -563,7 +572,7 @@ impl<'a> RunLoop<'a> {
                     {
                         continue;
                     }
-                    return Ok(());
+                    break Exit::Settled;
                 }
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Tools(requests),
@@ -576,12 +585,21 @@ impl<'a> RunLoop<'a> {
                     {
                         continue;
                     }
-                    return Ok(());
+                    break Exit::Settled;
                 }
-                CallResult::Cancelled => return self.cancel_primary().await,
-                CallResult::Response(_) if budget_refused => return self.fail_for_budget().await,
-                _ => return self.fail_primary().await,
+                CallResult::Cancelled => break Exit::Cancelled,
+                CallResult::Response(_) if budget_refused => break Exit::Budget,
+                _ => break Exit::Failed,
             }
+        };
+
+        match exit {
+            Exit::Stopped => self.settle_stopped_primary().await,
+            Exit::Cancelled => self.cancel_primary().await,
+            Exit::Finished(finish) => self.finish_primary(finish).await,
+            Exit::Failed => self.fail_primary().await,
+            Exit::Budget => self.fail_for_budget().await,
+            Exit::Settled => Ok(()),
         }
     }
 

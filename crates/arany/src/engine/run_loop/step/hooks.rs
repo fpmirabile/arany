@@ -2,7 +2,7 @@ use super::{ActiveTime, Answer, Grant, active_time_limit_observation, not_dispat
 use crate::engine::ledger::{Action, duration_ms};
 use crate::engine::run_loop::{RunLoop, TOOL_CLEANUP_OVERHEAD};
 use crate::engine::{EngineError, STORE_ACTION_OVERHEAD};
-use crate::session::Event;
+use crate::session::{AgentRunId, Event};
 use crate::tools::permissions::{
     CommandHook, ConfigError, Decision, HOOK_RESULT_BYTES, HookEvent, HookIgnoreReason,
     HookInvocation, HookOutcome, HookResult, MAX_HOOK_FEEDBACK_BYTES, MAX_HOOK_INPUT_BYTES,
@@ -599,7 +599,7 @@ impl RunLoop<'_> {
         self.journal
             .admit(
                 self.session_id,
-                2 * plans.len() + self.lifecycle_tail(event),
+                2 * plans.len() + self.lifecycle_tail(agent, event),
                 plans.len(),
             )
             .await?;
@@ -721,9 +721,16 @@ impl RunLoop<'_> {
         Ok(occurrence_verdict(&recorded, matched))
     }
 
-    // A SubagentStop shares the delegation's admission with its siblings, so it reserves a researcher's tail.
-    fn lifecycle_tail(&self, event: HookEvent) -> usize {
-        let tail = if event == HookEvent::SubagentStop {
+    // SubagentStop preserves the actor's complete team settlement tail.
+    fn lifecycle_tail(&self, agent: AgentRunId, event: HookEvent) -> usize {
+        let tail = if event == HookEvent::SubagentStop
+            && self
+                .worker_requests
+                .lock()
+                .is_ok_and(|r| r.contains_key(&agent))
+        {
+            Action::Worker { chunks: 0 }
+        } else if event == HookEvent::SubagentStop {
             Action::Child {
                 in_flight: self.ledger().in_flight_children(),
                 research: true,
@@ -770,7 +777,7 @@ impl RunLoop<'_> {
         );
         let intent = runtime.intent(self.run_id, agent, call);
         self.journal
-            .admit(self.session_id, 2 + self.lifecycle_tail(event), 1)
+            .admit(self.session_id, 2 + self.lifecycle_tail(agent, event), 1)
             .await?;
         let active_ceiling_ms = match self
             .ledger()

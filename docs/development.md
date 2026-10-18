@@ -46,17 +46,25 @@ owns standard and focused lanes. Watch the complete CI run and fix a red result
 before handoff. A new integration target with debug-only coverage must also be
 included in the debug selection.
 
-Both native debug lanes also check ordinary production builds without
-`test-support` and compile all release targets with all features. These checks
-clear CI's `RUSTFLAGS` so they also cover configurations without `arany_ci`.
-A separate production-only Clippy pass rejects `unwrap()` while allowing
-`expect()` for proven invariants:
+Both native debug lanes run production-only Clippy in debug and release without
+`test-support`: selecting `--lib --bins` excludes the dev-dependencies that enable
+it. These passes retain CI's `RUSTFLAGS` to share dependency fingerprints and
+caches; `arany_ci` only affects tests. The debug pass also rejects `unwrap()` while
+allowing `expect()` for proven invariants, and covers the same configuration as a
+debug production `cargo check`:
 
 ```sh
-RUSTFLAGS='' cargo check --workspace --lib --bins --locked --offline
-RUSTFLAGS='' cargo check --workspace --lib --bins --release --locked --offline
-RUSTFLAGS='' cargo check --workspace --all-targets --all-features --release --locked --offline
-RUSTFLAGS='' cargo clippy --workspace --lib --bins --locked --offline -- -D warnings -D clippy::unwrap_used
+cargo clippy --workspace --lib --bins --release --locked --offline -- -D warnings
+cargo clippy --workspace --lib --bins --locked --offline -- -D warnings -D clippy::unwrap_used
+```
+
+Only the Linux debug lane also compiles all release targets with all features,
+replacing CI's `RUSTFLAGS` to cover test alternatives without `arany_ci` while
+denying warnings. This extra dependency rebuild is omitted on macOS to limit
+runner cost:
+
+```sh
+RUSTFLAGS='-D warnings' cargo check --workspace --all-targets --all-features --release --locked --offline
 ```
 
 Run the full suite locally only when CI is unavailable or the change is
@@ -66,6 +74,21 @@ cross-cutting:
 cargo test --workspace --locked --offline
 cargo test --workspace --locked --offline --release
 ```
+
+The Linux hygiene job also checks unused dependencies with `cargo-machete 0.9.1`,
+spelling with `typos-cli 1.35.8` and TOML formatting with `taplo-cli 0.10.0`.
+Install those pinned versions with `cargo install --locked --version <version> <package>`
+and run:
+
+```sh
+cargo machete
+typos
+taplo fmt --check
+```
+
+Use `taplo fmt` to apply TOML formatting. Keep spelling exceptions narrow in
+`.typos.toml`; unused-dependency ignores require a reviewed reason in the manifest.
+Hygiene runs on documentation changes too, independently of the Rust change detector.
 
 CI marks the Rust jobs `skipped` without allocating their runners only when every
 changed path is on the [detector's non-code allowlist](../scripts/ci-changes.py).

@@ -7,7 +7,6 @@ use cap_std::fs::MetadataExt as _;
 use core_foundation::{base::CFType, dictionary::CFDictionary, string::CFString};
 use nix::libc;
 use serde::{Deserialize, Serialize};
-use std::cell::Cell;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -411,6 +410,29 @@ impl From<CleanupFailed> for ToolError {
     }
 }
 
+// The cleanup future can run inside the spawned, Send Run task, so the check is shared through a Mutex.
+struct CheckCell(std::sync::Mutex<GuardCheck>);
+
+impl CheckCell {
+    fn new(check: GuardCheck) -> Self {
+        Self(std::sync::Mutex::new(check))
+    }
+
+    fn set(&self, check: GuardCheck) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = check;
+    }
+
+    fn get(&self) -> GuardCheck {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 pub(super) async fn cleanup_storage(root: &Path) -> Result<(), CleanupFailed> {
     cleanup_storage_until(root, tokio::time::Instant::now() + TEARDOWN_WAIT).await
 }
@@ -419,7 +441,7 @@ pub(super) async fn cleanup_storage_until(
     root: &Path,
     deadline: tokio::time::Instant,
 ) -> Result<(), CleanupFailed> {
-    let check = Cell::new(GuardCheck::Inspection);
+    let check = CheckCell::new(GuardCheck::Inspection);
     retry_transient(CLEANUP_ATTEMPTS, CLEANUP_PAUSE, deadline, || {
         cleanup_storage_once(root, &check)
     })
@@ -430,7 +452,7 @@ pub(super) async fn cleanup_storage_until(
     })
 }
 
-async fn cleanup_storage_once(root: &Path, check: &Cell<GuardCheck>) -> Result<(), ToolError> {
+async fn cleanup_storage_once(root: &Path, check: &CheckCell) -> Result<(), ToolError> {
     check.set(GuardCheck::Inspection);
     let directory = crate::tools::fs::open_directory(root)?;
     let parent = crate::tools::fs::identity(&directory)?;
@@ -575,7 +597,7 @@ async fn confirm_detached(
     root: &Path,
     directory: &cap_std::fs::Dir,
     pending: bool,
-    check: &Cell<GuardCheck>,
+    check: &CheckCell,
 ) -> Result<(), ToolError> {
     check.set(GuardCheck::ListingUnavailable);
     let remaining = disk_command(root, &["info", "-plist"]).await?;

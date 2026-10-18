@@ -175,8 +175,17 @@ impl GoalView {
                         && run
                             .tools
                             .iter()
-                            .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
-                            .all(ToolView::settled_without_stop)
+                            .all(|t| t.settled_without_stop() || matches!(&t.intent.call, crate::tools::ToolCall::PrepareWorker { preparation } if preparation.purpose == super::worker::WorkerDataPurpose::Base))
+                        && run.agents.iter().all(|agent| {
+                            agent.tools.iter().all(|t| {
+                                t.settled_without_stop()
+                                    || agent.assignment.as_ref().is_some_and(|w| {
+                                        agent.grant == Some(super::ChildGrant::EditOnly)
+                                            && matches!(t.intent.target, super::worker::EffectTarget::WorkerView { assignment_id, base_digest, .. } if assignment_id == agent.id && base_digest == w.pins.base.sha256)
+                                            && t.hooks.iter().all(|h| h.outcome.as_ref().is_some_and(|o| !o.observation.stops_run()))
+                                    })
+                            })
+                        })
                 })
         })
     }

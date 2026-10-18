@@ -2,7 +2,7 @@
 
 mod accounts;
 mod cli;
-use arany_cli::{presentation, terminal};
+use arany_cli::{presentation, terminal, terminal::report_error};
 
 #[cfg(all(test, unix))]
 use arany::test_support::process as test_process;
@@ -30,6 +30,7 @@ struct Cli {
 enum Command {
     Exec(ExecArgs),
     Serve(cli::serve::ServeArgs),
+    Acp(cli::acp::AcpArgs),
     Provider(ProviderArgs),
     GenerateSchema {
         #[arg(long)]
@@ -89,6 +90,12 @@ fn main() -> ExitCode {
         report_error(error);
         return ExitCode::from(2);
     }
+    if let Some(Command::Acp(args)) = &cli.command
+        && let Err(error) = cli::acp::admit(args)
+    {
+        report_error(error);
+        return ExitCode::from(2);
+    }
     let telemetry = match Telemetry::from_process(cli.otlp_endpoint.as_deref()) {
         Ok(telemetry) => telemetry,
         Err(error) => {
@@ -123,7 +130,7 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
         report_error("attached options cannot be used with a subcommand");
         return ExitCode::FAILURE;
     }
-    let serving = matches!(cli.command, Some(Command::Serve(_)));
+    let serving = matches!(cli.command, Some(Command::Serve(_) | Command::Acp(_)));
     let result = runtime.block_on(run(cli.command.expect("checked subcommand"), telemetry));
     if serving {
         // A cancelled stdio read may still occupy Tokio's blocking pool.
@@ -155,10 +162,6 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
     }
 }
 
-fn report_error(message: impl std::fmt::Display) {
-    let _ = writeln!(std::io::stderr().lock(), "error: {message}");
-}
-
 fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -167,6 +170,7 @@ fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 
 async fn run(command: Command, telemetry: Telemetry) -> Result<CommandOutput, String> {
     match command {
+        Command::Acp(args) => cli::acp::run(args, telemetry).await,
         Command::Serve(args) => cli::serve::run(args, telemetry).await,
         Command::Exec(args) => cli::exec::run(args, telemetry).await,
         Command::Provider(args) => cli::provider::run(args).await,

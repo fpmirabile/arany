@@ -16,7 +16,7 @@ Repeat with `--release` for the optimized profile. Run one ignored gate with `ca
 
 ## Release-policy CI
 
-The [release-policy workflow](../../.github/workflows/release-policy.yml) runs when `Cargo.lock`, `deny.toml`, or the workflow changes. It builds pinned `cargo-audit` and `cargo-deny` without a cache, fetches the RustSec databases into a new private directory, and fails on a finding, version mismatch, timeout, or more than 64 KiB of output from one command. It checks the lockfile and selected-target policy only; the [dependency inventory](../../docs/security/beta-dependency-inventory.md) owns the other release gates. Check each workflow-expression context against GitHub's [context availability table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability); YAML parsing does not validate it.
+The [release-policy workflow](../../.github/workflows/release-policy.yml) runs weekly and when `Cargo.lock`, the workspace or crate manifests, `deny.toml`, or the workflow changes. It builds pinned `cargo-audit` and `cargo-deny` without a cache, fetches the RustSec databases into a new private directory, and fails on a finding, version mismatch, timeout, or more than 64 KiB of output from one command. It checks the lockfile and selected-target policy only; the [dependency inventory](../../docs/security/beta-dependency-inventory.md) owns the other release gates. Check each workflow-expression context against GitHub's [context availability table](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability); YAML parsing does not validate it.
 
 ## Native and live evidence
 

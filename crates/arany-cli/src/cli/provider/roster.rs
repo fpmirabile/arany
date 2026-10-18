@@ -181,10 +181,17 @@ pub(crate) fn load(
     workspace: &Path,
     name: &str,
 ) -> Result<SelectedRoster, String> {
-    let root =
-        StateRoot::open_existing(state_dir).map_err(|_| "state directory unavailable or unsafe")?;
     super::super::admit_workspace(Some(workspace.to_path_buf()), Some(state_dir.to_path_buf()))
         .map_err(str::to_owned)?;
+    load_without_workspace(state_dir, name)
+}
+
+pub(crate) fn load_without_workspace(
+    state_dir: &Path,
+    name: &str,
+) -> Result<SelectedRoster, String> {
+    let root =
+        StateRoot::open_existing(state_dir).map_err(|_| "state directory unavailable or unsafe")?;
     if root
         .record(RecordKind::ProviderRouting)
         .present()
@@ -203,6 +210,29 @@ pub(crate) fn load(
 }
 
 impl SelectedRoster {
+    pub(crate) async fn authenticate(&self, state_dir: &Path) -> bool {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            for profile in &self.profiles {
+                for route in &profile.routes {
+                    if !super::select::authenticate(
+                        state_dir,
+                        &route.provider,
+                        &route.model,
+                        route.effort,
+                        route.account_id,
+                    )
+                    .await
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     pub(crate) fn primary(&self) -> &Route {
         &self
             .profiles

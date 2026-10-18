@@ -15,11 +15,11 @@ use serde_json::{Value, json};
 use std::{future::Future, path::PathBuf, sync::Arc, task::Poll};
 use tokio::sync::{mpsc, watch};
 
-pub(super) enum ClientMessage {
+pub(in crate::cli) enum ClientMessage {
     Message(Message),
     Eof,
 }
-pub(super) type ServerMessage = Message;
+pub(in crate::cli) type ServerMessage = Message;
 
 #[derive(Debug)]
 pub(super) struct Fault {
@@ -57,7 +57,7 @@ impl Fault {
         }
     }
     pub fn engine(error: EngineError) -> Self {
-        let reason = engine_reason(&error);
+        let reason = Reason::from(&error);
         Self {
             code: if matches!(error, EngineError::Busy) {
                 -32600
@@ -81,49 +81,6 @@ impl Fault {
     }
 }
 
-fn engine_reason(error: &EngineError) -> Reason {
-    match error {
-        EngineError::IncompatibleProviderChain => Reason::IncompatibleProviderChain,
-        EngineError::RosterSelectionMismatch | EngineError::InvalidRequest => {
-            Reason::InvalidRequest
-        }
-        EngineError::MissingSession => Reason::MissingSession,
-        EngineError::NoSessionForWorkspace => Reason::NoSessionForWorkspace,
-        EngineError::TooManySessions => Reason::TooManySessions,
-        EngineError::SessionBusy => Reason::SessionBusy,
-        EngineError::WorkspaceBusy => Reason::WorkspaceBusy,
-        EngineError::GoalUnavailable => Reason::GoalUnavailable,
-        EngineError::GoalAdmissionUncertain => Reason::GoalAdmissionUncertain,
-        EngineError::GoalBudgetExhausted => Reason::GoalBudgetExhausted,
-        EngineError::GoalNotContinuable => Reason::GoalNotContinuable,
-        EngineError::Busy => Reason::Busy,
-        EngineError::GuardUnavailable => Reason::GuardUnavailable,
-        EngineError::SessionNotIdle => Reason::SessionNotIdle,
-        EngineError::ForkNotAtRunBoundary => Reason::ForkNotAtRunBoundary,
-        EngineError::WorkspaceMismatch => Reason::WorkspaceMismatch,
-        EngineError::InvalidWorkspacePath => Reason::InvalidWorkspacePath,
-        EngineError::InputNotRegular => Reason::InputNotRegular,
-        EngineError::InputTooLarge => Reason::InputTooLarge,
-        EngineError::InputNotUtf8 => Reason::InputNotUtf8,
-        EngineError::MissingInclude => Reason::MissingInclude,
-        EngineError::TooManyIncludes => Reason::TooManyIncludes,
-        EngineError::StateOverlap => Reason::StateOverlap,
-        EngineError::WorkspaceUnavailable => Reason::WorkspaceUnavailable,
-        EngineError::InvalidHistory => Reason::InvalidHistory,
-        EngineError::ContextTooLarge => Reason::ContextTooLarge,
-        EngineError::ImagesNotAdmitted => Reason::ImagesNotAdmitted,
-        EngineError::CompactionInputEmpty => Reason::CompactionInputEmpty,
-        EngineError::CompactionBlockedByHook => Reason::CompactionBlockedByHook,
-        EngineError::CompactionInputTooLarge => Reason::CompactionInputTooLarge,
-        EngineError::CompactionNotIdle => Reason::CompactionNotIdle,
-        EngineError::CancellationDrainTimeout => Reason::CancellationDrainTimeout,
-        EngineError::CoordinatorFailed => Reason::CoordinatorFailed,
-        EngineError::CancelledBeforeStart => Reason::CancelledBeforeStart,
-        EngineError::Store(_) => Reason::Store,
-        EngineError::Tool(_) => Reason::Tool,
-    }
-}
-
 struct ActiveTurn {
     thread_id: SessionId,
     result: tokio::task::AbortHandle,
@@ -143,26 +100,40 @@ impl Drop for ActiveTurn {
     }
 }
 
-pub(super) async fn run(
+pub(in crate::cli) async fn run(
     engine: Engine,
     state: PathBuf,
     inbound: mpsc::Receiver<ClientMessage>,
     outbound: mpsc::Sender<ServerMessage>,
     shutdown: watch::Sender<bool>,
 ) -> Result<(), String> {
+    run_configured(engine, state, inbound, outbound, shutdown, None).await
+}
+
+pub(in crate::cli) async fn run_configured(
+    engine: Engine,
+    state: PathBuf,
+    inbound: mpsc::Receiver<ClientMessage>,
+    outbound: mpsc::Sender<ServerMessage>,
+    shutdown: watch::Sender<bool>,
+    roster: Option<crate::cli::provider::roster::SelectedRoster>,
+) -> Result<(), String> {
     run_inner(
         engine,
         state,
         inbound,
         outbound,
-        Threads::default(),
+        Threads {
+            roster,
+            ..Default::default()
+        },
         shutdown,
     )
     .await
 }
 
 #[cfg(test)]
-pub(super) async fn run_with_threads(
+pub(in crate::cli) async fn run_with_threads(
     engine: Engine,
     state: PathBuf,
     inbound: mpsc::Receiver<ClientMessage>,

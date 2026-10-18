@@ -843,7 +843,6 @@ pub(crate) fn uses_guard_alias(args: &[String]) -> bool {
     })
 }
 
-/// The latest Guard-attested observation of the identical command, when it qualifies for an unguarded re-run.
 pub(crate) fn qualifying_guard_failure<'a>(
     call: &ToolCall,
     observations: impl Iterator<Item = &'a ToolObservation>,
@@ -1483,4 +1482,15 @@ mod internal_call_tests {
             .is_internal()
         );
     }
+}
+
+pub(crate) fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }

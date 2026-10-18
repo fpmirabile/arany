@@ -19,6 +19,7 @@ pub struct TeamObservation {
 struct TeamProvider {
     identity: ProviderIdentity,
     case: &'static str,
+    source: Option<AgentRunId>,
     workspace: PathBuf,
     budget: GoalBudget,
     requests: Mutex<Vec<ProviderRequest>>,
@@ -79,7 +80,7 @@ impl TeamProvider {
         let digest = serde_json::from_value(catalog["agents"][0]["digest"].clone()).unwrap();
         let count = if matches!(self.case, "cap" | "hard_cap") {
             8
-        } else if matches!(self.case, "waves" | "reassign") {
+        } else if matches!(self.case, "waves" | "reassign" | "resume_id") {
             1
         } else {
             2
@@ -125,15 +126,16 @@ impl TeamProvider {
                                 | "leased_edit"
                                 | "defer_finish"
                                 | "budget_calls"
+                                | "primary_time"
                                 | "cancel_background"
                         ) {
                             WorkerMode::Background
                         } else {
                             WorkerMode::Foreground
                         },
-                        max_turns: 17,
+                        max_turns: if self.case == "turn_limit" { 1 } else { 17 },
                         wave,
-                        resumes: None,
+                        resumes: self.source,
                         supersedes,
                     })),
                 }
@@ -187,6 +189,29 @@ impl TeamProvider {
             permit.forget();
             return Err(ProviderError::InvalidOutcome);
         }
+        if self.case == "resume_id" && step > 0 {
+            let requests = self.requests.lock().unwrap();
+            let first = requests
+                .iter()
+                .find(|r| r.agent_run_id == request.agent_run_id)
+                .unwrap();
+            self.check(
+                first.input.workspace_guidance == request.input.workspace_guidance,
+                "historical source context drifted between calls",
+            );
+        }
+        if self.case == "resume_id" && step == 0 {
+            self.check(
+                request.input.workspace_guidance.as_ref().is_some_and(|g| {
+                    g.contains(&self.source.unwrap().to_string()) && g.contains("Historical source")
+                }),
+                "missing bounded source-ID context",
+            );
+            self.check(
+                request.input.tools.as_ref().unwrap().steps.is_empty(),
+                "historical private steps resurrected",
+            );
+        }
         if self.case == "waves" && index == 1 && step == 0 {
             self.check(
                 std::fs::read(self.workspace.join("notes/0")).unwrap() == b"edited 0",
@@ -194,6 +219,11 @@ impl TeamProvider {
             );
             return Ok(tool_outcome(Self::read("notes/0"), None));
         }
+        let original = if self.case == "resume_id" {
+            "resume base".to_owned()
+        } else {
+            format!("original {index}")
+        };
         let write_step = usize::from(self.case == "waves" && index == 1);
         if step == write_step {
             if write_step == 1 {
@@ -214,9 +244,7 @@ impl TeamProvider {
             return Ok(tool_outcome(
                 ToolCall::Write {
                     path: format!("notes/{index}"),
-                    expected_digest: Some(crate::tools::types::hex_digest(
-                        format!("original {index}").as_bytes(),
-                    )),
+                    expected_digest: Some(crate::tools::types::hex_digest(original.as_bytes())),
                     content: format!("edited {index}"),
                 },
                 None,
@@ -225,10 +253,13 @@ impl TeamProvider {
         self.check(step == write_step + 1, "unexpected child continuation");
         self.check(
             std::fs::read(self.workspace.join(format!("notes/{index}"))).unwrap()
-                == format!("original {index}").as_bytes(),
+                == original.as_bytes(),
             "private edit reached Workspace early",
         );
         self.ready.send(index).await.unwrap();
+        if self.case == "primary_time" {
+            self.gates[6].add_permits(1);
+        }
         let permit = self.gates[index].acquire().await.unwrap();
         permit.forget();
         if self.case == "conflict" && index == 1 {
@@ -244,7 +275,7 @@ impl TeamProvider {
             .filter(|r| r.phase == AgentPhase::RootPlan)
             .count();
         if request.phase == AgentPhase::RootPlan {
-            return if wave == 1 {
+            return if wave == 1 && self.case != "resume_id" {
                 tool_outcome(Self::read("notes/0"), Some(Box::new(self.plan())))
             } else {
                 self.delegation(request, 1)
@@ -280,7 +311,7 @@ impl TeamProvider {
         }
         if matches!(
             self.case,
-            "leased_edit" | "background" | "command" | "budget_calls"
+            "leased_edit" | "background" | "command" | "budget_calls" | "primary_time"
         ) && prior == 1
         {
             return tool_outcome(
@@ -324,7 +355,7 @@ impl TeamProvider {
         }
         let count = if matches!(self.case, "cap" | "hard_cap") {
             8
-        } else if self.case == "reassign" {
+        } else if matches!(self.case, "reassign" | "resume_id") {
             1
         } else {
             2
@@ -367,6 +398,11 @@ impl Provider for TeamProvider {
             requests.push(request.clone());
             step
         };
+        if self.case == "primary_time" && request.phase == AgentPhase::RootSynthesis && step == 2 {
+            self.gates[6].acquire_many(2).await.unwrap().forget();
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+        }
         let outcome = if request.phase == AgentPhase::ChildWork {
             self.child(&request, step).await?
         } else {
@@ -474,6 +510,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let provider = Arc::new(TeamProvider {
         identity,
         case,
+        source: (case == "resume_unknown").then(AgentRunId::new),
         workspace: workspace.clone(),
         budget,
         requests: Default::default(),
@@ -541,7 +578,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                     if case.starts_with("cancel_") { cancellation.cancel(); }
                     else if case == "c1_failure" { provider.gates[7].add_permits(1); }
                     else if case == "failure" { provider.gates[0].add_permits(1); }
-                    else if matches!(case, "background" | "command" | "leased_edit" | "defer_finish" | "budget_calls") { if primary_seen { for gate in &provider.gates { gate.add_permits(1); } } }
+                    else if matches!(case, "background" | "command" | "leased_edit" | "defer_finish" | "budget_calls" | "primary_time") { if primary_seen { for gate in &provider.gates { gate.add_permits(1); } } }
                     else { provider.gates[1].add_permits(1); if case == "mixed" { provider.gates[7].add_permits(1); } }
                 }
             },
@@ -588,6 +625,9 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let result = result.unwrap_or_else(|e| panic!("{case}: team Run: {e:?}"));
     drop(handle);
     assert!(result.stopped.is_none());
+    if case == "primary_time" {
+        tokio::time::resume();
+    }
     assert!(
         provider.violations.lock().unwrap().is_empty(),
         "{case}: {:?}",
@@ -612,7 +652,14 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let run = &view.runs[0];
     let failed = matches!(
         case,
-        "failure" | "c1_failure" | "cap" | "hard_cap" | "budget_calls"
+        "failure"
+            | "c1_failure"
+            | "cap"
+            | "hard_cap"
+            | "budget_calls"
+            | "primary_time"
+            | "turn_limit"
+            | "resume_unknown"
     );
     assert_eq!(
         run.status,
@@ -642,10 +689,40 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             assert!(editor.assignment.as_ref().unwrap().integration.is_none());
         }
     }
+    if matches!(case, "failure" | "reassign" | "turn_limit") {
+        let cause = if case == "turn_limit" {
+            crate::worker::WorkerCause::TurnLimit
+        } else {
+            crate::worker::WorkerCause::InvalidOutcome
+        };
+        assert_eq!(
+            run.agents[1]
+                .assignment
+                .as_ref()
+                .unwrap()
+                .outcome
+                .as_ref()
+                .unwrap()
+                .1
+                .cause,
+            cause
+        );
+    }
     if matches!(case, "cap" | "hard_cap") {
         assert_eq!(run.agents.len(), 9, "total attempts differ from active cap");
     }
     if matches!(case, "leased_edit" | "defer_finish") {
+        let reason = if case == "defer_finish" {
+            ProviderFailureReason::WorkerFinishDeferred
+        } else {
+            ProviderFailureReason::WorkerToolRefused
+        };
+        assert!(
+            run.agents[0]
+                .provider_calls
+                .iter()
+                .any(|c| c.failure_reason == Some(reason))
+        );
         assert!(
             run.agents[0]
                 .provider_calls
@@ -713,6 +790,247 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     TeamObservation {
         directory,
         session,
+        events,
+        view,
+    }
+}
+
+pub async fn resume_by_id(guard: &Path) -> TeamObservation {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(360),
+        Box::pin(resume_case(guard, None)),
+    )
+    .await
+    .expect("bounded worker ID resume")
+}
+
+pub async fn recover_by_id(guard: &Path, checkpoint: &'static str) -> TeamObservation {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(360),
+        Box::pin(resume_case(guard, Some(checkpoint))),
+    )
+    .await
+    .expect("bounded worker recovery")
+}
+
+async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObservation {
+    let mut original = Box::pin(run_case(
+        guard,
+        if checkpoint.is_some() {
+            "order"
+        } else {
+            "cancel_foreground"
+        },
+    ))
+    .await;
+    let state = original.directory.path().join(if checkpoint.is_some() {
+        "recovery-state"
+    } else {
+        "state"
+    });
+    if let Some(checkpoint) = checkpoint {
+        let root = StateRoot::admit(&state).unwrap();
+        let prior = original.directory.path().join("state");
+        std::fs::copy(prior.join("tools.json"), state.join("tools.json")).unwrap();
+        std::fs::create_dir(state.join("agents")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::copy(
+            prior.join("agents/editor.md"),
+            state.join("agents/editor.md"),
+        )
+        .unwrap();
+        let last = original
+            .events
+            .iter()
+            .position(|e| match (checkpoint, &e.event) {
+                ("private_intent" | "private_unknown", Event::ToolStarted { intent, .. }) => {
+                    matches!(
+                        intent.target,
+                        crate::worker::EffectTarget::WorkerView { .. }
+                    )
+                }
+                ("private_result", Event::ToolFinished { observation, .. }) => matches!(
+                    observation.intent.target,
+                    crate::worker::EffectTarget::WorkerView { .. }
+                ),
+                ("handover", Event::WorkerHandoverRecorded { .. }) => true,
+                ("workspace_unknown", Event::ToolStarted { intent, .. }) => {
+                    matches!(intent.call, ToolCall::ApplyChangeset { .. })
+                }
+                ("published", Event::ToolFinished { observation, .. }) => {
+                    matches!(observation.intent.call, ToolCall::ApplyChangeset { .. })
+                }
+                _ => false,
+            })
+            .expect("named recovery checkpoint");
+        let last = if checkpoint == "private_unknown"
+            && matches!(
+                original.events[last + 1].event,
+                Event::ToolPermissionDecided { .. }
+            ) {
+            last + 1
+        } else {
+            last
+        };
+        let mut prefix: Vec<_> = original.events[..=last]
+            .iter()
+            .map(|e| e.event.clone())
+            .collect();
+        if checkpoint == "private_unknown" {
+            let intent = prefix
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Event::ToolStarted { intent, .. } => Some(intent),
+                    _ => None,
+                })
+                .unwrap();
+            prefix.push(Event::ToolFinished {
+                run_id: intent.run_id,
+                agent_run_id: intent.agent_run_id,
+                observation: ToolObservation {
+                    intent: intent.clone(),
+                    disposition: ToolDisposition::Uncertain,
+                    output: "Private outcome unknown".into(),
+                    attestation: None,
+                    enforcement_cause: None,
+                    cache_update: CacheUpdate::NotApplicable,
+                },
+            });
+        }
+        let store = Store::open(root).unwrap();
+        for event in prefix {
+            store.append(original.session, event).await.unwrap();
+        }
+        store.close().await.unwrap();
+        let (events, view) = replayed(&state, original.session).await;
+        original.events = events;
+        original.view = view;
+        for index in 0..2 {
+            std::fs::write(
+                original
+                    .directory
+                    .path()
+                    .join(format!("workspace/notes/{index}")),
+                format!("original {index}"),
+            )
+            .unwrap();
+        }
+    }
+    let workspace = original.directory.path().join("workspace");
+    let old = &original.view.runs[0].agents[1];
+    let old_assignment = old.assignment.as_ref().unwrap();
+    let source = old.id;
+    let old_base = old_assignment.pins.base.sha256;
+    let old_grant = old_assignment.pins.policy_digest;
+    std::fs::write(workspace.join("notes/0"), b"resume base").unwrap();
+    std::fs::write(state.join("tools.json"), br#"{"version":1,"workspace_paths":["docs","notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    let engine = super::engine::open(
+        StateRoot::open_existing(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(guard.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (ready, _arrivals) = mpsc::channel(16);
+    let provider = Arc::new(TeamProvider {
+        identity: ProviderIdentity::new("scripted", "test-model", Provenance::native()),
+        case: "resume_id",
+        source: Some(source),
+        workspace: workspace.clone(),
+        budget: original.view.goals[0].budget,
+        requests: Default::default(),
+        violations: Default::default(),
+        ready,
+        gates: std::array::from_fn(|_| Semaphore::new(1)),
+        active: AtomicUsize::new(0),
+        maximum: AtomicUsize::new(0),
+        stale: Mutex::new(0),
+    });
+    let mut input = request(&workspace, "");
+    input.include_paths.clear();
+    input.title = None;
+    input.session_id = Some(original.session);
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 3,
+    };
+    input.goal = GoalRequest::resume(original.view.goals[0].id, false);
+    if checkpoint == Some("workspace_unknown") {
+        let result = engine
+            .submit(
+                AdmittedProviders::single(provider.clone()),
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .result
+            .await;
+        assert!(matches!(result, Err(EngineError::GoalUnavailable)));
+        assert!(provider.requests.lock().unwrap().is_empty());
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state, original.session).await;
+        assert_eq!(events, original.events);
+        return TeamObservation {
+            directory: original.directory,
+            session: original.session,
+            events,
+            view,
+        };
+    }
+    let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
+    let mut running = engine
+        .submit(
+            AdmittedProviders::single(provider.clone()),
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                approvals: Some(approvals),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .result;
+    let result = loop {
+        tokio::select! {
+            result = &mut running => break result.unwrap(),
+            Some(approval) = inbox.next() => { approval.decide(true); },
+        }
+    };
+    drop(running);
+    assert!(
+        provider.violations.lock().unwrap().is_empty(),
+        "resume violated source context or isolation"
+    );
+    assert!(result.stopped.is_none());
+    engine.close().await.unwrap();
+    let (events, view) = replayed(&state, original.session).await;
+    assert_eq!(
+        &events[..original.events.len()],
+        original.events.as_slice(),
+        "resume rewrote source history"
+    );
+    assert_eq!(view.runs.len(), 2);
+    let resumed = &view.runs[1];
+    assert_eq!(resumed.status, RunStatus::Finished);
+    let worker = &resumed.agents[1];
+    let assignment = worker.assignment.as_ref().unwrap();
+    assert_ne!(worker.id, source);
+    assert_ne!(resumed.id, original.view.runs[0].id);
+    assert_eq!(assignment.pins.request.resumes, Some(source));
+    assert_ne!(assignment.pins.base.sha256, old_base);
+    assert_ne!(assignment.pins.policy_digest, old_grant);
+    assert_eq!(assignment.pins.grant.write_paths, ["notes/0"]);
+    assert_eq!(events[original.events.len()..].iter().filter(|e| matches!(&e.event, Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::ApplyChangeset { .. }))).count(), 1, "historical effect re-executed");
+    assert_action_bounds(&events, false, false);
+    TeamObservation {
+        directory: original.directory,
+        session: original.session,
         events,
         view,
     }

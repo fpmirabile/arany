@@ -47,6 +47,17 @@ pub(super) use macos::{SystemPrograms, macos_enforcement_digest};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod admission;
 
+pub(super) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
+    check_available()?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    return admission::recover_private(ids).await;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = ids;
+        Err(ToolError::ProtectionUnavailable)
+    }
+}
+
 pub(super) fn runtime_roots() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
         &["/System/Library", "/usr/lib", "/bin", "/usr/bin"]
@@ -2509,7 +2520,7 @@ mod tests {
         state: &crate::store::StateRoot,
         identity: &BuildCacheIdentity,
     ) -> BuildCacheSession {
-        let lease = crate::store::begin_released(state, identity.clone()).unwrap();
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
         let candidate_bytes = lease.candidate_limit();
         BuildCacheSession {
             lease,
@@ -2528,6 +2539,9 @@ mod tests {
 
     #[tokio::test]
     async fn cache_publication_never_replaces_a_succeeded_command() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
 
@@ -2600,7 +2614,7 @@ mod tests {
         state: &crate::store::StateRoot,
         identity: &BuildCacheIdentity,
     ) -> Vec<u8> {
-        let lease = crate::store::begin_released(state, identity.clone()).unwrap();
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
         let (mut file, length) = lease.archive().unwrap().unwrap();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
@@ -2610,6 +2624,9 @@ mod tests {
 
     #[tokio::test]
     async fn uncertain_commit_marker_keeps_the_command_and_recovers_the_prior_archive() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
         let prior = captured_archive(temp.path(), &identity, b"prior");
@@ -2642,13 +2659,16 @@ mod tests {
 
     #[tokio::test]
     async fn candidate_sync_failure_drains_the_archive_and_keeps_the_prior_archive() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
         let prior = captured_archive(temp.path(), &identity, b"prior");
         let candidate = captured_archive(temp.path(), &identity, b"candidate");
         publish_archive(&state, &identity, &prior).await;
 
-        let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
         let mut stream = b"CACHE_CANDIDATE\n".to_vec();
         stream.extend((candidate.len() as u64).to_le_bytes());
         stream.extend(&candidate);
@@ -2665,7 +2685,6 @@ mod tests {
         assert_eq!(committed_archive(&state, &identity), prior);
     }
 
-    /// Accepts `remaining` bytes, then reports zero-length writes so `write_all` fails.
     struct FailAfter {
         remaining: usize,
     }
@@ -2703,6 +2722,9 @@ mod tests {
 
     #[tokio::test]
     async fn candidate_staging_failure_drains_the_archive_and_keeps_the_prior_archive() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
         let session = cache_session(&state, &identity);
@@ -2720,7 +2742,7 @@ mod tests {
         .await;
         assert_eq!(observation.cache_update, CacheUpdate::Published);
 
-        let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
         // Occupies the candidate name, so the create_new staging step fails.
         drop(lease.candidate_writer().unwrap());
 
@@ -2737,7 +2759,7 @@ mod tests {
         assert_eq!(trailer, "CACHE_DONE\n");
         drop(lease);
 
-        let lease = crate::store::begin_released(&state, identity.clone()).unwrap();
+        let lease = state.begin_build_cache(identity.clone()).unwrap();
         let (mut file, length) = lease.archive().unwrap().unwrap();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();

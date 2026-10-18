@@ -981,6 +981,21 @@ pub(super) async fn selected_for_use(
     refresh_selected_at(state, workspace, id).await
 }
 
+pub(super) fn authenticate(expected_account_id: Option<Uuid>) -> Result<(), AuthorizationError> {
+    let state = open_account_state()?;
+    let id = selected_id_at(&state)?;
+    if expected_account_id.is_some_and(|expected| expected != id) {
+        return Err(AuthorizationError::SelectedAccountChanged);
+    }
+    let credentials = if selected_keyring_slot(id)?.is_some() {
+        load_selected_keyring_at(&state, id)?
+    } else {
+        load_selected_private_file_at(&state, id)?
+    };
+    drop(credentials);
+    Ok(())
+}
+
 pub(super) fn selected_id() -> Result<Uuid, AuthorizationError> {
     selected_id_at(&open_account_state()?)
 }
