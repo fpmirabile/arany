@@ -831,6 +831,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         result: None,
         provider_calls: Vec::new(),
         grant: None,
+        definition: None,
         tools: vec![child_tool],
         status: arany::AgentStatus::Interrupted,
     });
