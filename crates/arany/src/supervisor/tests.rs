@@ -273,3 +273,59 @@ fn supervisor_footprint_uses_only_leased_base_and_evicts_whole_actor_steps() {
     window.push_back(step(33, 2, true));
     assert!(evaluate(&window, None, &SupervisorPolicy::default()).is_empty());
 }
+
+#[test]
+fn supervisor_worst_case_verdict_fits_its_byte_bound() {
+    let max = u16::MAX;
+    let evidence: Vec<u64> = (0..8).map(|n| u64::MAX - 7 + n).collect();
+    let signal = |signal, features| Signal {
+        signal,
+        level: Level::WouldNarrow,
+        would_response: Some(Response::RequireApproval),
+        features,
+        evidence: evidence.clone(),
+    };
+    let verdict = SupervisorVerdict {
+        subject_sequence: u64::MAX,
+        site: Site::CommandCapture,
+        evaluator: 1,
+        mode: Mode::Shadow,
+        signals: vec![
+            signal(
+                SignalKind::Loop,
+                Features::Loop(LoopFeatures {
+                    repeat_identical: max,
+                    repeat_failing: max,
+                    cycle_reps: max,
+                    cycle_len: max,
+                    edit_oscillation: max,
+                    stalled_calls: max,
+                }),
+            ),
+            signal(
+                SignalKind::Probing,
+                Features::Probing(ProbingFeatures {
+                    denial_streak: max,
+                    denials_window: max,
+                    distinct_denied: max,
+                    alias_rejections: max,
+                }),
+            ),
+            signal(
+                SignalKind::Disproportion,
+                Features::Disproportion(DisproportionFeatures {
+                    files: max,
+                    deleted_files: max,
+                    changed_kib: max,
+                    declared_roots: max,
+                    base_kib: Some(max),
+                    files_per_root: max,
+                    delete_permille: max,
+                    growth_permille: Some(max),
+                }),
+            ),
+        ],
+        capped: true,
+    };
+    assert!(verdict.valid());
+}
