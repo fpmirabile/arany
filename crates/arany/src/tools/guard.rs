@@ -731,15 +731,34 @@ async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     intent: &EffectIntent,
 ) -> Result<ToolObservation, ToolError> {
-    let bytes = read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES).await?;
-    let observation = parse_observation(&bytes)?;
-    if observation.cache_update != CacheUpdate::NotApplicable
-        || !observation.attested_for(intent)
-        || !read_capped(&mut *reader, 1).await?.is_empty()
-    {
-        return Err(ToolError::Operation);
+    read_report(reader, intent)
+        .await
+        .map_err(|rejected| rejected.0)
+}
+
+// A rejection keeps the error the reader has always returned and, where it is an Operation, a closed check.
+async fn read_report<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    intent: &EffectIntent,
+) -> Result<ToolObservation, (ToolError, Option<GuardCheck>)> {
+    let tagged = |check| {
+        move |error| match error {
+            ToolError::Operation => (error, Some(check)),
+            error => (error, None),
+        }
+    };
+    let bytes = read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES)
+        .await
+        .map_err(tagged(GuardCheck::WorkerClosed))?;
+    let observation = parse_observation(&bytes).map_err(tagged(GuardCheck::ReportMalformed))?;
+    if observation.cache_update != CacheUpdate::NotApplicable || !observation.attested_for(intent) {
+        return Err((ToolError::Operation, Some(GuardCheck::ReportUnattested)));
     }
-    Ok(observation)
+    match read_capped(&mut *reader, 1).await {
+        Ok(rest) if rest.is_empty() => Ok(observation),
+        Ok(_) => Err((ToolError::Operation, Some(GuardCheck::ReportTrailing))),
+        Err(error) => Err(tagged(GuardCheck::ReportTrailing)(error)),
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -750,27 +769,14 @@ pub(super) fn execution_failure(check: GuardCheck) -> ToolError {
     })
 }
 
-// Same acceptance as `read_observation`, but each rejection names its closed check.
 #[cfg(any(target_os = "macos", test))]
 pub(super) async fn read_worker_report<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     intent: &EffectIntent,
 ) -> Result<ToolObservation, ToolError> {
-    let bytes = match read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES).await {
-        Err(ToolError::Operation) => return Err(execution_failure(GuardCheck::WorkerClosed)),
-        bytes => bytes?,
-    };
-    let observation = match parse_observation(&bytes) {
-        Err(ToolError::Operation) => return Err(execution_failure(GuardCheck::ReportMalformed)),
-        observation => observation?,
-    };
-    if observation.cache_update != CacheUpdate::NotApplicable || !observation.attested_for(intent) {
-        return Err(execution_failure(GuardCheck::ReportUnattested));
-    }
-    match read_capped(&mut *reader, 1).await {
-        Ok(rest) if rest.is_empty() => Ok(observation),
-        _ => Err(execution_failure(GuardCheck::ReportTrailing)),
-    }
+    read_report(reader, intent)
+        .await
+        .map_err(|(error, check)| check.map_or(error, execution_failure))
 }
 
 fn parse_observation(bytes: &[u8]) -> Result<ToolObservation, ToolError> {
@@ -1779,6 +1785,16 @@ mod tests {
         assert_eq!(
             check(trailing).await,
             Some(("execution", Some("report not followed by end of stream")))
+        );
+        let mut overlong = line(&attested);
+        overlong.extend_from_slice(b"xy");
+        let mut reader = tokio::io::BufReader::new(overlong.as_slice());
+        assert!(
+            matches!(
+                read_worker_report(&mut reader, &intent).await,
+                Err(ToolError::Limit)
+            ),
+            "two trailing bytes keep the resource-limit outcome"
         );
         let report = line(&attested);
         let mut reader = tokio::io::BufReader::new(report.as_slice());
