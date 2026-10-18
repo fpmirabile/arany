@@ -974,12 +974,50 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
     assert!(facts.len() > 512);
     let report = goal_report(&view, &view.runs[0], view.goal(f.goal).unwrap());
     let newest = view.rewinds.operations.last().unwrap().history_fact();
-    assert!(report.unresolved.contains(&newest));
+    assert_eq!(
+        report.unresolved[..8],
+        view.rewinds
+            .operations
+            .iter()
+            .rev()
+            .take(8)
+            .map(|operation| operation.history_fact())
+            .collect::<Vec<_>>()
+    );
+    assert!(report.unresolved[8].starts_with("Older Workspace rewind facts omitted"));
+    report.validate().unwrap();
+
+    let run = &mut view.runs[0];
+    let template = run
+        .agents
+        .iter()
+        .find(|agent| agent.assignment.is_some())
+        .unwrap()
+        .clone();
+    let mut uncertain_tool = run.tools[0].clone();
+    uncertain_tool.observation = None;
+    for _ in 0..25 {
+        let mut agent = template.clone();
+        agent.id = AgentRunId::new();
+        agent.tools = vec![uncertain_tool.clone()];
+        run.agents.push(agent);
+    }
+    let report = goal_report(&view, &view.runs[0], view.goal(f.goal).unwrap());
+    assert_eq!(report.unresolved[25], newest);
+    assert!(report.unresolved[..25].iter().all(|line| {
+        line.starts_with("Worker ") && line.contains("private_outcome_unknown=true")
+    }));
+    assert_eq!(report.unresolved.last().unwrap(), GOAL_REPORT_OMISSION);
+    assert!(report.unresolved.len() < GOAL_REPORT_ITEM_LIMIT);
     assert!(
         report
             .unresolved
             .iter()
-            .any(|line| line.contains("omitted"))
+            .filter(|line| line.starts_with("Workspace rewind "))
+            .count()
+            < 8
     );
+    let bytes = serde_json::to_vec(&report).unwrap();
+    assert!(bytes.len() > crate::session::MAX_GOAL_REPORT_BYTES * 3 / 4);
     report.validate().unwrap();
 }

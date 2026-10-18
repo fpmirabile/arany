@@ -90,7 +90,9 @@ pub(super) fn goal_report(
     {
         let mut lines = facts.lines();
         lines.next();
-        for fact in lines.rev() {
+        let mut lines = lines.rev().peekable();
+        let omission = lines.next_if(|line| line.starts_with("Older "));
+        for fact in lines.chain(omission) {
             push_goal_report_item(
                 &mut report,
                 GoalReportSection::Unresolved,
