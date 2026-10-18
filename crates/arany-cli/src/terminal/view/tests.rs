@@ -2768,6 +2768,7 @@ fn unguarded_approval_pages_show_the_risk_copy_then_three_choices_with_deny_focu
     let prompt = arany::UnguardedPrompt {
         executable: "/usr/bin/bash".into(),
         attribution: None,
+        remember: true,
     };
     let lines = crate::presentation::unguarded_approval_lines(&intent, &prompt);
     assert_eq!(lines[0], "Run outside the Guard? (unguarded)");

@@ -657,6 +657,7 @@ async fn hook_unguarded_rerun_requires_the_exact_command_and_a_fresh_human_ask_t
                 offset: 0,
                 limit: 64,
             };
+            let rules_before = host.rules();
             let exact = unguarded(HOOK);
             let wrong = unguarded("echo different");
             let seen = host
@@ -670,13 +671,15 @@ async fn hook_unguarded_rerun_requires_the_exact_command_and_a_fresh_human_ask_t
                     ],
                     Some(ApprovalMode::Auto),
                     vec![if allow {
-                        ApprovalReply::AllowOnce
+                        ApprovalReply::AllowAlwaysInProject
                     } else {
                         ApprovalReply::Deny
                     }],
                 )
                 .await;
             assert_eq!(seen.prompts.len(), 1);
+            assert!(!seen.prompts[0].remember);
+            assert_eq!(host.rules(), rules_before);
             assert_eq!(seen.intents[0].call, exact);
             assert_eq!(
                 seen.prompts[0].attribution,
@@ -860,4 +863,28 @@ async fn child_hook_unguarded_rerun_is_refused_without_explicit_inheritance() {
         let (_, view) = host.reopen(session).await;
         assert_eq!(view.runs[0].unguarded_tools(), usize::from(explicit));
     }
+}
+
+#[tokio::test]
+async fn pre_compact_with_a_rerun_offer_blocks_compaction() {
+    const HOOK: &str = "mkdir .ssh";
+    let host = Host::new(Some(
+        &json!({"hooks": {"PreCompact": [{"hooks": [{"type": "command", "command": HOOK}]}]}}),
+    ));
+    let seen = host
+        .run(&host.workspace, vec![finish("done")], None, vec![])
+        .await;
+    let session = seen.outcome.session_id;
+    let providers = arany::AdmittedProviders::single(Arc::new(ScriptedProvider::new(vec![])));
+    assert!(matches!(
+        host.engine
+            .compact_session(&providers, session, host.workspace.clone())
+            .await,
+        Err(arany::EngineError::CompactionBlockedByHook)
+    ));
+    let (events, _) = host.reopen(session).await;
+    assert!(!events.iter().any(|event| matches!(
+        event.event,
+        Event::ContextCompacted { .. } | Event::GoalCompactionCallReserved { .. }
+    )));
 }

@@ -358,6 +358,7 @@ mod tests {
         let prompt = UnguardedPrompt {
             executable: "/bin/sh".into(),
             attribution: None,
+            remember: true,
         };
         let warning = lines(&intent, Some(&prompt));
         assert_eq!(warning[0], "Run outside the Guard? (unguarded)");

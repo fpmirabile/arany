@@ -4760,7 +4760,7 @@ mod goal_replay_tests {
                     observation: ran.clone()
                 }
             ));
-            for change in ["argv", "cwd", "program", "cause", "parent"] {
+            for change in ["argv", "cwd", "program", "cause", "parent", "later"] {
                 let mut forged = view.clone();
                 let pending = &mut forged.runs[0].tools.last_mut().unwrap().intent;
                 if let ToolCall::CommandUnguarded {
@@ -4781,6 +4781,14 @@ mod goal_replay_tests {
                         .unwrap()
                         .observation
                         .enforcement_cause = None;
+                }
+                if change == "later" {
+                    let mut later = forged.runs[0].tools[0].hooks[0].clone();
+                    later.sequence += 1;
+                    let observation = &mut later.outcome.as_mut().unwrap().observation;
+                    observation.enforcement_cause = None;
+                    observation.disposition = ToolDisposition::Succeeded;
+                    forged.runs[0].tools[0].hooks.push(later);
                 }
                 if change == "parent" {
                     forged.runs[0]

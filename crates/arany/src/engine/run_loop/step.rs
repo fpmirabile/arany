@@ -1071,6 +1071,16 @@ impl RunLoop<'_> {
                     .filter(|(_, hook)| *hook)
                     .map(|(observation, _)| observation.clone())
             })?;
+            if hook_failure.is_some()
+                && (permission.decision != Decision::Ask
+                    || permission.basis == PermissionSource::ExactCommandRule)
+            {
+                return Ok(self.not_offered(
+                    intent,
+                    "A hook failure arrived after this re-run was classified; propose it again; no operation was dispatched",
+                    source,
+                ));
+            }
             match unguarded_gate(runtime, request, &intent, hook_failure.as_ref()) {
                 Ok(prompt) => unguarded_prompt = Some(prompt),
                 Err(message) => return Ok(self.not_offered(intent, message, source)),
@@ -1228,9 +1238,14 @@ impl RunLoop<'_> {
             }) => result.unwrap_or(ApprovalReply::Deny),
         };
         // The rule is durable before the verdict, so a crash cannot leave a recorded approval without it.
+        let remember = prompt.as_ref().is_some_and(|prompt| prompt.remember);
         let unsaved = reply == ApprovalReply::AllowAlwaysInProject
-            && prompt.is_some()
+            && remember
             && runtime.record_exact_command_rule(&intent.call).is_err();
+        let reply = match reply {
+            ApprovalReply::AllowAlwaysInProject if !remember => ApprovalReply::AllowOnce,
+            reply => reply,
+        };
         (reply, unsaved)
     }
 
@@ -1825,6 +1840,7 @@ fn unguarded_gate(
             .ok_or(NO_PRIOR_FAILURE)?
             .to_owned(),
         attribution: prior.enforcement_cause,
+        remember: hook_failure.is_none(),
     })
 }
 

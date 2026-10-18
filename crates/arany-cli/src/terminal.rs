@@ -551,7 +551,14 @@ impl AttachedTerminal {
         };
         if let Some(linear) = &mut self.linear {
             linear
-                .draw_tool_approval(approval.intent.id, &lines, approval.unguarded.is_some())
+                .draw_tool_approval(
+                    approval.intent.id,
+                    &lines,
+                    approval
+                        .unguarded
+                        .as_ref()
+                        .is_some_and(|prompt| prompt.remember),
+                )
                 .map_err(TerminalError::Io)?;
             return Ok(false);
         }
@@ -563,15 +570,21 @@ impl AttachedTerminal {
             .draw(|frame| {
                 if frame.area().width >= 16 && frame.area().height >= 8 {
                     let width = frame.area().width;
-                    let choices: &[&str] = match (approval.unguarded.is_some(), width) {
-                        (false, _) => &["Deny", "Allow once"],
-                        (true, 68..) => &[
+                    let choices: &[&str] = match (
+                        approval.unguarded.as_ref().map(|prompt| prompt.remember),
+                        width,
+                    ) {
+                        (None, _) => &["Deny", "Allow once"],
+                        (Some(false), _) => &["Deny", "Allow once (unguarded)"],
+                        (Some(true), 68..) => &[
                             "Deny",
                             "Allow once (unguarded)",
                             "Always allow this exact command in this project (unguarded)",
                         ],
-                        (true, 40..) => &["Deny", "Allow once", "Always allow exact command here"],
-                        (true, _) => &["Deny", "Allow once", "Always allow"],
+                        (Some(true), 40..) => {
+                            &["Deny", "Allow once", "Always allow exact command here"]
+                        }
+                        (Some(true), _) => &["Deny", "Allow once", "Always allow"],
                     };
                     more = view::draw_permission_frame(
                         frame,
