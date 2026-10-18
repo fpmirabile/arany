@@ -156,12 +156,14 @@ impl RunLoop<'_> {
             .collect()
     }
 
-    // Upper bound of Events and active time the hooks of one primary Tool can add.
+    // Upper bound of Events and active time one step's hooks can add: its own PreToolUse set plus the
+    // PostToolUse set of the requested Tool, which runs after a Command's integration step.
     pub(super) fn hook_admission(
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
         call: &ToolCall,
+        post_call: &ToolCall,
     ) -> (usize, u64, u64) {
         let Some(config) = runtime.permissions() else {
             return (0, 0, 0);
@@ -171,7 +173,7 @@ impl RunLoop<'_> {
         }
         let (Ok(pre), Ok(post)) = (
             self.hook_plans(runtime, config, HookEvent::PreToolUse, call),
-            self.hook_plans(runtime, config, HookEvent::PostToolUse, call),
+            self.hook_plans(runtime, config, HookEvent::PostToolUse, post_call),
         ) else {
             return (0, 0, 0);
         };

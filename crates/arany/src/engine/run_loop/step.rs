@@ -188,7 +188,8 @@ impl RunLoop<'_> {
         turn: ProviderTurn,
     ) -> Result<bool, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        let mut call = request.call.clone();
+        let source_call = request.call.clone();
+        let mut call = source_call.clone();
         let calls_remaining = match &grant {
             Grant::Primary { .. } => None,
             Grant::Researcher { child, .. } => Some(child.tool_calls_remaining.saturating_sub(1)),
@@ -203,13 +204,15 @@ impl RunLoop<'_> {
             hook_feedback: Default::default(),
         };
         loop {
-            let Some(intent) = self.sized_intent(&grant, runtime, &step, call)? else {
+            let Some(intent) = self.sized_intent(&grant, runtime, &step, call, &source_call)?
+            else {
                 return Ok(false);
             };
             let command = matches!(intent.call, ToolCall::Command { .. });
             let source_intent_digest = intent.digest();
             // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
-            let Some(observation) = Box::pin(self.run_intent(&grant, runtime, intent)).await?
+            let Some(observation) =
+                Box::pin(self.run_intent(&grant, runtime, intent, &source_call)).await?
             else {
                 return Ok(false);
             };
@@ -283,6 +286,7 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         step: &ToolStep,
         call: ToolCall,
+        post_call: &ToolCall,
     ) -> Result<Option<EffectIntent>, EngineError> {
         let intent = match grant {
             Grant::Primary { .. } => self.primary_intent(runtime, call)?,
@@ -294,9 +298,10 @@ impl RunLoop<'_> {
             return Ok(None);
         };
         // The PreToolUse hooks run before dispatch, so the authorization outlives them.
-        intent.expires_at_ms = intent
-            .expires_at_ms
-            .saturating_add(self.hook_admission(grant, runtime, &intent.call).1);
+        intent.expires_at_ms = intent.expires_at_ms.saturating_add(
+            self.hook_admission(grant, runtime, &intent.call, post_call)
+                .1,
+        );
         let integration =
             matches!(intent.call, ToolCall::Command { .. }).then(|| ToolCall::ApplyChangeset {
                 source_intent_digest: intent.digest(),
@@ -308,7 +313,7 @@ impl RunLoop<'_> {
             MAX_TOOL_ARGUMENT_BYTES + 128 * 6 + 512
         } else {
             0
-        } + self.feedback_reserve(runtime, &intent.call);
+        } + self.feedback_reserve(runtime, post_call);
         let Some(capacity) = runtime.result_capacity(overhead, integration_capacity) else {
             return Ok(None);
         };
@@ -429,9 +434,11 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
         intent: EffectIntent,
+        post_call: &ToolCall,
     ) -> Result<Option<ToolObservation>, EngineError> {
         let permission = self.permission(grant, runtime, &intent.call);
-        let (hook_events, pre_ms, post_ms) = self.hook_admission(grant, runtime, &intent.call);
+        let (hook_events, pre_ms, post_ms) =
+            self.hook_admission(grant, runtime, &intent.call, post_call);
         if !self
             .admit_tool(grant, runtime, &intent, permission, hook_events)
             .await?
@@ -1421,7 +1428,9 @@ impl RunLoop<'_> {
                 request,
                 review_allowed: false,
             };
-            let Some(observation) = Box::pin(self.run_intent(&grant, runtime, intent)).await?
+            let post_call = intent.call.clone();
+            let Some(observation) =
+                Box::pin(self.run_intent(&grant, runtime, intent, &post_call)).await?
             else {
                 return Ok(false);
             };

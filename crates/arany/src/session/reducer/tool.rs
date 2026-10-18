@@ -503,6 +503,13 @@ fn post_target<'a>(
         .checked_sub(1)
         .ok_or(ReplayError::InvalidTransition)?;
     let integration = &run.tools[last];
+    if matches!(
+        integration.intent.call,
+        crate::tools::ToolCall::ApplyChangeset { .. }
+    ) && integration.intent.digest() == *subject
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
     let integrated = matches!(
         &integration.intent.call,
         crate::tools::ToolCall::ApplyChangeset { source_intent_digest, .. }

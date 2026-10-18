@@ -2386,7 +2386,7 @@ async fn hook_post_tool_use_on_a_command_sees_the_integrated_tree() {
     let settings = json!({
         "permissions": {"allow": ["Bash", "Edit"]},
         "hooks": {"PostToolUse": [{"matcher": "Bash", "hooks": [
-            shell_hook("cat notes/new.txt >&2; exit 2")
+            {"type": "command", "command": "cat notes/new.txt >&2; exit 2", "timeout": 120}
         ]}]},
     });
     let fixture = Fixture::new(Some(&settings), true);
@@ -2429,6 +2429,18 @@ async fn hook_post_tool_use_on_a_command_sees_the_integrated_tree() {
         .position(|kind| *kind == "HookStarted")
         .unwrap();
     assert!(integration < hook, "the hook follows the integration");
+    // The integration step carries the source Tool's PostToolUse time, so a crash in the hook is charged.
+    let ceilings: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::ToolStarted {
+                active_ceiling_ms, ..
+            } => Some(*active_ceiling_ms),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ceilings.len(), 2);
+    assert!(ceilings[1] >= 120_000, "{ceilings:?}");
 }
 
 fn read_post_settings(hooks: Vec<Value>) -> Value {
