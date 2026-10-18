@@ -332,6 +332,7 @@ impl SessionView {
                     .model_tools()
                     .last()
                     .is_some_and(ToolView::settled_without_stop)
+                && run.hooks_settled()
                 && run.primary().is_some_and(|primary| {
                     let Some(request_index) = primary.provider_calls.iter().rposition(|call| {
                         call.disposition == ProviderCallDisposition::ToolRequested

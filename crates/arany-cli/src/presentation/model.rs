@@ -514,6 +514,7 @@ mod tests {
             review_call_index: None,
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             finished_sequence: None,
         });
         assert!(
@@ -699,6 +700,7 @@ mod tests {
             review_call_index: None,
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             finished_sequence: None,
         });
         let model = PresentationModel::from_session(&view, 80);

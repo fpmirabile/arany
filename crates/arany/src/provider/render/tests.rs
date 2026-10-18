@@ -48,6 +48,7 @@ fn step(id: &str, path: &str) -> ToolStep {
         facts: Some(GoalContextFacts::maximum()),
         steering_notes: Vec::new(),
         calls_remaining: None,
+        hook_feedback: Default::default(),
     }
 }
 
@@ -251,6 +252,7 @@ fn delegate_step_carries_child_results_once() {
         facts: None,
         steering_notes: Vec::new(),
         calls_remaining: None,
+        hook_feedback: Default::default(),
     }]);
     delegated.phase = AgentPhase::RootSynthesis;
     delegated.input.child_results = vec![ChildResult {
@@ -328,6 +330,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 review_call_index: None,
                 permission_verdict: None,
                 hooks: Vec::new(),
+                hook_sequence: None,
                 finished_sequence: Some(3),
             },
             ToolView {
@@ -345,6 +348,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 review_call_index: None,
                 permission_verdict: None,
                 hooks: Vec::new(),
+                hook_sequence: None,
                 finished_sequence: None,
             },
         ],
@@ -386,6 +390,7 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
             review_call_index: None,
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             finished_sequence: Some(3),
         }
     };
@@ -432,4 +437,22 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
         1,
         "covered counts index the Run's Tool Events"
     );
+}
+
+#[test]
+fn hook_feedback_renders_in_the_tool_result_only_when_present() {
+    let mut live = step("call_1", "src/lib.rs");
+    live.hook_feedback
+        .insert(0, vec!["hook feedback: check the file".into()]);
+    let rendered = serialized(&conversation(&request(vec![live.clone()])).unwrap().messages);
+    assert!(
+        rendered.iter().any(|block| block.contains("hook_feedback")
+            && block.contains("hook feedback: check the file"))
+    );
+    let plain = serialized(
+        &conversation(&request(vec![step("call_1", "src/lib.rs")]))
+            .unwrap()
+            .messages,
+    );
+    assert!(!plain.iter().any(|block| block.contains("hook_feedback")));
 }

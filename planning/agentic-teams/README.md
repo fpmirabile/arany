@@ -286,7 +286,7 @@ and evidence owners are in [execution](#execution).
 
 Named private presets now pin and admit all reachable routes for the four current roles (`primary`, `child`, `review`, `compaction`), with explicit `--profile`, bounded immutable Run metadata, same-selection Goal recovery and pinned compaction. The [Provider contract](../../docs/specs/provider.md#named-roster-presets) owns that behavior and its limits; current selected-account loaders and Tool-history adapter/account restrictions still apply.
 
-The primary can select an eligible, already admitted profile per typed child assignment, with journaled spawn references and actor-specific call/switch validation. Remaining item-9 work is cancellation, crash and Guard-continuity evidence through both entry paths. Children remain read-only and bounded by the parent grant; model output cannot introduce a destination or another preset.
+The primary can select an eligible, already admitted profile per typed child assignment, with journaled spawn references and actor-specific call/switch validation. Cancellation, crash, budget-refusal and Guard-continuity journeys are proven through both entry paths. Children remain read-only and bounded by the parent grant; model output cannot introduce a destination or another preset.
 
 Separately proposed D work, excluded from item 9 by decision O1: judge-only adapters and a durable per-agent pause/retry/switch lifecycle after exhausted routes. Those need accepted Events, dependency blocking, active-time and user-command contracts before implementation. Existing ordered HTTP-5xx fallback, failed-child → sibling drain → failed Run, shared budgets and explicit new-Run recovery remain authoritative. Worker/reviewer/judge taxonomy, writable workers, leases and handover belong to C2/C3 rather than this preset slice.
 
@@ -423,10 +423,11 @@ its owning contract and uses existing evidence under [testing rules](../../agent
   assignment-time build cache. Tools owns cache behavior; Tool journeys cover
   worker cache outcomes and the Engine corpus covers cancellation/disposal.
   MCP invocation and worker cache publication remain excluded.
-- **D roster (roadmap 9).** Complete cancellation, crash and Guard-continuity
-  evidence for presets and assignment selection. Provider and credential contracts
-  own admission. Judge-only adapters and paused-agent recovery are separate work
-  requiring accepted contracts and primary-source API research.
+- **D roster (roadmap 9).** Presets and assignment selection have
+  cancellation, crash and Guard-continuity evidence through both entry paths.
+  Provider and credential contracts own admission. Judge-only adapters and
+  paused-agent recovery are separate work requiring accepted contracts and
+  primary-source API research.
 - **B6/E7/E12 modes and RPI (roadmap 6).** Extend permission modes and hook
   wiring with phase Runs, grilling, plan/team approval, Goal presentation and
   settings. Goals, Tools and Terminal own approval, recovery, bounds and

@@ -1,11 +1,11 @@
 mod hooks;
 
-pub(crate) use hooks::pre_tool_use_input;
 pub use hooks::{
     CommandHook, HOOK_RESULT_BYTES, HookConfig, HookEvent, HookGroup, HookIgnoreReason,
-    HookInvocation, HookOutcome, HookResult, MAX_HOOK_INPUT_BYTES, MAX_HOOK_REASON_BYTES,
-    MAX_HOOKS_PER_OCCURRENCE,
+    HookInvocation, HookOutcome, HookResult, MAX_HOOK_FEEDBACK_BYTES, MAX_HOOK_INPUT_BYTES,
+    MAX_HOOK_REASON_BYTES, MAX_HOOKS_PER_OCCURRENCE,
 };
+pub(crate) use hooks::{feedback_lines, post_tool_use_input, pre_tool_use_input};
 
 use super::catalog::Family;
 use super::{ApprovalMode, ToolCall};
@@ -159,15 +159,16 @@ impl PermissionConfig {
         &self.hooks
     }
 
-    pub(crate) fn matched_pre_tool_use(
+    pub(crate) fn matched_tool_hooks(
         &self,
+        event: HookEvent,
         call: &ToolCall,
     ) -> Result<Vec<(u8, u8, &CommandHook)>, ConfigError> {
         let mut matched = Vec::new();
         if call.is_internal() {
             return Ok(matched);
         }
-        for (group_index, group) in self.hooks.groups(HookEvent::PreToolUse).iter().enumerate() {
+        for (group_index, group) in self.hooks.groups(event).iter().enumerate() {
             if !group.matches_tool(call)? {
                 continue;
             }

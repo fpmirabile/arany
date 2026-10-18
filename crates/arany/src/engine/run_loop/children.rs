@@ -578,6 +578,7 @@ impl RunLoop<'_> {
                 facts: None,
                 steering_notes: Vec::new(),
                 calls_remaining: None,
+                hook_feedback: Default::default(),
             });
         }
         // drive_primary reaches run_children, which reaches synthesize again.

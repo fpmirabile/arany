@@ -2593,6 +2593,92 @@ mod routing {
     }
 
     #[tokio::test]
+    async fn selected_profile_fallback_in_the_guard_keeps_one_read_only_tool_effect() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
+        let state = temp.path().join("state");
+        let primary = route(
+            ScriptedProvider::new(vec![
+                ProviderOutcome::Delegate(Delegate {
+                    agent: None,
+                    children: vec![arany::ChildAssignment {
+                        objective: "Read the facts".into(),
+                        profile: Some("spare".into()),
+                    }],
+                }),
+                finish("done"),
+            ])
+            .with_profile("scripted", "primary"),
+        );
+        let mut first = ScriptedProvider::new(vec![tool_outcome(
+            arany::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: 0,
+                limit: 4096,
+            },
+            None,
+        )])
+        .with_profile("scripted", "spare-first");
+        first
+            .responses
+            .get_mut()
+            .unwrap()
+            .push_back(Err(ProviderError::RemoteHttp(503)));
+        let first = route(first);
+        let fallback = route(
+            ScriptedProvider::new(vec![finish("read facts")])
+                .with_profile("scripted", "spare-fallback"),
+        );
+        let engine = engine_support::open(
+            StateRoot::admit(&state).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..EngineConfig::default()
+            },
+        )
+        .unwrap();
+        let config = state.join("tools.json");
+        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut bindings = routes(&primary);
+        pin_roster(&mut bindings, Some(vec![first.clone(), fallback.clone()]));
+        let mut request = input(&workspace);
+        request.policy = CollaborationPolicy::Team {
+            max_active_children: 1,
+        };
+        let result = run_routed(&engine, bindings, request, configured())
+            .await
+            .unwrap();
+        assert_eq!(result.run.status, RunStatus::Finished);
+        engine.close().await.unwrap();
+        let (events, view) = reopen(&state, result.session_id).await;
+        let child = &view.runs[0].agents[1];
+        assert_eq!(child.profile.as_deref(), Some("spare"));
+        assert_eq!(child.grant, Some(arany::ChildGrant::ReadOnly));
+        assert_eq!(child.tools.len(), 1);
+        assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
+        assert_eq!(first.requests.lock().unwrap().len(), 2);
+        let requests = fallback.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let step = &requests[0].input.tools.as_ref().unwrap().steps[0];
+        assert_eq!((step.requests.len(), step.observations.len()), (1, 1));
+        for started in [true, false] {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| match event.event {
+                        Event::ToolStarted { .. } => started,
+                        Event::ToolFinished { .. } => !started,
+                        _ => false,
+                    })
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn compaction_fallback_in_a_fork_runs_without_the_inherited_goal() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();

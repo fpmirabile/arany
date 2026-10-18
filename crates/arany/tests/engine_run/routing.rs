@@ -3,44 +3,6 @@ use super::*;
 use arany::test_support::routing::*;
 use arany::{ProviderRole, Providers};
 
-fn pin_roster(bindings: &mut arany::AdmittedProviders, spare: Option<Vec<Arc<dyn Provider>>>) {
-    let mut profiles = vec![
-        ("child".to_owned(), bindings.roles.child.clone()),
-        ("compaction".to_owned(), bindings.roles.compaction.clone()),
-        ("primary".to_owned(), bindings.roles.primary.clone()),
-        ("review".to_owned(), bindings.roles.review.clone()),
-    ];
-    let mut eligible = vec!["child".to_owned()];
-    if let Some(spare) = spare {
-        profiles.push(("spare".into(), spare));
-        eligible.push("spare".into());
-    }
-    let mut snapshot = arany::RosterSnapshot {
-        preset: "coding".into(),
-        selection_digest: [0; 32],
-        profiles: profiles
-            .iter()
-            .map(|(name, chain)| arany::NamedProviderRoutes {
-                name: name.clone(),
-                routes: chain
-                    .iter()
-                    .map(|provider| provider.identity().clone())
-                    .collect(),
-            })
-            .collect(),
-        providers: Providers {
-            primary: "primary".into(),
-            child: "child".into(),
-            review: "review".into(),
-            compaction: "compaction".into(),
-        },
-        child_profiles: eligible,
-    };
-    snapshot.selection_digest = snapshot.digest().unwrap();
-    assert!(snapshot.valid());
-    bindings.roster = Some(arany::AdmittedRoster { snapshot, profiles });
-}
-
 #[tokio::test]
 async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsistent_provenance() {
     for named in [false, true] {

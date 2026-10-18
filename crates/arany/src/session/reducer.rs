@@ -231,6 +231,17 @@ impl RunView {
             .count()
     }
 
+    // No Tool of the Run has an open or run-stopping hook; a Command's hooks sit on its source Tool.
+    pub(crate) fn hooks_settled(&self) -> bool {
+        self.tools.iter().all(|tool| {
+            tool.hooks.iter().all(|hook| {
+                hook.outcome
+                    .as_ref()
+                    .is_some_and(|outcome| !outcome.observation.stops_run())
+            })
+        })
+    }
+
     pub(crate) fn model_tools(&self) -> &[ToolView] {
         &self.tools[self.parse_count()..]
     }
@@ -243,6 +254,7 @@ pub struct ToolView {
     pub review_call_index: Option<u32>,
     pub permission_verdict: Option<crate::tools::permissions::PermissionVerdict>,
     pub hooks: Vec<HookView>,
+    pub hook_sequence: Option<u64>,
     pub finished_sequence: Option<u64>,
 }
 
@@ -253,6 +265,19 @@ pub struct HookView {
 }
 
 impl ToolView {
+    // Model-facing PostToolUse lines, derived from the journaled hook results alone.
+    pub fn hook_feedback(&self) -> Vec<String> {
+        crate::tools::permissions::feedback_lines(
+            self.hooks
+                .iter()
+                .filter(|hook| {
+                    hook.invocation.event == crate::tools::permissions::HookEvent::PostToolUse
+                })
+                .filter_map(|hook| hook.outcome.as_ref())
+                .map(|outcome| &outcome.result),
+        )
+    }
+
     // A hook whose outcome is unknown stops the Run exactly like an uncertain Tool.
     pub(crate) fn settled_without_stop(&self) -> bool {
         self.observation
@@ -353,6 +378,7 @@ fn is_tool_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallR
                         .find(|call| call.disposition == ProviderCallDisposition::ToolRequested)
                         .is_some_and(|call| call.phase == record.phase)
         })
+        && run.hooks_settled()
         && run.tools.last().is_some_and(|tool| {
             tool.settled_without_stop()
                 && tool.observation.as_ref().is_some_and(|observation| {

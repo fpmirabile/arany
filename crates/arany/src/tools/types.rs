@@ -931,6 +931,8 @@ pub struct ToolStep {
     pub steering_notes: Vec<String>,
     /// Researcher Tool calls left once this step is answered; `None` for the primary.
     pub calls_remaining: Option<usize>,
+    /// PostToolUse feedback lines by observation index, re-derived from `HookFinished` results.
+    pub hook_feedback: std::collections::BTreeMap<usize, Vec<String>>,
 }
 
 /// Live Run state only: replayed turns are never serialized or journaled.
@@ -942,13 +944,21 @@ pub struct ToolContext {
 }
 
 impl ToolStep {
+    pub(crate) fn feedback(&self, index: usize) -> &[String] {
+        self.hook_feedback.get(&index).map_or(&[], Vec::as_slice)
+    }
+
     fn rendered_len(&self) -> usize {
         self.turn.len()
             + self
                 .observations
                 .iter()
-                .map(|observation| {
-                    model_observation(observation).to_string().len() + RESULT_ENVELOPE_BYTES
+                .enumerate()
+                .map(|(index, observation)| {
+                    model_result(observation, self.feedback(index))
+                        .to_string()
+                        .len()
+                        + RESULT_ENVELOPE_BYTES
                 })
                 .sum::<usize>()
             + self
@@ -1031,7 +1041,12 @@ impl ToolContext {
     pub(crate) fn model_observations(&self, steps: usize) -> Vec<Value> {
         self.steps[..steps]
             .iter()
-            .flat_map(|step| step.observations.iter().map(model_observation))
+            .flat_map(|step| {
+                step.observations
+                    .iter()
+                    .enumerate()
+                    .map(|(index, observation)| model_result(observation, step.feedback(index)))
+            })
             .collect()
     }
 }
@@ -1043,6 +1058,14 @@ pub(crate) fn model_call(call: &ToolCall) -> Value {
         } => json!({"operation":"apply_changeset", "changeset": changeset}),
         _ => json!(call),
     }
+}
+
+pub(crate) fn model_result(observation: &ToolObservation, feedback: &[String]) -> Value {
+    let mut value = model_observation(observation);
+    if !feedback.is_empty() {
+        value["hook_feedback"] = json!(feedback);
+    }
+    value
 }
 
 pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
