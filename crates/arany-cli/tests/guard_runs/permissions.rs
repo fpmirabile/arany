@@ -164,7 +164,7 @@ impl Fixture {
         let unconsumed = provider.responses.lock().unwrap().len();
         assert!(
             unconsumed == 0,
-            "all expected calls consumed: {unconsumed} left, fixture settings {:?}, run {:?}, tools {:?}",
+            "all expected calls consumed: {unconsumed} left, fixture settings {:?}, run {:?}, tools (operation, attested, outcome, hook outcomes) {:?}",
             self.settings,
             result.run.status,
             result
@@ -177,7 +177,12 @@ impl Fixture {
                     tool.observation
                         .as_ref()
                         .map(|observation| observation.attestation.is_some()),
-                    tool_report(tool.observation.as_ref())
+                    tool_report(tool.observation.as_ref()),
+                    tool.hooks
+                        .iter()
+                        .filter_map(|hook| hook.outcome.as_ref())
+                        .map(|outcome| tool_report(Some(&outcome.observation)))
+                        .collect::<Vec<_>>()
                 ))
                 .collect::<Vec<_>>()
         );
@@ -541,6 +546,37 @@ async fn permission_dispatch_over_maximum_command_timeout_limits_before_deny() {
 }
 
 #[tokio::test]
+async fn a_one_second_command_timeout_is_admitted_and_ends_as_a_limit() {
+    let mut fixture = Fixture::new(None, true);
+    fixture.command_maximum = Some(1_000);
+    let call = arany::ToolCall::Command {
+        program: "sh".into(),
+        args: vec!["-c".into(), "sleep 20".into()],
+        cwd: "".into(),
+    };
+    let mut plan = plan(&call);
+    plan.command_timeout_ms = Some(1_000);
+    let (result, _, _) = fixture
+        .run(
+            vec![tool_outcome(call, Some(Box::new(plan))), finish("answer")],
+            Some(arany::ApprovalMode::Request),
+            false,
+        )
+        .await;
+    let observation = result.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(
+        observation.disposition,
+        arany::ToolDisposition::Limit,
+        "{}",
+        tool_report(Some(observation))
+    );
+    assert!(matches!(
+        observation.attestation,
+        Some(arany::Attestation::Guard(_))
+    ));
+}
+
+#[tokio::test]
 async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and_reaps_it() {
     let marker = format!("30.{}", std::process::id());
     let sleepers = || async {
@@ -555,7 +591,7 @@ async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and
             .count()
     };
     let mut fixture = Fixture::new(None, true);
-    // The intent expires one runtime after issue, and macOS storage preparation must fit before it.
+    // Long enough to observe both children running before the timeout.
     fixture.command_maximum = Some(10_000);
     let call = arany::ToolCall::Command {
         program: "sh".into(),
@@ -687,7 +723,10 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
         let mut outcomes = vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Inspect the facts".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect the facts".into(),
+                    profile: None,
+                }],
             }),
             tool_outcome(call(kind), None),
         ];
@@ -740,7 +779,10 @@ async fn researcher_review_approval_dispatches_within_a_short_goal_budget() {
             vec![
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
-                    children: vec!["Inspect the facts".into()],
+                    children: vec![arany::ChildAssignment {
+                        objective: "Inspect the facts".into(),
+                        profile: None,
+                    }],
                 }),
                 tool_outcome(call("catalog"), None),
                 finish("approve"),
@@ -793,7 +835,10 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
         ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Inspect the facts".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect the facts".into(),
+                    profile: None,
+                }],
             }),
             finish("answer"),
         ])
@@ -925,7 +970,10 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
         let mut outcomes = vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Inspect the task".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect the task".into(),
+                    profile: None,
+                }],
             }),
             finish("report"),
             tool_outcome(call.clone(), Some(Box::new(plan(&call)))),
@@ -1628,7 +1676,10 @@ async fn agent_definition_guard_registry_research_selection_and_replay() {
             vec![
                 ProviderOutcome::Delegate(Delegate {
                     agent: Some("reader".into()),
-                    children: vec!["Inspect facts".into()],
+                    children: vec![arany::ChildAssignment {
+                        objective: "Inspect facts".into(),
+                        profile: None,
+                    }],
                 }),
                 tool_outcome(call("read"), None),
                 finish("report"),
@@ -1778,7 +1829,10 @@ async fn agent_definition_guard_skips_invalid_files_and_refuses_their_selection(
         .run(
             vec![ProviderOutcome::Delegate(Delegate {
                 agent: Some("reader".into()),
-                children: vec!["Inspect facts".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect facts".into(),
+                    profile: None,
+                }],
             })],
             None,
             true,
@@ -1810,7 +1864,10 @@ async fn agent_definition_guard_editor_turn_and_tool_limits_refuse_child_egress(
         );
         let mut responses = vec![ProviderOutcome::Delegate(Delegate {
             agent: Some("reader".into()),
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         })];
         responses.extend(response);
         let (result, requests, _) = fixture.run(responses, None, true).await;
@@ -2016,7 +2073,10 @@ async fn agent_definition_guard_modes_preserve_parent_asks_and_add_review() {
         let mut responses = vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: Some("reader".into()),
-                children: vec!["Inspect".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect".into(),
+                    profile: None,
+                }],
             }),
             tool_outcome(call(if review { "catalog" } else { "read" }), None),
         ];

@@ -111,7 +111,12 @@ fn outcome_schema() -> Value {
             }, "required": ["type", "summary", "result"], "additionalProperties": false},
             {"type": "object", "properties": {
                 "type": {"type": "string", "enum": ["delegate"]},
-                "children": {"type": "array", "items": {"type": "string"}},
+                "children": {"type": "array", "items": {
+                    "type": "object", "properties": {
+                        "objective": {"type": "string"},
+                        "profile": {"type": ["string", "null"], "enum": [null], "description": "Eligible admitted profile, or null for the pinned child default."}
+                    }, "required": ["objective", "profile"], "additionalProperties": false
+                }},
                 "agent": {"type": ["string", "null"], "description": "Admitted agent definition name, or null for the default researcher. Editors are unsupported."}
             }, "required": ["type", "children", "agent"], "additionalProperties": false}
         ]}},
@@ -450,6 +455,15 @@ impl ProviderRequest {
                 && (self.collaboration != CollaborationPolicy::Single
                     || input.goal_context_facts.is_some())
             || !input.steering_notes.is_empty() && !root
+            || !root && !input.assignment_profiles.is_empty()
+            || input.assignment_profiles.len() > MAX_ASSIGNMENT_PROFILES
+            || input
+                .assignment_profiles
+                .iter()
+                .enumerate()
+                .any(|(index, name)| {
+                    !valid_profile_name(name) || input.assignment_profiles[..index].contains(name)
+                })
         {
             return Err(ProviderError::Rejected);
         }
@@ -461,7 +475,11 @@ pub(crate) fn restrict_outcome_schema(
     schema: serde_json::Value,
     request: &ProviderRequest,
 ) -> serde_json::Value {
-    outcome_schema_for_phases(schema, request.collaboration, &[request.phase])
+    outcome_schema_for_phases(
+        assignment_schema(schema, request),
+        request.collaboration,
+        &[request.phase],
+    )
 }
 
 pub(crate) fn run_outcome_schema(request: &ProviderRequest) -> Value {
@@ -470,7 +488,24 @@ pub(crate) fn run_outcome_schema(request: &ProviderRequest) -> Value {
     } else {
         std::slice::from_ref(&request.phase)
     };
-    outcome_schema_for_phases(outcome_schema(), request.collaboration, phases)
+    outcome_schema_for_phases(
+        assignment_schema(outcome_schema(), request),
+        request.collaboration,
+        phases,
+    )
+}
+
+fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
+    let mut profiles: Vec<Value> = request
+        .input
+        .assignment_profiles
+        .iter()
+        .map(|name| json!(name))
+        .collect();
+    profiles.push(Value::Null);
+    schema["properties"]["outcome"]["anyOf"][1]["properties"]["children"]["items"]["properties"]
+        ["profile"]["enum"] = json!(profiles);
+    schema
 }
 
 fn outcome_schema_for_phases(
@@ -573,10 +608,40 @@ pub struct Finish {
     pub result: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildAssignment {
+    pub objective: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub profile: Option<String>,
+}
+
+const MAX_CHILD_OBJECTIVE_BYTES: usize = 2 * 1024;
+const MAX_CHILD_ASSIGNMENTS: usize = 8;
+const MAX_DELEGATION_BYTES: usize = 24 * 1024;
+const MAX_ASSIGNMENT_PROFILES: usize = 8;
+
+impl ChildAssignment {
+    pub(crate) fn valid(&self) -> bool {
+        !self.objective.trim().is_empty()
+            && self.objective.len() <= MAX_CHILD_OBJECTIVE_BYTES
+            && self.profile.as_deref().is_none_or(valid_profile_name)
+    }
+}
+
+pub(crate) fn valid_assignments(children: &[ChildAssignment], agent: Option<&str>) -> bool {
+    (1..=MAX_CHILD_ASSIGNMENTS).contains(&children.len())
+        && children.iter().all(ChildAssignment::valid)
+        && serde_json::to_vec(
+            &json!({"outcome": {"type": "delegate", "children": children, "agent": agent}}),
+        )
+        .is_ok_and(|bytes| bytes.len() <= MAX_DELEGATION_BYTES)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Delegate {
     pub agent: Option<String>,
-    pub children: Vec<String>,
+    pub children: Vec<ChildAssignment>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -636,7 +701,13 @@ impl ProviderResponse {
                         .agent
                         .as_ref()
                         .is_some_and(|name| name.contains(secret))
-                        || value.children.iter().any(|child| child.contains(secret))
+                        || value.children.iter().any(|child| {
+                            child.objective.contains(secret)
+                                || child
+                                    .profile
+                                    .as_ref()
+                                    .is_some_and(|name| name.contains(secret))
+                        })
                 }
                 ProviderOutcome::Tools(requests) => requests
                     .iter()
@@ -1084,7 +1155,18 @@ mod tests {
         assert!(response.reflects_secret(secret));
         response.outcome = ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec![format!("child {secret}")],
+            children: vec![crate::ChildAssignment {
+                objective: format!("child {secret}"),
+                profile: None,
+            }],
+        });
+        assert!(response.reflects_secret(secret));
+        response.outcome = ProviderOutcome::Delegate(Delegate {
+            agent: None,
+            children: vec![ChildAssignment {
+                objective: "safe".into(),
+                profile: Some(secret.into()),
+            }],
         });
         assert!(response.reflects_secret(secret));
         let tool = |contract: Option<crate::session::GoalPlanContract>| {
@@ -1193,6 +1275,9 @@ mod tests {
         };
         assert!(researcher.validate_scope().is_err());
         researcher.collaboration = CollaborationPolicy::Single;
+        researcher.input.assignment_profiles = vec!["inspect".into()];
+        assert!(researcher.validate_scope().is_err());
+        researcher.input.assignment_profiles.clear();
         researcher.input.steering_notes = vec!["note".into()];
         assert!(researcher.validate_scope().is_err());
 

@@ -68,6 +68,7 @@ pub(crate) struct RunTrace {
     session_id: SessionId,
     goal_id: GoalId,
     routes: Option<ProviderRoutes>,
+    roster: Option<Box<crate::RosterSnapshot>>,
     switched: HashMap<(AgentRunId, ProviderRole), ProviderIdentity>,
     context: Option<(SystemTime, SystemTime)>,
     goal: Option<TraceSpan>,
@@ -83,6 +84,7 @@ pub(crate) struct RunTrace {
 }
 
 struct AgentSpan {
+    child_route: Option<ProviderIdentity>,
     span: TraceSpan,
     call_started: Option<SystemTime>,
     requested: Option<ProviderIdentity>,
@@ -201,6 +203,7 @@ impl Telemetry {
             session_id,
             goal_id,
             routes: None,
+            roster: None,
             switched: HashMap::new(),
             context: Some(context),
             goal: None,
@@ -387,6 +390,7 @@ impl RunTrace {
                 run_id,
                 agent_run_id,
                 role,
+                profile,
                 ..
             } if self.run_id() == Some(*run_id) => {
                 let mut attributes = vec![
@@ -426,6 +430,10 @@ impl RunTrace {
                 self.agents.insert(
                     *agent_run_id,
                     AgentSpan {
+                        child_route: profile
+                            .as_ref()
+                            .and_then(|name| self.roster.as_ref()?.chain(name)?.first())
+                            .cloned(),
                         span,
                         call_started: None,
                         requested: None,
@@ -433,6 +441,7 @@ impl RunTrace {
                 );
             }
             Event::RunStarted { run_id, config, .. } if self.run_id() == Some(*run_id) => {
+                self.roster = config.roster.clone();
                 self.routes = config.providers.clone().or_else(|| {
                     config
                         .identity()
@@ -628,6 +637,11 @@ impl RunTrace {
         let Some(route) = requested
             .as_ref()
             .or_else(|| self.switched.get(&(agent_run_id, role)))
+            .or_else(|| {
+                (role == ProviderRole::Child)
+                    .then_some(agent.child_route.as_ref())
+                    .flatten()
+            })
             .or_else(|| {
                 self.routes
                     .as_ref()

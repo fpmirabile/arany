@@ -253,6 +253,10 @@ mod goal_replay_tests {
         agent_run_id: AgentRunId,
         config: RunConfig,
     ) -> Vec<Event> {
+        let profile = config
+            .roster
+            .as_ref()
+            .map(|roster| roster.providers.primary.clone());
         vec![
             Event::GoalRunLinked {
                 goal_id,
@@ -270,6 +274,7 @@ mod goal_replay_tests {
                 active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
             },
             Event::AgentSpawned {
+                profile,
                 definition: None,
                 run_id,
                 agent_run_id,
@@ -531,6 +536,172 @@ mod goal_replay_tests {
                 assert_eq!(
                     SessionView::replay_open(session, &session_with(session, events)).is_ok(),
                     change == 0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn assigned_profile_replay_checks_spawn_chain_and_exact_output_cap() {
+        use crate::provider::{
+            NamedProviderRoutes, ProviderFallback, ProviderRole, Providers, RosterSnapshot,
+        };
+        for inherited in [false, true] {
+            let (session, goal, run, primary, child) = (
+                SessionId::new(),
+                GoalId::new(),
+                RunId::new(),
+                AgentRunId::new(),
+                AgentRunId::new(),
+            );
+            let mut config = config(
+                CollaborationPolicy::Team {
+                    max_active_children: 2,
+                },
+                false,
+            );
+            let main = config.identity().unwrap();
+            let mut first = main.clone();
+            first.model = "shared-first".into();
+            let mut default = main.clone();
+            default.model = "default-fallback".into();
+            let mut spare = main.clone();
+            spare.model = "spare-fallback".into();
+            spare.limits.max_output_tokens = 16;
+            let mut snapshot = RosterSnapshot {
+                preset: "coding".into(),
+                selection_digest: [0; 32],
+                profiles: vec![
+                    NamedProviderRoutes {
+                        name: "child".into(),
+                        routes: if inherited {
+                            vec![main.clone()]
+                        } else {
+                            vec![first.clone(), default.clone()]
+                        },
+                    },
+                    NamedProviderRoutes {
+                        name: "main".into(),
+                        routes: vec![main],
+                    },
+                    NamedProviderRoutes {
+                        name: "spare".into(),
+                        routes: vec![first.clone(), spare.clone()],
+                    },
+                ],
+                providers: Providers {
+                    primary: "main".into(),
+                    child: "child".into(),
+                    review: "main".into(),
+                    compaction: "main".into(),
+                },
+                child_profiles: vec!["child".into(), "spare".into()],
+            };
+            snapshot.selection_digest = snapshot.digest().unwrap();
+            config.providers = if inherited {
+                None
+            } else {
+                snapshot.role_routes()
+            };
+            config.roster = Some(Box::new(snapshot));
+            let mut facts = vec![goal_started(goal, GoalBudget::default())];
+            facts.extend(start_run(goal, run, primary, config));
+            facts.extend([
+                Event::GoalProviderCallReserved {
+                    goal_id: goal,
+                    run_id: run,
+                    agent_run_id: primary,
+                    active_ceiling_ms: 0,
+                },
+                Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: primary,
+                    record: record(
+                        AgentPhase::RootPlan,
+                        ProviderCallDisposition::Delegated,
+                        Some(1),
+                    ),
+                },
+                Event::AgentSpawned {
+                    run_id: run,
+                    agent_run_id: child,
+                    role: AgentRole::Child,
+                    ordinal: 1,
+                    objective: Some("Inspect".into()),
+                    grant: Some(ChildGrant::NoTools),
+                    definition: None,
+                    profile: Some("spare".into()),
+                },
+                Event::GoalProviderCallReserved {
+                    goal_id: goal,
+                    run_id: run,
+                    agent_run_id: child,
+                    active_ceiling_ms: 0,
+                },
+                Event::ProviderFallbackUsed {
+                    run_id: run,
+                    agent_run_id: child,
+                    fallback: ProviderFallback {
+                        role: ProviderRole::Child,
+                        call_index: 0,
+                        failure: ProviderCallDisposition::Unavailable,
+                        from: first,
+                        to: spare,
+                    },
+                },
+                Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: child,
+                    record: record(
+                        AgentPhase::ChildWork,
+                        ProviderCallDisposition::Finished,
+                        Some(16),
+                    ),
+                },
+            ]);
+            let valid = session_with(session, facts);
+            let view = SessionView::replay_open(session, &valid).unwrap().unwrap();
+            assert_eq!(view.runs[0].agents[1].profile.as_deref(), Some("spare"));
+            assert_eq!(view.goals[0].provider_calls, 3);
+            assert!(view.goals[0].token_usage_unknown);
+            for change in 0..6 {
+                let mut invalid = valid.clone();
+                for event in &mut invalid {
+                    match &mut event.event {
+                        Event::AgentSpawned {
+                            agent_run_id,
+                            profile,
+                            ..
+                        } if *agent_run_id == child && change < 3 => {
+                            *profile = match change {
+                                0 => None,
+                                1 => Some("unknown".into()),
+                                _ => Some("main".into()),
+                            };
+                        }
+                        Event::AgentSpawned {
+                            agent_run_id,
+                            profile,
+                            ..
+                        } if *agent_run_id == primary && change == 3 => {
+                            *profile = Some("child".into())
+                        }
+                        Event::ProviderFallbackUsed { fallback, .. } if change == 4 => {
+                            fallback.to = default.clone()
+                        }
+                        Event::ProviderCallRecorded {
+                            agent_run_id,
+                            record,
+                            ..
+                        } if *agent_run_id == child && change == 5 => {
+                            record.output_tokens = Some(17)
+                        }
+                        _ => (),
+                    }
+                }
+                assert!(
+                    SessionView::replay_open(session, &invalid).is_err(),
+                    "tampering {change}"
                 );
             }
         }
@@ -934,6 +1105,7 @@ mod goal_replay_tests {
                 ),
             });
             events.push(Event::AgentSpawned {
+                profile: None,
                 definition: None,
                 run_id,
                 agent_run_id: child,
@@ -2386,6 +2558,7 @@ mod goal_replay_tests {
                     false,
                 )),
                 agents: vec![AgentView {
+                    profile: None,
                     definition: None,
                     id: agent_run_id,
                     role: AgentRole::Primary,
@@ -2456,6 +2629,7 @@ mod goal_replay_tests {
     fn apply_child_spawn(view: &mut SessionView, grant: ChildGrant) -> Result<(), ReplayError> {
         let run_id = view.runs[0].id;
         let event = Event::AgentSpawned {
+            profile: None,
             definition: None,
             run_id,
             agent_run_id: AgentRunId::new(),
@@ -3003,6 +3177,7 @@ mod goal_replay_tests {
                 images: Vec::new(),
                 config: Some(config(CollaborationPolicy::Single, true)),
                 agents: vec![AgentView {
+                    profile: None,
                     definition: None,
                     id: agent_run_id,
                     role: AgentRole::Primary,
@@ -3172,6 +3347,7 @@ mod goal_replay_tests {
                     images: Vec::new(),
                     config: Some(config(CollaborationPolicy::Single, true)),
                     agents: vec![AgentView {
+                        profile: None,
                         definition: None,
                         id: agent_run_id,
                         role: AgentRole::Primary,

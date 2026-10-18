@@ -441,6 +441,7 @@ mod tests {
                 tool_policy: None,
             }),
             agents: std::iter::once(AgentView {
+                profile: None,
                 definition: None,
                 id: AgentRunId::new(),
                 role: AgentRole::Primary,
@@ -454,6 +455,7 @@ mod tests {
                 status: AgentStatus::Active,
             })
             .chain((1..=5).map(|ordinal| AgentView {
+                profile: None,
                 definition: None,
                 id: AgentRunId::new(),
                 role: AgentRole::Child,

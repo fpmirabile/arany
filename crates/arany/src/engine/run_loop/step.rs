@@ -530,7 +530,7 @@ impl RunLoop<'_> {
                     research: true,
                 };
                 (
-                    step.max_events_for(&self.routing.providers),
+                    step.max_events_for_admitted(&self.routing.providers),
                     step.tool_observations(),
                 )
             }

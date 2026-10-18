@@ -111,7 +111,7 @@ fn startup_upper_bound_two_files_on_named_host() {
                         serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
                     }
                     1 => {
-                        serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}})
+                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                     }
                     _ => serde_json::json!({"summary":"synthetic summary"}),
                 }

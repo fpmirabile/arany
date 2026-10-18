@@ -1007,7 +1007,7 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
     let delegate = event_reply(completed_with_id(
         "resp_delegate",
         Some(12),
-        r#"{"outcome":{"type":"delegate","children":["Explain two"]}}"#,
+        r#"{"outcome":{"type":"delegate","children":[{"objective":"Explain two","profile":null}]}}"#,
     ));
     let compact = event_reply(completed_with_id(
         "resp_compact",
@@ -1044,12 +1044,12 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
     let wrong_direct = event_reply(completed_with_id(
         "resp_direct",
         Some(12),
-        r#"{"outcome":{"type":"delegate","children":["Wrong phase"]}}"#,
+        r#"{"outcome":{"type":"delegate","children":[{"objective":"Wrong phase","profile":null}]}}"#,
     ));
     let repeated_delegate = event_reply(completed_with_id(
         "resp_direct",
         Some(12),
-        r#"{"outcome":{"type":"delegate","children":["Explain two"]}}"#,
+        r#"{"outcome":{"type":"delegate","children":[{"objective":"Explain two","profile":null}]}}"#,
     ));
     let wrong_delegate = event_reply(completed_with_id(
         "resp_delegate",

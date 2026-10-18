@@ -34,7 +34,16 @@ fn team_two_core_latency_on_named_host() {
             responses.extend([
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
-                    children: vec!["A".into(), "B".into()],
+                    children: vec![
+                        arany::ChildAssignment {
+                            objective: "A".into(),
+                            profile: None,
+                        },
+                        arany::ChildAssignment {
+                            objective: "B".into(),
+                            profile: None,
+                        },
+                    ],
                 }),
                 ProviderOutcome::Finish(Finish {
                     summary: "child".into(),

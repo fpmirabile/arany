@@ -829,6 +829,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
     let mut child_tool = run.tools.pop().unwrap();
     child_tool.intent.id = uuid::Uuid::now_v7();
     run.agents.push(arany::AgentView {
+        profile: None,
         id: child_tool.intent.agent_run_id,
         role: arany::AgentRole::Child,
         ordinal: 1,

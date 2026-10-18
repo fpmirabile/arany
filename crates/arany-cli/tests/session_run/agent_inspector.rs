@@ -176,7 +176,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
             let text = match index {
                 0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
                 1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}})
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
                 2 => serde_json::json!({"summary":"synthetic summary"}),
                 3 => {

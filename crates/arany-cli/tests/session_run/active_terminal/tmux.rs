@@ -1020,7 +1020,9 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             let body = read_request(&mut stream);
             let text = match index {
                 0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
-                1 => serde_json::json!({"outcome":{"type":"delegate","children":["child"]}}),
+                1 => {
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child","profile":null}]}})
+                }
                 2 => serde_json::json!({"summary":"summary"}),
                 3 => {
                     let wire: serde_json::Value =
@@ -2406,7 +2408,7 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
                 1 => send_response_for(
                     &mut stream,
                     index,
-                    serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}}),
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}}),
                     true,
                 ),
                 2 => send_response_for(
@@ -2420,7 +2422,7 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
                     send_response_for(
                         &mut stream,
                         index,
-                        serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}}),
+                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}}),
                         true,
                     );
                 }
@@ -2454,7 +2456,7 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
                     send_response_for(
                         &mut stream,
                         index,
-                        serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}}),
+                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}}),
                         true,
                     );
                 }

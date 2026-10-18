@@ -380,6 +380,67 @@ fn action_bounds_reserve_only_the_selected_roles_switches() {
 }
 
 #[test]
+fn action_headroom_covers_eligible_chains_longer_than_the_child_default() {
+    use crate::test_support::scenario::ScriptedProvider;
+    use crate::{AdmittedProviders, AdmittedRoster, NamedProviderRoutes, Provider, RosterSnapshot};
+    use std::sync::Arc;
+    let primary: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![]));
+    let mut providers = AdmittedProviders::single(primary.clone());
+    let chain: Vec<Arc<dyn Provider>> = vec![
+        primary.clone(),
+        Arc::new(ScriptedProvider::new(vec![]).with_profile("scripted", "fallback-a")),
+        Arc::new(ScriptedProvider::new(vec![]).with_profile("scripted", "fallback-b")),
+    ];
+    let mut snapshot = RosterSnapshot {
+        preset: "coding".into(),
+        selection_digest: [0; 32],
+        profiles: vec![
+            NamedProviderRoutes {
+                name: "main".into(),
+                routes: vec![primary.identity().clone()],
+            },
+            NamedProviderRoutes {
+                name: "spare".into(),
+                routes: chain
+                    .iter()
+                    .map(|provider| provider.identity().clone())
+                    .collect(),
+            },
+        ],
+        providers: Providers::all("main".into()),
+        child_profiles: vec!["main".into(), "spare".into()],
+    };
+    snapshot.selection_digest = snapshot.digest().unwrap();
+    assert!(snapshot.valid());
+    providers.roster = Some(AdmittedRoster {
+        snapshot,
+        profiles: vec![("main".into(), vec![primary]), ("spare".into(), chain)],
+    });
+    for (action, extra) in [
+        (
+            Action::Delegation {
+                children: 8,
+                research: true,
+            },
+            8 * (MAX_CHILD_TOOL_CALLS + 1) * 2,
+        ),
+        (
+            Action::Child {
+                in_flight: 2,
+                research: true,
+            },
+            6,
+        ),
+        (Action::Review, 0),
+    ] {
+        assert_eq!(
+            action.max_events_for_admitted(&providers),
+            action.max_events() + extra
+        );
+    }
+}
+
+#[test]
 fn staged_bounds_never_exceed_the_first_admission() {
     let call = Action::ProviderCall {
         previews: true,

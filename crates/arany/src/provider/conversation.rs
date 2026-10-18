@@ -36,6 +36,7 @@ pub struct ProviderRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunInput {
     pub role: PromptRole,
+    pub assignment_profiles: Vec<String>,
     pub objective: String,
     pub images: Vec<ProviderImage>,
     /// Notes recorded before the first step; later ones live in their `ToolStep`.
@@ -57,6 +58,7 @@ impl RunInput {
     pub fn new(role: PromptRole, objective: String) -> Self {
         Self {
             role,
+            assignment_profiles: Vec::new(),
             objective,
             images: Vec::new(),
             steering_notes: Vec::new(),

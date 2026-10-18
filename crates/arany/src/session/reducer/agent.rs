@@ -238,10 +238,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 agent.provider_calls.len()
             };
             let chain = run
-                .config
-                .as_ref()
-                .and_then(|config| config.providers.as_ref())
-                .map(|providers| providers.get(fallback.role))
+                .provider_chain(*agent_run_id, fallback.role)
                 .ok_or(ReplayError::InvalidTransition)?;
             let previous = run
                 .provider_fallbacks
@@ -292,6 +289,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             objective,
             grant,
             definition,
+            profile,
         } => {
             if *role == AgentRole::Child {
                 let goal =
@@ -309,6 +307,18 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             }
             let run = active_run(current, *run_id)?;
             let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
+            let valid_profile = match &config.roster {
+                Some(roster) => match role {
+                    AgentRole::Primary => profile.as_ref() == Some(&roster.providers.primary),
+                    AgentRole::Child => profile
+                        .as_ref()
+                        .is_some_and(|name| roster.child_profiles.contains(name)),
+                },
+                None => profile.is_none(),
+            };
+            if !valid_profile {
+                return Err(ReplayError::InvalidTransition);
+            }
             let child_grant = if config.tool_policy.is_some() {
                 ChildGrant::ReadOnly
             } else {
@@ -345,6 +355,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 }
             }
             run.agents.push(AgentView {
+                profile: profile.clone(),
                 definition: definition.clone(),
                 id: *agent_run_id,
                 role: *role,
@@ -392,19 +403,20 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             {
                 return Err(ReplayError::InvalidTransition);
             }
-            if let Some(routes) = run
-                .config
-                .as_ref()
-                .and_then(|config| config.providers.as_ref())
+            let role = crate::provider::ProviderRole::for_phase(record.phase);
+            let inherited = run.config.as_ref().and_then(|config| config.identity());
+            if let Some(initial) = run
+                .provider_chain(*agent_run_id, role)
+                .and_then(|chain| chain.first())
+                .or(inherited.as_ref())
             {
-                let role = crate::provider::ProviderRole::for_phase(record.phase);
                 let identity = run
                     .provider_fallbacks
                     .iter()
                     .rev()
                     .find(|(actor, fallback)| *actor == *agent_run_id && fallback.role == role)
                     .map(|(_, fallback)| &fallback.to)
-                    .unwrap_or(&routes.get(role)[0]);
+                    .unwrap_or(initial);
                 let cap = match role {
                     crate::provider::ProviderRole::Primary => identity.limits.max_output_tokens,
                     crate::provider::ProviderRole::Child => identity
