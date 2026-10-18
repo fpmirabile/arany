@@ -21,14 +21,14 @@ use replay::{
 };
 pub use state::HistoryReset;
 #[cfg(test)]
+pub(crate) use state::begin_released;
+#[cfg(test)]
 pub(crate) use state::capture_archive;
 pub(crate) use state::{
     BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock,
     WorkspaceRunLock, archive_size_with_limit,
 };
 pub use state::{Record, RecordKind, StateRoot};
-#[cfg(test)]
-pub(crate) use state::{begin_released, retry_busy};
 #[cfg(target_os = "macos")]
 pub(crate) use state::{capture_archive_async_with_limit, restore_archive_async_with_limit};
 #[cfg(target_os = "linux")]
