@@ -488,6 +488,14 @@ impl RunLoop<'_> {
     }
 
     fn permission(&self, grant: &Grant<'_>, runtime: &ToolRuntime, call: &ToolCall) -> Permission {
+        // Definition parsing is an internal Engine step, never a model Tool; it runs only in the fixed Guard grant.
+        if matches!(call, ToolCall::ParseAgentDefinition { .. }) {
+            return Permission {
+                decision: Decision::Allow,
+                basis: PermissionSource::Mode,
+                approval: None,
+            };
+        }
         let (mut decision, mut basis, mut approval) = runtime
             .permissions()
             .map_or((Decision::Allow, PermissionSource::Mode, None), |config| {
@@ -1393,7 +1401,7 @@ mod tests {
             disallowed_tools: Vec::new(),
             model: None,
             permission_mode: None,
-            max_turns: 17,
+            max_turns: crate::session::MAX_CHILD_TURNS,
             isolation: None,
             background: false,
             body: String::new(),

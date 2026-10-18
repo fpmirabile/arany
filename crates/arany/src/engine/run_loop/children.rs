@@ -9,7 +9,7 @@ use crate::provider::{
 };
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, Event,
-    MAX_CHILD_TOOL_CALLS,
+    MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
 };
 use crate::tools::{ToolCall, ToolContext, ToolRequest, ToolStep};
 use std::collections::{HashMap, VecDeque};
@@ -257,7 +257,7 @@ impl RunLoop<'_> {
                 objective,
                 turns_remaining: definition
                     .as_ref()
-                    .map_or(17, |definition| definition.max_turns),
+                    .map_or(MAX_CHILD_TURNS, |definition| definition.max_turns),
                 definition: definition.clone(),
                 tools: research_template.clone(),
                 tool_calls_remaining: tool_allowance,

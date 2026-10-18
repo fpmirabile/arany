@@ -317,7 +317,7 @@ impl AgentDefinition {
             && !self.description.trim().is_empty()
             && self.description.len() <= 2048
             && self.body.len() <= 32 * 1024
-            && (1..=17).contains(&self.max_turns)
+            && (1..=crate::session::MAX_CHILD_TURNS).contains(&self.max_turns)
             && self.model.as_ref().is_none_or(|value| {
                 !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
             })
@@ -523,7 +523,7 @@ pub(super) fn strict(raw: &[u8]) -> Result<(AgentDefinition, Vec<String>), Rejec
             .unwrap_or_default(),
         model: front.model.filter(|value| value != "inherit"),
         permission_mode: front.permission_mode,
-        max_turns: front.max_turns.unwrap_or(17),
+        max_turns: front.max_turns.unwrap_or(crate::session::MAX_CHILD_TURNS),
         isolation: front.isolation,
         background: front.background.unwrap_or(false),
         body: body.to_owned(),

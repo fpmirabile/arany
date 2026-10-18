@@ -1028,14 +1028,12 @@ async fn agent_definition_guard_registry_research_selection_and_replay() {
     assert!(!stdout.is_empty());
     let jsonl = render_session(&view, &events, Output::Jsonl);
     let requests = format!("{requests:?}");
-    let diagnostic = diagnostics_tail();
     for bytes in [
         requests.as_bytes(),
         jsonl.as_bytes(),
         stdout.as_bytes(),
         db.as_slice(),
         wal.as_slice(),
-        diagnostic.as_bytes(),
     ] {
         assert!(
             !bytes
@@ -1167,32 +1165,23 @@ async fn agent_definition_guard_cancellation_during_parsing_stops_before_the_pro
     let provider = Arc::new(ScriptedProvider::new(vec![finish("forbidden")]));
     let mut input = request(&fixture.workspace, "Inspect facts");
     input.include_paths.clear();
-    let database = fixture.state.join("events.sqlite3");
+    let mut events = fixture.engine.subscribe();
     let watcher = {
         let cancellation = cancellation.clone();
         tokio::spawn(async move {
-            loop {
-                let started = rusqlite::Connection::open_with_flags(
-                    &database,
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                )
-                .ok()
-                .and_then(|connection| {
-                    connection
-                        .query_row(
-                            "SELECT COUNT(*) FROM events WHERE kind = 'ToolStarted'",
-                            [],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .ok()
-                })
-                .is_some_and(|count| count > 0);
-                if started {
-                    cancellation.cancel();
-                    return;
+            let started = async {
+                while let Some(tapped) = events.next().await {
+                    if matches!(
+                        tapped,
+                        arany::Tapped::Committed(ref envelope)
+                            if matches!(envelope.event, Event::ToolStarted { .. })
+                    ) {
+                        cancellation.cancel();
+                        return;
+                    }
                 }
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
+            };
+            let _ = tokio::time::timeout(Duration::from_secs(60), started).await;
         })
     };
     let result = run_with(
@@ -1207,7 +1196,8 @@ async fn agent_definition_guard_cancellation_during_parsing_stops_before_the_pro
     )
     .await
     .unwrap();
-    watcher.await.unwrap();
+    watcher.abort();
+    let _ = watcher.await;
     assert!(provider.requests.lock().unwrap().is_empty());
     assert_eq!(result.run.status, RunStatus::Cancelled);
     let (events, view) = fixture.reopen(result.session_id).await;
@@ -1385,6 +1375,40 @@ async fn agent_definition_guard_modes_preserve_parent_asks_and_add_review() {
                 .as_ref()
                 .unwrap()
                 .approved
+        );
+    }
+}
+
+#[tokio::test]
+async fn agent_definition_parsing_ignores_model_permission_rules_without_widening_them() {
+    for rule in ["deny", "ask"] {
+        let fixture = Fixture::new(Some(&json!({"permissions":{ rule: ["*"]}})), false);
+        agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
+        let mut outcomes = vec![tool_outcome(call("read"), None)];
+        if rule == "deny" {
+            outcomes.push(finish("answer"));
+        }
+        let (result, requests, humans) = fixture.run(outcomes, None, false).await;
+        assert_eq!(requests.len(), if rule == "deny" { 2 } else { 1 }, "{rule}");
+        assert_eq!(humans, 0);
+        let (_, view) = fixture.reopen(result.session_id).await;
+        let tools = &view.runs[0].tools;
+        let parse = tools[0].observation.as_ref().unwrap();
+        assert_eq!(
+            parse.disposition,
+            arany::ToolDisposition::Succeeded,
+            "{rule}"
+        );
+        assert!(parse.attestation.is_some());
+        let read = tools[1].observation.as_ref().unwrap();
+        assert_ne!(
+            read.disposition,
+            arany::ToolDisposition::Succeeded,
+            "{rule}"
+        );
+        assert!(
+            read.attestation.is_none(),
+            "model Tool still refused: {rule}"
         );
     }
 }

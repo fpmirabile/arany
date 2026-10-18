@@ -160,6 +160,11 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
     }
 }
 pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
+// Every model Tool call takes one inference turn, plus the final report.
+pub(crate) const MAX_CHILD_TURNS: u8 = {
+    assert!(MAX_CHILD_TOOL_CALLS < u8::MAX as usize);
+    MAX_CHILD_TOOL_CALLS as u8 + 1
+};
 pub(crate) const MAX_STEP_TOOL_CALLS: u8 = 4;
 const _: () = assert!(MAX_STEP_TOOL_CALLS as u32 <= u8::MAX as u32);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
