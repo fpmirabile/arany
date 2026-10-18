@@ -76,7 +76,7 @@ Goal Events are additive facts within the current internal format ([execution](.
 
 ## Steering notes and pause
 
-A user may send a steering note to a running Goal, and may pause it at its next boundary. The attached terminal composes notes and offers `/goal pause` as specified in the [terminal spec](./terminal.md#interactive-commands-and-completion); `exec` never requests steering.
+A user may send a steering note to a running Goal, and may pause it at its next boundary. The attached terminal composes notes and offers `/goal pause` as specified in the [terminal spec](./terminal.md#interactive-commands-and-completion); `exec` never requests steering. The [serve protocol](./serve.md) is a second caller: `turn/steer` and `goal/pause` use the same handle, and `goal/resume` is the explicit resume above.
 
 - A note is the Run-scoped Goal fact `GoalSteeringNoteRecorded` (goal ID, Run ID, text). Replay rejects an agent-scoped or unlinked instance.
 - A Run accepts any number of notes within its per-Run bound of 8 KiB (`MAX_STEERING_NOTE_BYTES`). Each recorded note is charged its text plus its history label (`MAX_STEERING_LABEL_BYTES`, 8 bytes, the largest `\n[N] ` label for up to 9999 notes); a waiting note is charged the same way. Rendered labels and notes therefore stay within 8 KiB, and the fixed history header is the only other content. Each note is non-empty after trimming. An offer made while another note waits merges into it, separated by a blank line, so the Engine delivers one note. An offer that would exceed the bound is refused, and the caller keeps its text.
