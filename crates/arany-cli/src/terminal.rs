@@ -2091,6 +2091,9 @@ impl AttachedTerminal {
         {
             first_error.get_or_insert(error);
         }
+        if let Err(error) = clipboard::shutdown() {
+            first_error.get_or_insert(error);
+        }
         first_error.map_or(Ok(()), Err)
     }
 

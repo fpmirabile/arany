@@ -2,17 +2,60 @@ use arany::ImageAttachment;
 use std::sync::{
     Arc, LazyLock, Mutex,
     atomic::{AtomicBool, Ordering},
+    mpsc,
 };
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const CLEANUP_UNCONFIRMED: &str =
     "clipboard cleanup unconfirmed; restart Arany before another clipboard read";
 
 #[derive(Default)]
 struct ClipboardWorker {
-    task: Mutex<Option<JoinHandle<()>>>,
+    task: Mutex<Option<ClipboardTask>>,
     cleanup_unconfirmed: AtomicBool,
+}
+
+struct ClipboardTask {
+    thread: JoinHandle<()>,
+    cancelled: Arc<AtomicBool>,
+    finished: mpsc::Receiver<()>,
+}
+
+impl ClipboardWorker {
+    fn shutdown(&self, timeout: Duration) -> Result<(), &'static str> {
+        let deadline = Instant::now() + timeout;
+        let mut current = self.task.try_lock().map_err(|_| {
+            self.cleanup_unconfirmed.store(true, Ordering::Release);
+            CLEANUP_UNCONFIRMED
+        })?;
+        let Some(task) = current.take() else {
+            return Ok(());
+        };
+        task.cancelled.store(true, Ordering::Release);
+        task.thread.thread().unpark();
+        if task
+            .finished
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .is_err()
+            || self.cleanup_unconfirmed.load(Ordering::Acquire)
+        {
+            self.cleanup_unconfirmed.store(true, Ordering::Release);
+            return Err(CLEANUP_UNCONFIRMED);
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn shutdown() -> std::io::Result<()> {
+    use std::io::Write;
+
+    WORKER.shutdown(CLEANUP_TIMEOUT).map_err(|message| {
+        let _ = writeln!(std::io::stderr(), "{message}");
+        std::io::Error::other(message)
+    })
 }
 
 static WORKER: LazyLock<Arc<ClipboardWorker>> =
@@ -27,7 +70,7 @@ impl Default for Cleanup {
     fn default() -> Self {
         Self {
             child: None,
-            timeout: std::time::Duration::from_secs(1),
+            timeout: CLEANUP_TIMEOUT,
         }
     }
 }
@@ -60,15 +103,18 @@ impl ClipboardRead {
         if owner.cleanup_unconfirmed.load(Ordering::Acquire) {
             return Err(CLEANUP_UNCONFIRMED);
         }
-        if task.as_ref().is_some_and(|task| !task.is_finished()) {
+        if task.as_ref().is_some_and(|task| !task.thread.is_finished()) {
             return Err("clipboard read or cleanup already in progress");
         }
         let (sender, result) = oneshot::channel();
+        let (finished, completion) = mpsc::sync_channel(1);
         let cancelled = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&cancelled);
         let owner = Arc::clone(owner);
-        *task = Some(
-            std::thread::Builder::new()
+        *task = Some(ClipboardTask {
+            cancelled: Arc::clone(&cancelled),
+            finished: completion,
+            thread: std::thread::Builder::new()
                 .name("arany-clipboard-read".into())
                 .spawn(move || {
                     let mut cleanup = Cleanup::default();
@@ -90,9 +136,10 @@ impl ClipboardRead {
                             std::thread::park_timeout(std::time::Duration::from_millis(5));
                         }
                     }
+                    let _ = finished.send(());
                 })
                 .map_err(|_| "clipboard worker unavailable")?,
-        );
+        });
         Ok(Self { result, cancelled })
     }
 
@@ -513,10 +560,11 @@ mod cleanup_tests {
     fn cancellation_does_not_wait_for_the_clipboard_worker() {
         let (release, held) = mpsc::sync_channel::<()>(1);
         let (progress, progressed) = mpsc::sync_channel(1);
+        let (observed, cancellation) = mpsc::sync_channel(1);
         let owner = Arc::new(ClipboardWorker::default());
         let read = ClipboardRead::start_with(&owner, move |stop, _| {
             held.recv_timeout(Duration::from_secs(5)).unwrap();
-            assert!(stop.load(Ordering::Acquire));
+            observed.send(stop.load(Ordering::Acquire)).unwrap();
             Err("clipboard read cancelled or timed out")
         })
         .unwrap();
@@ -533,8 +581,38 @@ mod cleanup_tests {
         let responsive = progressed.recv_timeout(Duration::from_secs(1)).is_ok();
         release.send(()).unwrap();
         reactor.join().unwrap();
-        owner.task.lock().unwrap().take().unwrap().join().unwrap();
+        owner
+            .task
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .thread
+            .join()
+            .unwrap();
         assert!(responsive, "clipboard cancellation blocked the reactor");
+        assert!(cancellation.recv_timeout(Duration::from_secs(1)).unwrap());
+    }
+
+    #[test]
+    fn clipboard_shutdown_reports_a_worker_that_misses_its_deadline() {
+        let (release, held) = mpsc::sync_channel::<()>(1);
+        let (observed, cancellation) = mpsc::sync_channel(1);
+        let owner = Arc::new(ClipboardWorker::default());
+        let read = ClipboardRead::start_with(&owner, move |stop, _| {
+            held.recv_timeout(Duration::from_secs(5)).unwrap();
+            observed.send(stop.load(Ordering::Acquire)).unwrap();
+            Err("clipboard read cancelled or timed out")
+        })
+        .unwrap();
+        assert_eq!(owner.shutdown(Duration::ZERO), Err(CLEANUP_UNCONFIRMED));
+        release.send(()).unwrap();
+        assert!(cancellation.recv_timeout(Duration::from_secs(1)).unwrap());
+        assert_eq!(
+            ClipboardRead::start_with(&owner, |_, _| panic!("retry after shutdown deadline")).err(),
+            Some(CLEANUP_UNCONFIRMED)
+        );
+        drop(read);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -544,15 +622,23 @@ mod cleanup_tests {
         use std::{process::Command, time::Instant};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        for (cancel, cleanup_timeout, expected) in [
-            (false, Duration::from_secs(1), None),
+        for (cancel, cleanup_timeout, expected, shutdown) in [
+            (false, Duration::from_secs(1), None, false),
             (
                 true,
                 Duration::from_secs(1),
                 Some("clipboard read cancelled or timed out"),
+                false,
             ),
-            (true, Duration::ZERO, Some(CLEANUP_UNCONFIRMED)),
-            (false, Duration::ZERO, Some(CLEANUP_UNCONFIRMED)),
+            (true, Duration::ZERO, Some(CLEANUP_UNCONFIRMED), false),
+            (false, Duration::ZERO, Some(CLEANUP_UNCONFIRMED), false),
+            (
+                true,
+                Duration::from_secs(1),
+                Some("clipboard read cancelled or timed out"),
+                true,
+            ),
+            (true, Duration::ZERO, Some(CLEANUP_UNCONFIRMED), true),
         ] {
             let fixture = tempfile::tempdir().unwrap();
             let socket = fixture.path().join("clipboard.sock");
@@ -595,7 +681,16 @@ mod cleanup_tests {
                 ClipboardRead::start_with(&owner, |_, _| panic!("overlapping clipboard read"))
                     .is_err()
             );
-            if cancel {
+            if shutdown {
+                assert_eq!(
+                    owner.shutdown(CLEANUP_TIMEOUT),
+                    if cleanup_timeout.is_zero() {
+                        Err(CLEANUP_UNCONFIRMED)
+                    } else {
+                        Ok(())
+                    }
+                );
+            } else if cancel {
                 read.cancelled.store(true, Ordering::Release);
             } else {
                 gate.write_all(&[1]).await.unwrap();
@@ -613,13 +708,21 @@ mod cleanup_tests {
             }
             assert_eq!(child_retained.await.unwrap(), cleanup_timeout.is_zero());
             tokio::time::timeout(Duration::from_secs(5), async {
-                while !owner.task.lock().unwrap().as_ref().unwrap().is_finished() {
+                while owner
+                    .task
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|task| !task.thread.is_finished())
+                {
                     tokio::task::yield_now().await;
                 }
             })
             .await
             .unwrap();
-            owner.task.lock().unwrap().take().unwrap().join().unwrap();
+            if let Some(task) = owner.task.lock().unwrap().take() {
+                task.thread.join().unwrap();
+            }
             assert!(
                 matches!(
                     waitid(
