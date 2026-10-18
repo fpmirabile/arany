@@ -479,15 +479,15 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
             CheckpointTarget::Run { run_id, sequence } if *run_id == run.id => Some(*sequence),
             _ => None,
         });
-        if started.is_none_or(|s| s < target.sequence()) {
+        let Some(started) = started.filter(|s| *s >= target.sequence()) else {
             continue;
-        }
+        };
         for t in &run.tools {
             if super::checkpoint::publication(&t.intent) {
                 match &t.observation {
-                    None => blockers.push(t.finished_sequence.unwrap_or(started.unwrap())),
+                    None => blockers.push(t.finished_sequence.unwrap_or(started)),
                     Some(o) if o.disposition == ToolDisposition::Uncertain => {
-                        blockers.push(t.finished_sequence.unwrap_or(started.unwrap()))
+                        blockers.push(t.finished_sequence.unwrap_or(started))
                     }
                     Some(o) if o.disposition == ToolDisposition::Succeeded => {
                         steps.push((
@@ -498,7 +498,7 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
                     _ => {}
                 }
             }
-            let seq = t.finished_sequence.unwrap_or(started.unwrap());
+            let seq = t.finished_sequence.unwrap_or(started);
             if t.ran_unguarded() {
                 non_rewindable.push((seq, NonRewindable::UnguardedCommand));
             }
