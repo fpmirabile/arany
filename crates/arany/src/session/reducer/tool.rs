@@ -792,8 +792,10 @@ fn start_lifecycle(
                 agent.role == AgentRole::Primary
             } else {
                 agent.role == AgentRole::Child
-                    && agent.grant == Some(ChildGrant::ReadOnly)
-                    && agent.assignment.is_none()
+                    && matches!(
+                        (agent.grant, agent.assignment.is_some()),
+                        (Some(ChildGrant::ReadOnly), false) | (Some(ChildGrant::EditOnly), true)
+                    )
             };
             if run.status != RunStatus::Active
                 || agent.status != AgentStatus::Active

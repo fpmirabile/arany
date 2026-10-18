@@ -2302,7 +2302,9 @@ fn print_run_answer(
     show: &str,
 ) -> Result<(), String> {
     if terminal.is_linear() {
-        terminal.restore().map_err(|error| error.to_string())?;
+        terminal
+            .release_for_output()
+            .map_err(|error| error.to_string())?;
         let emitted = match confirmed {
             Some(view) => emit_outcome(view, outcome, preview_already_printed, false, None),
             None => write_hidden_answer_recovery(&mut std::io::stderr(), show)

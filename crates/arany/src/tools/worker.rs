@@ -9,6 +9,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+pub(crate) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
+    super::guard::recover_private(ids).await
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Entry {
     Directory,

@@ -586,6 +586,23 @@ mod tests {
             disposition: crate::session::RunDisposition::Failed,
             active_ms: 0,
         });
+        for mut event in crate::session::worker_protocol_fixture().events {
+            match &mut event {
+                crate::session::Event::WorkerDataChunk { record, .. } => {
+                    record.content = CANARY.into()
+                }
+                crate::session::Event::AgentSpawned {
+                    assignment: Some(pins),
+                    ..
+                } => pins.request.direction = CANARY.into(),
+                crate::session::Event::AgentFinished {
+                    result: Some(result),
+                    ..
+                } => *result = CANARY.into(),
+                _ => {}
+            }
+            event_failure(&event);
+        }
         let failure_log = std::fs::read_to_string(&path).unwrap();
         for detail in [
             "runtime stage=ProviderAdmission",

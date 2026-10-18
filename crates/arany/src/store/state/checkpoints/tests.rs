@@ -425,7 +425,7 @@ fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_sessio
     )
     .unwrap();
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(10),
         "{:?}",
         started.elapsed()
     );

@@ -2145,3 +2145,40 @@ fn assigned_child_telemetry_uses_its_pinned_profile_instead_of_the_child_default
         assert!(has_attribute(span, "gen_ai.request.model", model.into()));
     }
 }
+
+#[test]
+fn worker_recovery_history_and_lineage_export_only_closed_metadata() {
+    let f = crate::session::worker_protocol_fixture();
+    let (telemetry, exporter) = in_memory();
+    let mut trace = telemetry
+        .trace_run(f.session, f.goal, unit_context())
+        .unwrap();
+    let mut events = f.envelopes();
+    let canary = "WORKER_PRIVATE_TRACE_CANARY_601";
+    for event in &mut events {
+        match &mut event.event {
+            Event::AgentSpawned {
+                objective: Some(text),
+                assignment: Some(pins),
+                ..
+            } => {
+                *text = canary.into();
+                pins.request.direction = canary.into();
+                pins.request.resumes = Some(AgentRunId::new());
+            }
+            Event::WorkerDataChunk { record, .. } => record.content = canary.into(),
+            Event::AgentFinished {
+                result: Some(text), ..
+            } => *text = canary.into(),
+            _ => {}
+        }
+        trace.committed(event);
+    }
+    trace.finish(None);
+    let spans = finished_spans(&telemetry, &exporter);
+    assert!(!spans.is_empty());
+    assert!(
+        !format!("{spans:?}").contains(canary),
+        "worker content leaked through telemetry"
+    );
+}

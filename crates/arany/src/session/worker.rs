@@ -427,6 +427,54 @@ pub enum WorkerIntegrationOutcome {
     Denied,
     Uncertain,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerPublication {
+    Unpublished,
+    Confirmed,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WorkerHistory {
+    pub run_id: super::RunId,
+    pub assignment_id: AgentRunId,
+    pub resumes: Option<AgentRunId>,
+    pub supersedes: Option<AgentRunId>,
+    pub status: String,
+    pub cause: Option<WorkerCause>,
+    pub publication: WorkerPublication,
+    pub integration: Option<WorkerIntegrationOutcome>,
+    pub discarded: Option<WorkerSettlementReason>,
+    pub private_outcome_unknown: bool,
+    pub cleanup_confirmed: bool,
+    pub lease_released: bool,
+    pub verified: bool,
+    pub report: String,
+}
+
+impl WorkerHistory {
+    pub fn description(&self) -> String {
+        format!(
+            "Worker {}: {}; cause={:?}; publication={:?}; integration={:?}; discard={:?}; private_outcome_unknown={}; cleanup_confirmed={}; lease_released={}; verified={}; resumes={}; supersedes={}",
+            self.assignment_id,
+            self.status,
+            self.cause,
+            self.publication,
+            self.integration,
+            self.discarded,
+            self.private_outcome_unknown,
+            self.cleanup_confirmed,
+            self.lease_released,
+            self.verified,
+            self.resumes
+                .map_or_else(|| "none".into(), |id| id.to_string()),
+            self.supersedes
+                .map_or_else(|| "none".into(), |id| id.to_string()),
+        )
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerIntegration {

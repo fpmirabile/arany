@@ -20,6 +20,10 @@ pub(super) async fn recover_abandoned(
     unit::recover_retained_roots_with_budget(parent, rustix::process::geteuid().as_raw(), attempts)
         .await
 }
+
+pub(super) fn private_recovered(parent: &Path, id: uuid::Uuid) -> Result<(), ToolError> {
+    unit::private_recovered(parent, id)
+}
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
