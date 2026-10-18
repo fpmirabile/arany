@@ -5704,6 +5704,7 @@ async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_out
         let mut input = request(&workspace, "Inspect repeatedly");
         input.include_paths.clear();
         input.session_id = Some(session);
+        input.title = None;
         let result = run_with(
             &engine,
             &provider,
