@@ -11,6 +11,9 @@ pub const CAPABILITIES: &[&str] = &[
     "items_v1",
     "interrupt_receipt_v1",
     "approvals_v1",
+    "events_subscribe_v1",
+    "receipt_get_v1",
+    "thread_fork_v1",
 ];
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -461,6 +464,109 @@ pub enum ApprovalDecision {
     Accept,
     Decline,
     Cancel,
+}
+
+pub const MAX_EVENT_PAGE: usize = 1_000;
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EventsSubscribeParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    pub since: u64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EventsSubscribeResult {
+    #[schemars(length(max = MAX_EVENT_PAGE))]
+    pub events: Vec<super::EventLine>,
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    #[schemars(required, schema_with = "nullable_sequence_schema")]
+    pub next_since: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EventsCommittedNotification {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    pub event: super::EventLine,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReceiptGetParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[schemars(with = "String")]
+    pub goal_id: GoalId,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReceiptGetResult {
+    pub goal: ReceiptGoal,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReceiptGoal {
+    #[schemars(with = "String")]
+    pub id: GoalId,
+    pub status: GoalStatus,
+    pub objective: String,
+    pub budget: ReceiptBudget,
+    pub usage: ReceiptUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<ReceiptReport>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptBudget {
+    pub max_provider_calls: Option<u32>,
+    pub max_tokens: Option<u64>,
+    pub max_active_ms: Option<u64>,
+    pub max_runs: u8,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReceiptUsage {
+    pub runs: usize,
+    pub provider_calls: u32,
+    pub active_ms: u64,
+    pub uncertain_active_ms: u64,
+    pub known_tokens: u64,
+    pub known_cached_tokens: u64,
+    pub token_usage_unknown: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptReport {
+    pub summary: String,
+    pub changes: Vec<String>,
+    pub evidence: Vec<String>,
+    pub unresolved: Vec<String>,
+    pub cached_input_tokens: u64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadForkParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[serde(deserialize_with = "absolute_path")]
+    #[schemars(regex(pattern = "^/"))]
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+fn nullable_sequence_schema(generator: &mut SchemaGenerator) -> Schema {
+    generator.subschema_for::<Option<u64>>()
 }
 
 fn client_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {

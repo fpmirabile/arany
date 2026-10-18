@@ -4,7 +4,8 @@
 
 This contract owns `arany serve --stdio`: its JSON-RPC vocabulary, bounded
 transport, thread and turn projection, and JSON Schema export. The server runs
-`initialize` / `initialized`, `thread/start|resume` and `turn/start|interrupt`.
+`initialize` / `initialized`, `thread/start|resume|fork`, `turn/start|interrupt`,
+`events/subscribe` and `receipt/get`.
 The server sends one-use human approval requests. The remaining methods belong to
 [NEXT_STEPS item 8](../../NEXT_STEPS.md#pursue-in-order).
 
@@ -36,7 +37,8 @@ server and client request IDs are separate namespaces, so an answer could be mis
 for a reply to the client's own request.
 
 Protocol fields use camelCase. Embedded journal vocabulary (`EventLine`, Event
-payloads, Tool calls and intents) retains its existing snake_case bytes.
+payloads, Tool calls and intents, receipt budgets and reports) retains its
+existing snake_case bytes.
 `EventLine.payload` is an open object: exporting a schema does not redefine the
 journal format. JSON is data; clients must render untrusted content inertly.
 
@@ -81,6 +83,9 @@ entry with the same `$defs`. Output is deterministic for a fixed contract.
 | `initialize` | `{clientInfo:{name,title?,version},capabilities?:{optOutNotificationMethods?:[string]}}` → `{userAgent,platformOs,capabilities}` | First request; other requests before it return `notInitialized`; a second initialize returns `alreadyInitialized`. Returns no paths or credentials. `initialized {}` is the following client notification and has no response. |
 | `thread/start` | `{cwd,provider,model,effort?,title?,collaboration?,maxActiveChildren?,tools?,permissionMode?,includePaths?}` → `{thread}` | Selects the Provider and configured role chains as `exec` does. `Engine::create_session` commits `SessionStarted` before the result and subsequent `thread/started`. A thread is a durable Session, including when no turn follows. |
 | `thread/resume` | `{threadId,cwd,provider,model,effort?,tools?,permissionMode?,includePaths?}` → `{thread,turns}` | Admits the selected Workspace and Provider configuration, strictly replays history without executing it, and loads the thread. Turns contain historical user, Tool and answer items; an unfinished Run and Goal appear interrupted. |
+| `thread/fork` | `{threadId,cwd,title?}` → `{thread}` | Requires a loaded source and capacity for another thread. Calls `Engine::fork_session`: the Workspace identity must match, the source must be unlocked and end at a committed terminal Run boundary. Inherits the source's pinned execution configuration. The result precedes `thread/started` with `forkedFromId`; empty or interrupted prefixes fail `forkNotAtRunBoundary`, a busy source fails `sessionBusy`. |
+| `events/subscribe` | `{threadId,since:u64}` → `{events:[EventLine],nextSince:u64|null}` | Requires a loaded thread. Strictly replays committed Events with `sequence > since`; `since` beyond that thread's head fails `invalidParams`. Follow each non-null `nextSince` to drain the backlog. The final page enables live forwarding after its result; repeating a subscription replaces its cursor. |
+| `receipt/get` | `{threadId,goalId}` → `{goal:{id,status,objective,budget,usage,report?}}` | Requires a loaded thread and a Goal in its strictly reduced history; otherwise `threadNotLoaded` or `goalUnavailable`. Returns only journaled receipt facts, with no State paths, Workspace metadata, credentials or runtime configuration. `report` exists only after committed `GoalFinished`. An oversized result fails `contextTooLarge`, without partial receipt data. |
 | `turn/start` | `{threadId,input:[{type:"text",text}\|{type:"image",mediaType:"image/png",data:base64}],goal?:{autonomous}}` → `{turn}` | Requires a loaded thread. Uses its pinned configuration and the existing Engine submission path. The result follows tapped `MessageAccepted`, before `turn/started` and user item notifications. If that tap is lost, successful finalization answers from the first committed Run accepted after the submission began. The turn ID is the committed Run ID, with a separate Goal ID. One submission may be active per process; another returns `busy`. |
 | `turn/interrupt` | `{threadId,turnId}` → `{}` | Signals the matching active Run's cancellation. Unknown or finished turns return `turnNotActive`. The empty result acknowledges the signal; `turn/completed` reports interruption only after committed `RunFinished`. |
 
@@ -97,9 +102,17 @@ loaded thread. Plain input starts a new Goal; `goal.autonomous:true` uses the
 Engine's existing autonomous lifecycle. `resumeGoalId` is reserved and rejected
 until explicit Goal resume is implemented.
 
+Receipt `usage` contains `runs`, `providerCalls`, `activeMs`, `uncertainActiveMs`,
+`knownTokens`, `knownCachedTokens` and `tokenUsageUnknown` from strict replay;
+it adds no elapsed wall time or inferred Provider usage. `budget` is the pinned
+Goal budget. `report` is the exact committed Goal report, including its cache
+counter and uncertainty facts. Objective and report text remain journal data.
+Unknown threads on all three methods return `threadNotLoaded`.
+
 ## Notifications and items
 
-All live facts come from committed Events on `RunHandle.events`, never
+All live facts come from committed Events on `RunHandle.events` or the single
+process-wide `Engine::subscribe()` tap for raw subscriptions, never
 Provider previews or `RunProgress`. Completion reloads the strict reduced view
 to include a following Goal receipt and recover a missing terminal tap. Each
 submission is driven independently of the bounded outbound follower, so a slow
@@ -108,12 +121,21 @@ honored.
 
 | Notification | Committed source and payload |
 |---|---|
-| `thread/started` | Durable Session creation; `{thread}` after the thread/start result. |
+| `thread/started` | Durable Session creation; `{thread}` after the thread/start or thread/fork result. |
 | `turn/started` | `MessageAccepted`; `{threadId,turn:{id,goalId,status:"inProgress",items:[]}}`. Each subsequent Run of an autonomous Goal has a new turn ID and the same Goal ID. |
 | `item/started` | `MessageAccepted` or `ToolStarted`; `{threadId,turnId,item,startedAtMs}`. |
 | `item/completed` | `MessageAccepted`, `MessageCommitted` or `ToolFinished`; `{threadId,turnId,item,completedAtMs}`. User items start and complete together; final answer items complete without a started notification. |
 | `turn/completed` | `RunFinished` plus reduced Goal state; `{threadId,turn:{id,goalId,status,items:[],error?,goal:{status,stopped?}}}`. Status is `completed`, `interrupted` or `failed`. An autonomous submission can complete several turns before its final receipt. |
-| `events/resync` | A tap `Resync {missed}`; `{threadId,missed,lastSequence}`. The sequence is the last observed committed Event; recover through `thread/resume`. Live delivery is best effort: a lost append acknowledgment can leave a gap without Resync. Future paged event subscription supplies completeness. |
+| `events/committed` | After a thread's final subscription page, `{threadId,event:EventLine}` for each later tapped Event in commit order. Events at or before the page head are suppressed. |
+| `events/resync` | A tap `Resync {missed}`; `{threadId,missed,lastSequence}`. Raw subscriptions receive one notice per subscribed thread with its last delivered sequence; `missed` counts the process-wide tap loss and may include other threads. Recover by paging `events/subscribe` from `lastSequence`, or reconstruct items with `thread/resume`. Live delivery is best effort: a lost append acknowledgment or a fork committed inside Store can leave a gap without Resync; paging supplies completeness. |
+
+Raw Event delivery and turn/item projection use separate subscriptions, so
+`events/committed` may precede or follow the matching `item/*` notification.
+Replaying a page neither executes effects nor repeats Provider calls. A partial
+page disables live forwarding until the backlog is drained, preventing a live
+cursor from skipping unreturned history. Slow clients never hold Journal appends.
+An individual Event that cannot fit a live line emits `events/resync` with
+`missed:1` and disables that subscription; replay refuses it with `contextTooLarge`.
 
 Times are committed Event timestamps, never a presentation clock. Item IDs are
 `<runId>:user`, `<runId>:answer`, or the immutable Tool intent UUID.
@@ -193,7 +215,8 @@ admission still apply. Hook execution remains owned by the Tools contract.
 | Outbound queue | 256; follower waits and Journal lag is reported through `events/resync`. |
 | Loaded threads / active submissions / pending approval requests | 64 / 1 / 1; `threadLimit` / `busy` / deny excess approvals; loaded threads are never evicted. Reloading a known thread consumes no extra slot. |
 | Resume response | Must fit the outbound line bound; otherwise `-32000 contextTooLarge`, without partial history. |
-| Event page (future subscription) | 1,000; explicit continuation. |
+| Event replay backlog / page | Strict Store replay is bounded to 10,000 Events per Session, including inherited history; exceeding that existing bound fails closed with `store`. Each response contains at most 1,000 Events and fits 1 MiB including envelope, request ID and newline; byte overflow shortens the page and count overflow continues via `nextSince`. An Event that cannot fit alone fails `contextTooLarge`. No partial oversized response is sent. |
+| Raw live subscriptions / tap backlog | At most one cursor per loaded thread (64 total); the single process-wide tap retains 256 Events. Overflow emits `events/resync` with the prior cursor, without blocking commits or silently completing missing history. |
 | Shutdown grace | 3 seconds total after EOF, input/output failure or a stop signal, covering Run cancellation, Engine closure and output draining; timeout exits 1 with `Run may be interrupted; check Session history`. |
 
 Schema string lengths are character constraints; typed admission additionally
@@ -215,7 +238,8 @@ native evidence remains with [NEXT_STEPS](../../NEXT_STEPS.md).
 
 The protocol uses capability strings for feature detection; schema artifact
 versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
-`items_v1`, `interrupt_receipt_v1`, `approvals_v1`. Breaking wire changes require a new
+`items_v1`, `interrupt_receipt_v1`, `approvals_v1`, `events_subscribe_v1`,
+`receipt_get_v1`, `thread_fork_v1`. Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
 pre-beta; stored formats retain their existing no-migration contract.
 
@@ -231,4 +255,5 @@ pre-beta; stored formats retain their existing no-migration contract.
 | Protocol state, capacity and transport recovery | Initialization refusals, 64-thread refusal without eviction, 64/256 queue backpressure, oversized/malformed duplex input recovery, tap-gap sequence and missed count | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Cancellation and failure | Busy refusal, interrupt and EOF commit cancellation, three-second grace despite a stalled client, failed accepted turns carry compiled guidance rather than RPC errors | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Tool history and human approvals | Reopened dispositions and uncertain unfinished ToolStarted; approval payload equals committed intent and timestamp; accept dispatches once; decline, invalid result, timeout, EOF and cancel deny; late/duplicate/unknown replies change no decision and get no reply; oversized requests deny unsent; full outbound queue cannot prevent expiry or Journal completion | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
+| Replay, receipts and forks | Exclusive `since`, count/byte pagination, live Event order and JSONL identity; tap overflow recovery; unknown threads/Goals and future cursors refused; receipt equals committed GoalFinished and oversized receipt refuses without closing the connection; fork lineage and Workspace identity preserved, busy and nonterminal sources refused | [History protocol corpus](../../crates/arany-cli/tests/serve/history.rs) |
 | Shipped process | Cleared credentials: initialize succeeds, Provider selection fails, EOF exits 0, schema-valid stdout and empty stderr; argument/TTY admission exits 2 before State | [Session process tests](../../crates/arany-cli/tests/session_run.rs) |

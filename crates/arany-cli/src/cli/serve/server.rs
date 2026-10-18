@@ -19,6 +19,7 @@ pub(super) enum ClientMessage {
 }
 pub(super) type ServerMessage = Message;
 
+#[derive(Debug)]
 pub(super) struct Fault {
     code: i64,
     message: String,
@@ -172,6 +173,8 @@ async fn run_inner(
     stopping: watch::Sender<bool>,
 ) -> Result<(), String> {
     let engine = Arc::new(engine);
+    let mut committed = engine.subscribe();
+    let mut history = super::history::History::default();
     let mut active: Option<ActiveTurn> = None;
     let mut workers = tokio::task::JoinSet::<Result<arany::RunResult, EngineError>>::new();
     let next_server_id = Arc::new(std::sync::atomic::AtomicI64::new(1));
@@ -183,19 +186,25 @@ async fn run_inner(
             enum Next {
                 Input(Option<ClientMessage>),
                 Event(Option<Tapped>),
+                Committed(Option<Tapped>),
                 Done(Result<Option<String>, EngineError>),
             }
             let next = if let Some(turn) = active.as_mut() {
                 tokio::select! { biased;
                     input = inbound.recv(), if !shutdown => Next::Input(input),
                     event = turn.events.next() => Next::Event(event),
+                    event = committed.next() => Next::Committed(event),
                     result = workers.join_next() => Next::Done(result.and_then(Result::ok).unwrap_or(Err(EngineError::CoordinatorFailed)).map(|result| result.stopped.map(|reason| reason.to_string()))),
                 }
             } else {
                 if shutdown {
+                    history.drain(&mut committed, &outbound, &opt_out).await?;
                     break;
                 }
-                Next::Input(inbound.recv().await)
+                tokio::select! { biased;
+                    input = inbound.recv() => Next::Input(input),
+                    event = committed.next() => Next::Committed(event),
+                }
             };
             match next {
                 Next::Input(None | Some(ClientMessage::Eof)) => {
@@ -233,6 +242,18 @@ async fn run_inner(
                             return Err(Fault::state(Reason::NotInitialized));
                         }
                         match request.method.as_str() {
+                            "events/subscribe" | "receipt/get" | "thread/fork" => {
+                                history
+                                    .dispatch(
+                                        &engine,
+                                        &state,
+                                        &mut threads,
+                                        request,
+                                        &outbound,
+                                        &opt_out,
+                                    )
+                                    .await
+                            }
                             "thread/start" => {
                                 let result = threads::start(
                                     &engine,
@@ -435,6 +456,8 @@ async fn run_inner(
                     .await?
                 }
                 Next::Event(None) => return Err("Event stream closed during a Run".into()),
+                Next::Committed(Some(event)) => history.observe(event, &outbound, &opt_out).await?,
+                Next::Committed(None) => return Err("committed Event stream closed".into()),
                 Next::Done(result) => {
                     let turn = active.as_mut().expect("active turn");
                     turn.result_done = true;
@@ -641,7 +664,7 @@ async fn complete(
     Ok(())
 }
 
-fn params<T: DeserializeOwned>(params: Option<Value>) -> Result<T, Fault> {
+pub(super) fn params<T: DeserializeOwned>(params: Option<Value>) -> Result<T, Fault> {
     let params = params.unwrap_or_else(|| json!({}));
     let unsupported = params
         .get("permissionMode")
@@ -706,7 +729,7 @@ pub(super) async fn send(outbound: &mpsc::Sender<Message>, message: Message) -> 
         .await
         .map_err(|_| "protocol writer closed".into())
 }
-async fn emit(
+pub(super) async fn emit(
     outbound: &mpsc::Sender<Message>,
     opt_out: &[String],
     note: Notification,
