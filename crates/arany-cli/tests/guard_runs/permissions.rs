@@ -2339,7 +2339,8 @@ async fn hook_post_tool_use_feedback_is_journaled_and_never_undoes() {
     }});
     for (script, expected) in [
         (
-            "rm -f notes/new.txt; echo 'file looks wrong' >&2; exit 2".to_owned(),
+            // A shell builtin rewrites the hook's private copy; macOS hook grants carry no `rm`.
+            ": > notes/new.txt; echo 'file looks wrong' >&2; exit 2".to_owned(),
             vec!["hook feedback: file looks wrong".to_owned()],
         ),
         (
