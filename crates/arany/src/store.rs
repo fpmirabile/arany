@@ -21,8 +21,6 @@ use replay::{
 };
 pub use state::HistoryReset;
 #[cfg(test)]
-pub(crate) use state::begin_released;
-#[cfg(test)]
 pub(crate) use state::capture_archive;
 pub(crate) use state::checkpoints::Capture as CheckpointCapture;
 pub use state::checkpoints::CheckpointReset;
