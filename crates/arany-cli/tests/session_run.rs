@@ -120,10 +120,7 @@ fn hash(bytes: &[u8]) -> String {
         .collect()
 }
 
-#[cfg(any(
-    target_os = "linux",
-    all(target_os = "macos", any(debug_assertions, arany_ci))
-))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn private_file(path: &std::path::Path, bytes: &[u8]) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, bytes).unwrap();
