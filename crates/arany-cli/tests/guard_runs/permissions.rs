@@ -2380,6 +2380,14 @@ async fn hook_post_tool_use_without_feedback_leaves_model_bytes_unchanged() {
         "printf '{\"updatedToolOutput\":\"x\"}'",
     ] {
         let case = post_case(shell_hook(script)).await;
+        assert_eq!(case.status, RunStatus::Finished, "{script}");
+        assert_eq!(case.tool.hooks.len(), 1, "{script}");
+        assert!(case.tool.hooks[0].outcome.is_some(), "{script}");
+        assert_eq!(
+            case.model_output,
+            case.tool.observation.as_ref().unwrap().output,
+            "{script}"
+        );
         assert_eq!(case.live_feedback, None, "{script}");
         assert!(case.tool.hook_feedback().is_empty(), "{script}");
         assert_eq!(case.host_file, "done");
