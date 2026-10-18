@@ -116,7 +116,7 @@ pub(super) async fn worker_case(case: &'static str) {
             | "hook_stop_deadline_last_turn" => {
                 serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command("echo verify-worker >&2; exit 2")]}]})
             }
-            "hook_stop" => {
+            "hook_stop" | "hook_requested_stop_last_turn" => {
                 serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
             }
             "hook_write_stop" => {
@@ -230,9 +230,15 @@ pub(super) async fn worker_case(case: &'static str) {
         .unwrap()
         .result;
     let mut injected = false;
+    let deadline_case = case.contains("deadline");
+    let watchdog = std::time::Instant::now();
     let result = loop {
         tokio::select! {
             result = &mut running => break result,
+            // Keep paused time from auto-advancing during real Guard and journal I/O.
+            () = tokio::task::yield_now(), if deadline_case => {
+                assert!(watchdog.elapsed() < Duration::from_secs(60), "{case}: Run stalled");
+            }
             Some(approval) = inbox.next(), if case != "no_channel" => {
                 let private = matches!(approval.intent.target, EffectTarget::WorkerView { .. });
                 if !injected && (case == "private_loss" && private || case == "publication_loss" && !private) {
@@ -243,6 +249,9 @@ pub(super) async fn worker_case(case: &'static str) {
         }
     };
     drop(running);
+    if deadline_case {
+        tokio::time::resume();
+    }
     let violations = provider.violations.lock().unwrap().clone();
     assert!(violations.is_empty(), "{case}: {violations:?}");
     let calls = provider.requests.lock().unwrap().clone();
@@ -551,18 +560,34 @@ pub(super) async fn worker_case(case: &'static str) {
         } else {
             assert_eq!(
                 run.status,
-                if matches!(case, "hook_stop" | "hook_write_stop") {
+                if matches!(
+                    case,
+                    "hook_stop" | "hook_requested_stop_last_turn" | "hook_write_stop"
+                ) {
                     RunStatus::StoppedByHook
                 } else {
                     RunStatus::Failed
                 },
                 "{case}"
             );
-            if matches!(case, "hook_stop" | "hook_write_stop") {
+            if matches!(
+                case,
+                "hook_stop" | "hook_requested_stop_last_turn" | "hook_write_stop"
+            ) {
                 assert_eq!(synthesis_calls, 0);
                 assert!(worker.handover.is_none());
                 assert_eq!(run.hook_stop_reason(), Some(Some("halt")));
                 assert_eq!(run.agents[1].status, arany::AgentStatus::StoppedByHook);
+                let outcome = &worker.outcome.as_ref().unwrap().1;
+                assert_eq!(outcome.disposition, WorkerDisposition::Failed, "{case}");
+                assert_eq!(
+                    outcome.cause,
+                    arany::worker::WorkerCause::StoppedByHook,
+                    "{case}"
+                );
+                if case == "hook_requested_stop_last_turn" {
+                    assert_eq!(child_calls, 1, "{case}: no reprompt");
+                }
             }
             if case == "hook_handover_deny" {
                 assert_eq!(
@@ -606,6 +631,7 @@ async fn foreground_worker_deadline_and_stop_refusals_keep_their_causes() {
     for case in [
         "tool_deadline",
         "hook_stop_last_turn",
+        "hook_requested_stop_last_turn",
         "hook_stop_tokens",
         "hook_stop_deadline",
         "hook_stop_deadline_last_turn",

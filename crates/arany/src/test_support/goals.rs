@@ -395,7 +395,9 @@ impl ForegroundWorkerProvider {
                 },
                 max_turns: if matches!(
                     self.case,
-                    "hook_stop_last_turn" | "hook_stop_deadline_last_turn"
+                    "hook_stop_last_turn"
+                        | "hook_requested_stop_last_turn"
+                        | "hook_stop_deadline_last_turn"
                 ) {
                     1
                 } else {
@@ -446,11 +448,14 @@ impl crate::Provider for ForegroundWorkerProvider {
                 },
                 Some(Box::new(self.plan())),
             ),
-            (AgentPhase::RootPlan, 1) => self.delegation(&request),
+            (AgentPhase::RootPlan, 1) => {
+                if self.case.contains("deadline") {
+                    tokio::time::pause();
+                }
+                self.delegation(&request)
+            }
             (AgentPhase::ChildWork, 0) if self.case == "tool_deadline" => {
-                tokio::time::pause();
                 tokio::time::advance(std::time::Duration::from_secs(1192)).await;
-                tokio::time::resume();
                 super::scenario::tool_outcome(
                     ToolCall::Write {
                         path: "notes/a".into(),
@@ -475,6 +480,7 @@ impl crate::Provider for ForegroundWorkerProvider {
                 if matches!(
                     self.case,
                     "hook_stop_last_turn"
+                        | "hook_requested_stop_last_turn"
                         | "hook_stop_tokens"
                         | "hook_stop_deadline"
                         | "hook_stop_deadline_last_turn"
@@ -484,9 +490,7 @@ impl crate::Provider for ForegroundWorkerProvider {
                     self.case,
                     "hook_stop_deadline" | "hook_stop_deadline_last_turn"
                 ) {
-                    tokio::time::pause();
                     tokio::time::advance(std::time::Duration::from_secs(1192)).await;
-                    tokio::time::resume();
                 }
                 finish_with("Candidate worker result")
             }
