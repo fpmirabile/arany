@@ -50,12 +50,36 @@ impl ClipboardWorker {
 }
 
 pub(super) fn shutdown() -> std::io::Result<()> {
-    use std::io::Write;
-
     WORKER.shutdown(CLEANUP_TIMEOUT).map_err(|message| {
-        let _ = writeln!(std::io::stderr(), "{message}");
+        #[cfg(unix)]
+        {
+            static OUTPUT: LazyLock<Mutex<std::io::Stderr>> =
+                LazyLock::new(|| Mutex::new(std::io::stderr()));
+            let _ = warn_cleanup_unconfirmed(&OUTPUT);
+        }
         std::io::Error::other(message)
     })
+}
+
+#[cfg(unix)]
+fn warn_cleanup_unconfirmed(output: &Mutex<impl std::os::fd::AsFd>) -> rustix::io::Result<()> {
+    use rustix::fs::{FileType, OFlags, fcntl_getfl, fcntl_setfl, fstat};
+
+    let output = output.try_lock().map_err(|_| rustix::io::Errno::AGAIN)?;
+    let fd = output.as_fd();
+    if !matches!(
+        FileType::from_raw_mode(fstat(fd)?.st_mode),
+        FileType::Fifo | FileType::Socket
+    ) && !rustix::termios::isatty(fd)
+    {
+        return Err(rustix::io::Errno::NOTSUP);
+    }
+    let flags = fcntl_getfl(fd)?;
+    fcntl_setfl(fd, flags | OFlags::NONBLOCK)?;
+    // Bypass the stderr lock and never retry a partial or unavailable write.
+    let result = rustix::io::write(fd, format!("{CLEANUP_UNCONFIRMED}\n").as_bytes());
+    let restored = fcntl_setfl(fd, flags);
+    result.and(restored)
 }
 
 static WORKER: LazyLock<Arc<ClipboardWorker>> =
@@ -555,6 +579,52 @@ fn run_process(
 mod cleanup_tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
+
+    #[cfg(unix)]
+    #[test]
+    fn clipboard_cleanup_warning_never_waits_for_a_lock_or_full_pipe() {
+        use nix::unistd::pipe;
+        use rustix::{
+            fs::{OFlags, fcntl_getfl, fcntl_setfl},
+            io::{Errno, read, write},
+        };
+
+        let (reader, writer) = pipe().unwrap();
+        let output = Arc::new(Mutex::new(writer));
+        let locked = output.lock().unwrap();
+        assert_eq!(warn_cleanup_unconfirmed(&output), Err(Errno::AGAIN));
+        let flags = fcntl_getfl(&*locked).unwrap();
+        drop(locked);
+        warn_cleanup_unconfirmed(&output).unwrap();
+        let mut bytes = [0; 256];
+        let length = read(&reader, &mut bytes).unwrap();
+        assert_eq!(
+            &bytes[..length],
+            format!("{CLEANUP_UNCONFIRMED}\n").as_bytes()
+        );
+        let locked = output.lock().unwrap();
+        assert_eq!(fcntl_getfl(&*locked).unwrap(), flags);
+        fcntl_setfl(&*locked, flags | OFlags::NONBLOCK).unwrap();
+        loop {
+            match write(&*locked, &[0; 4096]) {
+                Ok(_) => {}
+                Err(Errno::AGAIN) => break,
+                Err(error) => panic!("fill warning pipe: {error}"),
+            }
+        }
+        fcntl_setfl(&*locked, flags).unwrap();
+        drop(locked);
+        let (sent, received) = mpsc::sync_channel(1);
+        let warning = std::thread::spawn(move || {
+            let result = warn_cleanup_unconfirmed(&output);
+            let restored = fcntl_getfl(&*output.lock().unwrap()).unwrap();
+            sent.send((result, restored)).unwrap();
+        });
+        let result = received.recv_timeout(Duration::from_secs(1));
+        drop(reader);
+        warning.join().unwrap();
+        assert_eq!(result.unwrap(), (Err(Errno::AGAIN), flags));
+    }
 
     #[test]
     fn cancellation_does_not_wait_for_the_clipboard_worker() {
