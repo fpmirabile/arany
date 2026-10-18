@@ -770,6 +770,46 @@ fn worker_protocol_legal_lifecycle_and_every_cold_prefix() {
                 .and_then(|r| r.agents.iter().find(|a| a.id == f.child))
         {
             assert!(a.assignment.as_ref().unwrap().interrupted);
+            let run = cold.runs.last().unwrap();
+            let workspace_unknown = run.tools.iter().any(|t| {
+                !t.settled_without_stop()
+                    && !matches!(t.intent.call, ToolCall::PrepareWorker { .. })
+            });
+            assert_eq!(
+                cold.goal(f.goal).unwrap().can_resume(&cold),
+                !workspace_unknown,
+                "resume prefix {end}"
+            );
+            let history = run.worker_history();
+            let worker = history.iter().find(|w| w.assignment_id == f.child).unwrap();
+            let published = run.tools.iter().any(|t| {
+                matches!(t.intent.call, ToolCall::ApplyChangeset { .. })
+                    && t.observation
+                        .as_ref()
+                        .is_some_and(|o| o.disposition == ToolDisposition::Succeeded)
+            });
+            if published {
+                assert_eq!(
+                    worker.publication,
+                    WorkerPublication::Confirmed,
+                    "publication prefix {end}"
+                );
+            }
+            if a.tools.iter().any(|t| t.observation.is_none()) {
+                assert!(
+                    worker.private_outcome_unknown,
+                    "unknown private prefix {end}"
+                );
+            }
+            assert_eq!(
+                crate::provider::history_tool_block(run),
+                crate::provider::history_tool_block(
+                    &SessionView::replay(f.session, &decoded)
+                        .unwrap()
+                        .unwrap()
+                        .runs[0]
+                )
+            );
         }
     }
 }
@@ -3007,4 +3047,107 @@ fn worker_protocol_researcher_only_run_rejects_a_call_after_an_invalid_synthesis
     );
     let recorded = again.events.pop().unwrap();
     refused(&again, recorded, "synthesis after an invalid synthesis");
+}
+
+#[test]
+fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hooks() {
+    use crate::tools::permissions::{
+        HookEvent, HookInvocation, HookOutcome, HookResult, stop_subject,
+    };
+    for result in ["passed", "blocked", "stopped", "unknown"] {
+        let mut f = fixture();
+        f.call(
+            f.child,
+            AgentPhase::ChildWork,
+            ProviderCallDisposition::Finished,
+            None,
+        );
+        let mut view = f.view();
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        let intent = f.intent(
+            f.child,
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 0".into()],
+                cwd: String::new(),
+            },
+            EffectTarget::Workspace,
+        );
+        let call_index = view.runs[0].agents[1].provider_calls.len() - 1;
+        let started = Event::HookStarted {
+            run_id: f.run,
+            agent_run_id: f.child,
+            hook: HookInvocation {
+                event: HookEvent::SubagentStop,
+                group: 0,
+                handler: 0,
+                subject_digest: stop_subject(f.child, call_index),
+                intent: intent.clone(),
+                input_digest: [9; 32],
+                active_ceiling_ms: Some(1),
+            },
+        };
+        let sequence = view.last_sequence + 1;
+        view.apply_committed(&f.envelope(started, sequence))
+            .unwrap();
+        let (disposition, stdout, stderr, exit, hook_result) = match result {
+            "passed" => (ToolDisposition::Succeeded, "", "", 0, HookResult::Passed),
+            "blocked" => (
+                ToolDisposition::Failed,
+                "",
+                "verify",
+                2,
+                HookResult::Blocked {
+                    reason: Some("verify".into()),
+                },
+            ),
+            "stopped" => (
+                ToolDisposition::Succeeded,
+                r#"{"continue":false,"stopReason":"halt"}"#,
+                "",
+                0,
+                HookResult::Stopped {
+                    reason: Some("halt".into()),
+                },
+            ),
+            _ => (
+                ToolDisposition::Uncertain,
+                "",
+                "",
+                0,
+                HookResult::Ignored {
+                    why: crate::tools::permissions::HookIgnoreReason::NotCompleted,
+                },
+            ),
+        };
+        let observation = ToolObservation {
+            intent: intent.clone(), disposition, output: serde_json::json!({"exit_code":exit,"stdout":stdout,"stderr":stderr,"changeset":{"files":[]}}).to_string(),
+            attestation: (result != "unknown").then(|| Attestation::Guard(receipt(&intent))), enforcement_cause: None, cache_update: CacheUpdate::NotApplicable,
+        };
+        let finished = Event::HookFinished {
+            run_id: f.run,
+            agent_run_id: f.child,
+            outcome: HookOutcome {
+                observation,
+                result: hook_result,
+                boundary_active_ms: None,
+            },
+        };
+        let sequence = view.last_sequence + 1;
+        view.apply_committed(&f.envelope(finished, sequence))
+            .unwrap();
+        assert_eq!(view.runs[0].hooks_settled(), result != "unknown");
+        assert_eq!(view.runs[0].stop_blocked(f.child), result == "blocked");
+        assert_eq!(
+            view.runs[0].actor_stopped_by_hook(f.child),
+            result == "stopped"
+        );
+    }
 }

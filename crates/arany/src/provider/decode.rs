@@ -242,6 +242,13 @@ mod tests {
         let schema = super::super::run_outcome_schema(&request);
         let validator = jsonschema::validator_for(&schema).unwrap();
         assert!(validator.is_valid(&value));
+        value["outcome"]["children"][0]["editor"]["resumes"] =
+            json!(crate::session::AgentRunId::new().to_string());
+        assert!(validator.is_valid(&value));
+        assert!(structured_outcome(&value.to_string()).is_ok());
+        value["outcome"]["children"][0]["editor"]["resumes"] = json!("not-an-agent-id");
+        assert!(structured_outcome(&value.to_string()).is_err());
+        value["outcome"]["children"][0]["editor"]["resumes"] = serde_json::Value::Null;
         value["outcome"]["children"][0]["editor"]["mode"] = json!("background");
         assert!(validator.is_valid(&value));
         value["outcome"]["children"][0]["editor"]["wave"] = json!(8);

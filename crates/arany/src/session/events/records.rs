@@ -515,6 +515,16 @@ impl ProviderCallRecord {
                 )
             })
             || self.failure_reason.is_some_and(|reason| {
+                if matches!(
+                    reason,
+                    crate::provider::ProviderFailureReason::WorkerFinishDeferred
+                        | crate::provider::ProviderFailureReason::WorkerDelegateRefused
+                        | crate::provider::ProviderFailureReason::WorkerToolRefused
+                ) && self.phase != crate::provider::AgentPhase::RootSynthesis
+                {
+                    return true;
+                }
+
                 use crate::provider::ProviderFailureReason;
                 !matches!(
                     (self.disposition, reason),
@@ -531,6 +541,9 @@ impl ProviderCallRecord {
                             | ProviderFailureReason::ResponseContract
                             | ProviderFailureReason::OutcomeContract
                             | ProviderFailureReason::LocalOutputLimit
+                            | ProviderFailureReason::WorkerFinishDeferred
+                            | ProviderFailureReason::WorkerDelegateRefused
+                            | ProviderFailureReason::WorkerToolRefused
                     )
                 )
             })

@@ -67,6 +67,132 @@ impl WorkerView {
                     .is_some_and(|(_, d)| d.reason != WorkerSettlementReason::NoChange))
     }
 }
+
+impl RunView {
+    pub fn worker_history(&self) -> Vec<WorkerHistory> {
+        let mut history: Vec<_> = self
+            .agents
+            .iter()
+            .filter_map(|a| {
+                let w = a.assignment.as_ref()?;
+                let publication = self
+                    .tools
+                    .iter()
+                    .find_map(|t| {
+                        if !matches!(&t.intent.call, ToolCall::ApplyChangeset {
+                    source: ChangesetSource::WorkerHandover { assignment_id, .. }
+                } if *assignment_id == a.id)
+                        {
+                            return None;
+                        }
+                        Some(match &t.observation {
+                            Some(o)
+                                if o.disposition == ToolDisposition::Succeeded
+                                    && o.attested_for(&t.intent) =>
+                            {
+                                WorkerPublication::Confirmed
+                            }
+                            None => WorkerPublication::Unknown,
+                            Some(o) if o.disposition == ToolDisposition::Uncertain => {
+                                WorkerPublication::Unknown
+                            }
+                            _ => WorkerPublication::Unpublished,
+                        })
+                    })
+                    .unwrap_or(WorkerPublication::Unpublished);
+                let outcome = w.outcome.as_ref().map(|(_, o)| o);
+                let interrupted = w.interrupted || self.status != RunStatus::Active && !w.settled();
+                let status = if interrupted && publication == WorkerPublication::Unpublished {
+                    "interrupted; unpublished private work discarded".to_owned()
+                } else {
+                    outcome.map_or_else(|| a.status.to_string(), |o| format!("{:?}", o.disposition))
+                };
+                let mut report = a
+                    .result
+                    .clone()
+                    .or_else(|| a.summary.clone())
+                    .unwrap_or_default();
+                let mut end = report.len().min(2048);
+                while !report.is_char_boundary(end) {
+                    end -= 1;
+                }
+                report.truncate(end);
+                Some(WorkerHistory {
+                    run_id: self.id,
+                    assignment_id: a.id,
+                    resumes: w.pins.request.resumes,
+                    supersedes: w.pins.request.supersedes,
+                    status,
+                    cause: outcome.map(|o| o.cause),
+                    publication,
+                    integration: w.integration.as_ref().map(|(_, i)| i.outcome),
+                    discarded: w.discarded.as_ref().map(|(_, d)| d.reason),
+                    private_outcome_unknown: a.tools.iter().any(|t| {
+                        t.observation
+                            .as_ref()
+                            .is_none_or(|o| o.disposition == ToolDisposition::Uncertain)
+                    }),
+                    cleanup_confirmed: outcome.is_some_and(|o| o.cleanup.is_some()),
+                    lease_released: w.released.is_some(),
+                    verified: w.verification.as_ref().is_some_and(|(_, v)| v.passed),
+                    report,
+                })
+            })
+            .collect();
+        for (index, t) in self.tools.iter().enumerate() {
+            if let ToolCall::PrepareWorker { preparation } = &t.intent.call
+                && preparation.purpose == WorkerDataPurpose::Base
+                && !self
+                    .agents
+                    .iter()
+                    .any(|a| a.id == preparation.assignment_id)
+            {
+                let ordinal = self.tools[..index].iter().filter(|t| matches!(&t.intent.call, ToolCall::PrepareWorker { preparation } if preparation.purpose == WorkerDataPurpose::Base)).count();
+                let request = self
+                    .primary()
+                    .into_iter()
+                    .flat_map(|a| &a.provider_calls)
+                    .filter_map(|c| c.delegation.as_ref())
+                    .flatten()
+                    .filter_map(|p| match p {
+                        ChildAssignment::Editor { assignment } => Some(assignment),
+                        _ => None,
+                    })
+                    .nth(ordinal);
+                history.push(WorkerHistory {
+                    run_id: self.id,
+                    assignment_id: preparation.assignment_id,
+                    resumes: request.and_then(|r| r.resumes),
+                    supersedes: request.and_then(|r| r.supersedes),
+                    status: if self.status == RunStatus::Active {
+                        "preparing"
+                    } else {
+                        "unspawned; private preparation discarded"
+                    }
+                    .into(),
+                    cause: None,
+                    publication: WorkerPublication::Unpublished,
+                    integration: None,
+                    discarded: None,
+                    private_outcome_unknown: false,
+                    cleanup_confirmed: false,
+                    lease_released: false,
+                    verified: false,
+                    report: String::new(),
+                });
+            }
+        }
+        history
+    }
+
+    pub(crate) fn private_recovery_tools(&self) -> impl Iterator<Item = &ToolView> {
+        self.agents
+            .iter()
+            .filter(|a| a.assignment.is_some())
+            .flat_map(|a| &a.tools)
+            .filter(|t| !t.settled_without_stop())
+    }
+}
 impl WorkerState {
     pub(super) fn clear_pending(&mut self) {
         self.pending = None;
@@ -388,6 +514,28 @@ fn validate_request(
     Ok(())
 }
 
+impl SessionView {
+    pub(crate) fn worker_resume_source(
+        &self,
+        goal: GoalId,
+        source: AgentRunId,
+    ) -> Option<(&RunView, &AgentView)> {
+        let goal = self.goal(goal)?;
+        self.runs
+            .iter()
+            .filter(|r| goal.run_ids.contains(&r.id))
+            .find_map(|r| {
+                let a = r.agents.iter().find(|a| a.id == source)?;
+                (a.role == AgentRole::Child
+                    && a.status != AgentStatus::Active
+                    && a.assignment
+                        .as_ref()
+                        .is_none_or(|w| w.released.is_some() || r.status != RunStatus::Active))
+                .then_some((r, a))
+            })
+    }
+}
+
 pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), ReplayError> {
     let Event::AgentSpawned {
         run_id,
@@ -691,6 +839,29 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
     let (scope, actor) = event.scope();
     if scope != Some(run.id) {
         return Ok(());
+    }
+    if let Event::ProviderCallRecorded {
+        agent_run_id,
+        record,
+        ..
+    } = event
+        && matches!(
+            record.failure_reason,
+            Some(
+                crate::provider::ProviderFailureReason::WorkerFinishDeferred
+                    | crate::provider::ProviderFailureReason::WorkerDelegateRefused
+                    | crate::provider::ProviderFailureReason::WorkerToolRefused
+            )
+        )
+        && (!primary(run, *agent_run_id)
+            || !coordination_ready(run)
+            || !run.agents.iter().any(|a| {
+                a.assignment
+                    .as_ref()
+                    .is_some_and(|w| w.pins.request.mode == WorkerMode::Background)
+            }))
+    {
+        return Err(ReplayError::InvalidTransition);
     }
     if run.workers.pending.is_some() && starts_team_work(event) {
         return Err(ReplayError::InvalidTransition);

@@ -141,6 +141,34 @@ fn agent_lines(
             agent.objective.as_deref().unwrap_or(&run.objective)
         ),
     ];
+    if let Some(worker) = run
+        .worker_history()
+        .into_iter()
+        .find(|w| w.assignment_id == agent.id)
+    {
+        lines.push(format!(
+            "Worker: {}; cause: {:?}",
+            worker.status, worker.cause
+        ));
+        lines.push(format!(
+            "Publication: {:?}; integration: {:?}",
+            worker.publication, worker.integration
+        ));
+        lines.push(format!(
+            "Private outcome unknown: {}; cleanup confirmed: {}",
+            worker.private_outcome_unknown, worker.cleanup_confirmed
+        ));
+        lines.push(format!(
+            "Lease released: {}; verified: {}",
+            worker.lease_released, worker.verified
+        ));
+        if let Some(source) = worker.resumes {
+            lines.push(format!("Resumes: {source}"));
+        }
+        if let Some(source) = worker.supersedes {
+            lines.push(format!("Supersedes: {source}"));
+        }
+    }
     if let Some(call) = agent.provider_calls.last() {
         let input = call
             .input_tokens

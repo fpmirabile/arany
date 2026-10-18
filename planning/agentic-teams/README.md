@@ -35,7 +35,7 @@ and user-owned checks; this plan defines the remaining slices.
 
 ## Current boundary and owners
 
-C1 read-only researchers are implemented; writable workers remain C2/C3 scope.
+C1 read-only researchers and C2 edit-only workers are implemented; persistent command-capable views remain C3 scope.
 The [execution contract](../../docs/specs/execution.md#researcher-children)
 owns current child identity, grants, limits, failure and synthesis ordering.
 The [Goals contract](../../docs/specs/goals.md) owns lifecycle, plan contracts,
@@ -217,59 +217,8 @@ Skills and MCP tools; workers never receive Git or network capabilities. The
 worker slices grant catalog listing only; MCP invocation is excluded
 ([rationale](./design-tree.md#worker-ownership)).
 
-C2 adds edit-only workers to the existing researchers; C3 adds command-capable
-views. The [ownership rationale](./design-tree.md#worker-ownership) explains
-the cut. Until C3, the primary verifies each worker criterion after integration
-because edit-only workers cannot execute it inside a view.
+C2's implemented assignment identity, grants, leases, disposable private edits, handover eligibility, whole-batch conflicts and completion-order waves belong to the [Execution contract](../../docs/specs/execution.md#worker-journal-protocol). [Session](../../docs/specs/session.md#worker-identity-and-explicit-reassignment) owns explicit fresh-assignment ID resume and historical context; [Goals](../../docs/specs/goals.md#worker-accounting-and-verification) owns recovery admission and primary verification. The [ownership rationale](./design-tree.md#worker-ownership) retains the remaining C3 choices.
 
-**Worker assignment identity (C2).** One assignment is one child AgentRun with a
-UUIDv7 ID and an ordinal. Its spawn fact pins mission, lease, grant, success
-criterion and assignment base (digests of the leased paths). Reassignment is
-always a new AgentRun; an AgentRun never takes a second assignment. The AgentRun
-Events gain a new current payload version, with no compatibility readers.
-
-- **C2 Edit-only workers.** Workers are writable but run no
-   commands. Each worker's edits accumulate into one changeset against its
-   assignment base, which it hands to the primary; it never writes to the
-   Workspace directly. No Git worktrees.
-   - **Leases.** A lease is fixed at assignment for its Run, does not overlap
-     another live assignment, and is a subset of the Goal path scope. It is held
-     until its handover is integrated or discarded, or until its AgentRun ends
-     without one, and never crosses a Run boundary. A write outside the lease
-     rejects at changeset validation and leaves the Workspace unchanged. Reads
-     stay within the Goal grant; the Goal's Workspace writer lock already
-     excludes other writers.
-   - **Handover.** A handover is a journaled fact bound to its AgentRun and
-     changeset digest. The primary integrates only the handover of a Finished
-     worker AgentRun of an open Run (no `RunFinished`), with no cancellation
-     observed, that no reassignment superseded and that was not already
-     integrated or discarded. Until C3, the worker's own criterion is not part of
-     this test; the primary verifies the criterion after integration. Any other
-     handover is journaled as discarded with its reason, including a conflicted
-     handover the primary resolves by hand (its resolution is the primary's own
-     new change), and a handover whose Run has no terminal fact when the Goal
-     resumes, which is never carried over. Replay rejects an integration without
-     an eligible handover.
-   - **Conflicts.** A failed digest precondition is a conflict: the primary
-     receives both versions and resolves it itself or reassigns the work on the
-     current base. No automatic text merge.
-   - **Failure and loss.** A failed or cancelled worker's changeset is discarded
-     and reported; the primary may issue a new assignment within budget; no
-     automatic retry. A result lost inside a worker's private storage fails that
-     worker only and discards it; the Workspace is not marked Uncertain.
-     Integration stays the primary's `ApplyChangeset`: a missing receipt after GO
-     is Uncertain and stops the Run without retry. A worker failure is not fatal
-     to the Run, which replaces the execution rule that child failure drains
-     siblings before primary failure.
-   - **Worker storage lifetime.** The worker's private storage is disposable
-     Guard-owned storage, lost on cancellation, crash or process exit and never
-     recovered. A resumed Goal reports the discarded worker work; the primary may
-     reassign within budget. There is no automatic restart.
-   - **Integration order and bounds.** Changesets integrate in completion order,
-     recorded in the journal so replay stays deterministic. Dependencies are
-     waves: a later wave starts after the earlier wave integrates; there is no
-     general task DAG. A changeset holds at most 2,048 files and 32 MiB;
-     oversized changesets reject whole with a count report and are never split.
 - **C3 Command-capable views.** Each worker gets one persistent
    private Guard view for its whole assignment: the Workspace at assignment plus
    its own work. Its commands run there, and it must pass its own success
@@ -279,8 +228,7 @@ Events gain a new current payload version, with no compatibility readers.
 - **C4 Reviewer role.** A read-only reviewer child evaluates each changeset
    before integration, feeding the Supervisor review point (B4).
 
-C2 will change the current researcher-only collaboration contract. Its gates
-and evidence owners are in [execution](#execution).
+C3 extends the current C1/C2 collaboration contract. Its remaining gates and evidence owners are in [execution](#execution).
 
 ### D. Provider roster and per-agent routing
 
@@ -405,19 +353,6 @@ Each slice that crosses one of these boundaries runs the
 these are the remaining slice boundaries and dependencies. Each slice updates
 its owning contract and uses existing evidence under [testing rules](../../agents/testing.md).
 
-- **C2 edit-only workers (roadmap 11).** Build on C1 and the shared Tool step.
-  Add worker assignment pins, leases, handover eligibility, conflicts, loss,
-  storage lifetime, waves and completion-order integration. Update Execution,
-  Goals and Tools. Use the [Tool journeys](../../crates/arany-cli/tests/session_run/tools.rs)
-  for out-of-lease rejection, post-GO Uncertain and digest conflict;
-  [Goal corpus](../../crates/arany/tests/engine_run/goals.rs) for scope, writer
-  exclusion and resume reporting discarded work;
-  [reducer corpus](../../crates/arany/src/session/reducer/tests.rs) for spawn
-  pins, lease overlap/lifetime and ineligible integration; and
-  [Engine corpus](../../crates/arany/tests/engine_run.rs) for local worker loss
-  and cancellation. Keep worker commands, MCP invocation, cache publication
-  and in-view criteria out until their slice. Child write encodings need the
-  owner-run [live coding check](../../NEXT_STEPS.md#beta-1-final-user-owned-checks).
 - **C3 command-capable views (roadmap 12).** After C2, add persistent private
   assignment views, worker commands, the in-view success criterion and read-only
   assignment-time build cache. Tools owns cache behavior; Tool journeys cover
@@ -449,7 +384,7 @@ its owning contract and uses existing evidence under [testing rules](../../agent
   verify public-registry success followed by offline build, SSRF/host refusal,
   disabled install scripts and byte/connection/time overflow.
 
-Next action: follow the roadmap prerequisites, then implement C2. Dogfooding is
+Next action: follow the roadmap prerequisites and C3 owner decisions. Dogfooding is
 owner-run and supplies Supervisor calibration; pending live/native checks do
 not block independent implementation. E13 telemetry lands with each new
 subject under the existing telemetry contract.

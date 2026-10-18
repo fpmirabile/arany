@@ -754,3 +754,50 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
             .any(|item| item.starts_with("An unguarded host run attested"))
     );
 }
+
+#[test]
+fn worker_recovery_report_preserves_exact_ids_disposal_and_unverified_publication() {
+    let f = crate::session::worker_protocol_fixture();
+    let events = f.envelopes();
+    for end in 1..=events.len() {
+        let view = crate::session::SessionView::replay(f.session, &events[..end])
+            .unwrap()
+            .unwrap();
+        let Some(run) = view.runs.last() else {
+            continue;
+        };
+        let goal = view.goal(f.goal).unwrap();
+        let report = goal_report(&view, run, goal);
+        for worker in run.worker_history() {
+            let text = report
+                .unresolved
+                .iter()
+                .chain(&report.changes)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                text.contains(&worker.assignment_id.to_string()),
+                "prefix {end} lost worker ID"
+            );
+            if worker.publication == crate::worker::WorkerPublication::Confirmed && !worker.verified
+            {
+                assert!(
+                    text.contains(
+                        "confirmed Workspace publication needs fresh primary verification"
+                    ),
+                    "prefix {end}"
+                );
+            }
+            if worker.private_outcome_unknown {
+                assert!(
+                    text.contains("private_outcome_unknown=true"),
+                    "prefix {end}"
+                );
+            }
+        }
+        assert!(
+            serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES
+        );
+    }
+}

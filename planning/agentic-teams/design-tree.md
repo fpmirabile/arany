@@ -6,21 +6,16 @@ Completed slices and the grilling transcript remain in Git history.
 
 ## Worker ownership
 
+Implemented C2 decisions are owned by [Execution](../../docs/specs/execution.md#worker-journal-protocol), [Session identity and replay](../../docs/specs/session.md#worker-replay) and [Goal recovery](../../docs/specs/goals.md#worker-accounting-and-verification). The remaining choices below constrain C3.
+
 | Choice | Reason | Remaining slice |
 |---|---|---|
-| AgentRun identity is the assignment attempt | A new AgentRun for reassignment makes stale work distinguishable without a separate attempt counter or fencing token. Existing researcher identity does not yet supply worker lease/base pins. | C2 |
-| Journaled handover eligibility | Late, duplicate, superseded or cancelled results must not publish; eligibility follows recorded facts rather than arrival timing. | C2 |
-| Fixed, non-overlapping Run-scoped leases | The existing Goal writer lock excludes outside writers; leases handle internal ownership without renewal clocks or cross-Run fencing. | C2 |
-| Completion-order integration and waves | Disjoint leases permit faster feedback; recording integration order makes replay deterministic without a general task DAG. | C2 |
-| Digest conflicts require primary resolution or reassignment | Automatic text merge could silently lose a worker's edits. | C2 |
-| Disposable worker storage and no automatic restart | Recovery stays at a Run boundary; recovering a half-built view would need another durability contract. | C2/C3 |
-| Worker-local loss differs from uncertain Workspace publication | Only primary integration can leave the Workspace uncertain; private-view loss can discard one worker without failing the whole Run. | C2 |
-| Whole bounded changesets | Rejecting an oversized changeset avoids partial publication. | C2 |
-| Edit-only workers before command-capable views | Writable teams can arrive before the Supervisor; the primary verifies criteria after C2 integration until C3 can verify inside each view. | C2/C3 |
+| Disposable worker storage and no automatic restart | Recovery stays at a Run boundary; recovering a half-built view would need another durability contract. | C3 |
+| Edit-only workers before command-capable views | Writable teams can arrive before the Supervisor; the primary verifies criteria after C2 integration until C3 can verify inside each view. | C3 |
 | Persistent private Guard views, without Git worktrees | Workers need assignment-local build state and isolation; worktrees bring `.git` without confinement. | C3 |
 | Criterion before handover and verification after integration | In-view checks catch worker breakage; primary checks catch interaction effects. | C3 |
 | Read-only assignment-time build cache | Publishing worker build state could expose outputs from work later discarded. Repeated local builds are the accepted cost. | C3 |
-| MCP catalog listing only | MCP effects can escape the worker view and lease, so those boundaries cannot contain an invocation. | C2/C3 |
+| MCP catalog listing only | MCP effects can escape the worker view and lease, so those boundaries cannot contain an invocation. | C3 |
 
 ## Supervisor and routing
 
