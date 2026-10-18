@@ -993,8 +993,10 @@ async fn execute_worker(
             let capture = fixture::Span::begin(fixture::Stage::WorkerGo);
             receive_go.await.map_err(|_| ToolError::Operation)?;
             capture.complete();
-            let payload_deadline = tokio::time::Instant::now()
-                + Duration::from_millis(u64::from(intent.limits.runtime_ms));
+            let payload_deadline = super::payload_report_deadline(
+                tokio::time::Instant::now(),
+                intent.limits.runtime_ms,
+            );
             tokio::time::timeout_at(payload_deadline, async {
                 let capture = fixture::Span::begin(fixture::Stage::WorkerReceipt);
                 stdin
