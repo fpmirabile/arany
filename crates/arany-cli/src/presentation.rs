@@ -23,6 +23,10 @@ pub enum Output {
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     use arany::{ToolCall, ToolDisposition};
     let operation = match &tool.intent.call {
+        ToolCall::PrepareWorker { .. } => "Worker data preparation".into(),
+        ToolCall::ApplyChangeset {
+            source: arany::worker::ChangesetSource::WorkerHandover { .. },
+        } => "Worker changeset publication".into(),
         ToolCall::ParseAgentDefinition { .. } => "Parse agent definition".into(),
         ToolCall::List { path } => format!("List {path}"),
         ToolCall::Read { path, .. } => format!("Read {path}"),
@@ -32,7 +36,9 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ToolCall::Edit { path, .. } => format!("Edit {path}"),
         ToolCall::Command { program, .. } => format!("Command {program}"),
         ToolCall::CommandUnguarded { program, .. } => format!("Unguarded command {program}"),
-        ToolCall::ApplyChangeset { changeset, .. } => {
+        ToolCall::ApplyChangeset {
+            source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
+        } => {
             format!("Publish {} command file changes", changeset.files.len())
         }
         ToolCall::Skill { name, .. } => format!("Skill {name}"),
@@ -334,7 +340,9 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
                 ));
             }
         }
-        ToolCall::ApplyChangeset { changeset, .. } => {
+        ToolCall::ApplyChangeset {
+            source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
+        } => {
             lines.push(format!(
                 "Publish {} command file changes",
                 changeset.files.len()
@@ -878,6 +886,7 @@ mod exec_jsonl_tests {
             ),
         ];
         let run = RunView {
+            workers: Default::default(),
             id: current_run,
             objective: "Current Run".into(),
             images: Vec::new(),
@@ -1108,6 +1117,7 @@ mod tests {
             )
         }
         let run = |fallbacks: Vec<_>| super::RunView {
+            workers: Default::default(),
             id: RunId::new(),
             objective: String::new(),
             images: Vec::new(),
@@ -1413,6 +1423,7 @@ mod git_summary_tests {
         ] {
             let tool = ToolView {
                 intent: EffectIntent {
+                    target: arany::worker::EffectTarget::Workspace,
                     id: Uuid::now_v7(),
                     run_id: RunId::new(),
                     agent_run_id: AgentRunId::new(),
@@ -1440,6 +1451,7 @@ mod enforcement_tests {
     #[test]
     fn tool_summary_preserves_the_guards_protected_path_diagnostic() {
         let intent = arany::EffectIntent {
+            target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: arany::RunId::new(),
             agent_run_id: arany::AgentRunId::new(),
@@ -1490,6 +1502,7 @@ mod unguarded_tests {
 
     fn intent(args: &[&str], cwd: &str) -> EffectIntent {
         EffectIntent {
+            target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: RunId::new(),
             agent_run_id: AgentRunId::new(),
@@ -1586,6 +1599,7 @@ mod unguarded_tests {
     #[test]
     fn answer_headings_count_unguarded_effects() {
         let mut run = arany::RunView {
+            workers: Default::default(),
             id: RunId::new(),
             objective: "Run".into(),
             images: Vec::new(),

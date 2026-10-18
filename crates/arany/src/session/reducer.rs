@@ -7,6 +7,8 @@ use super::events::{
 use crate::provider::AgentPhase;
 
 mod agent;
+mod worker;
+pub use worker::{WorkerState, WorkerView};
 mod goal;
 mod run;
 mod session;
@@ -177,9 +179,12 @@ impl GoalView {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) mod worker_tests;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentView {
+    pub assignment: Option<WorkerView>,
     pub definition: Option<String>,
     pub id: AgentRunId,
     pub role: AgentRole,
@@ -196,6 +201,7 @@ pub struct AgentView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunView {
+    pub workers: WorkerState,
     pub id: RunId,
     pub objective: String,
     pub images: Vec<crate::provider::ImageAttachment>,
@@ -262,12 +268,7 @@ impl ToolView {
 }
 
 fn all_children_finished(run: &RunView) -> bool {
-    run.agents.len() > 1
-        && run
-            .agents
-            .iter()
-            .skip(1)
-            .all(|child| child.status == AgentStatus::Finished)
+    run.agents.len() > 1 && run.agents.iter().skip(1).all(worker::child_terminal)
 }
 
 fn model_tool_count(run: &RunView) -> usize {
@@ -278,6 +279,7 @@ fn model_tool_count(run: &RunView) -> usize {
                 && !matches!(
                     tool.intent.call,
                     crate::tools::ToolCall::ParseAgentDefinition { .. }
+                        | crate::tools::ToolCall::PrepareWorker { .. }
                 )
         })
         .count()
@@ -352,7 +354,9 @@ fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCal
             .last()
             .is_some_and(|call| call.disposition == ProviderCallDisposition::Delegated)
         && record.phase == AgentPhase::RootSynthesis
-        && all_children_finished(run)
+        && (all_children_finished(run)
+            || record.disposition == ProviderCallDisposition::ToolRequested
+                && worker::coordination_ready(run))
 }
 
 impl RunView {
@@ -443,7 +447,11 @@ impl RunView {
     fn interrupt(&mut self) {
         if !self.status.is_terminal() {
             self.status = RunStatus::Interrupted;
+            self.workers.clear_pending();
             for agent in &mut self.agents {
+                if let Some(w) = &mut agent.assignment {
+                    w.interrupted = true;
+                }
                 if agent.status == AgentStatus::Active {
                     agent.status = AgentStatus::Interrupted;
                 }
@@ -659,6 +667,7 @@ impl SessionView {
         {
             previous.interrupt();
         }
+        worker::before_event(current, &envelope.event)?;
         match &envelope.event {
             Event::SessionStarted { .. } | Event::SessionForked { .. } => {
                 return Err(ReplayError::InvalidTransition);
@@ -686,10 +695,21 @@ impl SessionView {
             | Event::ProviderFallbackUsed { .. }
             | Event::ProviderCallRecorded { .. }
             | Event::AgentFinished { .. } => agent::apply(current, &envelope.event)?,
+            Event::WorkerDataChunk { .. }
+            | Event::WorkerDataSealed { .. }
+            | Event::WorkerStopObserved { .. }
+            | Event::WorkerHandoverRecorded { .. }
+            | Event::WorkerIntegrationRecorded { .. }
+            | Event::WorkerHandoverDiscarded { .. }
+            | Event::WorkerLeaseReleased { .. }
+            | Event::WorkerVerificationRecorded { .. } => {
+                worker::apply(current, &envelope.event, prior)?
+            }
             Event::ToolStarted { .. }
             | Event::ToolFinished { .. }
             | Event::ToolPermissionDecided { .. } => tool::apply(current, &envelope.event, prior)?,
         }
+        worker::after_event(current, &envelope.event, prior)?;
         current.last_sequence = prior;
         Ok(())
     }
@@ -863,6 +883,21 @@ fn definition_mode(
         return Ok(None);
     };
     let registry = definition_registry(run)?;
+    if let Some(w) = run
+        .agents
+        .iter()
+        .find(|a| a.id == actor)
+        .and_then(|a| a.assignment.as_ref())
+    {
+        let parent = run
+            .config
+            .as_ref()
+            .and_then(|c| c.worker_policy.as_ref())
+            .and_then(|p| p.parent_grant.permission_mode);
+        if let Some(mode) = w.pins.grant.permission_mode.or(parent) {
+            return Ok(Some(mode));
+        }
+    }
     Ok(registry
         .get(name)
         .ok_or(ReplayError::InvalidTransition)?

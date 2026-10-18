@@ -686,6 +686,7 @@ async fn bounded_writer_preserves_messages_and_backpressures_at_256() {
 fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertain() {
     use arany::{CacheUpdate, ToolCall, ToolDisposition, ToolObservation};
     let intent = arany::EffectIntent {
+        target: arany::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: arany::RunId::new(),
         agent_run_id: arany::AgentRunId::new(),
@@ -745,6 +746,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         "uncertain"
     );
     let mut run = arany::RunView {
+        workers: Default::default(),
         id: intent.run_id,
         objective: "Inspect".into(),
         images: Vec::new(),
@@ -827,6 +829,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
     let mut child_tool = run.tools.pop().unwrap();
     child_tool.intent.id = uuid::Uuid::now_v7();
     run.agents.push(arany::AgentView {
+        assignment: None,
         id: child_tool.intent.agent_run_id,
         role: arany::AgentRole::Child,
         ordinal: 1,

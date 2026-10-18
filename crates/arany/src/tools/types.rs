@@ -1,4 +1,7 @@
 use super::catalog::{Family, Site};
+use crate::session::worker::{
+    ChangesetSource, EffectTarget, WorkerDataRef, WorkerMutation, WorkerPreparation,
+};
 use crate::session::{AgentRunId, RunId};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -184,8 +187,10 @@ pub enum ToolCall {
         justification: String,
     },
     ApplyChangeset {
-        source_intent_digest: [u8; 32],
-        changeset: CommandChangeset,
+        source: ChangesetSource,
+    },
+    PrepareWorker {
+        preparation: WorkerPreparation,
     },
     Skill {
         name: String,
@@ -264,6 +269,7 @@ impl ToolCall {
             Family::Git => super::git::valid(self),
             Family::Preparation => {
                 matches!(self, Self::ParseAgentDefinition { index, .. } if usize::from(*index) < 128)
+                    || matches!(self, Self::PrepareWorker { preparation } if preparation.valid())
             }
         }
     }
@@ -400,6 +406,7 @@ impl ToolPolicyReceipt {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectIntent {
+    pub target: EffectTarget,
     pub id: Uuid,
     pub run_id: RunId,
     pub agent_run_id: AgentRunId,
@@ -419,7 +426,8 @@ impl EffectIntent {
     }
 
     pub(crate) fn valid(&self) -> bool {
-        self.id.get_version() == Some(uuid::Version::SortRand)
+        self.target.valid()
+            && self.id.get_version() == Some(uuid::Version::SortRand)
             && self.policy_digest != [0; 32]
             && self.enforcement_digest != [0; 32]
             && self.workspace_inode > 0
@@ -641,27 +649,87 @@ pub enum Attestation {
         workspace_inode: u64,
     },
     Guard(GuardReceipt),
+    WorkerRead {
+        intent_digest: [u8; 32],
+        #[serde(deserialize_with = "Option::deserialize")]
+        guard: Option<Box<GuardReceipt>>,
+    },
+    WorkerMutation {
+        receipt: GuardReceipt,
+        mutation: Box<WorkerMutation>,
+    },
+    WorkerData {
+        #[serde(deserialize_with = "Option::deserialize")]
+        guard: Option<Box<GuardReceipt>>,
+        intent_digest: [u8; 32],
+        data: WorkerDataRef,
+    },
     Unguarded(UnguardedReceipt),
 }
 
 impl Attestation {
     pub(crate) fn valid_for(&self, intent: &EffectIntent) -> bool {
         match self {
+            Self::WorkerRead {
+                intent_digest,
+                guard,
+            } => {
+                matches!(intent.target, EffectTarget::WorkerView { .. })
+                    && !intent.call.mutates()
+                    && intent.call.is_child_research()
+                    && *intent_digest == intent.digest()
+                    && match intent.call.facts().site {
+                        Site::InProcess => guard.is_none(),
+                        Site::Guard => guard.as_ref().is_some_and(|r| r.valid_for(intent)),
+                        Site::Unguarded => false,
+                    }
+            }
+            Self::WorkerMutation { receipt, mutation } => {
+                matches!(intent.target, EffectTarget::WorkerView { revision, .. } if revision == mutation.previous_revision && revision.checked_add(1) == Some(mutation.next_revision) && mutation.next_revision <= 16)
+                    && matches!(
+                        intent.call,
+                        ToolCall::Mkdir { .. } | ToolCall::Write { .. } | ToolCall::Edit { .. }
+                    )
+                    && receipt.valid_for(intent)
+                    && mutation.data.assignment_id == intent.agent_run_id
+                    && mutation.data.valid()
+                    && mutation.data.purpose == crate::session::worker::WorkerDataPurpose::Mutation
+            }
+            Self::WorkerData {
+                guard,
+                intent_digest,
+                data,
+            } => {
+                matches!(&intent.call, ToolCall::PrepareWorker { preparation } if preparation.assignment_id == data.assignment_id && (preparation.purpose == data.purpose || preparation.purpose == crate::session::worker::WorkerDataPurpose::Handover && data.purpose == crate::session::worker::WorkerDataPurpose::Mutation))
+                    && *intent_digest == intent.digest()
+                    && data.valid()
+                    && match intent.call.site() {
+                        Site::InProcess => guard.is_none(),
+                        Site::Guard => guard.as_ref().is_some_and(|r| r.valid_for(intent)),
+                        Site::Unguarded => false,
+                    }
+            }
             Self::InProcess {
                 policy_digest,
                 workspace_device,
                 workspace_inode,
             } => {
-                intent.call.facts().site == Site::InProcess
+                intent.target == EffectTarget::Workspace
+                    && intent.call.facts().site == Site::InProcess
                     && *policy_digest == intent.policy_digest
                     && *workspace_device == intent.workspace_device
                     && *workspace_inode == intent.workspace_inode
             }
             Self::Guard(receipt) => {
-                intent.call.facts().site == Site::Guard && receipt.valid_for(intent)
+                intent.target == EffectTarget::Workspace
+                    && !matches!(intent.call, ToolCall::PrepareWorker { .. })
+                    && intent.call.facts().site == Site::Guard
+                    && receipt.valid_for(intent)
             }
             Self::Unguarded(receipt) => {
-                intent.call.facts().site == Site::Unguarded && receipt.valid_for(intent)
+                intent.target == EffectTarget::Workspace
+                    && intent.call.facts().site == Site::Unguarded
+                    && receipt.valid_for(intent)
             }
         }
     }
@@ -694,7 +762,11 @@ impl Attestation {
     pub fn guard(&self) -> Option<&GuardReceipt> {
         match self {
             Self::Guard(receipt) => Some(receipt),
-            Self::InProcess { .. } | Self::Unguarded(_) => None,
+            Self::InProcess { .. }
+            | Self::Unguarded(_)
+            | Self::WorkerRead { .. }
+            | Self::WorkerMutation { .. }
+            | Self::WorkerData { .. } => None,
         }
     }
 }
@@ -718,8 +790,10 @@ impl EnforcementCause {
 pub struct ToolObservation {
     pub intent: EffectIntent,
     pub disposition: ToolDisposition,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub enforcement_cause: Option<EnforcementCause>,
     pub output: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub attestation: Option<Attestation>,
     pub cache_update: CacheUpdate,
 }
@@ -951,19 +1025,21 @@ impl ToolContext {
 }
 
 pub(crate) fn model_call(call: &ToolCall) -> Value {
-    let mut value = json!(call);
-    if let ToolCall::ApplyChangeset { .. } = call
-        && let Some(object) = value.as_object_mut()
-    {
-        object.remove("source_intent_digest");
+    match call {
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::CommandReceipt { changeset, .. },
+        } => json!({"operation":"apply_changeset", "changeset": changeset}),
+        _ => json!(call),
     }
-    value
 }
 
 pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
     let output = super::skills::parse_json(observation.output.as_bytes(), MAX_TOOL_RESULT_BYTES)
         .unwrap_or_else(|_| json!(observation.output));
-    let effect = if observation.intent.call.is_unguarded() {
+    let private = matches!(observation.intent.target, EffectTarget::WorkerView { .. });
+    let effect = if private {
+        "none"
+    } else if observation.intent.call.is_unguarded() {
         match observation.disposition {
             ToolDisposition::Uncertain | ToolDisposition::Cancelled => "uncertain",
             _ if matches!(observation.attestation, Some(Attestation::Unguarded(_))) => "unguarded",
@@ -992,6 +1068,17 @@ pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
         effect,
         observation.cache_update,
     );
+    if private {
+        value["target"] = json!(observation.intent.target);
+        value["private_effect"] = json!(match observation.disposition {
+            ToolDisposition::Succeeded
+                if observation.intent.call.mutates()
+                    && observation.attested_for(&observation.intent) =>
+                "applied",
+            ToolDisposition::Uncertain => "uncertain",
+            _ => "none",
+        });
+    }
     if let Some(cause) = observation.enforcement_cause {
         value["enforcement_cause"] = json!(cause.diagnostic());
     }
@@ -1016,8 +1103,10 @@ mod model_call_tests {
     #[test]
     fn model_call_strips_only_the_changeset_source_digest() {
         let changeset = ToolCall::ApplyChangeset {
-            source_intent_digest: [7; 32],
-            changeset: CommandChangeset::default(),
+            source: crate::session::worker::ChangesetSource::CommandReceipt {
+                source_intent_digest: [7; 32],
+                changeset: CommandChangeset::default(),
+            },
         };
         let value = model_call(&changeset);
         assert!(value.get("source_intent_digest").is_none());
@@ -1039,6 +1128,7 @@ mod unguarded_vocabulary_tests {
 
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: RunId::new(),
             agent_run_id: AgentRunId::new(),

@@ -297,6 +297,10 @@ fn push_success_facts(
             }
             let call = &tool.intent.call;
             match call {
+                crate::tools::ToolCall::PrepareWorker { .. } => {}
+                crate::tools::ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
+                } => {}
                 crate::tools::ToolCall::ParseAgentDefinition { .. } => {}
                 crate::tools::ToolCall::Write { path, .. }
                 | crate::tools::ToolCall::Edit { path, .. } => {
@@ -315,7 +319,10 @@ fn push_success_facts(
                         omitted_facts,
                     );
                 }
-                crate::tools::ToolCall::ApplyChangeset { changeset, .. } => {
+                crate::tools::ToolCall::ApplyChangeset {
+                    source:
+                        crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+                } => {
                     for change in &changeset.files {
                         let action = if change.after.is_none() {
                             "removed"
@@ -437,6 +444,10 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
 
 fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
     match call {
+        crate::tools::ToolCall::PrepareWorker { .. } => "Worker data preparation".into(),
+        crate::tools::ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
+        } => "Worker changeset publication".into(),
         crate::tools::ToolCall::ParseAgentDefinition { .. } => {
             "Agent definition preparation".into()
         }
@@ -471,6 +482,10 @@ fn goal_report_evidence(
         _ => "Guard",
     };
     match call {
+        crate::tools::ToolCall::PrepareWorker { .. } => "Worker data preparation".into(),
+        crate::tools::ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
+        } => "Worker changeset publication".into(),
         crate::tools::ToolCall::ParseAgentDefinition { .. } => {
             "Agent definition preparation".into()
         }
@@ -490,7 +505,9 @@ fn goal_report_evidence(
                     },
                 )
         }
-        crate::tools::ToolCall::ApplyChangeset { changeset, .. } => {
+        crate::tools::ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+        } => {
             format!(
                 "{attester} attested publication of {} command file change(s).",
                 changeset.files.len()

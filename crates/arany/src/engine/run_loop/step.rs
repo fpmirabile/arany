@@ -203,8 +203,10 @@ impl RunLoop<'_> {
                 return Ok(false);
             }
             call = ToolCall::ApplyChangeset {
-                source_intent_digest,
-                changeset,
+                source: crate::session::worker::ChangesetSource::CommandReceipt {
+                    source_intent_digest,
+                    changeset,
+                },
             };
             if !call.valid() {
                 return Ok(false);
@@ -238,8 +240,10 @@ impl RunLoop<'_> {
         };
         let integration =
             matches!(intent.call, ToolCall::Command { .. }).then(|| ToolCall::ApplyChangeset {
-                source_intent_digest: intent.digest(),
-                changeset: CommandChangeset { files: Vec::new() },
+                source: crate::session::worker::ChangesetSource::CommandReceipt {
+                    source_intent_digest: intent.digest(),
+                    changeset: CommandChangeset { files: Vec::new() },
+                },
             });
         let reserved: Vec<_> = std::iter::once(&intent.call).chain(&integration).collect();
         let overhead = grant.context()?.reserved_len(step, &reserved);

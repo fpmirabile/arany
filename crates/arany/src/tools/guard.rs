@@ -999,7 +999,8 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         cache.validate(&task.intent, &task.config)?;
     }
     verify_intent_runtime_grants(&task.intent, &task.config)?;
-    if !task.intent.valid()
+    if task.intent.target != crate::session::worker::EffectTarget::Workspace
+        || !task.intent.valid()
         || task.intent.call.facts().site != Site::Guard
         || task.intent.policy_digest != task.config.digest()
         || task.intent.expires_at_ms <= now_ms()
@@ -1785,6 +1786,7 @@ mod tests {
 
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::session::RunId::default(),
             agent_run_id: crate::session::AgentRunId::default(),
@@ -2245,6 +2247,7 @@ mod tests {
                 definition: None,
                 config: config.clone(),
                 intent: EffectIntent {
+                    target: crate::session::worker::EffectTarget::Workspace,
                     id: uuid::Uuid::now_v7(),
                     run_id: crate::session::RunId::new(),
                     agent_run_id: crate::session::AgentRunId::new(),

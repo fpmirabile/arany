@@ -1007,7 +1007,15 @@ impl From<&Event> for TraceEventKind {
             | Event::MessageCommitted { .. }
             | Event::RunFinished { .. }
             | Event::ContextCompacted { .. } => Self::Run(kind),
-            Event::AssistantDisplayRecorded { .. }
+            Event::WorkerDataChunk { .. }
+            | Event::WorkerDataSealed { .. }
+            | Event::WorkerStopObserved { .. }
+            | Event::WorkerHandoverRecorded { .. }
+            | Event::WorkerIntegrationRecorded { .. }
+            | Event::WorkerHandoverDiscarded { .. }
+            | Event::WorkerLeaseReleased { .. }
+            | Event::WorkerVerificationRecorded { .. }
+            | Event::AssistantDisplayRecorded { .. }
             | Event::GoalSteeringNoteRecorded { .. }
             | Event::SessionStarted { .. }
             | Event::SessionDefaultChanged { .. }

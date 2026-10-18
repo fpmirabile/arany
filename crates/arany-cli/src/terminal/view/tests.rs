@@ -2747,6 +2747,7 @@ fn tool_approval_panel_stays_centered_and_boxed() {
 #[test]
 fn unguarded_approval_pages_show_the_risk_copy_then_three_choices_with_deny_focused() {
     let intent = arany::EffectIntent {
+        target: arany::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: arany::RunId::new(),
         agent_run_id: arany::AgentRunId::new(),

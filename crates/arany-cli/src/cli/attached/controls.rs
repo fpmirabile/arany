@@ -1227,11 +1227,13 @@ mod tests {
 
         let run_id = RunId::new();
         view.runs.push(RunView {
+            workers: Default::default(),
             id: run_id,
             objective: "Current objective".into(),
             images: Vec::new(),
             config: None,
             agents: vec![AgentView {
+                assignment: None,
                 definition: None,
                 id: AgentRunId::new(),
                 role: AgentRole::Primary,
@@ -1261,6 +1263,7 @@ mod tests {
             "Task: working · 1 agent · details: /agents"
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
+            worker_policy: None,
             agent_definitions: None,
             roster: None,
             providers: None,

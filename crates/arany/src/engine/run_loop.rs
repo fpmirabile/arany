@@ -772,6 +772,7 @@ impl<'a> RunLoop<'a> {
                 call,
                 crate::tools::ToolCall::ApplyChangeset { .. }
                     | crate::tools::ToolCall::ParseAgentDefinition { .. }
+                    | crate::tools::ToolCall::PrepareWorker { .. }
             )
     }
 
@@ -804,6 +805,7 @@ impl<'a> RunLoop<'a> {
             };
         }
         self.append(Event::AgentFinished {
+            worker: None,
             run_id: self.run_id,
             agent_run_id: self.primary_id,
             disposition: AgentDisposition::Finished,
@@ -855,6 +857,7 @@ impl<'a> RunLoop<'a> {
             return self.cancel_primary().await;
         }
         self.append(Event::AgentFinished {
+            worker: None,
             run_id: self.run_id,
             agent_run_id: self.primary_id,
             disposition: AgentDisposition::Failed,
@@ -873,6 +876,7 @@ impl<'a> RunLoop<'a> {
 
     async fn cancel_primary(&self) -> Result<(), EngineError> {
         self.append(Event::AgentFinished {
+            worker: None,
             run_id: self.run_id,
             agent_run_id: self.primary_id,
             disposition: AgentDisposition::Cancelled,
@@ -997,6 +1001,27 @@ fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> 
         CallResult::Failed(_) | CallResult::Cancelled => (None, Usage::default(), None),
     };
     ProviderCallRecord {
+        delegation: if disposition == ProviderCallDisposition::Delegated {
+            match result {
+                CallResult::Response(ProviderResponse {
+                    outcome: ProviderOutcome::Delegate(d),
+                    ..
+                }) => Some(
+                    d.children
+                        .iter()
+                        .map(
+                            |objective| crate::session::worker::ChildAssignment::Researcher {
+                                objective: objective.clone(),
+                                definition: d.agent.clone(),
+                            },
+                        )
+                        .collect(),
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        },
         phase,
         disposition,
         requested_tools: match result {

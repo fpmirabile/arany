@@ -533,6 +533,7 @@ impl Segment {
     fn spawn(&mut self, role: AgentRole) -> AgentRunId {
         let agent_run_id = AgentRunId::new();
         self.commit(Event::AgentSpawned {
+            assignment: None,
             definition: None,
             run_id: self.run_id,
             agent_run_id,
@@ -567,6 +568,7 @@ impl Segment {
 
     fn finish_agent(&mut self, agent_run_id: AgentRunId, disposition: AgentDisposition) {
         self.commit(Event::AgentFinished {
+            worker: None,
             run_id: self.run_id,
             agent_run_id,
             disposition,
@@ -598,6 +600,7 @@ fn child_routes() -> ProviderRoutes {
 
 fn run_config(providers: Option<ProviderRoutes>) -> crate::session::RunConfig {
     crate::session::RunConfig {
+        worker_policy: None,
         agent_definitions: None,
         roster: None,
         providers,
@@ -630,6 +633,7 @@ fn provider_record(
     usage: (Option<u32>, Option<u32>),
 ) -> ProviderCallRecord {
     ProviderCallRecord {
+        delegation: None,
         phase,
         disposition,
         requested_tools: 0,

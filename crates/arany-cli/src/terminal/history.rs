@@ -1003,6 +1003,7 @@ mod tests {
 
     fn run(objective: &str, answer: &str) -> RunView {
         RunView {
+            workers: Default::default(),
             id: RunId::new(),
             objective: objective.into(),
             images: Vec::new(),
@@ -1731,6 +1732,7 @@ mod tests {
                     Event::RunStarted {
                         run_id,
                         config: RunConfig {
+                            worker_policy: None,
                             agent_definitions: None,
                             roster: None,
                             providers: None,
@@ -1758,6 +1760,7 @@ mod tests {
                         active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                     },
                     Event::AgentSpawned {
+                        assignment: None,
                         definition: None,
                         run_id,
                         agent_run_id,
@@ -1767,6 +1770,7 @@ mod tests {
                         grant: None,
                     },
                     Event::AgentFinished {
+                        worker: None,
                         run_id,
                         agent_run_id,
                         disposition: AgentDisposition::Finished,

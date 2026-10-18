@@ -250,6 +250,7 @@ impl RunLoop<'_> {
             }
             let agent_run_id = AgentRunId::new();
             self.append(Event::AgentSpawned {
+                assignment: None,
                 definition: agent.clone(),
                 run_id: self.run_id,
                 agent_run_id,
@@ -735,6 +736,7 @@ impl RunLoop<'_> {
         call_reserved: bool,
     ) -> Result<(), EngineError> {
         self.append(Event::AgentFinished {
+            worker: None,
             run_id: self.run_id,
             agent_run_id,
             disposition,

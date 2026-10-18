@@ -1330,6 +1330,7 @@ impl Engine {
         };
         ledger.append(&self.journal, session_id, started).await?;
         let spawned = Event::AgentSpawned {
+            assignment: None,
             definition: None,
             run_id,
             agent_run_id,
@@ -1500,8 +1501,7 @@ impl Engine {
         identity: &crate::provider::ProviderIdentity,
         admitted: &AdmittedTurn,
     ) -> Result<PreparedTurn, EngineError> {
-        let workspace_identity = admitted.workspace_identity;
-        let history = &admitted.history;
+        let (workspace_identity, history) = (admitted.workspace_identity, &admitted.history);
         let goal = &admitted.goal;
         let objective = &admitted.objective;
         let budget = admitted.budget;
@@ -1602,6 +1602,7 @@ impl Engine {
             .iter()
             .all(|chain| chain.len() == 1 && chain[0] == *identity);
         let config = RunConfig {
+            worker_policy: None,
             agent_definitions: tools.as_ref().and_then(|tools| tools.definitions.pin()),
             roster: submission
                 .providers

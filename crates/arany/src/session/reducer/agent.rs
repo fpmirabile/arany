@@ -27,7 +27,14 @@ pub(super) fn is_child_step(agent: &AgentView, record: &ProviderCallRecord) -> b
                 .rev()
                 .find(|call| call.phase != AgentPhase::ToolReview)
                 .is_some_and(|call| call.disposition == ProviderCallDisposition::ToolRequested)
-                && agent.tools.len() == child_tool_requests(agent)
+                && agent
+                    .tools
+                    .iter()
+                    .filter(|t| {
+                        !matches!(t.intent.call, crate::tools::ToolCall::PrepareWorker { .. })
+                    })
+                    .count()
+                    == child_tool_requests(agent)
                 && agent
                     .tools
                     .last()
@@ -54,6 +61,9 @@ fn child_tool_is_admissible(
     let Some(child) = run.agents.iter().find(|agent| agent.id == agent_run_id) else {
         return false;
     };
+    if child.assignment.is_some() {
+        return super::worker::child_tool_admissible(run, agent_run_id, intent);
+    }
     child.status == AgentStatus::Active
         && child.grant == Some(ChildGrant::ReadOnly)
         && child
@@ -129,6 +139,10 @@ impl SessionView {
             .as_ref()
             .is_some_and(|contract| !contract.allows_call(&observation.intent.call));
         if out_of_plan
+            && !matches!(
+                observation.intent.call,
+                crate::tools::ToolCall::PrepareWorker { .. }
+            )
             && (observation.disposition != ToolDisposition::Denied
                 || observation.attestation.is_some()
                 || observation.cache_update != CacheUpdate::NotApplicable)
@@ -290,7 +304,9 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             objective,
             grant,
             definition,
+            assignment,
         } => {
+            super::worker::validate_spawn(current, event)?;
             if *role == AgentRole::Child {
                 let goal =
                     active_run_goal(current, *run_id).ok_or(ReplayError::InvalidTransition)?;
@@ -318,7 +334,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                     if !run.agents.is_empty()
                         && *ordinal as usize == run.agents.len()
                         && *ordinal <= config.policy.max_children()
-                        && *grant == Some(child_grant) => {}
+                        && (*grant == Some(child_grant)
+                            || assignment.is_some() && *grant == Some(ChildGrant::EditOnly)) => {}
                 _ => return Err(ReplayError::InvalidTransition),
             }
             if run.agents.iter().any(|agent| agent.id == *agent_run_id) {
@@ -337,12 +354,13 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 if *role != AgentRole::Child
                     || definitions
                         .get(name)
-                        .is_none_or(|definition| definition.editor())
+                        .is_none_or(|definition| definition.editor() != assignment.is_some())
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
             }
             run.agents.push(AgentView {
+                assignment: assignment.clone().map(super::worker::WorkerView::new),
                 definition: definition.clone(),
                 id: *agent_run_id,
                 role: *role,
@@ -436,6 +454,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                         if first.disposition == ProviderCallDisposition::Delegated =>
                     {
                         all_children_finished(run)
+                            || record.disposition == ProviderCallDisposition::ToolRequested
+                                && super::worker::coordination_ready(run)
                     }
                     (AgentRole::Child, _, AgentPhase::ChildWork) => is_child_step(agent, record),
                     _ => false,
@@ -448,7 +468,10 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                             AgentRole::Primary => record.phase != AgentPhase::ToolReview,
                             AgentRole::Child => {
                                 record.phase == AgentPhase::ChildWork
-                                    && agent.grant == Some(ChildGrant::ReadOnly)
+                                    && matches!(
+                                        agent.grant,
+                                        Some(ChildGrant::ReadOnly | ChildGrant::EditOnly)
+                                    )
                                     && record.requested_tools == 1
                                     && agent.definition.as_ref().is_none_or(|name| {
                                         super::definition_registry(run)
@@ -471,6 +494,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                             }
                         })
                 || (record.phase != AgentPhase::RootPlan
+                    && !(record.phase == AgentPhase::RootSynthesis
+                        && super::worker::wave_settled(run))
                     && record.disposition == ProviderCallDisposition::Delegated)
             {
                 return Err(ReplayError::InvalidTransition);
@@ -541,6 +566,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             disposition,
             summary,
             result,
+            worker: _,
         } => {
             // Unknown usage blocks Tool and Delegate outcomes and Provider calls, not a Finish.
             let over_token_cap = match active_run_goal(current, *run_id) {
@@ -565,7 +591,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                     .agents
                     .iter()
                     .skip(1)
-                    .any(|agent| agent.status != AgentStatus::Finished)
+                    .any(|agent| !super::worker::child_terminal(agent))
             {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -643,7 +669,10 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
 fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
     if agent.role == AgentRole::Child {
         return record.phase == AgentPhase::ToolReview
-            && agent.grant == Some(ChildGrant::ReadOnly)
+            && matches!(
+                agent.grant,
+                Some(ChildGrant::ReadOnly | ChildGrant::EditOnly)
+            )
             && agent
                 .provider_calls
                 .last()

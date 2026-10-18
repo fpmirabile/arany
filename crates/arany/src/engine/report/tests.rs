@@ -14,6 +14,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     let goal_id = GoalId::new();
     let run_id = RunId::new();
     let command_intent = EffectIntent {
+        target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id,
         agent_run_id: AgentRunId::new(),
@@ -58,6 +59,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     }];
     tools.extend((0..15).map(|index| {
         let intent = EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id,
             agent_run_id: AgentRunId::new(),
@@ -94,11 +96,13 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         }
     }));
     let run = RunView {
+        workers: Default::default(),
         id: run_id,
         objective: "Report bounded evidence".into(),
         images: Vec::new(),
         config: None,
         agents: vec![AgentView {
+            assignment: None,
             definition: None,
             id: AgentRunId::new(),
             role: AgentRole::Primary,
@@ -256,6 +260,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     assert!(rejected_observation.attested_for(&late_rejected_command.intent));
     late_run.tools.push(late_rejected_command);
     let uncertain_intent = EffectIntent {
+        target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id,
         agent_run_id: late_run.agents[0].id,
@@ -350,6 +355,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     let mut byte_run = run.clone();
     byte_run.tools.truncate(13);
     let failed_intent = EffectIntent {
+        target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id,
         agent_run_id: byte_run.agents[0].id,
@@ -440,6 +446,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         }
         for failure_index in 0..denied_count {
             let intent = EffectIntent {
+                target: crate::session::worker::EffectTarget::Workspace,
                 id: Uuid::now_v7(),
                 run_id,
                 agent_run_id,
@@ -594,6 +601,7 @@ fn read_evidence_names_the_site_that_attested_it() {
 
 fn read_intent(call: &ToolCall) -> EffectIntent {
     EffectIntent {
+        target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
@@ -641,6 +649,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
     assert!(tool.ran_unguarded());
     let goal_id = GoalId::new();
     let run = RunView {
+        workers: Default::default(),
         id: run_id,
         objective: "Report".into(),
         images: Vec::new(),

@@ -238,7 +238,15 @@
             "ToolPermissionDecided",
             "AgentFinished",
             "MessageCommitted",
-            "RunFinished"
+            "RunFinished",
+            "WorkerDataChunk",
+            "WorkerDataSealed",
+            "WorkerStopObserved",
+            "WorkerHandoverRecorded",
+            "WorkerIntegrationRecorded",
+            "WorkerHandoverDiscarded",
+            "WorkerLeaseReleased",
+            "WorkerVerificationRecorded"
           ],
           "type": "string"
         },

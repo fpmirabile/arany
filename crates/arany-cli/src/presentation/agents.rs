@@ -198,12 +198,14 @@ mod tests {
 
     fn run(ordinal: usize) -> RunView {
         RunView {
+            workers: Default::default(),
             id: RunId::new(),
             objective: format!("Run {ordinal}"),
             images: Vec::new(),
             config: None,
             agents: vec![
                 AgentView {
+                    assignment: None,
                     definition: None,
                     id: AgentRunId::new(),
                     role: AgentRole::Primary,
@@ -217,6 +219,7 @@ mod tests {
                     status: AgentStatus::Finished,
                 },
                 AgentView {
+                    assignment: None,
                     definition: None,
                     id: AgentRunId::new(),
                     role: AgentRole::Child,
@@ -278,6 +281,7 @@ mod tests {
             (Some(u32::MAX), Some(u32::MAX)),
         ] {
             let first = arany::ProviderCallRecord {
+                delegation: None,
                 phase: arany::AgentPhase::RootPlan,
                 disposition: arany::ProviderCallDisposition::Delegated,
                 response_id: None,
@@ -290,6 +294,7 @@ mod tests {
                 cache_creation_input_tokens: None,
             };
             let last = arany::ProviderCallRecord {
+                delegation: None,
                 phase: arany::AgentPhase::RootSynthesis,
                 disposition: arany::ProviderCallDisposition::Finished,
                 input_tokens: input,

@@ -217,6 +217,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                 Event::RunStarted {
                     run_id,
                     config: RunConfig {
+                        worker_policy: None,
                         agent_definitions: None,
                         roster: None,
                         providers: None,
@@ -244,6 +245,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                 },
                 Event::AgentSpawned {
+                    assignment: None,
                     definition: None,
                     run_id,
                     agent_run_id,
@@ -262,6 +264,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     run_id,
                     agent_run_id,
                     record: ProviderCallRecord {
+                        delegation: None,
                         phase: AgentPhase::RootPlan,
                         disposition: ProviderCallDisposition::Finished,
                         response_id: None,
@@ -275,6 +278,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     },
                 },
                 Event::AgentFinished {
+                    worker: None,
                     run_id,
                     agent_run_id,
                     disposition: AgentDisposition::Finished,

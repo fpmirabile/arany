@@ -337,16 +337,18 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
 #[test]
 fn changeset_rules_require_all_paths_for_allow_and_any_path_for_deny_or_ask() {
     let batch = |paths: &[&str]| ToolCall::ApplyChangeset {
-        source_intent_digest: [1; 32],
-        changeset: CommandChangeset {
-            files: paths
-                .iter()
-                .map(|path| FileChange {
-                    path: (*path).into(),
-                    before: None,
-                    after: Some(FileVersion::from_bytes(b"x", false)),
-                })
-                .collect(),
+        source: crate::session::worker::ChangesetSource::CommandReceipt {
+            source_intent_digest: [1; 32],
+            changeset: CommandChangeset {
+                files: paths
+                    .iter()
+                    .map(|path| FileChange {
+                        path: (*path).into(),
+                        before: None,
+                        after: Some(FileVersion::from_bytes(b"x", false)),
+                    })
+                    .collect(),
+            },
         },
     };
     let mixed = batch(&["docs/a", "src/a"]);

@@ -4,6 +4,7 @@ mod events;
 pub(crate) mod input;
 mod lineage;
 mod reducer;
+pub mod worker;
 
 pub(crate) const MAX_CONTEXT_CONTENT_BYTES: usize = 376 * 1024;
 pub(crate) const MAX_HISTORY_RUNS: usize = 32;
@@ -38,6 +39,8 @@ pub(crate) use events::{
 };
 pub(crate) use lineage::prefix_digest;
 pub(crate) use reducer::ForkInheritance;
+#[cfg(test)]
+pub(crate) use reducer::worker_tests::completed_fixture as worker_protocol_fixture;
 pub use reducer::{
     AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,
 };

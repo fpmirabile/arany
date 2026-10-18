@@ -170,7 +170,8 @@ pub(super) fn apply(
                 true
             } else if let Some(contract) = &goal.plan_contract {
                 !goal.awaiting_plan_contract
-                    && (contract.allows_call(&intent.call)
+                    && (matches!(intent.call, crate::tools::ToolCall::PrepareWorker { .. })
+                        || contract.allows_call(&intent.call)
                         || matches!(&intent.call, crate::tools::ToolCall::ApplyChangeset { .. }))
             } else {
                 goal.awaiting_plan_contract && intent.call.is_goal_plan_prelude()
@@ -206,6 +207,8 @@ pub(super) fn apply(
                                 observation.disposition == crate::tools::ToolDisposition::Succeeded
                             })
                         })
+                } else if let crate::tools::ToolCall::PrepareWorker { preparation } = &intent.call {
+                    super::worker::base_preparation(run, preparation)
                 } else if integration {
                     valid_integration_source(run, intent)
                 } else {
@@ -259,6 +262,11 @@ pub(super) fn apply(
             let out_of_plan_integration = matches!(
                 &observation.intent.call,
                 crate::tools::ToolCall::ApplyChangeset { .. }
+            ) && !matches!(
+                observation.intent.call,
+                crate::tools::ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                }
             ) && goal
                 .plan_contract
                 .as_ref()
@@ -337,7 +345,16 @@ pub(super) fn apply(
                 .ok_or(ReplayError::InvalidTransition)?;
             let goal = current_goal_mut(current, goal_id)?;
             if let Some(contract) = goal.plan_contract.as_ref() {
-                contract.observe_success(&mut goal.success_state, observation);
+                if matches!(
+                    observation.intent.call,
+                    crate::tools::ToolCall::ApplyChangeset {
+                        source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                    }
+                ) {
+                    goal.success_state = contract.initial_success_state();
+                } else {
+                    contract.observe_success(&mut goal.success_state, observation);
+                }
                 goal.success_criterion_satisfied =
                     contract.success_state_satisfied(&goal.success_state);
             }
@@ -380,9 +397,18 @@ fn pending_tool(
 }
 
 fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
+    if let crate::tools::ToolCall::ApplyChangeset {
+        source: source @ crate::session::worker::ChangesetSource::WorkerHandover { .. },
+    } = &intent.call
+    {
+        return super::worker::integration_source(run, source);
+    }
     let crate::tools::ToolCall::ApplyChangeset {
-        source_intent_digest,
-        changeset,
+        source:
+            crate::session::worker::ChangesetSource::CommandReceipt {
+                source_intent_digest,
+                changeset,
+            },
     } = &intent.call
     else {
         return false;

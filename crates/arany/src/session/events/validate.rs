@@ -2,6 +2,9 @@ use super::*;
 
 impl Event {
     pub(in crate::session) fn validate(&self) -> Result<(), ReplayError> {
+        if self.scope().1.is_some_and(|id| !id.valid()) {
+            return Err(ReplayError::InvalidPayload);
+        }
         let valid_goal_ids = match self {
             Self::GoalStarted { goal_id, .. }
             | Self::GoalRunLinked { goal_id, .. }
@@ -104,26 +107,61 @@ impl Event {
                 objective,
                 grant,
                 definition,
+                assignment,
                 ..
-            } => match (role, grant) {
-                (AgentRole::Primary, None)
-                    if *ordinal == 0 && objective.is_none() && definition.is_none() =>
+            } => {
+                if !serde_json::to_vec(&SpawnPayload {
+                    role: *role,
+                    ordinal: *ordinal,
+                    objective: objective.clone(),
+                    grant: *grant,
+                    definition: definition.clone(),
+                    assignment: assignment.clone(),
+                })
+                .is_ok_and(|b| b.len() <= crate::store::MAX_EVENT_BYTES)
                 {
-                    Ok(())
+                    return Err(ReplayError::InvalidPayload);
                 }
-                (AgentRole::Child, Some(_))
-                    if (1..=8).contains(ordinal)
-                        && definition.as_ref().is_none_or(|name| {
-                            name.len() <= 64 && crate::tools::types::valid_name(name)
-                        }) =>
-                {
-                    bounded(
-                        objective.as_deref().ok_or(ReplayError::InvalidPayload)?,
-                        2 * 1024,
-                    )
+                match (role, grant) {
+                    (AgentRole::Primary, None)
+                        if *ordinal == 0
+                            && objective.is_none()
+                            && definition.is_none()
+                            && assignment.is_none() =>
+                    {
+                        Ok(())
+                    }
+                    (AgentRole::Child, Some(_))
+                        if (1..=8).contains(ordinal)
+                            && definition.as_ref().is_none_or(|name| {
+                                name.len() <= 64 && crate::tools::types::valid_name(name)
+                            }) =>
+                    {
+                        if (*grant == Some(ChildGrant::EditOnly)) != assignment.is_some() {
+                            return Err(ReplayError::InvalidPayload);
+                        }
+                        if let Some(p) = assignment
+                            && (!(ChildAssignment::Editor {
+                                assignment: Box::new(p.request.clone()),
+                            })
+                            .valid()
+                                || !p.grant.valid()
+                                || !p.base.valid()
+                                || p.policy_digest == [0; 32]
+                                || p.permissions_digest == Some([0; 32])
+                                || p.data_bytes == 0
+                                || p.data_bytes as usize > WORKER_DATA_BYTES)
+                        {
+                            return Err(ReplayError::InvalidPayload);
+                        }
+                        bounded(
+                            objective.as_deref().ok_or(ReplayError::InvalidPayload)?,
+                            2 * 1024,
+                        )
+                    }
+                    _ => Err(ReplayError::InvalidPayload),
                 }
-                _ => Err(ReplayError::InvalidPayload),
-            },
+            }
             Self::ProviderFallbackUsed { fallback, .. } => {
                 if fallback.from.valid()
                     && fallback.to.valid()
@@ -210,25 +248,96 @@ impl Event {
                 disposition,
                 summary,
                 result,
+                worker,
                 ..
-            } => match disposition {
-                AgentDisposition::Finished => {
-                    bounded(
-                        summary.as_deref().ok_or(ReplayError::InvalidPayload)?,
-                        2 * 1024,
-                    )?;
-                    bounded(
-                        result.as_deref().ok_or(ReplayError::InvalidPayload)?,
-                        super::MAX_ASSISTANT_MESSAGE_BYTES,
-                    )
+            } => {
+                if worker.as_ref().is_some_and(|o| !o.valid()) {
+                    return Err(ReplayError::InvalidPayload);
                 }
-                AgentDisposition::Failed | AgentDisposition::Cancelled
-                    if summary.is_none() && result.is_none() =>
+                match disposition {
+                    AgentDisposition::Finished => {
+                        bounded(
+                            summary.as_deref().ok_or(ReplayError::InvalidPayload)?,
+                            2 * 1024,
+                        )?;
+                        bounded(
+                            result.as_deref().ok_or(ReplayError::InvalidPayload)?,
+                            super::MAX_ASSISTANT_MESSAGE_BYTES,
+                        )
+                    }
+                    AgentDisposition::Failed | AgentDisposition::Cancelled
+                        if summary.is_none() && result.is_none() =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(ReplayError::InvalidPayload),
+                }
+            }
+            Self::WorkerDataChunk { record, .. } => {
+                if record.decoded().is_some() {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
+            Self::WorkerDataSealed { record, .. } => {
+                if record.data.valid() && record.tool_id.get_version() == Some(Version::SortRand) {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
+            Self::WorkerStopObserved { .. } => Ok(()),
+            Self::WorkerHandoverRecorded { record, .. } => {
+                if record.assignment_id.valid()
+                    && record.assignment_id == record.data.assignment_id
+                    && record.data.valid()
+                    && record.base_digest != [0; 32]
+                    && matches!(
+                        record.data.purpose,
+                        WorkerDataPurpose::Handover | WorkerDataPurpose::Mutation
+                    )
                 {
                     Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
                 }
-                _ => Err(ReplayError::InvalidPayload),
-            },
+            }
+            Self::WorkerIntegrationRecorded { record, .. } => {
+                if record.assignment_id.valid()
+                    && record.handover_sequence > 0
+                    && record.finished_sequence > record.handover_sequence
+                    && record.tool_id.get_version() == Some(Version::SortRand)
+                {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
+            Self::WorkerHandoverDiscarded { record, .. }
+            | Self::WorkerLeaseReleased { record, .. } => {
+                if record.assignment_id.valid()
+                    && record.cause_sequence > 0
+                    && record.handover_sequence != Some(0)
+                {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
+            Self::WorkerVerificationRecorded { record, .. } => {
+                if record.assignment_id.valid()
+                    && record.criterion_digest != [0; 32]
+                    && !record.evidence.is_empty()
+                    && record.evidence.len() <= 8
+                    && record.evidence.iter().all(|s| *s > 0)
+                    && record.evidence.windows(2).all(|s| s[0] < s[1])
+                {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
             Self::RunFinished { .. } => Ok(()),
         }
     }

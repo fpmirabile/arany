@@ -2978,6 +2978,7 @@ done
                     config: runtime.config.clone(),
                     cache: None,
                     intent: EffectIntent {
+                        target: crate::session::worker::EffectTarget::Workspace,
                         id: uuid::Uuid::now_v7(),
                         run_id: crate::session::RunId::default(),
                         agent_run_id: crate::session::AgentRunId::default(),

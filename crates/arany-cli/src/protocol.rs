@@ -75,6 +75,14 @@ event_kinds!(
     AgentFinished,
     MessageCommitted,
     RunFinished,
+    WorkerDataChunk,
+    WorkerDataSealed,
+    WorkerStopObserved,
+    WorkerHandoverRecorded,
+    WorkerIntegrationRecorded,
+    WorkerHandoverDiscarded,
+    WorkerLeaseReleased,
+    WorkerVerificationRecorded,
 );
 
 fn event_kind_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {

@@ -608,11 +608,13 @@ mod tests {
         let run_id = RunId::new();
         view.last_sequence = 2;
         view.runs.push(RunView {
+            workers: Default::default(),
             id: run_id,
             objective: "Question".into(),
             images: Vec::new(),
             config: None,
             agents: vec![AgentView {
+                assignment: None,
                 definition: None,
                 id: AgentRunId::new(),
                 role: AgentRole::Primary,

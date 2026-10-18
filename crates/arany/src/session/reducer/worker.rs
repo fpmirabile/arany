@@ -1,0 +1,1463 @@
+use super::*;
+use crate::session::worker::*;
+use crate::session::{ChildGrant, GoalSuccessCriterion};
+use crate::tools::{Attestation, ToolCall, ToolDisposition};
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WorkerState {
+    pub stop: Option<(u64, WorkerStopReason)>,
+    pub data: Vec<SealedWorkerData>,
+    pending: Option<PendingData>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingData {
+    actor: AgentRunId,
+    assignment: AgentRunId,
+    purpose: WorkerDataPurpose,
+    tool: uuid::Uuid,
+    first: u64,
+    chunks: u16,
+    bytes: Vec<u8>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedWorkerData {
+    pub reference: WorkerDataRef,
+    pub tool: uuid::Uuid,
+    pub facts: WorkerDataFacts,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkerView {
+    pub pins: WorkerAssignment,
+    pub revision: u32,
+    pub overlay: Vec<WorkerFileFact>,
+    pub outcome: Option<(u64, WorkerOutcome)>,
+    pub handover: Option<(u64, WorkerHandover)>,
+    pub integration: Option<(u64, WorkerIntegration)>,
+    pub discarded: Option<(u64, WorkerSettlement)>,
+    pub released: Option<u64>,
+    pub verification: Option<(u64, WorkerVerification)>,
+    pub interrupted: bool,
+}
+impl WorkerView {
+    pub(super) fn new(pins: WorkerAssignment) -> Self {
+        Self {
+            pins,
+            revision: 0,
+            overlay: Vec::new(),
+            outcome: None,
+            handover: None,
+            integration: None,
+            discarded: None,
+            released: None,
+            verification: None,
+            interrupted: false,
+        }
+    }
+    fn settled(&self) -> bool {
+        self.released.is_some()
+            && (self.outcome.as_ref().is_some_and(|(_, o)| {
+                !matches!(
+                    o.disposition,
+                    WorkerDisposition::Ready | WorkerDisposition::NoChange
+                )
+            }) || self.verification.as_ref().is_some_and(|(_, v)| v.passed)
+                || self
+                    .discarded
+                    .as_ref()
+                    .is_some_and(|(_, d)| d.reason != WorkerSettlementReason::NoChange))
+    }
+}
+impl WorkerState {
+    pub(super) fn clear_pending(&mut self) {
+        self.pending = None;
+    }
+    fn sealed(&self, reference: &WorkerDataRef) -> Result<&SealedWorkerData, ReplayError> {
+        self.data
+            .iter()
+            .find(|d| &d.reference == reference)
+            .ok_or(ReplayError::InvalidTransition)
+    }
+}
+fn worker(run: &RunView, id: AgentRunId) -> Result<&WorkerView, ReplayError> {
+    run.agents
+        .iter()
+        .find(|a| a.id == id)
+        .and_then(|a| a.assignment.as_ref())
+        .ok_or(ReplayError::InvalidTransition)
+}
+fn worker_mut(run: &mut RunView, id: AgentRunId) -> Result<&mut WorkerView, ReplayError> {
+    run.agents
+        .iter_mut()
+        .find(|a| a.id == id)
+        .and_then(|a| a.assignment.as_mut())
+        .ok_or(ReplayError::InvalidTransition)
+}
+fn primary(run: &RunView, actor: AgentRunId) -> bool {
+    run.primary()
+        .is_some_and(|a| a.id == actor && a.status == AgentStatus::Active)
+}
+fn tool(run: &RunView, actor: AgentRunId) -> Option<&ToolView> {
+    if primary(run, actor) {
+        run.tools.last()
+    } else {
+        run.agents.iter().find(|a| a.id == actor)?.tools.last()
+    }
+}
+fn quiescent(run: &RunView) -> bool {
+    run.tools
+        .iter()
+        .chain(run.agents.iter().flat_map(|a| &a.tools))
+        .all(|t| t.observation.is_some())
+}
+fn sealed_changes<'a>(
+    run: &'a RunView,
+    reference: &WorkerDataRef,
+) -> Result<&'a [WorkerFileFact], ReplayError> {
+    match &run.workers.sealed(reference)?.facts {
+        WorkerDataFacts::Changes(changes) => Ok(changes),
+        _ => Err(ReplayError::InvalidTransition),
+    }
+}
+fn manifest<'a>(
+    run: &'a RunView,
+    w: &WorkerView,
+) -> Result<&'a [WorkerManifestEntry], ReplayError> {
+    match &run.workers.sealed(&w.pins.base)?.facts {
+        WorkerDataFacts::Manifest(entries) => Ok(entries),
+        _ => Err(ReplayError::InvalidTransition),
+    }
+}
+fn base_version(entries: &[WorkerManifestEntry], path: &str) -> Option<WorkerBaseVersion> {
+    entries
+        .iter()
+        .find(|e| e.path == path)
+        .map(|e| e.version.clone())
+        .or_else(|| {
+            entries
+                .iter()
+                .any(|e| e.version == WorkerBaseVersion::Directory && contains(&e.path, path))
+                .then_some(WorkerBaseVersion::Absent)
+        })
+}
+fn valid_delta(
+    run: &RunView,
+    id: AgentRunId,
+    reference: &WorkerDataRef,
+    cumulative: bool,
+) -> Result<Vec<WorkerFileFact>, ReplayError> {
+    let w = worker(run, id)?;
+    let entries = manifest(run, w)?;
+    let changes = sealed_changes(run, reference)?;
+    for change in changes {
+        let expected = if cumulative {
+            base_version(entries, &change.path)
+        } else {
+            w.overlay
+                .iter()
+                .find(|f| f.path == change.path)
+                .map(|f| f.after.clone())
+                .or_else(|| base_version(entries, &change.path))
+        };
+        if !within(&change.path, &w.pins.request.lease) || expected.as_ref() != Some(&change.before)
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+        if let (
+            WorkerBaseVersion::File { executable: a, .. },
+            WorkerBaseVersion::File { executable: b, .. },
+        ) = (&change.before, &change.after)
+            && a != b
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    if cumulative {
+        let nonempty: Vec<_> = w
+            .overlay
+            .iter()
+            .filter(|f| f.before != f.after)
+            .cloned()
+            .collect();
+        if nonempty != changes {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    Ok(changes.to_vec())
+}
+
+pub(super) fn coordination_ready(run: &RunView) -> bool {
+    run.agents.iter().skip(1).all(|a| {
+        a.assignment
+            .as_ref()
+            .map_or(a.status == AgentStatus::Finished, |w| {
+                a.status != AgentStatus::Active && w.released.is_some()
+                    || w.pins.request.mode == WorkerMode::Background
+            })
+    })
+}
+
+pub(super) fn wave_settled(run: &RunView) -> bool {
+    run.agents.iter().skip(1).all(|a| {
+        a.assignment
+            .as_ref()
+            .map_or(a.status == AgentStatus::Finished, |w| {
+                a.status != AgentStatus::Active && w.settled()
+            })
+    })
+}
+pub(super) fn child_terminal(a: &AgentView) -> bool {
+    a.assignment
+        .as_ref()
+        .map_or(a.status == AgentStatus::Finished, |w| {
+            a.status != AgentStatus::Active && w.settled()
+        })
+}
+fn proposal(run: &RunView, ordinal: u8) -> Result<&ChildAssignment, ReplayError> {
+    let plan = run
+        .primary()
+        .and_then(|a| a.provider_calls.last())
+        .and_then(|r| r.delegation.as_ref())
+        .ok_or(ReplayError::InvalidTransition)?;
+    let before = run
+        .agents
+        .iter()
+        .skip(1)
+        .filter(|a| {
+            // A proposal belongs to the most recent primary call.
+            a.ordinal < ordinal
+        })
+        .count();
+    let earlier: usize = run
+        .primary()
+        .into_iter()
+        .flat_map(|a| a.provider_calls.iter().rev().skip(1))
+        .filter_map(|r| r.delegation.as_ref())
+        .map(Vec::len)
+        .sum();
+    plan.get(
+        before
+            .checked_sub(earlier)
+            .ok_or(ReplayError::InvalidTransition)?,
+    )
+    .ok_or(ReplayError::InvalidTransition)
+}
+
+fn validate_request(
+    view: &SessionView,
+    run: &RunView,
+    request: &EditorAssignment,
+) -> Result<(), ReplayError> {
+    let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
+    let policy = config
+        .worker_policy
+        .as_ref()
+        .ok_or(ReplayError::InvalidTransition)?;
+    let goal = active_run_goal(view, run.id).ok_or(ReplayError::InvalidTransition)?;
+    let plan = goal
+        .plan_contract
+        .as_ref()
+        .ok_or(ReplayError::InvalidTransition)?;
+    let registry = super::definition_registry(run)?;
+    let definition = registry
+        .get(&request.definition)
+        .ok_or(ReplayError::InvalidTransition)?;
+    if goal.phase != GoalPhase::Implementation
+        || goal.awaiting_plan_contract
+        || !definition.editor()
+        || request.definition_digest
+            != crate::tools::types::digest(
+                &serde_json::to_vec(definition).map_err(|_| ReplayError::InvalidPayload)?,
+            )
+        || request.max_turns > definition.max_turns
+        || request.max_turns > policy.max_turns
+        || request
+            .lease
+            .iter()
+            .any(|p| !within(p, &plan.paths) || !within(p, &policy.parent_grant.write_paths))
+        || ![WorkerTool::Write, WorkerTool::Edit].iter().any(|op| {
+            policy.parent_grant.tools.contains(op) && definition.allows_worker(&sample_call(*op))
+        })
+        || match &request.criterion {
+            GoalSuccessCriterion::ToolCallSucceeded { call } => !plan.allows_call(call),
+            GoalSuccessCriterion::WorkspaceFileContent { path, .. }
+            | GoalSuccessCriterion::WorkspaceFileDigest { path, .. } => !within(path, &plan.paths),
+        }
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    for source in request.resumes.iter().chain(request.supersedes.iter()) {
+        if !view
+            .runs
+            .iter()
+            .filter(|r| goal.run_ids.contains(&r.id))
+            .any(|r| {
+                r.agents.iter().any(|a| {
+                    a.id == *source
+                        && a.role == AgentRole::Child
+                        && a.status != AgentStatus::Active
+                        && a.assignment
+                            .as_ref()
+                            .is_none_or(|w| w.released.is_some() || r.status != RunStatus::Active)
+                })
+            })
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), ReplayError> {
+    let Event::AgentSpawned {
+        run_id,
+        agent_run_id: id,
+        ordinal,
+        objective,
+        definition,
+        grant,
+        assignment: pins,
+        ..
+    } = event
+    else {
+        return Err(ReplayError::InvalidTransition);
+    };
+    let (run_id, id, ordinal, grant) = (*run_id, *id, *ordinal, *grant);
+    let run = view
+        .runs
+        .last()
+        .filter(|r| r.id == run_id)
+        .ok_or(ReplayError::InvalidTransition)?;
+    if pins.is_some() && view.runs.iter().flat_map(|r| &r.agents).any(|a| a.id == id) {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if ordinal == 0 {
+        return if pins.is_none() {
+            Ok(())
+        } else {
+            Err(ReplayError::InvalidTransition)
+        };
+    }
+    match (proposal(run, ordinal)?, pins) {
+        (
+            ChildAssignment::Researcher {
+                objective: expected,
+                definition: selected,
+            },
+            None,
+        ) if objective.as_ref() == Some(expected)
+            && definition == selected
+            && grant != Some(ChildGrant::EditOnly) =>
+        {
+            Ok(())
+        }
+        (ChildAssignment::Editor { assignment }, Some(p))
+            if assignment.as_ref() == &p.request
+                && objective.as_ref() == Some(&p.request.mission)
+                && definition.as_ref() == Some(&p.request.definition)
+                && grant == Some(ChildGrant::EditOnly) =>
+        {
+            let goal = active_run_goal(view, run_id).ok_or(ReplayError::InvalidTransition)?;
+            let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
+            let policy = config
+                .worker_policy
+                .as_ref()
+                .ok_or(ReplayError::InvalidTransition)?;
+            let receipt = config
+                .tool_policy
+                .as_ref()
+                .ok_or(ReplayError::InvalidTransition)?;
+            let plan = goal
+                .plan_contract
+                .as_ref()
+                .ok_or(ReplayError::InvalidTransition)?;
+            let registry = super::definition_registry(run)?;
+            let def = registry
+                .get(&p.request.definition)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let digest = crate::tools::types::digest(
+                &serde_json::to_vec(def).map_err(|_| ReplayError::InvalidPayload)?,
+            );
+            if goal.phase != GoalPhase::Implementation
+                || goal.awaiting_plan_contract
+                || run.workers.stop.is_some()
+                || !p.grant.within(&policy.parent_grant)
+                || p.grant.write_paths != p.request.lease
+                || !p.request.lease.iter().all(|l| within(l, &plan.paths))
+                || !p.grant.read_paths.iter().all(|l| within(l, &plan.paths))
+                || p.policy_digest != receipt.config_digest
+                || p.permissions_digest != receipt.permissions_digest
+                || digest != p.request.definition_digest
+                || !def.editor()
+                || p.request.max_turns > def.max_turns
+                || p.request.max_turns > policy.max_turns
+                || p.data_bytes > policy.data_bytes
+                || p.data_bytes == 0
+                || p.base.assignment_id != id
+                || p.base.purpose != WorkerDataPurpose::Base
+                || run
+                    .agents
+                    .iter()
+                    .filter(|a| a.assignment.as_ref().is_some_and(|w| w.released.is_none()))
+                    .count()
+                    >= usize::from(policy.concurrency)
+                || run
+                    .agents
+                    .iter()
+                    .filter_map(|a| a.assignment.as_ref())
+                    .filter(|w| w.released.is_none())
+                    .any(|w| {
+                        w.pins
+                            .request
+                            .lease
+                            .iter()
+                            .any(|a| p.request.lease.iter().any(|b| overlaps(a, b)))
+                    })
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            for source in p.request.resumes.iter().chain(p.request.supersedes.iter()) {
+                if *source == id
+                    || !view
+                        .runs
+                        .iter()
+                        .filter(|r| goal.run_ids.contains(&r.id))
+                        .any(|r| {
+                            r.agents.iter().any(|a| {
+                                a.id == *source
+                                    && a.role == AgentRole::Child
+                                    && a.status != AgentStatus::Active
+                                    && a.assignment.as_ref().is_none_or(|w| {
+                                        w.released.is_some() || r.status != RunStatus::Active
+                                    })
+                            })
+                        })
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
+            if p.base.bytes > p.data_bytes {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let criterion_allowed = match &p.request.criterion {
+                GoalSuccessCriterion::ToolCallSucceeded { call } => plan.allows_call(call),
+                GoalSuccessCriterion::WorkspaceFileDigest { path, .. }
+                | GoalSuccessCriterion::WorkspaceFileContent { path, .. } => {
+                    within(path, &plan.paths)
+                }
+            };
+            if !criterion_allowed {
+                return Err(ReplayError::InvalidTransition);
+            }
+            for op in &p.grant.tools {
+                let call = sample_call(*op);
+                if !def.allows_worker(&call) {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
+            let sealed = run.workers.sealed(&p.base)?;
+            if let WorkerDataFacts::Manifest(entries) = &sealed.facts {
+                if entries
+                    .iter()
+                    .any(|e| !within(&e.path, &p.grant.read_paths))
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            } else {
+                return Err(ReplayError::InvalidTransition);
+            }
+
+            if !run.tools.last().is_some_and(|t| {
+                t.intent.id == sealed.tool
+                    && t.observation.as_ref().is_some_and(|o| {
+                        o.disposition == ToolDisposition::Succeeded && o.attested_for(&t.intent)
+                    })
+            }) {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let wave = run
+                .primary()
+                .into_iter()
+                .flat_map(|a| a.provider_calls.iter())
+                .filter(|r| r.delegation.is_some())
+                .count();
+            if usize::from(p.request.wave) != wave {
+                return Err(ReplayError::InvalidTransition);
+            }
+            Ok(())
+        }
+        _ => Err(ReplayError::InvalidTransition),
+    }
+}
+fn sample_call(tool: WorkerTool) -> ToolCall {
+    match tool {
+        WorkerTool::List => ToolCall::List { path: ".".into() },
+        WorkerTool::Read => ToolCall::Read {
+            path: "file".into(),
+            offset: 0,
+            limit: 1,
+        },
+        WorkerTool::Search => ToolCall::Search {
+            path: ".".into(),
+            query: "x".into(),
+        },
+        WorkerTool::Mkdir => ToolCall::Mkdir { path: "dir".into() },
+        WorkerTool::Write => ToolCall::Write {
+            path: "file".into(),
+            expected_digest: None,
+            content: String::new(),
+        },
+        WorkerTool::Edit => ToolCall::Edit {
+            path: "file".into(),
+            expected_digest: "0".repeat(64),
+            old: "a".into(),
+            new: "b".into(),
+        },
+        WorkerTool::Skill => ToolCall::Skill {
+            name: "skill".into(),
+            resource: None,
+        },
+        WorkerTool::McpList => ToolCall::McpList {
+            server: "server".into(),
+        },
+    }
+}
+
+pub(super) fn child_tool_admissible(
+    run: &RunView,
+    id: AgentRunId,
+    intent: &crate::tools::EffectIntent,
+) -> bool {
+    let Ok(w) = worker(run, id) else {
+        return false;
+    };
+    let Some(a) = run.agents.iter().find(|a| a.id == id) else {
+        return false;
+    };
+    let target = EffectTarget::WorkerView {
+        assignment_id: id,
+        base_digest: w.pins.base.sha256,
+        revision: w.revision,
+    };
+    if intent.target != target
+        || w.outcome.is_some()
+        || run.workers.stop.is_some()
+        || !quiescent(run)
+        || intent.policy_digest != w.pins.policy_digest
+        || a.status != AgentStatus::Active
+        || a.tools.iter().any(|t| {
+            t.intent.id == intent.id
+                || t.observation
+                    .as_ref()
+                    .is_some_and(|o| o.disposition != ToolDisposition::Succeeded)
+        })
+    {
+        return false;
+    }
+    if let ToolCall::PrepareWorker { preparation } = &intent.call {
+        return preparation.assignment_id == id
+            && preparation.purpose == WorkerDataPurpose::Handover
+            && preparation.max_bytes <= w.pins.data_bytes
+            && a.provider_calls
+                .last()
+                .is_some_and(|r| r.disposition == ProviderCallDisposition::Finished)
+            && !a
+                .tools
+                .iter()
+                .any(|t| matches!(t.intent.call, ToolCall::PrepareWorker { .. }));
+    }
+    a.provider_calls
+        .last()
+        .is_some_and(|r| r.disposition == ProviderCallDisposition::ToolRequested)
+        && super::agent::child_tool_requests(a)
+            == a.tools
+                .iter()
+                .filter(|t| !matches!(t.intent.call, ToolCall::PrepareWorker { .. }))
+                .count()
+                + 1
+        && w.pins.grant.allows(&intent.call)
+}
+
+pub(super) fn base_preparation(run: &RunView, preparation: &WorkerPreparation) -> bool {
+    run.workers.stop.is_none()
+        && preparation.purpose == WorkerDataPurpose::Base
+        && quiescent(run)
+        && !run.tools.iter().any(|t| matches!(&t.intent.call, ToolCall::PrepareWorker { preparation: p } if p.purpose == WorkerDataPurpose::Base && !run.agents.iter().any(|a| a.id == p.assignment_id)))
+        && !run.agents.iter().any(|a| a.id == preparation.assignment_id)
+        && !run
+            .workers
+            .data
+            .iter()
+            .any(|d| d.reference.assignment_id == preparation.assignment_id)
+        && matches!(
+            u8::try_from(run.agents.len())
+                .ok()
+                .and_then(|o| proposal(run, o).ok()),
+            Some(ChildAssignment::Editor { .. })
+        )
+}
+
+pub(super) fn integration_source(run: &RunView, source: &ChangesetSource) -> bool {
+    let ChangesetSource::WorkerHandover {
+        assignment_id,
+        handover_sequence,
+        data,
+    } = source
+    else {
+        return false;
+    };
+    let Ok(w) = worker(run, *assignment_id) else {
+        return false;
+    };
+    run.workers.stop.is_none()
+        && quiescent(run)
+        && !run.tools.iter().any(|t| matches!(&t.intent.call, ToolCall::ApplyChangeset { source: ChangesetSource::WorkerHandover { handover_sequence: seq, .. } } if seq == handover_sequence))
+        && w.handover
+            .as_ref()
+            .is_some_and(|(s, h)| s == handover_sequence && &h.data == data)
+        && w.integration.is_none()
+        && w.discarded.is_none()
+        && w.released.is_none()
+        && run
+            .agents
+            .iter()
+            .filter_map(|a| a.assignment.as_ref())
+            .filter(|w| w.integration.is_none() && w.discarded.is_none())
+            .filter_map(|w| w.handover.as_ref().map(|(s, _)| *s))
+            .min()
+            == Some(*handover_sequence)
+}
+
+pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), ReplayError> {
+    let Some(run) = view.runs.last().filter(|r| r.status == RunStatus::Active) else {
+        return Ok(());
+    };
+    let (scope, actor) = event.scope();
+    if scope != Some(run.id) {
+        return Ok(());
+    }
+    if run.workers.pending.is_some()
+        && matches!(
+            event,
+            Event::ToolStarted { .. }
+                | Event::GoalProviderCallReserved { .. }
+                | Event::AgentSpawned { .. }
+                | Event::WorkerHandoverRecorded { .. }
+        )
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if run.tools.last().is_some_and(|t| t.observation.is_some() && matches!(&t.intent.call, ToolCall::ApplyChangeset { source: ChangesetSource::WorkerHandover { assignment_id, .. } } if worker(run, *assignment_id).is_ok_and(|w| w.integration.is_none())))
+        && matches!(event, Event::ToolStarted { .. } | Event::GoalProviderCallReserved { .. } | Event::AgentSpawned { .. } | Event::WorkerHandoverRecorded { .. }) { return Err(ReplayError::InvalidTransition); }
+    let workspace_stopped = run
+        .tools
+        .iter()
+        .any(|t| t.observation.as_ref().is_some_and(|o| o.stops_run()));
+    if (run.workers.stop.is_some() || workspace_stopped)
+        && matches!(
+            event,
+            Event::AgentSpawned { .. }
+                | Event::ToolStarted { .. }
+                | Event::GoalProviderCallReserved { .. }
+                | Event::ProviderFallbackUsed { .. }
+                | Event::WorkerHandoverRecorded { .. }
+                | Event::WorkerVerificationRecorded { .. }
+        )
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if let Some(id) = actor
+        && let Ok(w) = worker(run, id)
+        && matches!(
+            event,
+            Event::GoalProviderCallReserved { .. }
+                | Event::ProviderCallRecorded { .. }
+                | Event::ProviderFallbackUsed { .. }
+        )
+    {
+        let a = run
+            .agents
+            .iter()
+            .find(|a| a.id == id)
+            .ok_or(ReplayError::InvalidTransition)?;
+        let reviewing = matches!(event, Event::ProviderCallRecorded { record, .. } if record.phase == AgentPhase::ToolReview)
+            || matches!(event, Event::GoalProviderCallReserved { .. })
+                && a.tools.last().is_some_and(|t| t.observation.is_none());
+        if w.outcome.is_some()
+            || a.tools.iter().any(|t| {
+                t.observation
+                    .as_ref()
+                    .is_some_and(|o| o.disposition != ToolDisposition::Succeeded)
+            })
+            || !reviewing
+                && a.provider_calls
+                    .iter()
+                    .filter(|r| r.phase == AgentPhase::ChildWork)
+                    .count()
+                    >= usize::from(w.pins.request.max_turns)
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    match event {
+        Event::ProviderCallRecorded {
+            agent_run_id,
+            record,
+            ..
+        } if worker(run, *agent_run_id).is_ok() => {
+            let w = worker(run, *agent_run_id)?;
+            let a = run
+                .agents
+                .iter()
+                .find(|a| a.id == *agent_run_id)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let max_tools = run
+                .config
+                .as_ref()
+                .and_then(|c| c.worker_policy.as_ref())
+                .ok_or(ReplayError::InvalidTransition)?
+                .max_tools;
+            if record.disposition == ProviderCallDisposition::ToolRequested
+                && (super::agent::child_tool_requests(a) >= usize::from(max_tools)
+                    || a.provider_calls
+                        .iter()
+                        .filter(|r| r.phase == AgentPhase::ChildWork)
+                        .count()
+                        + 1
+                        >= usize::from(w.pins.request.max_turns))
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+        Event::ToolStarted {
+            agent_run_id,
+            intent,
+            ..
+        } => {
+            let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
+            if intent.workspace_device != config.workspace_device
+                || intent.workspace_inode != config.workspace_inode
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if primary(run, *agent_run_id) {
+                if intent.target != EffectTarget::Workspace || !quiescent(run) {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                if let ToolCall::ApplyChangeset {
+                    source: source @ ChangesetSource::WorkerHandover { .. },
+                } = &intent.call
+                {
+                    if !integration_source(run, source) {
+                        return Err(ReplayError::InvalidTransition);
+                    }
+                } else if intent.call.mutates() || intent.call.is_process() {
+                    let leases: Vec<_> = run
+                        .agents
+                        .iter()
+                        .filter_map(|a| a.assignment.as_ref())
+                        .filter(|w| w.released.is_none())
+                        .flat_map(|w| &w.pins.request.lease)
+                        .collect();
+                    let paths: Vec<_> = match &intent.call {
+                        ToolCall::Write { path, .. }
+                        | ToolCall::Edit { path, .. }
+                        | ToolCall::Mkdir { path } => vec![path],
+                        ToolCall::ApplyChangeset {
+                            source: ChangesetSource::CommandReceipt { changeset, .. },
+                        } => changeset.files.iter().map(|f| &f.path).collect(),
+                        _ if !leases.is_empty() => return Err(ReplayError::InvalidTransition),
+                        _ => Vec::new(),
+                    };
+                    if paths.iter().any(|p| leases.iter().any(|l| overlaps(l, p))) {
+                        return Err(ReplayError::InvalidTransition);
+                    }
+                }
+            } else if worker(run, *agent_run_id).is_ok() {
+                if !child_tool_admissible(run, *agent_run_id, intent) {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            } else if intent.target != EffectTarget::Workspace {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+        Event::ToolFinished {
+            agent_run_id,
+            observation: o,
+            ..
+        } => {
+            if let Ok(w) = worker(run, *agent_run_id) {
+                use crate::tools::permissions::{Decision, PermissionConfig, PermissionSource};
+                let parent = run
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.worker_policy.as_ref())
+                    .and_then(|p| p.parent_grant.permission_mode);
+                let definition = super::definition_registry(run)?
+                    .get(&w.pins.request.definition)
+                    .and_then(|d| d.permission_mode);
+                for mode in parent
+                    .into_iter()
+                    .chain(w.pins.grant.permission_mode)
+                    .chain(definition)
+                {
+                    let verdict = tool(run, *agent_run_id)
+                        .and_then(|t| t.permission_verdict.as_ref())
+                        .ok_or(ReplayError::InvalidTransition)?;
+                    let restriction = PermissionConfig::evaluate_mode(mode, &o.intent.call).0;
+                    if verdict.approved
+                        && (restriction == Decision::Deny
+                            || restriction == Decision::Ask
+                                && !matches!(
+                                    verdict.source,
+                                    PermissionSource::Human | PermissionSource::AiReview
+                                ))
+                    {
+                        return Err(ReplayError::InvalidTransition);
+                    }
+                }
+            }
+
+            if let Some(Attestation::WorkerData { data, .. }) = &o.attestation {
+                let sealed = run.workers.sealed(data)?;
+                if sealed.tool != o.intent.id
+                    && !matches!(&o.intent.call, ToolCall::PrepareWorker { preparation } if preparation.purpose == WorkerDataPurpose::Handover && data.assignment_id == *agent_run_id)
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                if matches!(&o.intent.call, ToolCall::PrepareWorker { preparation } if preparation.purpose == WorkerDataPurpose::Handover)
+                {
+                    valid_delta(run, *agent_run_id, data, true)?;
+                }
+            }
+            if let Some(Attestation::WorkerMutation { mutation, .. }) = &o.attestation {
+                if o.disposition != ToolDisposition::Succeeded
+                    || mutation.data.assignment_id != *agent_run_id
+                    || run.workers.sealed(&mutation.data)?.tool != o.intent.id
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                let changes = valid_delta(run, *agent_run_id, &mutation.data, false)?;
+                let expected_path = match &o.intent.call {
+                    ToolCall::Write { path, .. }
+                    | ToolCall::Edit { path, .. }
+                    | ToolCall::Mkdir { path } => path,
+                    _ => return Err(ReplayError::InvalidTransition),
+                };
+                if changes
+                    .iter()
+                    .any(|f| &f.path != expected_path || f.after == WorkerBaseVersion::Absent)
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                for change in &changes {
+                    let expected_digest = match &o.intent.call {
+                        ToolCall::Write {
+                            expected_digest, ..
+                        } => expected_digest.as_deref(),
+                        ToolCall::Edit {
+                            expected_digest, ..
+                        } => Some(expected_digest.as_str()),
+                        _ => None,
+                    };
+                    let before_digest = match &change.before {
+                        WorkerBaseVersion::File { sha256, .. } => Some(sha256.as_str()),
+                        _ => None,
+                    };
+                    if expected_digest != before_digest
+                        || matches!(
+                            (&change.before, &change.after),
+                            (
+                                WorkerBaseVersion::Absent,
+                                WorkerBaseVersion::File {
+                                    executable: true,
+                                    ..
+                                }
+                            )
+                        )
+                    {
+                        return Err(ReplayError::InvalidTransition);
+                    }
+                }
+                if let ToolCall::Write { content, .. } = &o.intent.call
+                    && !changes.iter().all(|f| matches!(&f.after, WorkerBaseVersion::File { sha256, .. } if *sha256 == crate::tools::types::hex_digest(content.as_bytes()))) { return Err(ReplayError::InvalidTransition); }
+            }
+            if o.disposition == ToolDisposition::Succeeded
+                && matches!(o.intent.target, EffectTarget::WorkerView { .. })
+                && o.intent.call.mutates()
+                && !matches!(o.attestation, Some(Attestation::WorkerMutation { .. }))
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if run.workers.pending.is_some() && o.disposition == ToolDisposition::Succeeded {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+        Event::AgentFinished {
+            agent_run_id,
+            disposition,
+            worker: outcome,
+            ..
+        } => {
+            if let Ok(w) = worker(run, *agent_run_id) {
+                let o = outcome.as_ref().ok_or(ReplayError::InvalidTransition)?;
+                let a = run
+                    .agents
+                    .iter()
+                    .find(|a| a.id == *agent_run_id)
+                    .ok_or(ReplayError::InvalidTransition)?;
+                if let Some(cleanup) = &o.cleanup
+                    && (cleanup.assignment_id != *agent_run_id
+                        || cleanup.base_digest != w.pins.base.sha256
+                        || cleanup.revision != w.revision
+                        || a.tools.last().is_some_and(|t| {
+                            cleanup.enforcement_digest != t.intent.enforcement_digest
+                        })
+                        || cleanup.enforcement_digest == [0; 32]
+                        || cleanup.last_intent_digest != a.tools.last().map(|t| t.intent.digest()))
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                if !matches!(
+                    o.disposition,
+                    WorkerDisposition::Ready | WorkerDisposition::NoChange
+                ) && o.cleanup.is_none()
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                if w.outcome.is_some()
+                    || (*disposition == AgentDisposition::Finished)
+                        != matches!(
+                            o.disposition,
+                            WorkerDisposition::Ready | WorkerDisposition::NoChange
+                        )
+                    || (*disposition == AgentDisposition::Cancelled)
+                        != (o.disposition == WorkerDisposition::Cancelled)
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                if matches!(
+                    o.disposition,
+                    WorkerDisposition::Ready | WorkerDisposition::NoChange
+                ) {
+                    let data = o.data.as_ref().ok_or(ReplayError::InvalidTransition)?;
+                    if data.assignment_id != *agent_run_id || !matches!(data.purpose, WorkerDataPurpose::Handover | WorkerDataPurpose::Mutation)
+                        || !a.tools.last().is_some_and(|t| matches!(t.observation.as_ref().and_then(|o| o.attestation.as_ref()), Some(Attestation::WorkerData { data: d, .. }) if d == data)) { return Err(ReplayError::InvalidTransition); }
+                    let changes = valid_delta(run, *agent_run_id, data, true)?;
+                    if (o.disposition == WorkerDisposition::NoChange) != changes.is_empty()
+                        || o.cause != WorkerCause::Finished
+                    {
+                        return Err(ReplayError::InvalidTransition);
+                    }
+                } else if o.data.is_some() {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                let unknown = a.tools.iter().any(|t| {
+                    t.observation
+                        .as_ref()
+                        .is_some_and(|o| o.disposition == ToolDisposition::Uncertain)
+                });
+                if unknown != (o.disposition == WorkerDisposition::PrivateUncertain) {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            } else if outcome.is_some() {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if primary(run, *agent_run_id)
+                && *disposition == AgentDisposition::Finished
+                && !wave_settled(run)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+        Event::ProviderCallRecorded {
+            agent_run_id,
+            record,
+            ..
+        } if primary(run, *agent_run_id) => {
+            if record.disposition == ProviderCallDisposition::Delegated {
+                if run.agents.len() > 1 && !wave_settled(run) {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
+                let assignments = record
+                    .delegation
+                    .as_ref()
+                    .ok_or(ReplayError::InvalidTransition)?;
+                if assignments.len() + run.agents.len().saturating_sub(1)
+                    > usize::from(config.policy.max_children())
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                let editors: Vec<_> = assignments
+                    .iter()
+                    .filter_map(|a| {
+                        if let ChildAssignment::Editor { assignment } = a {
+                            Some(assignment)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                for request in &editors {
+                    validate_request(view, run, request)?;
+                }
+                if !editors.is_empty() && config.worker_policy.is_none() {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                if editors.iter().enumerate().any(|(i, a)| {
+                    editors[..i].iter().any(|b| {
+                        a.lease
+                            .iter()
+                            .any(|p| b.lease.iter().any(|q| overlaps(p, q)))
+                    })
+                }) {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
+        }
+        Event::RunFinished {
+            disposition: RunDisposition::Finished,
+            ..
+        } if !wave_settled(run) => return Err(ReplayError::InvalidTransition),
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(super) fn after_event(
+    view: &mut SessionView,
+    event: &Event,
+    sequence: u64,
+) -> Result<(), ReplayError> {
+    let Some(run) = view.runs.last_mut() else {
+        return Ok(());
+    };
+    match event {
+        Event::ToolFinished {
+            agent_run_id,
+            observation: o,
+            ..
+        } => {
+            if o.intent.target == EffectTarget::Workspace
+                && (o.intent.call.mutates() || o.intent.call.is_process())
+            {
+                for a in &mut run.agents {
+                    if let Some(w) = &mut a.assignment {
+                        w.verification = None;
+                    }
+                }
+            }
+            if o.disposition != ToolDisposition::Succeeded {
+                run.workers.pending = None;
+            }
+            if let Some(Attestation::WorkerMutation { mutation, .. }) = &o.attestation {
+                let changes = sealed_changes(run, &mutation.data)?.to_vec();
+                let w = worker_mut(run, *agent_run_id)?;
+                w.revision = mutation.next_revision;
+                for change in changes {
+                    if let Some(prior) = w.overlay.iter_mut().find(|f| f.path == change.path) {
+                        prior.after = change.after;
+                    } else {
+                        w.overlay.push(change);
+                    }
+                }
+                w.overlay.sort_by(|a, b| a.path.cmp(&b.path));
+                if w.overlay.len() > WORKER_FILES {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                for data in run.workers.data.iter_mut().filter(|d| {
+                    d.reference.assignment_id == *agent_run_id
+                        && d.reference.purpose == WorkerDataPurpose::Mutation
+                        && d.reference != mutation.data
+                }) {
+                    data.facts = WorkerDataFacts::Changes(Vec::new());
+                }
+            }
+        }
+        Event::AgentFinished {
+            agent_run_id,
+            worker: Some(outcome),
+            ..
+        } => {
+            worker_mut(run, *agent_run_id)?.outcome = Some((sequence, outcome.clone()));
+        }
+        Event::RunFinished { .. } => {
+            run.workers.clear_pending();
+            for a in &mut run.agents {
+                if let Some(w) = &mut a.assignment
+                    && !w.settled()
+                {
+                    w.interrupted = true;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(super) fn apply(
+    current: &mut SessionView,
+    event: &Event,
+    sequence: u64,
+) -> Result<(), ReplayError> {
+    let (run_id, actor) = event.scope();
+    let verification_contract = if matches!(event, Event::WorkerVerificationRecorded { .. }) {
+        active_run_goal(current, run_id.ok_or(ReplayError::InvalidTransition)?)
+            .and_then(|g| g.plan_contract.clone())
+    } else {
+        None
+    };
+    let run = active_run(current, run_id.ok_or(ReplayError::InvalidTransition)?)?;
+    let actor = actor.ok_or(ReplayError::InvalidTransition)?;
+    match event {
+        Event::WorkerStopObserved { record, .. } => {
+            if !primary(run, actor)
+                || run.workers.stop.is_some()
+                || run
+                    .config
+                    .as_ref()
+                    .is_none_or(|c| c.worker_policy.is_none())
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            run.workers.stop = Some((sequence, record.reason));
+        }
+        Event::WorkerDataChunk { record: c, .. } => {
+            let t = tool(run, actor)
+                .filter(|t| t.observation.is_none())
+                .ok_or(ReplayError::InvalidTransition)?;
+            if t.intent.id != c.tool_id {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let (max_bytes, max_chunks) = if let ToolCall::PrepareWorker { preparation } =
+                &t.intent.call
+            {
+                if preparation.assignment_id != c.assignment_id || preparation.purpose != c.purpose
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                (
+                    preparation.max_bytes as usize,
+                    usize::from(preparation.max_chunks),
+                )
+            } else {
+                let w = worker(run, actor)?;
+                if c.assignment_id != actor
+                    || c.purpose != WorkerDataPurpose::Mutation
+                    || !t.intent.call.mutates()
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                (
+                    w.pins.data_bytes as usize,
+                    (w.pins.data_bytes as usize).div_ceil(WORKER_CHUNK_BYTES),
+                )
+            };
+            if run.workers.data.iter().any(|d| d.tool == c.tool_id) {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if let Ok(w) = worker(run, c.assignment_id) {
+                let used = run
+                    .workers
+                    .data
+                    .iter()
+                    .filter(|d| d.reference.assignment_id == c.assignment_id)
+                    .try_fold(0u32, |sum, d| sum.checked_add(d.reference.bytes))
+                    .ok_or(ReplayError::InvalidTransition)?;
+                let pending = run
+                    .workers
+                    .pending
+                    .as_ref()
+                    .map_or(0usize, |p| p.bytes.len());
+                if (used as usize)
+                    .checked_add(pending)
+                    .and_then(|n| n.checked_add(c.bytes as usize))
+                    .is_none_or(|n| n > w.pins.data_bytes as usize)
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
+            let bytes = c.decoded().ok_or(ReplayError::InvalidPayload)?;
+            let pending = run.workers.pending.get_or_insert_with(|| PendingData {
+                actor,
+                assignment: c.assignment_id,
+                purpose: c.purpose,
+                tool: c.tool_id,
+                first: sequence,
+                chunks: 0,
+                bytes: Vec::new(),
+            });
+            if pending.actor != actor
+                || pending.assignment != c.assignment_id
+                || pending.purpose != c.purpose
+                || pending.tool != c.tool_id
+                || pending.chunks != c.ordinal
+                || usize::from(c.ordinal) >= max_chunks
+                || pending
+                    .bytes
+                    .len()
+                    .checked_add(bytes.len())
+                    .is_none_or(|n| n > max_bytes)
+                || c.ordinal > 0
+                    && pending.bytes.len() != usize::from(c.ordinal) * WORKER_CHUNK_BYTES
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            pending.bytes.extend(bytes);
+            pending.chunks += 1;
+        }
+        Event::WorkerDataSealed { record: s, .. } => {
+            let p = run
+                .workers
+                .pending
+                .as_ref()
+                .ok_or(ReplayError::InvalidTransition)?;
+            if p.actor != actor
+                || p.tool != s.tool_id
+                || p.assignment != s.data.assignment_id
+                || p.purpose != s.data.purpose
+                || p.first != s.data.first_sequence
+                || p.chunks != s.data.chunks
+                || sequence != s.data.seal_sequence
+                || p.bytes.len() != s.data.bytes as usize
+                || crate::tools::types::digest(&p.bytes) != s.data.sha256
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let facts = decode_data(&p.bytes, p.purpose)?;
+            run.workers.data.push(SealedWorkerData {
+                reference: s.data.clone(),
+                tool: s.tool_id,
+                facts,
+            });
+            run.workers.pending = None;
+        }
+        Event::WorkerHandoverRecorded { record: h, .. } => {
+            let w = worker(run, h.assignment_id)?;
+            if actor != h.assignment_id
+                || run.workers.stop.is_some()
+                || w.handover.is_some()
+                || w.released.is_some()
+                || w.discarded.is_some()
+                || w.pins.base.sha256 != h.base_digest
+                || w.outcome.as_ref().is_none_or(|(_, o)| {
+                    o.disposition != WorkerDisposition::Ready || o.data.as_ref() != Some(&h.data)
+                })
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            valid_delta(run, h.assignment_id, &h.data, true)?;
+            worker_mut(run, h.assignment_id)?.handover = Some((sequence, h.clone()));
+        }
+        Event::WorkerIntegrationRecorded { record: i, .. } => {
+            if !primary(run, actor) {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let w = worker(run, i.assignment_id)?;
+            let (hseq, h) = w.handover.as_ref().ok_or(ReplayError::InvalidTransition)?;
+            let t = run
+                .tools
+                .iter()
+                .find(|t| {
+                    t.intent.id == i.tool_id && t.finished_sequence == Some(i.finished_sequence)
+                })
+                .ok_or(ReplayError::InvalidTransition)?;
+            let o = t
+                .observation
+                .as_ref()
+                .ok_or(ReplayError::InvalidTransition)?;
+            let expected = ChangesetSource::WorkerHandover {
+                assignment_id: i.assignment_id,
+                handover_sequence: *hseq,
+                data: h.data.clone(),
+            };
+            let outcome = match o.disposition {
+                ToolDisposition::Succeeded if o.attested_for(&t.intent) => {
+                    WorkerIntegrationOutcome::Integrated
+                }
+                ToolDisposition::Conflict => WorkerIntegrationOutcome::Conflict,
+                ToolDisposition::Denied => WorkerIntegrationOutcome::Denied,
+                ToolDisposition::Uncertain => WorkerIntegrationOutcome::Uncertain,
+                _ => return Err(ReplayError::InvalidTransition),
+            };
+            if *hseq != i.handover_sequence
+                || w.integration.is_some()
+                || w.discarded.is_some()
+                || w.released.is_some()
+                || i.outcome != outcome
+                || !matches!(&t.intent.call, ToolCall::ApplyChangeset { source } if source == &expected)
+                || t.intent.target != EffectTarget::Workspace
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            worker_mut(run, i.assignment_id)?.integration = Some((sequence, i.clone()));
+        }
+        Event::WorkerHandoverDiscarded { record: d, .. } => {
+            if !primary(run, actor) {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let w = worker(run, d.assignment_id)?;
+            if w.integration.as_ref().is_some_and(|(_, i)| {
+                matches!(
+                    i.outcome,
+                    WorkerIntegrationOutcome::Integrated | WorkerIntegrationOutcome::Uncertain
+                )
+            }) || w.discarded.is_some()
+                || w.released.is_some()
+                || d.handover_sequence != w.handover.as_ref().map(|(s, _)| *s)
+                || !valid_discard(run, w, d)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            worker_mut(run, d.assignment_id)?.discarded = Some((sequence, d.clone()));
+        }
+        Event::WorkerLeaseReleased { record: r, .. } => {
+            if !primary(run, actor) {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let w = worker(run, r.assignment_id)?;
+            let integrated = w.integration.as_ref().is_some_and(|(seq, i)| {
+                i.outcome == WorkerIntegrationOutcome::Integrated
+                    && r.reason == WorkerSettlementReason::Integrated
+                    && *seq == r.cause_sequence
+            });
+            let disposed = w
+                .discarded
+                .as_ref()
+                .is_some_and(|(seq, d)| *seq == r.cause_sequence && d.reason == r.reason);
+            if w.released.is_some()
+                || w.outcome.is_none()
+                || r.handover_sequence != w.handover.as_ref().map(|(s, _)| *s)
+                || !(integrated || disposed)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            worker_mut(run, r.assignment_id)?.released = Some(sequence);
+        }
+        Event::WorkerVerificationRecorded { record: v, .. } => {
+            if !primary(run, actor) || run.workers.stop.is_some() {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let w = worker(run, v.assignment_id)?;
+            let released = w.released.ok_or(ReplayError::InvalidTransition)?;
+            let criterion = &w.pins.request.criterion;
+            if v.criterion_digest
+                != crate::tools::types::digest(
+                    &serde_json::to_vec(criterion).map_err(|_| ReplayError::InvalidPayload)?,
+                )
+                || w.verification
+                    .as_ref()
+                    .is_some_and(|(_, prior)| prior.passed)
+                || w.outcome.as_ref().is_none_or(|(_, o)| {
+                    !matches!(
+                        o.disposition,
+                        WorkerDisposition::Ready | WorkerDisposition::NoChange
+                    )
+                })
+                || w.integration
+                    .as_ref()
+                    .is_some_and(|(_, i)| i.outcome != WorkerIntegrationOutcome::Integrated)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let mut contract = verification_contract.ok_or(ReplayError::InvalidTransition)?;
+            contract.success_criterion = criterion.clone();
+            let run = current.runs.last().ok_or(ReplayError::InvalidTransition)?;
+            for seq in &v.evidence {
+                let t = run
+                    .tools
+                    .iter()
+                    .find(|t| t.finished_sequence == Some(*seq))
+                    .ok_or(ReplayError::InvalidTransition)?;
+                let o = t
+                    .observation
+                    .as_ref()
+                    .ok_or(ReplayError::InvalidTransition)?;
+                if *seq <= released
+                    || o.intent.target != EffectTarget::Workspace
+                    || matches!(o.intent.call, ToolCall::PrepareWorker { .. })
+                    || matches!(o.intent.call, ToolCall::ApplyChangeset { .. })
+                        && !matches!((&contract.success_criterion, &o.intent.call), (GoalSuccessCriterion::ToolCallSucceeded { call }, ToolCall::ApplyChangeset { source: ChangesetSource::CommandReceipt { .. } }) if matches!(call.as_ref(), ToolCall::Command { .. }))
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
+            let mut state = contract.initial_success_state();
+            for t in &run.tools {
+                let Some(seq) = t.finished_sequence.filter(|s| *s > released) else {
+                    continue;
+                };
+                let o = t
+                    .observation
+                    .as_ref()
+                    .ok_or(ReplayError::InvalidTransition)?;
+                if v.evidence.contains(&seq) {
+                    contract.observe_success(&mut state, o);
+                } else if o.intent.call.mutates() || o.intent.call.is_process() {
+                    state = contract.initial_success_state();
+                } else {
+                    let prior = state.clone();
+                    contract.observe_success(&mut state, o);
+                    if contract.success_state_satisfied(&state)
+                        && !contract.success_state_satisfied(&prior)
+                    {
+                        state = prior;
+                    }
+                }
+            }
+            if v.passed != contract.success_state_satisfied(&state) {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let run = current
+                .runs
+                .last_mut()
+                .ok_or(ReplayError::InvalidTransition)?;
+            worker_mut(run, v.assignment_id)?.verification = Some((sequence, v.clone()));
+        }
+        _ => return Err(ReplayError::InvalidTransition),
+    }
+    Ok(())
+}
+fn valid_discard(run: &RunView, w: &WorkerView, d: &WorkerSettlement) -> bool {
+    match d.reason {
+        WorkerSettlementReason::Stopped => {
+            run.workers.stop.is_some_and(|(s, _)| s == d.cause_sequence)
+        }
+        WorkerSettlementReason::Conflict | WorkerSettlementReason::Denied => {
+            w.integration.as_ref().is_some_and(|(s, i)| {
+                *s == d.cause_sequence
+                    && matches!(
+                        (d.reason, i.outcome),
+                        (
+                            WorkerSettlementReason::Conflict,
+                            WorkerIntegrationOutcome::Conflict
+                        ) | (
+                            WorkerSettlementReason::Denied,
+                            WorkerIntegrationOutcome::Denied
+                        )
+                    )
+            })
+        }
+        WorkerSettlementReason::Integrated => false,
+        reason => w.outcome.as_ref().is_some_and(|(s, o)| {
+            *s == d.cause_sequence
+                && matches!(
+                    (reason, o.disposition),
+                    (
+                        WorkerSettlementReason::Failed,
+                        WorkerDisposition::Failed | WorkerDisposition::Lost
+                    ) | (
+                        WorkerSettlementReason::Cancelled,
+                        WorkerDisposition::Cancelled
+                    ) | (
+                        WorkerSettlementReason::PrivateUncertain,
+                        WorkerDisposition::PrivateUncertain
+                    ) | (
+                        WorkerSettlementReason::NoChange,
+                        WorkerDisposition::NoChange
+                    )
+                )
+        }),
+    }
+}
