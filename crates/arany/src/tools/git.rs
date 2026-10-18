@@ -203,15 +203,26 @@ fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
         }
     }
     let index = match read_optional(&git_dir, "index", MAX_SNAPSHOT_BYTES) {
-        Ok(index) => index,
+        Ok(Some(bytes)) => match git_dir.symlink_metadata("index").and_then(|m| m.modified()) {
+            Ok(modified) => Some((bytes, modified.into_std())),
+            Err(_) => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
+        },
+        Ok(None) => None,
         Err(ToolError::Path) => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
         Err(error) => return Err(error),
     };
     std::fs::create_dir(view).map_err(|_| ToolError::Operation)?;
     std::fs::write(view.join("config"), VIEW_CONFIG).map_err(|_| ToolError::Operation)?;
     std::fs::write(view.join("HEAD"), &head).map_err(|_| ToolError::Operation)?;
-    if let Some(index) = index {
-        std::fs::write(view.join("index"), index).map_err(|_| ToolError::Operation)?;
+    if let Some((index, modified)) = index {
+        let copy = view.join("index");
+        std::fs::write(&copy, index).map_err(|_| ToolError::Operation)?;
+        // Git's racy-stat check compares entry times with the index mtime; a fresh mtime hides same-size edits.
+        std::fs::File::options()
+            .write(true)
+            .open(copy)
+            .and_then(|file| file.set_modified(modified))
+            .map_err(|_| ToolError::Operation)?;
     }
     for name in links {
         std::os::unix::fs::symlink(workspace.join(".git").join(name), view.join(name))
