@@ -70,7 +70,7 @@ pub use session::{
     RunStatus, RunView, SessionDefaults, SessionId, SessionListItem, SessionView, ToolView,
     WorkspaceIdentity,
 };
-pub use store::{HistoryReset, Record, RecordKind, StateRoot, Store, StoreError};
+pub use store::{HistoryRecovery, HistoryReset, Record, RecordKind, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{
     ApprovalInbox, ApprovalMode, ApprovalReply, Attestation, CacheUpdate, CommandChangeset,
