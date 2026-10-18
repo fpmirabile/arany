@@ -12,9 +12,9 @@ pub async fn create_session(
     workspace: PathBuf,
     title: Option<String>,
 ) -> Result<SessionId, EngineError> {
-    validate_session_title(title.as_deref())?;
-    let journal = Journal::new(Store::open(state.try_clone()?)?);
-    let result = create_with_journal(&state, &journal, &workspace, title).await;
+    let admitted = admit_new_session(&state, &workspace, title)?;
+    let journal = Journal::new(Store::open(state)?);
+    let result = start_admitted_session(&journal, admitted).await;
     let closed = journal.close().await;
     let session_id = result?;
     closed?;
@@ -27,21 +27,49 @@ pub(super) async fn create_with_journal(
     workspace: &Path,
     title: Option<String>,
 ) -> Result<SessionId, EngineError> {
+    start_admitted_session(journal, admit_new_session(state, workspace, title)?).await
+}
+
+struct AdmittedSession {
+    session_id: SessionId,
+    lock: SessionRunLock,
+    title: String,
+    workspace_identity: WorkspaceIdentity,
+}
+
+// Admission runs before the Store opens, so a refused Workspace never creates journal tables.
+fn admit_new_session(
+    state: &StateRoot,
+    workspace: &Path,
+    title: Option<String>,
+) -> Result<AdmittedSession, EngineError> {
     validate_session_title(title.as_deref())?;
     let session_id = SessionId::new();
-    let mut session_lock = lock_session(state, session_id)?;
+    let lock = lock_session(state, session_id)?;
     let workspace_identity = WorkspaceInputs::admit_identity(workspace, state)?;
+    Ok(AdmittedSession {
+        session_id,
+        lock,
+        title: title.unwrap_or_else(|| "New Session".into()),
+        workspace_identity,
+    })
+}
+
+async fn start_admitted_session(
+    journal: &Journal,
+    mut admitted: AdmittedSession,
+) -> Result<SessionId, EngineError> {
     journal
         .append(
-            session_id,
+            admitted.session_id,
             Event::SessionStarted {
-                title: title.unwrap_or_else(|| "New Session".into()),
-                workspace_identity,
+                title: admitted.title,
+                workspace_identity: admitted.workspace_identity,
             },
         )
         .await?;
-    session_lock.keep();
-    Ok(session_id)
+    admitted.lock.keep();
+    Ok(admitted.session_id)
 }
 
 pub async fn set_session_defaults(
