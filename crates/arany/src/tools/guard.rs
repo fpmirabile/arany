@@ -1794,11 +1794,14 @@ mod tests {
 
     #[tokio::test]
     async fn the_launcher_never_shares_the_supervisor_process_group() {
+        // The child blocks on the pipe this test holds, so it stays alive until the assertions finish.
         let mut launcher = launcher_command(Path::new("/bin/sh"))
-            .args(["-c", "sleep 30"])
+            .args(["-c", "read _"])
+            .stdin(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        let _gate = launcher.stdin.take().unwrap();
         let pid = rustix::process::Pid::from_raw(launcher.id().unwrap() as i32);
         let group = rustix::process::getpgid(pid).unwrap();
         assert_eq!(Some(group), pid);
