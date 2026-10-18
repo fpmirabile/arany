@@ -1151,11 +1151,16 @@ impl RunLoop<'_> {
             .observation
             .as_ref()
             .ok_or(EngineError::InvalidHistory)?;
-        if observation.disposition == ToolDisposition::Succeeded
+        let post_exhausted = if observation.disposition == ToolDisposition::Succeeded
             && let Some(config) = runtime.permissions()
         {
-            Box::pin(self.post_tool_use_hooks(runtime, config, observation, None)).await?;
-        }
+            Box::pin(self.post_tool_use_hooks(runtime, config, observation, None))
+                .await?
+                .stop
+                == super::step::hooks::HookStop::ActiveTime
+        } else {
+            false
+        };
         self.observe_worker_stop().await?;
         let observation = tool.observation.ok_or(EngineError::InvalidHistory)?;
         let outcome = match observation.disposition {
@@ -1210,6 +1215,9 @@ impl RunLoop<'_> {
                 .await?;
                 return Ok(false);
             }
+        }
+        if post_exhausted {
+            return Err(EngineError::GoalBudgetExhausted);
         }
         Ok(true)
     }

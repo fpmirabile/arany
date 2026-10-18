@@ -3107,6 +3107,31 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
             .unwrap();
         } else if site == "stopped" {
             assert!(view.runs[0].actor_stopped_by_hook(actor));
+            let finished = |disposition, cause| Event::AgentFinished {
+                run_id: f.run,
+                agent_run_id: actor,
+                disposition,
+                summary: None,
+                result: None,
+                worker: Some(WorkerOutcome {
+                    disposition: WorkerDisposition::Failed,
+                    cause,
+                    data: None,
+                    cleanup: Some(WorkerCleanupReceipt {
+                        assignment_id: actor,
+                        base_digest: f.base.sha256,
+                        revision: 1,
+                        enforcement_digest: pending.enforcement_digest,
+                        last_intent_digest: Some(pending.digest()),
+                    }),
+                }),
+            };
+            for (disposition, cause) in [
+                (AgentDisposition::Failed, WorkerCause::StoppedByHook),
+                (AgentDisposition::StoppedByHook, WorkerCause::ToolFailed),
+            ] {
+                assert!(append(&mut view.clone(), finished(disposition, cause)).is_err());
+            }
             append(
                 &mut view,
                 Event::AgentFinished {
@@ -3132,6 +3157,26 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
             .unwrap();
         } else if site == "stop" {
             assert!(view.runs[0].stop_blocked(actor));
+            let unstopped = Event::AgentFinished {
+                run_id: f.run,
+                agent_run_id: actor,
+                disposition: AgentDisposition::StoppedByHook,
+                summary: None,
+                result: None,
+                worker: Some(WorkerOutcome {
+                    disposition: WorkerDisposition::Failed,
+                    cause: WorkerCause::StoppedByHook,
+                    data: None,
+                    cleanup: Some(WorkerCleanupReceipt {
+                        assignment_id: actor,
+                        base_digest: f.base.sha256,
+                        revision: 1,
+                        enforcement_digest: pending.enforcement_digest,
+                        last_intent_digest: Some(pending.digest()),
+                    }),
+                }),
+            };
+            assert!(append(&mut view.clone(), unstopped).is_err());
         }
     }
 }

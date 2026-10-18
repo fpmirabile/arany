@@ -31,7 +31,7 @@ pub(super) struct HookFold {
 
 pub(in crate::engine::run_loop) struct PostFold {
     pub(super) feedback: Vec<String>,
-    pub(super) stop: HookStop,
+    pub(in crate::engine::run_loop) stop: HookStop,
 }
 
 struct HookRun {
