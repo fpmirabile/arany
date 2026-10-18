@@ -907,7 +907,7 @@ async fn approval_cancel_interrupt_and_eof_deny() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn approval_timeout_denies_and_late_response_is_a_protocol_error() {
+async fn approval_timeout_denies_and_ignores_a_late_response() {
     let _deadline = deadline();
     approval_scenario(ApprovalCase::Timeout).await;
 }
