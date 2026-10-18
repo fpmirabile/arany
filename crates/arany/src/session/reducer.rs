@@ -236,6 +236,23 @@ impl ToolView {
                     .is_none_or(|outcome| outcome.observation.stops_run())
             })
     }
+
+    /// A host run that may have had effects: attested or uncertain, or approved without a recorded outcome.
+    pub fn ran_unguarded(&self) -> bool {
+        self.intent.call.is_unguarded()
+            && match &self.observation {
+                Some(observation) => {
+                    matches!(
+                        observation.attestation,
+                        Some(crate::tools::Attestation::Unguarded(_))
+                    ) || observation.disposition == crate::tools::ToolDisposition::Uncertain
+                }
+                None => self
+                    .permission_verdict
+                    .as_ref()
+                    .is_some_and(|verdict| verdict.approved),
+            }
+    }
 }
 
 fn all_children_finished(run: &RunView) -> bool {
@@ -327,6 +344,13 @@ fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCal
 }
 
 impl RunView {
+    pub fn unguarded_tools(&self) -> usize {
+        self.tools
+            .iter()
+            .filter(|tool| tool.ran_unguarded())
+            .count()
+    }
+
     pub fn primary_tool_limit_reached(&self) -> bool {
         self.config
             .as_ref()

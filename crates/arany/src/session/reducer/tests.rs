@@ -3441,8 +3441,24 @@ mod goal_replay_tests {
         assert!(!stopped.runs[0].tools[0].settled_without_stop());
     }
 
-    #[test]
-    fn unguarded_operation_has_no_replay_admission_until_its_gate_lands() {
+    struct Unguarded {
+        view: SessionView,
+        host: EffectIntent,
+        run: RunId,
+        agent: AgentRunId,
+        started: bool,
+    }
+
+    // A primary that ran `sh -c <prior_script>` in the Guard with this outcome, then requests the host re-run of `exit 7`.
+    fn unguarded_scenario(
+        prior: Option<(
+            &str,
+            ToolDisposition,
+            Option<crate::tools::EnforcementCause>,
+        )>,
+        configured: bool,
+        rules_pinned: bool,
+    ) -> Unguarded {
         let (mut view, goal, run, agent) = primary_tool_session(true);
         view.goals[0]
             .plan_contract
@@ -3450,33 +3466,378 @@ mod goal_replay_tests {
             .unwrap()
             .commands
             .push("sh".into());
+        let policy = view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap();
+        policy.permissions_digest = configured.then_some([3; 32]);
+        policy.unguarded_rules_digest = rules_pinned.then_some([5; 32]);
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
-        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
-        let args = || vec!["-c".to_owned(), "exit 7".to_owned()];
-        let guarded = child_intent(
-            run,
-            agent,
-            ToolCall::Command {
-                program: "sh".into(),
-                args: args(),
-                cwd: String::new(),
-            },
-        );
+        apply(
+            &mut view,
+            requesting_step(run, agent, 1 + u8::from(prior.is_some())),
+        )
+        .unwrap();
+        if let Some((script, disposition, cause)) = prior {
+            let guarded = child_intent(
+                run,
+                agent,
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), script.into()],
+                    cwd: String::new(),
+                },
+            );
+            apply(&mut view, tool_started(run, agent, &guarded)).unwrap();
+            if configured {
+                apply(
+                    &mut view,
+                    verdict_event(
+                        &guarded,
+                        configured.then_some(crate::tools::permissions::PermissionMode::Default),
+                        crate::tools::permissions::Decision::Allow,
+                        crate::tools::permissions::PermissionSource::Mode,
+                        crate::tools::permissions::PermissionSource::Mode,
+                        true,
+                    ),
+                )
+                .unwrap();
+            }
+            let mut observation = observation_for(guarded, b"ok");
+            observation.disposition = disposition;
+            observation.enforcement_cause = cause;
+            observation.output =
+                r#"{"exit_code":7,"stdout":"","stderr":"","changeset":{"files":[]}}"#.into();
+            apply(
+                &mut view,
+                Event::ToolFinished {
+                    run_id: run,
+                    agent_run_id: agent,
+                    observation,
+                },
+            )
+            .unwrap();
+        }
         let host = child_intent(
             run,
             agent,
             ToolCall::CommandUnguarded {
                 program: "sh".into(),
-                args: args(),
+                args: vec!["-c".into(), "exit 7".into()],
                 cwd: String::new(),
                 justification: "Run the failed command once".into(),
             },
         );
-        let mut control = view.clone();
-        apply(&mut control, tool_started(run, agent, &guarded))
-            .expect("the guarded control is admitted by the same plan");
-        assert!(rejected(&view, tool_started(run, agent, &host)));
-        assert!(rejected(&view, tool_finished(run, agent, &host, b"ok")));
+        let start = tool_started(run, agent, &host);
+        if matches!(
+            prior,
+            Some((
+                _,
+                ToolDisposition::Uncertain | ToolDisposition::Cancelled,
+                _
+            ))
+        ) {
+            // The Run stops at these outcomes, so the reducer refuses the unguarded start itself.
+            assert!(rejected(&view, start), "{prior:?}");
+            return Unguarded {
+                view,
+                host,
+                run,
+                agent,
+                started: false,
+            };
+        }
+        apply(&mut view, start).expect("the start is always admitted");
+        Unguarded {
+            view,
+            host,
+            run,
+            agent,
+            started: true,
+        }
+    }
+
+    #[test]
+    fn an_approved_host_run_without_an_outcome_counts_as_unguarded() {
+        use crate::tools::permissions::{Decision, PermissionSource};
+        let mut scenario = unguarded_scenario(
+            Some(("exit 7", ToolDisposition::Failed, None)),
+            false,
+            false,
+        );
+        let count = |view: &SessionView| view.runs[0].unguarded_tools();
+        assert_eq!(count(&scenario.view), 0);
+        let (host, run, agent) = (scenario.host.clone(), scenario.run, scenario.agent);
+        let mut refused = scenario.view.clone();
+        apply(
+            &mut refused,
+            verdict_event(
+                &host,
+                None,
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::UnavailableApproval,
+                false,
+            ),
+        )
+        .unwrap();
+        assert_eq!(count(&refused), 0);
+        let _ = (run, agent);
+        apply(
+            &mut scenario.view,
+            verdict_event(
+                &host,
+                None,
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::Human,
+                true,
+            ),
+        )
+        .unwrap();
+        assert_eq!(count(&scenario.view), 1);
+    }
+
+    fn verdict_event(
+        intent: &EffectIntent,
+        mode: Option<crate::tools::permissions::PermissionMode>,
+        decision: crate::tools::permissions::Decision,
+        basis: crate::tools::permissions::PermissionSource,
+        source: crate::tools::permissions::PermissionSource,
+        approved: bool,
+    ) -> Event {
+        Event::ToolPermissionDecided {
+            run_id: intent.run_id,
+            agent_run_id: intent.agent_run_id,
+            verdict: crate::tools::permissions::PermissionVerdict {
+                intent_digest: intent.digest(),
+                decision,
+                mode,
+                basis,
+                source,
+                approved,
+                hook_restriction: None,
+                hooks: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn unguarded_replay_requires_prior_guard_failure_human_or_exact_rule_verdict_and_unguarded_attestation()
+     {
+        use crate::tools::EnforcementCause;
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        let failed = Some(("exit 7", ToolDisposition::Failed, None));
+        for configured in [false, true] {
+            let mode = configured.then_some(PermissionMode::Default);
+            let human = |scenario: &Unguarded| {
+                verdict_event(
+                    &scenario.host,
+                    mode,
+                    Decision::Ask,
+                    PermissionSource::Mode,
+                    PermissionSource::Human,
+                    true,
+                )
+            };
+            let good = unguarded_scenario(failed, configured, true);
+            assert!(!rejected(&good.view, human(&good)));
+
+            for prior in [
+                None,
+                Some(("exit 8", ToolDisposition::Failed, None)),
+                Some(("exit 7", ToolDisposition::Limit, None)),
+                Some((
+                    "exit 7",
+                    ToolDisposition::Denied,
+                    Some(EnforcementCause::FilesystemDenied),
+                )),
+                Some(("exit 7", ToolDisposition::Succeeded, None)),
+                Some(("exit 7", ToolDisposition::Uncertain, None)),
+                Some(("exit 7", ToolDisposition::Cancelled, None)),
+            ] {
+                let scenario = unguarded_scenario(prior, configured, true);
+                if !scenario.started {
+                    continue;
+                }
+                assert!(rejected(&scenario.view, human(&scenario)), "{prior:?}");
+                let mut denied = scenario.view.clone();
+                apply(
+                    &mut denied,
+                    verdict_event(
+                        &scenario.host,
+                        mode,
+                        Decision::Ask,
+                        PermissionSource::Mode,
+                        PermissionSource::UnavailableApproval,
+                        false,
+                    ),
+                )
+                .expect("a denial is journaled without a qualifying failure");
+                let mut refusal = observation_for(scenario.host.clone(), b"");
+                refusal.disposition = ToolDisposition::Denied;
+                refusal.attestation = None;
+                refusal.output = "No identical command failed under the Guard".into();
+                apply(
+                    &mut denied,
+                    Event::ToolFinished {
+                        run_id: scenario.run,
+                        agent_run_id: scenario.agent,
+                        observation: refusal,
+                    },
+                )
+                .expect("the refusal finishes");
+            }
+
+            for (basis, source, approved) in [
+                (PermissionSource::Mode, PermissionSource::AiReview, true),
+                (PermissionSource::Rule, PermissionSource::Rule, true),
+                (PermissionSource::Mode, PermissionSource::Mode, true),
+                (
+                    PermissionSource::UnavailableApproval,
+                    PermissionSource::UnavailableApproval,
+                    true,
+                ),
+                (
+                    PermissionSource::PinnedGrant,
+                    PermissionSource::PinnedGrant,
+                    true,
+                ),
+            ] {
+                assert!(
+                    rejected(
+                        &good.view,
+                        verdict_event(&good.host, mode, Decision::Ask, basis, source, approved)
+                    ),
+                    "{source:?}"
+                );
+            }
+            let exact = |scenario: &Unguarded| {
+                verdict_event(
+                    &scenario.host,
+                    mode,
+                    Decision::Allow,
+                    PermissionSource::ExactCommandRule,
+                    PermissionSource::ExactCommandRule,
+                    true,
+                )
+            };
+            assert!(!rejected(&good.view, exact(&good)));
+            let unpinned = unguarded_scenario(failed, configured, false);
+            assert!(rejected(&unpinned.view, exact(&unpinned)));
+            let forged_decision = verdict_event(
+                &good.host,
+                mode,
+                Decision::Deny,
+                PermissionSource::Mode,
+                PermissionSource::Human,
+                true,
+            );
+            assert!(rejected(&good.view, forged_decision));
+        }
+
+        let good = unguarded_scenario(failed, true, true);
+        let mode = Some(PermissionMode::Default);
+        let mut approved = good.view.clone();
+        apply(
+            &mut approved,
+            verdict_event(
+                &good.host,
+                mode,
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::Human,
+                true,
+            ),
+        )
+        .unwrap();
+        let finish = |observation: ToolObservation| Event::ToolFinished {
+            run_id: good.run,
+            agent_run_id: good.agent,
+            observation,
+        };
+        let mut host_run = observation_for(good.host.clone(), b"ok");
+        assert!(matches!(
+            host_run.attestation,
+            Some(crate::tools::Attestation::Unguarded(_))
+        ));
+        let mut guard_receipt = host_run.clone();
+        guard_receipt.attestation = Some(crate::tools::Attestation::Guard(
+            crate::tools::GuardReceipt {
+                contract_version: 1,
+                intent_digest: good.host.digest(),
+                enforcement_digest: good.host.enforcement_digest,
+                limits: good.host.limits.clone(),
+            },
+        ));
+        assert!(rejected(&approved, finish(guard_receipt)));
+        let mut cached = host_run.clone();
+        cached.cache_update = CacheUpdate::Published;
+        assert!(rejected(&approved, finish(cached)));
+        host_run.output =
+            r#"{"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]}}"#.into();
+        let no_verdict = good.view.clone();
+        assert!(rejected(&no_verdict, finish(host_run.clone())));
+        let mut refused = good.view.clone();
+        apply(
+            &mut refused,
+            verdict_event(
+                &good.host,
+                mode,
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::Human,
+                false,
+            ),
+        )
+        .unwrap();
+        assert!(rejected(&refused, finish(host_run.clone())));
+        apply(&mut approved, finish(host_run.clone())).expect("the approved host run finishes");
+
+        let integration = Event::ToolStarted {
+            run_id: good.run,
+            agent_run_id: good.agent,
+            intent: child_intent(
+                good.run,
+                good.agent,
+                ToolCall::ApplyChangeset {
+                    source_intent_digest: good.host.digest(),
+                    changeset: crate::tools::CommandChangeset { files: Vec::new() },
+                },
+            ),
+            active_ceiling_ms: 0,
+        };
+        assert!(rejected(&approved, integration));
+
+        let (mut child, goal, run, researcher) = research_session();
+        child.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut child, reserve_child_call(goal, run, researcher)).unwrap();
+        apply(
+            &mut child,
+            child_record(run, researcher, ProviderCallDisposition::ToolRequested),
+        )
+        .unwrap();
+        let forged = child_intent(
+            run,
+            researcher,
+            ToolCall::CommandUnguarded {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 7".into()],
+                cwd: String::new(),
+                justification: "Run the failed command once".into(),
+            },
+        );
+        assert!(rejected(&child, tool_started(run, researcher, &forged)));
     }
 
     #[test]

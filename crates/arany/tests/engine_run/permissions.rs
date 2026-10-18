@@ -14,7 +14,7 @@ async fn permission_dispatch_invalid_or_unsafe_settings_refuse_before_provider()
         let state = temp.path().join("state");
         let root = StateRoot::admit(&state).unwrap();
         private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             root,
             EngineConfig {
                 guard_executable: Some(std::env::current_exe().unwrap()),
@@ -139,7 +139,7 @@ async fn exact_command_rules_reject_unsafe_or_invalid_records_before_provider_us
             "oversized" => private_file(&path, &vec![b' '; 64 * 1024 + 1]),
             _ => (),
         }
-        let engine = Engine::open(
+        let engine = engine_support::open(
             root,
             EngineConfig {
                 guard_executable: Some(std::env::current_exe().unwrap()),
@@ -194,7 +194,7 @@ async fn run_started_pins_the_rules_digest_and_a_later_edit_does_not_change_the_
     let original = br#"{"version":1,"commands":[]}"#;
     let edited = br#"{ "version": 1, "commands": [] }"#;
     private_file(&path, original);
-    let engine = Engine::open(
+    let engine = engine_support::open(
         root,
         EngineConfig {
             guard_executable: Some(std::env::current_exe().unwrap()),

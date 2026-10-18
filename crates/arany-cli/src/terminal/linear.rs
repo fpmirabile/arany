@@ -26,11 +26,20 @@ pub(super) struct LinearState {
 }
 
 impl LinearState {
-    pub(super) fn draw_tool_approval(&mut self, intent: &arany::EffectIntent) -> io::Result<()> {
+    pub(super) fn draw_tool_approval(
+        &mut self,
+        id: uuid::Uuid,
+        lines: &[String],
+        unguarded: bool,
+    ) -> io::Result<()> {
         self.draw_permission_prompt(
-            intent.id,
-            &crate::presentation::tool_approval_lines(intent),
-            "Type allow or deny; empty Enter denies:",
+            id,
+            lines,
+            if unguarded {
+                "Type allow, always or deny; empty Enter denies:"
+            } else {
+                "Type allow or deny; empty Enter denies:"
+            },
         )
     }
 

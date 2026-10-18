@@ -15,7 +15,6 @@ mod process;
 mod skills;
 pub(crate) mod toolchains;
 pub(crate) mod types;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in slice 4"))]
 mod unguarded;
 pub(crate) mod unguarded_rules;
 mod workspace;
@@ -25,7 +24,9 @@ mod tests;
 
 use crate::session::{AgentRunId, RunId, WorkspaceIdentity};
 use crate::store::StateRoot;
-pub use approval::{ApprovalInbox, ApprovalMode, ToolApproval, ToolApprovals};
+pub use approval::{
+    ApprovalInbox, ApprovalMode, ApprovalReply, ToolApproval, ToolApprovals, UnguardedPrompt,
+};
 pub use cancel::Cancellation;
 use config::Config;
 pub(crate) use skills::parse_json;
@@ -88,7 +89,7 @@ pub use types::{
     Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause, FileChange,
     FileVersion, GuardReceipt, MAX_SKILLS, NetworkGrant, ToolCall, ToolContext, ToolDisposition,
     ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
-    ToolResourceProfile, ToolResourceSettings, ToolStep,
+    ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -442,19 +443,19 @@ impl ToolRuntime {
         self.unguarded_rules.as_ref()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the unguarded approval integration")
-    )]
+    pub(crate) fn command_executable(&self, name: &str) -> Option<&str> {
+        self.config
+            .commands
+            .iter()
+            .find(|program| program.name == name)
+            .map(|program| program.executable.as_str())
+    }
+
     pub(crate) fn matches_exact_command_rule(&self, call: &ToolCall) -> bool {
         self.exact_command_rules()
             .is_some_and(|rules| rules.matches(call, self.workspace_identity, &self.workspace))
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the unguarded approval integration")
-    )]
     pub(crate) fn record_exact_command_rule(&self, call: &ToolCall) -> Result<(), ToolError> {
         fs::validate_workspace(self)?;
         let state = self
@@ -574,15 +575,7 @@ impl ToolRuntime {
         }
         match intent.call.facts().site {
             Site::InProcess => self.run_in_process(intent, cancellation).await,
-            // Slice 3 replaces this with the approved host executor; until then nothing dispatches.
-            Site::Unguarded => ToolObservation {
-                enforcement_cause: None,
-                intent,
-                disposition: ToolDisposition::Denied,
-                output: "Unguarded operations are not available".into(),
-                attestation: None,
-                cache_update: crate::tools::CacheUpdate::NotApplicable,
-            },
+            Site::Unguarded => self.run_unguarded(intent, cancellation).await,
             Site::Guard => match guard::execute(self, &intent, cancellation).await {
                 Ok(observation) => observation,
                 Err(error) => {
@@ -592,6 +585,62 @@ impl ToolRuntime {
                 }
             },
         }
+    }
+
+    async fn run_unguarded(
+        &self,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+    ) -> ToolObservation {
+        let ToolCall::CommandUnguarded {
+            program, args, cwd, ..
+        } = &intent.call
+        else {
+            return unstarted_observation(intent, ToolError::Configuration);
+        };
+        if let Err(error) = self.pinned_root(&intent) {
+            return unstarted_observation(intent, error);
+        }
+        let Some(pinned) = self.config.commands.iter().find(|row| &row.name == program) else {
+            return unstarted_observation(intent, ToolError::Configuration);
+        };
+        let outcome = unguarded::run(
+            unguarded::Request {
+                program: pinned,
+                args,
+                cwd,
+                workspace: &self.workspace,
+                workspace_identity: self.workspace_identity,
+                runtime_grants: &self.config.runtime_grants,
+                result_bytes: intent.limits.result_bytes,
+                runtime_ms: intent.limits.runtime_ms,
+            },
+            cancellation,
+        )
+        .await;
+        let attestation = outcome.spawned.then(|| {
+            Attestation::Unguarded(types::UnguardedReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                executable_sha256: pinned.sha256.clone(),
+                pid: outcome.pid,
+                exit_code: outcome.exit_code,
+                descendants_confirmed_stopped: outcome.descendants_stopped,
+            })
+        });
+        let mut observation = ToolObservation {
+            enforcement_cause: None,
+            attestation,
+            intent,
+            disposition: outcome.disposition,
+            output: outcome.output,
+            cache_update: CacheUpdate::NotApplicable,
+        };
+        if !observation.valid() {
+            observation.disposition = ToolDisposition::Limit;
+            observation.output = "Tool result exceeded its reserved serialized capacity".into();
+        }
+        observation
     }
 
     fn pinned_root(

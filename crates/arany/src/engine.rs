@@ -863,6 +863,14 @@ impl Engine {
             .map_err(|_| EngineError::Busy)
     }
 
+    pub async fn create_session(
+        &self,
+        workspace: PathBuf,
+        title: Option<String>,
+    ) -> Result<SessionId, EngineError> {
+        lifecycle::create_with_journal(&self.state, &self.journal, &workspace, title).await
+    }
+
     pub async fn fork_session(
         &self,
         source_session_id: SessionId,

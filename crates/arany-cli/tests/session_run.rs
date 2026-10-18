@@ -2748,3 +2748,94 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         store.close().await.expect("read-only shutdown");
     });
 }
+
+#[test]
+fn serve_stdio_initializes_refuses_missing_credentials_and_exits_cleanly() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let input = format!(
+        "{}\n{}\n",
+        serde_json::json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"process","version":"1"}}}),
+        serde_json::json!({"id":2,"method":"thread/start","params":{"cwd":workspace,"provider":"openai","model":"gpt-5.4"}})
+    );
+    let output = process::file_output(
+        Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .current_dir(&workspace)
+            .args(["serve", "--stdio", "--state-dir"])
+            .arg(&state),
+        Some(input.as_bytes()),
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let schema = arany_cli::protocol::protocol_schema();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let messages: Vec<serde_json::Value> = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|message| validator.is_valid(message)));
+    assert_eq!(messages[0]["id"], 1);
+    assert_eq!(
+        messages[0]["result"]["capabilities"],
+        serde_json::json!(["threads_v1", "turns_v1", "items_v1", "interrupt_receipt_v1"])
+    );
+    assert_eq!(messages[1]["error"]["code"], -32001);
+    assert_eq!(
+        messages[1]["error"]["data"]["reason"],
+        "providerUnavailable"
+    );
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            assert!(
+                arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace.clone())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        });
+}
+
+#[test]
+fn serve_rejects_unsupported_transport_and_terminal_input_before_state_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path();
+    let output = process::file_output(
+        Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .current_dir(workspace)
+            .arg("serve"),
+        None,
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"error: unsupported transport; pass --stdio\n"
+    );
+    let (_master, slave) = process::cloexec_pty(None);
+    let state = root.path().join("state");
+    let output = Command::new(env!("CARGO_BIN_EXE_arany"))
+        .env_clear()
+        .current_dir(workspace)
+        .args(["serve", "--stdio", "--state-dir"])
+        .arg(&state)
+        .stdin(slave)
+        .bounded_output_with_input()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"error: serve requires piped stdin and stdout\n"
+    );
+    assert!(!state.exists());
+}

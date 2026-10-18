@@ -36,7 +36,7 @@ fn team_cancellation_latency_on_named_host() {
             identity: crate::gated_identity(CHILDREN as u8),
         };
         let provider = Arc::new(provider);
-        let mut engine = Engine::open(
+        let mut engine = engine_support::open(
             StateRoot::admit(&state).expect("private state"),
             EngineConfig::default(),
         )

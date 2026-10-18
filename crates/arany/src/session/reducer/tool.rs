@@ -24,12 +24,21 @@ pub(super) fn apply(
             .as_ref()
             .and_then(|config| config.tool_policy.as_ref())
             .is_some_and(|policy| policy.permissions_digest.is_some());
-        if configured {
+        let unguarded = observation.intent.call.is_unguarded();
+        if configured || unguarded {
             let tool = pending_tool(run, *agent_run_id)?;
             let verdict = tool
                 .permission_verdict
                 .as_ref()
                 .ok_or(ReplayError::InvalidTransition)?;
+            if unguarded
+                && !matches!(
+                    observation.attestation,
+                    None | Some(crate::tools::Attestation::Unguarded(_))
+                )
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
             if !verdict.approved
                 && (observation.attestation.is_some()
                     || observation.cache_update != crate::tools::CacheUpdate::NotApplicable
@@ -50,17 +59,34 @@ pub(super) fn apply(
             verdict,
         } => {
             let run = active_run(current, *run_id)?;
-            let rules_pinned = match run
+            let policy = run
                 .config
                 .as_ref()
-                .and_then(|config| config.tool_policy.as_ref())
+                .and_then(|config| config.tool_policy.as_ref());
+            let permissions_pinned =
+                policy.is_some_and(|policy| policy.permissions_digest.is_some());
+            let rules_pinned = policy.is_some_and(|policy| policy.unguarded_rules_digest.is_some());
+            let pending_call = pending_tool(run, *agent_run_id)?.intent.call.clone();
+            let unguarded = pending_call.is_unguarded();
+            if verdict.mode.is_some() != permissions_pinned || !(permissions_pinned || unguarded) {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if unguarded
+                && verdict.approved
+                && (!matches!(
+                    verdict.source,
+                    crate::tools::permissions::PermissionSource::Human
+                        | crate::tools::permissions::PermissionSource::ExactCommandRule
+                ) || verdict.decision == crate::tools::permissions::Decision::Deny
+                    || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
+                    || crate::tools::types::qualifying_guard_failure(
+                        &pending_call,
+                        run.tools
+                            .iter()
+                            .filter_map(|tool| tool.observation.as_ref()),
+                    )
+                    .is_none())
             {
-                Some(policy) if policy.permissions_digest.is_some() => {
-                    policy.unguarded_rules_digest.is_some()
-                }
-                _ => return Err(ReplayError::InvalidTransition),
-            };
-            if verdict.mode.is_none() {
                 return Err(ReplayError::InvalidTransition);
             }
             if verdict.source == crate::tools::permissions::PermissionSource::AiReview
@@ -231,12 +257,10 @@ pub(super) fn apply(
                             .and_then(|tool| tool.observation.as_ref())
                             .is_none_or(|observation| !observation.stops_run())
                 };
-            // The approved host run has no replayable admission until its Engine gate lands.
             if config
                 .tool_policy
                 .as_ref()
                 .is_none_or(|policy| policy.config_digest != intent.policy_digest)
-                || intent.call.is_unguarded()
                 || primary.id != *agent_run_id
                 || primary.status != AgentStatus::Active
                 || !valid_origin

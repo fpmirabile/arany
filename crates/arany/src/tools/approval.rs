@@ -1,4 +1,4 @@
-use super::{EffectIntent, ToolCall};
+use super::{EffectIntent, EnforcementCause, ToolCall};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -42,14 +42,35 @@ pub struct ToolApprovals {
 
 pub struct ApprovalInbox(mpsc::Receiver<ToolApproval>);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalReply {
+    Deny,
+    AllowOnce,
+    AllowAlwaysInProject,
+}
+
+impl From<bool> for ApprovalReply {
+    fn from(allow: bool) -> Self {
+        if allow { Self::AllowOnce } else { Self::Deny }
+    }
+}
+
+/// What the user needs, beyond the intent, to judge an unguarded re-run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnguardedPrompt {
+    pub executable: String,
+    pub attribution: Option<EnforcementCause>,
+}
+
 pub struct ToolApproval {
     pub intent: EffectIntent,
-    reply: oneshot::Sender<bool>,
+    pub unguarded: Option<UnguardedPrompt>,
+    reply: oneshot::Sender<ApprovalReply>,
 }
 
 impl ToolApproval {
-    pub fn decide(self, allow: bool) {
-        let _ = self.reply.send(allow);
+    pub fn decide(self, reply: impl Into<ApprovalReply>) {
+        let _ = self.reply.send(reply.into());
     }
 }
 
@@ -75,18 +96,35 @@ impl ToolApprovals {
     }
 
     pub(crate) async fn ask(&self, intent: &EffectIntent) -> bool {
+        self.request(intent, None).await != ApprovalReply::Deny
+    }
+
+    pub(crate) async fn ask_unguarded(
+        &self,
+        intent: &EffectIntent,
+        prompt: UnguardedPrompt,
+    ) -> ApprovalReply {
+        self.request(intent, Some(prompt)).await
+    }
+
+    async fn request(
+        &self,
+        intent: &EffectIntent,
+        unguarded: Option<UnguardedPrompt>,
+    ) -> ApprovalReply {
         let (reply, response) = oneshot::channel();
         if self
             .sender
             .send(ToolApproval {
                 intent: intent.clone(),
+                unguarded,
                 reply,
             })
             .await
             .is_err()
         {
-            return false;
+            return ApprovalReply::Deny;
         }
-        response.await.unwrap_or(false)
+        response.await.unwrap_or(ApprovalReply::Deny)
     }
 }
