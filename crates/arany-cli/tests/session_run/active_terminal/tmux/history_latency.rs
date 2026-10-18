@@ -217,6 +217,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                 Event::RunStarted {
                     run_id,
                     config: RunConfig {
+                        supervisor: None,
                         worker_policy: None,
                         agent_definitions: None,
                         roster: None,

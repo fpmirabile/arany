@@ -88,6 +88,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
             Event::RunStarted {
                 run_id,
                 config: RunConfig {
+                    supervisor: None,
                     worker_policy: None,
                     agent_definitions: None,
                     roster: None,

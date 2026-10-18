@@ -198,6 +198,7 @@ mod tests {
 
     fn run(ordinal: usize) -> RunView {
         RunView {
+            supervisor: Default::default(),
             workers: Default::default(),
             id: RunId::new(),
             objective: format!("Run {ordinal}"),

@@ -787,7 +787,7 @@ impl RunLoop<'_> {
                 },
             })
             .await?;
-            let sequence = self.sequence()?;
+            let sequence = self.ledger().view(|v| v.previous_subject_sequence())?;
             if !Box::pin(self.integrate_worker(root, id, sequence, data)).await? {
                 self.handover
                     .lock()

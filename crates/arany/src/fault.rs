@@ -8,6 +8,7 @@ use tokio::sync::oneshot;
 type Admits = fn(&Event) -> bool;
 
 enum Fault {
+    SupervisorOff(SessionId),
     WorkerReceipt(uuid::Uuid),
     GoalAppend(SessionId, Admits),
     GoalAcknowledgment(
@@ -38,6 +39,14 @@ fn take(mut matches: impl FnMut(&Fault) -> bool) -> Option<Fault> {
 pub struct FaultPlan;
 
 impl FaultPlan {
+    pub fn supervisor_off(session_id: SessionId) {
+        plan().push(Fault::SupervisorOff(session_id));
+    }
+
+    pub(crate) fn take_supervisor_off(session_id: SessionId) -> bool {
+        take(|fault| matches!(fault, Fault::SupervisorOff(id) if *id == session_id)).is_some()
+    }
+
     /// Fails the next Event that `admits` accepts for the Session before it commits.
     pub fn fail_goal_append(session_id: SessionId, admits: Admits) {
         plan().push(Fault::GoalAppend(session_id, admits));

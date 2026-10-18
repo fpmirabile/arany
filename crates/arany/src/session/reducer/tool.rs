@@ -191,7 +191,7 @@ pub(super) fn apply(
             if !matches!(hook.event, HookEvent::PreToolUse | HookEvent::PostToolUse) {
                 return start_lifecycle(current, *run_id, *agent_run_id, hook, prior);
             }
-            let previous = current.last_sequence;
+            let previous = current.previous_subject_sequence();
             let run = active_run(current, *run_id)?;
             if !permissions_pinned(run)
                 || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
@@ -315,7 +315,7 @@ pub(super) fn apply(
                 }
                 return Ok(());
             }
-            let previous = current.last_sequence;
+            let previous = current.previous_subject_sequence();
             let run = active_run(current, *run_id)?;
             if !permissions_pinned(run)
                 || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
@@ -726,7 +726,7 @@ fn start_lifecycle(
 ) -> Result<(), ReplayError> {
     use crate::session::{AgentRole, ChildGrant, RunStatus};
     use crate::tools::permissions::{MAX_STOP_CONTINUATIONS, compact_subject, stop_subject};
-    let previous = current.last_sequence;
+    let previous = current.previous_subject_sequence();
     let run = current
         .runs
         .last_mut()

@@ -18,7 +18,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 mod children;
-mod step;
+pub(super) mod step;
 mod tool_compaction;
 mod worker;
 

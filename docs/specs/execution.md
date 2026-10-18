@@ -38,7 +38,7 @@ Read-only research steps of child AgentRuns keep Child Tool facts in the child's
 | Child Tool result | `min([Tool result ceiling](tools.md#limits-and-failure-behavior), (context limit − context − intent − 512) / 6)`; Tools offered only while at least 4.6 KiB fits | only Finish offered; safety net stops the child |
 | Delegation time | one active segment, at most 20 min and at most the remaining Goal active time | calls time out, child Failed, Run fails |
 | Child Tool time | runtime at most half of (deadline − preparation − cleanup − Store overhead); the Guard capacity wait ends at `expires_at_ms` = start + runtime (Guard returns `Limit` before dispatch, Linux and macOS) | runtime 0: the child stops before `ToolStarted` |
-| Events per delegation | child Events at most 928 (8 × (7 × 16 + 4)), admitted with an 8-Event tail plus configured route-switch bounds before the first spawn | Store admission refusal before `AgentSpawned` |
+| Events per delegation | child Events at most 1,064 (8 × (8 × 16 + 5)), admitted with an 8-Event tail plus configured route-switch bounds before the first spawn | Store admission refusal before `AgentSpawned` |
 | Concurrency | Provider concurrency for calls; child Tools one at a time per Run | queued |
 
 ## Agent definitions
@@ -146,14 +146,14 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 
 | Event kind | Current payload version |
 |---|---|
-| `RunStarted` | 13 |
+| `RunStarted` | 14 |
 | `ToolFinished` | 11 |
 | `ToolStarted` | 10 |
 | `AgentSpawned` | 9 |
 | `AgentFinished`, `RunFinished` | 8 |
 | `ProviderCallRecorded`, `GoalStarted`, `GoalFinished`, `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
 | `ToolPermissionDecided` | 4 |
-| `ProviderFallbackUsed`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerHandoverRecorded`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
+| `SupervisorVerdictRecorded`, `ProviderFallbackUsed`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerHandoverRecorded`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
 | `HookStarted` | 2 |
 | `HookFinished` | 3 |
 | All other supported Event kinds | 6 |
@@ -190,6 +190,8 @@ Run and compaction hold the Session lock and every fork ancestor's operation loc
 
 A CLI process opens one Engine: the attached terminal after its Session starts, `exec` after Provider selection. The Engine's Store thread and its shared history lock live until exit, so another process's history reset reports history in use while an attached terminal is open, even when idle; Session, lineage and Workspace locks stay per Run. A normal exit closes the Engine and reports a failed close; an error exit drops it, which still stops the Store thread. The Engine runs one operation at a time: a submission or compaction while another is open is refused with `Busy` before any admission or Provider call. Each submission brings its own [per-role Provider chains](./provider.md#per-role-selection-and-fallback) and controls (Tool grant, approvals, steering, cancellation, display hints), fixed for every Run of its Goal loop, and its handle follows the Engine's committed Event stream from submission on. Invalid chains are refused at submission; a compaction brings the chains whose compaction route it calls. Each attached submission and compaction re-admits the State path and fails closed when it became unavailable or unsafe or no longer names the directory the Engine holds; a Tool grant loads its configuration at submission.
 
+The [Supervisor adapter](./tools.md#supervisor-adapter) is a shadow-only canonical fact. When recomputation produces a verdict below the per-Run cap, it must be the subject's next sequence, with the same Run and actor, exact features, level, response, evidence and cap marker. No other Event in that Run may intervene. An interrupted prefix may end between subject and verdict; recovery never executes the subject again. A verdict is transparent to existing hook adjacency and handover correlation, and changes no authority or other transition's legality. Action admission reserves one additional Event and at least 2 KiB per possible evaluation boundary (ordinary Event byte reservations conservatively exceed this), including narrowing replacement outcomes and worker capture/handover boundaries. A worker action reserves `N + 12 + (5 × 8 + 6) + 4` Events before configured route switches: `N` chunk slots, the existing terminal tail, one possible stall verdict per drained child, and four current-actor boundaries. The reducer also evaluates negative and capped boundaries but appends nothing.
+
 ### Persistence bounds
 
 | Bound | Limit | Overflow |
@@ -197,6 +199,7 @@ A CLI process opens one Engine: the attached terminal after its Session starts, 
 | Session lock files | 65,536, including pre-commit files stranded by process death; the directory scan stops after that bound plus 32 State files | quota failure before Workspace input or Provider disclosure |
 | Workspace writer lock files | bounded and shared across StateRoots; the limit is owned by [Goals](./goals.md#lifecycle-budgets-and-recovery) | new writers refused before disclosure or effects |
 | Direct-Session projection cache | 128 MiB of serialized Event payload | not kept; the next append replays strictly |
+| Supervisor verdicts | 2 KiB each; at most 256 per Run; the 256th has `capped: true` | oversized payload rejected; after 256 evaluation continues without another verdict |
 | Event payload, default | 64 KiB | append refused |
 | `MessageAccepted` | 656 KiB, with inline PNG bytes (an empty list for text) | append refused |
 | `GoalStarted` | 400 KiB | append refused |

@@ -1534,9 +1534,7 @@ impl Engine {
         admitted: &AdmittedTurn,
     ) -> Result<PreparedTurn, EngineError> {
         let (workspace_identity, history) = (admitted.workspace_identity, &admitted.history);
-        let goal = &admitted.goal;
-        let objective = &admitted.objective;
-        let budget = admitted.budget;
+        let (goal, objective, budget) = (&admitted.goal, &admitted.objective, admitted.budget);
         if let Some(permissions) = submission.permissions() {
             permissions.verify(&request.workspace)?;
         }
@@ -1634,6 +1632,7 @@ impl Engine {
             .iter()
             .all(|chain| chain.len() == 1 && chain[0] == *identity);
         let config = RunConfig {
+            supervisor: supervisor_policy(admitted.session_id, tools.is_some()),
             worker_policy: self.worker_policy(tools.as_ref(), request.policy, provider_concurrency),
             agent_definitions: tools.as_ref().and_then(|tools| tools.definitions.pin()),
             roster: submission
@@ -1953,4 +1952,17 @@ fn checked_identity(
     } else {
         Err(EngineError::InvalidRequest)
     }
+}
+
+fn supervisor_policy(
+    _session_id: SessionId,
+    tools_enabled: bool,
+) -> Option<crate::supervisor::SupervisorPolicy> {
+    tools_enabled.then(|| {
+        #[cfg(any(test, feature = "test-support"))]
+        if crate::fault::FaultPlan::take_supervisor_off(_session_id) {
+            return crate::supervisor::SupervisorPolicy::all_off();
+        }
+        crate::supervisor::SupervisorPolicy::default()
+    })
 }

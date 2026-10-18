@@ -30,25 +30,25 @@ impl Action {
         match self {
             // Reserve terminal Events through the Goal receipt even when no further step runs.
             Self::ProviderCall { previews, steering } => {
-                6 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
+                7 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
             }
             Self::Child {
                 in_flight,
                 research,
-            } => (if research { 14_usize } else { 9_usize }).saturating_add(
+            } => (if research { 15_usize } else { 10_usize }).saturating_add(
                 usize::try_from(in_flight)
                     .unwrap_or(usize::MAX)
-                    .saturating_mul(2),
+                    .saturating_mul(3),
             ),
-            Self::Tool | Self::Review => 8,
-            Self::Worker { chunks } => chunks.saturating_add(12 + 4 * 8 + 6),
+            Self::Tool | Self::Review => 10,
+            Self::Worker { chunks } => chunks.saturating_add(12 + 5 * 8 + 6 + 4),
             Self::Compaction => 6,
             Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
             Self::Delegation { children, research } => {
                 if research {
-                    children * (7 * MAX_CHILD_TOOL_CALLS + 4) + 8
+                    children * (8 * MAX_CHILD_TOOL_CALLS + 5) + 8
                 } else {
-                    4 * children + 6
+                    5 * children + 7
                 }
             }
         }
@@ -237,17 +237,27 @@ impl GoalLedger {
     }
 
     // The ledger is fed before any subscriber can see the Event.
-    pub(super) async fn append(
-        &self,
-        journal: &Journal,
+    pub(super) fn append<'a>(
+        &'a self,
+        journal: &'a Journal,
         session_id: SessionId,
         event: Event,
-    ) -> Result<u64, EngineError> {
-        let (committed, fed) = journal
-            .append_then(session_id, event, |envelope| self.committed(envelope))
-            .await?;
-        fed?;
-        Ok(committed.sequence)
+    ) -> super::run_loop::step::BoxedStep<'a, u64> {
+        Box::pin(async move {
+            let (committed, fed) = journal
+                .append_then(session_id, event, |envelope| self.committed(envelope))
+                .await?;
+            fed?;
+            if let Some(event) =
+                self.view(|v| v.runs.last().and_then(|r| r.supervisor.pending_event()))?
+            {
+                let (_, fed) = journal
+                    .append_then(session_id, event, |envelope| self.committed(envelope))
+                    .await?;
+                fed?;
+            }
+            Ok(committed.sequence)
+        })
     }
 
     fn committed(&self, envelope: &EventEnvelope) -> Result<(), EngineError> {

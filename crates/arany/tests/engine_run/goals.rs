@@ -1529,6 +1529,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                supervisor: None,
                 worker_policy: None,
                 agent_definitions: None,
                 roster: None,
@@ -4977,6 +4978,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                supervisor: None,
                 worker_policy: None,
                 agent_definitions: None,
                 roster: None,
@@ -5677,4 +5679,82 @@ async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable
         );
         assert_action_bounds(&events, false, false);
     }
+}
+
+#[tokio::test]
+async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_outcome() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = facts_workspace(temp.path(), "stable");
+    let mut observations = Vec::new();
+    for enabled in [true, false] {
+        let state_path = temp.path().join(if enabled { "shadow" } else { "off" });
+        let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+        let session = engine
+            .create_session(workspace.clone(), Some("Supervisor".into()))
+            .await
+            .unwrap();
+        if !enabled {
+            arany::FaultPlan::supervisor_off(session);
+        }
+        let mut outcomes: Vec<_> = (0..4)
+            .map(|_| crate::tool_outcome(facts_read(), None))
+            .collect();
+        outcomes.push(finish_with("done"));
+        let provider = Arc::new(ScriptedProvider::new(outcomes));
+        let mut input = request(&workspace, "Inspect repeatedly");
+        input.include_paths.clear();
+        input.session_id = Some(session);
+        let result = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        engine.close().await.unwrap();
+        let calls = provider.requests.lock().unwrap().clone();
+        assert_eq!(calls.len(), 5);
+        let (events, view) = replayed(&state_path, session).await;
+        assert_action_bounds(&events, false, false);
+        let verdicts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::SupervisorVerdictRecorded { verdict, .. } => Some((e.sequence, verdict)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verdicts.len(), if enabled { 2 } else { 0 });
+        for (sequence, verdict) in verdicts {
+            assert_eq!(sequence, verdict.subject_sequence + 1);
+        }
+        assert_eq!(view.runs[0].status, RunStatus::Finished);
+        let inputs: Vec<_> = calls
+            .iter()
+            .map(|c| {
+                c.input
+                    .tools
+                    .as_ref()
+                    .unwrap()
+                    .observations()
+                    .iter()
+                    .map(|o| (o.intent.call.clone(), o.disposition, o.output.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        observations.push((
+            result.run.assistant_message.clone(),
+            result.run.agents[0].summary.clone(),
+            inputs,
+        ));
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            5,
+            "strict replay never calls the Provider"
+        );
+    }
+    assert_eq!(observations[0], observations[1]);
 }

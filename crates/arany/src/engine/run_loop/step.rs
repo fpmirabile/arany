@@ -205,7 +205,7 @@ struct ActiveTime {
 }
 
 // Boxing a large future in a non-async wrapper keeps debug-build callers from holding it in their own frames.
-pub(super) type BoxedStep<'a, T> =
+pub(in crate::engine) type BoxedStep<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, EngineError>> + Send + 'a>>;
 
 impl RunLoop<'_> {
