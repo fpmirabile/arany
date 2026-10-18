@@ -1447,7 +1447,10 @@ fn submission_notice(
     let feedback = match paused_goal {
         Some(notice) if run_status == RunStatus::Cancelled => Some(notice.to_owned()),
         Some(notice) => Some(match run_feedback {
-            Some(feedback) => format!("{feedback} {notice}"),
+            Some(feedback) if feedback.ends_with(['.', '!', '?']) => {
+                format!("{feedback} {notice}")
+            }
+            Some(feedback) => format!("{feedback}. {notice}"),
             None => notice.to_owned(),
         }),
         None => run_feedback,
@@ -2325,6 +2328,21 @@ mod tests {
         assert!(!super::committed_nothing(None, 7));
     }
     use super::*;
+
+    #[test]
+    fn hook_stop_feedback_joins_the_pause_notice_as_a_sentence() {
+        assert_eq!(
+            submission_notice(
+                Some(INTERRUPTED_GOAL_NOTICE),
+                RunStatus::StoppedByHook,
+                Some("Run stopped by hook: halt".into()),
+                None
+            ),
+            Some(format!(
+                "Run stopped by hook: halt. {INTERRUPTED_GOAL_NOTICE}"
+            ))
+        );
+    }
 
     #[test]
     fn interrupted_goal_notice_replaces_only_cancelled_run_feedback() {
