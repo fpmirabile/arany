@@ -1065,7 +1065,7 @@ async fn execute_worker(
                     .write_all(b"GO\n")
                     .await
                     .map_err(|_| ToolError::Operation)?;
-                stdin.shutdown().await.map_err(|_| ToolError::Operation)?;
+                drop(stdin);
                 let observation = if runtime.worker.is_some() {
                     super::read_worker_observation(
                         &mut stdout,

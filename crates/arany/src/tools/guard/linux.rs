@@ -1008,7 +1008,7 @@ pub(super) async fn execute_inner(
             .write_all(b"GO\n")
             .await
             .map_err(|_| ToolError::Operation)?;
-        stdin.shutdown().await.map_err(|_| ToolError::Operation)?;
+        drop(stdin);
         let (observation, candidate) = if let Some(session) = cache.as_ref() {
             let observation = super::read_observation_line(&mut stdout, intent).await?;
             let update_deadline = super::cache_transfer_deadline(
