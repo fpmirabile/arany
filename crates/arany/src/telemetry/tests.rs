@@ -35,6 +35,7 @@ fn in_memory() -> (Telemetry, InMemorySpanExporter) {
     let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())
         .with_sampler(Sampler::AlwaysOn)
+        .with_max_events_per_span(MAX_EVENTS_PER_SPAN)
         .build();
     let tracer = provider.tracer("arany");
     (
@@ -793,6 +794,110 @@ fn unit_context() -> (SystemTime, SystemTime) {
     )
 }
 
+fn supervisor_trace_verdict() -> crate::supervisor::SupervisorVerdict {
+    use crate::supervisor::*;
+    let signals = vec![
+        Signal {
+            signal: SignalKind::Loop,
+            level: Level::WouldNarrow,
+            would_response: Some(Response::Pause),
+            features: Features::Loop(LoopFeatures {
+                repeat_identical: u16::MAX,
+                ..Default::default()
+            }),
+            evidence: vec![1],
+        },
+        Signal {
+            signal: SignalKind::Probing,
+            level: Level::WouldNarrow,
+            would_response: Some(Response::Revoke),
+            features: Features::Probing(Default::default()),
+            evidence: vec![1],
+        },
+        Signal {
+            signal: SignalKind::Disproportion,
+            level: Level::WouldNarrow,
+            would_response: Some(Response::RequireApproval),
+            features: Features::Disproportion(Default::default()),
+            evidence: vec![1],
+        },
+    ];
+    SupervisorVerdict {
+        subject_sequence: 1,
+        site: Site::WorkerCapture,
+        evaluator: 1,
+        mode: Mode::Shadow,
+        signals,
+        capped: true,
+    }
+}
+
+#[test]
+fn supervisor_verdict_events_export_only_closed_signal_and_level_arrays() {
+    let (telemetry, exporter) = in_memory();
+    let mut segment = Segment::begin(&telemetry, unit_context());
+    let actor = segment.spawn(AgentRole::Primary);
+    segment.commit(Event::MessageCommitted {
+        run_id: segment.run_id,
+        text: "SUPERVISOR_CONTENT_CANARY".into(),
+    });
+    let mut verdict = supervisor_trace_verdict();
+    verdict.signals[0].level = crate::supervisor::Level::Notice;
+    verdict.signals[0].would_response = None;
+    segment.commit(Event::SupervisorVerdictRecorded {
+        run_id: RunId::new(),
+        agent_run_id: actor,
+        verdict: verdict.clone(),
+    });
+    let sequence = segment.commit(Event::SupervisorVerdictRecorded {
+        run_id: segment.run_id,
+        agent_run_id: actor,
+        verdict,
+    });
+    segment.finish_agent(actor, AgentDisposition::Finished);
+    segment.finish(RunDisposition::Finished, None);
+    let spans = finished_spans(&telemetry, &exporter);
+    let events: Vec<_> = spans
+        .iter()
+        .flat_map(|s| s.events.iter())
+        .filter(|e| e.name == "arany.supervisor.verdict")
+        .collect();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].timestamp, committed_at(sequence));
+    assert_eq!(
+        events[0].attributes,
+        vec![
+            KeyValue::new(
+                "arany.supervisor.signals",
+                Value::Array(opentelemetry::Array::String(vec![
+                    "loop".into(),
+                    "probing".into(),
+                    "disproportion".into()
+                ]))
+            ),
+            KeyValue::new(
+                "arany.supervisor.levels",
+                Value::Array(opentelemetry::Array::String(vec![
+                    "notice".into(),
+                    "would_narrow".into(),
+                    "would_narrow".into()
+                ]))
+            ),
+        ]
+    );
+    let resource = ResourceAttributesWithSchema::from(&telemetry_resource());
+    let body = ExportTraceServiceRequest {
+        resource_spans: group_spans_by_resource_and_scope(spans, &resource),
+    }
+    .encode_to_vec();
+    assert!(
+        !body
+            .windows(b"SUPERVISOR_CONTENT_CANARY".len())
+            .any(|w| w == b"SUPERVISOR_CONTENT_CANARY"),
+        "trace content canary leaked"
+    );
+}
+
 #[test]
 fn direct_and_team_span_trees_follow_admitted_agents() {
     for children in [0, 2, 8] {
@@ -1360,51 +1465,82 @@ fn compaction_record(status: CompactionStatus) -> crate::session::CompactionReco
 
 #[test]
 fn fullest_mapped_batch_fits_trace_body_limit() {
-    let (telemetry, exporter) = in_memory();
-    let mut goal = goal_view();
-    goal.provider_calls = u32::MAX;
-    goal.known_tokens = u64::MAX;
-    goal.active_ms = u64::MAX;
-    goal.uncertain_active_ms = u64::MAX;
-    for _ in 0..MAX_EXPORT_BATCH_SPANS / 2 {
-        let mut segment = Segment::begin(&telemetry, unit_context());
-        let unknown = AgentRunId::new();
-        // Each span holds its cap of markers with the longest kind names.
-        for _ in 1..MAX_EVENTS_PER_SPAN {
-            segment.commit(Event::GoalCompactionCallReserved {
-                goal_id: segment.goal_id,
-                run_id: segment.run_id,
-                active_ceiling_ms: u64::MAX,
-            });
+    for supervisor in [false, true] {
+        let (telemetry, exporter) = in_memory();
+        let mut goal = goal_view();
+        goal.provider_calls = u32::MAX;
+        goal.known_tokens = u64::MAX;
+        goal.active_ms = u64::MAX;
+        goal.uncertain_active_ms = u64::MAX;
+        for _ in 0..MAX_EXPORT_BATCH_SPANS / if supervisor { 1 } else { 2 } {
+            let mut segment = Segment::begin(&telemetry, unit_context());
+            let unknown = AgentRunId::new();
+            // Each span holds its cap of markers with the longest kind names.
+            for _ in 1..MAX_EVENTS_PER_SPAN {
+                segment.commit(Event::GoalCompactionCallReserved {
+                    goal_id: segment.goal_id,
+                    run_id: segment.run_id,
+                    active_ceiling_ms: u64::MAX,
+                });
+            }
+            for _ in 3..MAX_EVENTS_PER_SPAN {
+                if supervisor {
+                    segment.commit(Event::SupervisorVerdictRecorded {
+                        run_id: segment.run_id,
+                        agent_run_id: unknown,
+                        verdict: supervisor_trace_verdict(),
+                    });
+                } else {
+                    segment.commit(Event::ProviderCallRecorded {
+                        run_id: segment.run_id,
+                        agent_run_id: unknown,
+                        record: provider_record(
+                            AgentPhase::RootSynthesis,
+                            ProviderCallDisposition::Finished,
+                            (None, None),
+                        ),
+                    });
+                }
+            }
+            if supervisor {
+                for _ in 0..256 {
+                    segment.commit(Event::SupervisorVerdictRecorded {
+                        run_id: segment.run_id,
+                        agent_run_id: unknown,
+                        verdict: supervisor_trace_verdict(),
+                    });
+                }
+            }
+            segment.finish(RunDisposition::Cancelled, Some(&goal));
         }
-        for _ in 3..MAX_EVENTS_PER_SPAN {
-            segment.commit(Event::ProviderCallRecorded {
-                run_id: segment.run_id,
-                agent_run_id: unknown,
-                record: provider_record(
-                    AgentPhase::RootSynthesis,
-                    ProviderCallDisposition::Finished,
-                    (None, None),
-                ),
-            });
+        let spans: Vec<_> = finished_spans(&telemetry, &exporter)
+            .into_iter()
+            .filter(|span| !supervisor || span.name == "invoke_workflow arany.run")
+            .collect();
+        if supervisor {
+            assert!(
+                spans
+                    .iter()
+                    .filter(|span| span.name == "invoke_workflow arany.run")
+                    .all(|span| span.events.dropped_count == 256)
+            );
         }
-        segment.finish(RunDisposition::Cancelled, Some(&goal));
+        assert_eq!(spans.len(), MAX_EXPORT_BATCH_SPANS);
+        assert!(
+            spans
+                .iter()
+                .all(|span| span.events.len() == MAX_EVENTS_PER_SPAN as usize)
+        );
+        let resource = ResourceAttributesWithSchema::from(&telemetry_resource());
+        let request = ExportTraceServiceRequest {
+            resource_spans: group_spans_by_resource_and_scope(spans, &resource),
+        };
+        assert!(
+            request.encoded_len() <= MAX_TRACE_BODY_BYTES,
+            "fullest mapped batch exceeds the OTLP body limit: supervisor={supervisor}, bytes={}",
+            request.encoded_len()
+        );
     }
-    let spans = finished_spans(&telemetry, &exporter);
-    assert_eq!(spans.len(), MAX_EXPORT_BATCH_SPANS);
-    assert!(
-        spans
-            .iter()
-            .all(|span| span.events.len() == MAX_EVENTS_PER_SPAN as usize)
-    );
-    let resource = ResourceAttributesWithSchema::from(&telemetry_resource());
-    let request = ExportTraceServiceRequest {
-        resource_spans: group_spans_by_resource_and_scope(spans, &resource),
-    };
-    assert!(
-        request.encoded_len() <= MAX_TRACE_BODY_BYTES,
-        "fullest mapped batch exceeds the OTLP body limit"
-    );
 }
 
 #[test]

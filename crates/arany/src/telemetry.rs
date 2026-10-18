@@ -32,7 +32,7 @@ const EXPORT_TIMEOUT: Duration = Duration::from_millis(500);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
 const MAX_MODEL_BYTES: usize = 256;
 const MAX_QUEUED_SPANS: usize = 256;
-const MAX_EXPORT_BATCH_SPANS: usize = 64;
+const MAX_EXPORT_BATCH_SPANS: usize = 32;
 const MAX_TRACE_BODY_BYTES: usize = 256 * 1024;
 const MAX_EVENTS_PER_SPAN: u32 = 32;
 
@@ -489,6 +489,48 @@ impl RunTrace {
     }
 
     fn mark(&mut self, envelope: &EventEnvelope, at: SystemTime) {
+        if let Event::SupervisorVerdictRecorded {
+            run_id, verdict, ..
+        } = &envelope.event
+        {
+            use crate::supervisor::{Level, SignalKind};
+            if let Some((_, span)) = self.run.as_ref().filter(|(id, _)| id == run_id)
+                && let Some(context) = &span.context
+            {
+                let signals = verdict
+                    .signals
+                    .iter()
+                    .map(|signal| match signal.signal {
+                        SignalKind::Loop => "loop".into(),
+                        SignalKind::Probing => "probing".into(),
+                        SignalKind::Disproportion => "disproportion".into(),
+                    })
+                    .collect::<Vec<opentelemetry::StringValue>>();
+                let levels = verdict
+                    .signals
+                    .iter()
+                    .map(|signal| match signal.level {
+                        Level::Notice => "notice".into(),
+                        Level::WouldNarrow => "would_narrow".into(),
+                    })
+                    .collect::<Vec<opentelemetry::StringValue>>();
+                context.span().add_event_with_timestamp(
+                    "arany.supervisor.verdict",
+                    at,
+                    vec![
+                        KeyValue::new(
+                            "arany.supervisor.signals",
+                            opentelemetry::Value::Array(opentelemetry::Array::String(signals)),
+                        ),
+                        KeyValue::new(
+                            "arany.supervisor.levels",
+                            opentelemetry::Value::Array(opentelemetry::Array::String(levels)),
+                        ),
+                    ],
+                );
+            }
+            return;
+        }
         let kind = TraceEventKind::from(&envelope.event);
         let span = match kind {
             TraceEventKind::Goal(_) => self.goal.as_ref(),

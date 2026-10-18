@@ -65,6 +65,13 @@ async fn closed_bundle(
 }
 
 pub(super) async fn worker_case(case: &'static str) {
+    let padding = match case {
+        "headroom" => Some(9_906),
+        "headroom_child" => Some(9_912),
+        "headroom_background" => Some(9_916),
+        "headroom_race" => Some(9_916),
+        _ => None,
+    };
     arany::test_support::isolate_account_root();
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -167,13 +174,13 @@ pub(super) async fn worker_case(case: &'static str) {
         },
     )
     .unwrap();
-    let (engine, session) = if case == "headroom" {
+    let (engine, session) = if let Some(padding) = padding {
         let id = engine
             .create_session(workspace.clone(), None)
             .await
             .unwrap();
         engine.close().await.unwrap();
-        pad_worker_session(&state, id);
+        pad_worker_session(&state, id, padding);
         (
             engine_support::open(
                 StateRoot::open_existing(&state).unwrap(),
@@ -353,7 +360,97 @@ pub(super) async fn worker_case(case: &'static str) {
             "source canary remained private"
         );
     }
-    if case == "publication_loss" {
+    if matches!(
+        case,
+        "headroom_child" | "headroom_background" | "headroom_race"
+    ) {
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Store(arany::StoreError::ReplayLimit))
+            ),
+            "{case}: {result:?}"
+        );
+        assert_eq!(run.status, RunStatus::Failed, "{case}");
+        assert!(run.agents.iter().all(|a| a.status != AgentStatus::Active));
+        assert!(worker.released.is_some(), "{case}");
+        assert_eq!(
+            worker.outcome.as_ref().unwrap().1.disposition,
+            WorkerDisposition::Failed,
+            "{case}"
+        );
+        assert_eq!(
+            worker.outcome.as_ref().unwrap().1.cause,
+            arany::worker::WorkerCause::Budget,
+            "{case}"
+        );
+        assert!(worker.handover.is_none(), "{case}");
+        assert!(worker.integration.is_none(), "{case}");
+        assert!(
+            run.tools
+                .iter()
+                .chain(run.agents.iter().flat_map(|a| &a.tools))
+                .all(|t| {
+                    t.observation
+                        .as_ref()
+                        .is_some_and(|o| o.disposition == arany::ToolDisposition::Succeeded)
+                }),
+            "{case}: every Tool has a known successful observation"
+        );
+        let stops = bundle
+            .events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, e)| {
+                matches!(&e.event, Event::WorkerStopObserved { record, .. }
+                if record.reason == arany::worker::WorkerStopReason::Budget)
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stops.len(), 1, "{case}");
+        let stopped = stops[0];
+        let Event::ToolFinished { agent_run_id, .. } = &bundle.events[stopped - 1].event else {
+            panic!("{case}: capacity must stop the continuation after a successful read");
+        };
+        if case == "headroom_child" {
+            assert!(child_calls >= 2, "{case}: reach a worker continuation");
+            assert_eq!(synthesis_calls, 0, "{case}");
+            assert_ne!(*agent_run_id, run.agents[0].id, "{case}");
+        } else if case == "headroom_race" {
+            assert_eq!(child_calls, 1, "{case}");
+            assert_eq!(synthesis_calls, 1, "{case}");
+            assert_ne!(*agent_run_id, run.agents[0].id, "{case}");
+            assert!(
+                bundle.events[stopped + 1..].iter().any(|e| matches!(
+                    &e.event,
+                    Event::ProviderCallRecorded { agent_run_id, record, .. }
+                        if *agent_run_id == run.agents[0].id
+                            && record.phase == AgentPhase::RootSynthesis
+                            && record.disposition == ProviderCallDisposition::InvalidResponse
+                            && record.failure_reason == Some(arany::ProviderFailureReason::WorkerToolRefused)
+                )),
+                "{case}: the completed primary response is refused after the child stops"
+            );
+        } else {
+            assert_eq!(child_calls, 1, "{case}: drain the blocked worker call");
+            assert!(synthesis_calls >= 1, "{case}: reach primary coordination");
+            assert_eq!(*agent_run_id, run.agents[0].id, "{case}");
+        }
+        assert!(
+            bundle.events[stopped + 1..].iter().all(|e| !matches!(
+                e.event,
+                Event::GoalProviderCallReserved { .. }
+                    | Event::ToolStarted { .. }
+                    | Event::AgentSpawned { .. }
+                    | Event::WorkerHandoverRecorded { .. }
+            )),
+            "{case}: no work starts after the stop"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("notes/a")).unwrap(),
+            b"original a"
+        );
+    } else if case == "publication_loss" {
         assert!(result.is_err(), "publication uncertainty is fatal");
         assert!(injected, "{case}");
         assert_eq!(synthesis_calls, 0, "{case}");
@@ -596,17 +693,32 @@ async fn foreground_worker_guard_journey_active_time_budget_closes_the_goal() {
     worker_case("time").await;
 }
 
-fn pad_worker_session(state: &Path, id: SessionId) {
+fn pad_worker_session(state: &Path, id: SessionId, through: i64) {
     let mut connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
     let transaction = connection.transaction().unwrap();
     let mut insert = transaction.prepare("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)").unwrap();
-    for sequence in 2..=9_906 {
+    for sequence in 2..=through {
         insert
             .execute(rusqlite::params![sequence, id.to_string()])
             .unwrap();
     }
     drop(insert);
     transaction.commit().unwrap();
+}
+
+#[tokio::test]
+async fn worker_call_capacity_stop_releases_the_lease_before_returning_the_store_error() {
+    worker_case("headroom_child").await;
+}
+
+#[tokio::test]
+async fn background_primary_capacity_stop_drains_workers_before_returning_the_store_error() {
+    worker_case("headroom_background").await;
+}
+
+#[tokio::test]
+async fn child_capacity_stop_discards_a_completed_background_primary_response() {
+    worker_case("headroom_race").await;
 }
 
 #[tokio::test]
