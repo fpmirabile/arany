@@ -959,4 +959,27 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
     assert!(serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES);
     assert!(!goal.success_criterion_satisfied);
     assert!(!view.runs[0].worker_history()[0].verified);
+
+    let template = view.rewinds.operations[0].clone();
+    for index in 1..10 {
+        let mut operation = template.clone();
+        operation.started.rewind_id = Uuid::now_v7();
+        operation.started_sequence = view.last_sequence + index;
+        operation.finished = None;
+        operation.finished_sequence = None;
+        view.rewinds.operations.push(operation);
+    }
+    view.last_sequence += 10;
+    let facts = crate::session::rewind::history_facts(&view, 0, view.last_sequence).unwrap();
+    assert!(facts.len() > 512);
+    let report = goal_report(&view, &view.runs[0], view.goal(f.goal).unwrap());
+    let newest = view.rewinds.operations.last().unwrap().history_fact();
+    assert!(report.unresolved.contains(&newest));
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .any(|line| line.contains("omitted"))
+    );
+    report.validate().unwrap();
 }

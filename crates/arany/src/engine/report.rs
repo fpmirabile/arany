@@ -88,12 +88,16 @@ pub(super) fn goal_report(
     if let Some(facts) =
         crate::session::rewind::history_facts(view, goal.started_sequence, view.last_sequence)
     {
-        push_goal_report_item(
-            &mut report,
-            GoalReportSection::Unresolved,
-            &facts,
-            &mut omitted_facts,
-        );
+        let mut lines = facts.lines();
+        lines.next();
+        for fact in lines.rev() {
+            push_goal_report_item(
+                &mut report,
+                GoalReportSection::Unresolved,
+                fact,
+                &mut omitted_facts,
+            );
+        }
     }
     for (index, (_, fallback)) in view
         .runs

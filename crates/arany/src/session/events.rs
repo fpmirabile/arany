@@ -1302,6 +1302,8 @@ impl Event {
             }
             "SessionStarted"
             | "SessionDefaultChanged"
+            | "WorkspaceRewindStarted"
+            | "WorkspaceRewindFinished"
             | "SessionForked"
             | "ContextCompacted"
             | "SessionRenamed"

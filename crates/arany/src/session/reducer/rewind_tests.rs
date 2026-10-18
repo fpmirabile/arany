@@ -372,6 +372,83 @@ fn rewind_planner_folds_runs_gaps_exec_bits_deletes_and_inherited_prefix_only() 
 }
 
 #[test]
+fn rewind_pruned_first_preimages_reject_start_but_can_be_kept() {
+    let (_, mut view) = fixture();
+    let source = view.runs[0]
+        .tools
+        .iter()
+        .find(|t| matches!(t.intent.call, ToolCall::ApplyChangeset { .. }))
+        .unwrap()
+        .clone();
+    for (before, after) in [
+        (b"old".as_slice(), b"middle".as_slice()),
+        (b"middle", b"new"),
+    ] {
+        let mut run = view.runs[0].clone();
+        run.id = RunId::new();
+        run.accepted_sequence = view.last_sequence + 1;
+        let sequence = view.last_sequence + 2;
+        view.rewinds.checkpoints.push(CheckpointTarget::Run {
+            run_id: run.id,
+            sequence,
+        });
+        let mut tool = source.clone();
+        tool.intent.run_id = run.id;
+        tool.intent.call = ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt {
+                source_intent_digest: [4; 32],
+                changeset: crate::tools::CommandChangeset {
+                    files: vec![crate::tools::FileChange {
+                        path: "src/a".into(),
+                        before: Some(crate::tools::FileVersion::from_bytes(before, false)),
+                        after: Some(crate::tools::FileVersion::from_bytes(after, false)),
+                    }],
+                },
+            },
+        };
+        tool.observation.as_mut().unwrap().intent = tool.intent.clone();
+        tool.finished_sequence = Some(sequence + 1);
+        tool.checkpoint = Some(Checkpoint {
+            status: CheckpointStatus::Captured,
+            reason: None,
+            pruned_before_run: None,
+        });
+        run.tools = vec![tool];
+        view.last_sequence = sequence + 2;
+        view.runs.push(run);
+    }
+    let target = view.rewinds.checkpoints[1].clone();
+    assert!(!plan(&view, &target).unwrap().files[0].unavailable);
+    let pruned = view.runs[1].id;
+    view.runs[2].tools[0]
+        .checkpoint
+        .as_mut()
+        .unwrap()
+        .pruned_before_run = Some(pruned);
+    let p = plan(&view, &target).unwrap();
+    assert!(p.files[0].unavailable);
+    rejects(&view, started(&view, target.clone()));
+    let overwrite = Overwrite {
+        path: "src/a".into(),
+        observed: p.files[0].expected_current.clone(),
+    };
+    assert!(p.select(&[], &[overwrite]).unwrap().files[0].unavailable);
+    assert!(p.select(&["src/a".into()], &[]).unwrap().files.is_empty());
+    assert!(!plan(&view, &view.rewinds.checkpoints[2]).unwrap().files[0].unavailable);
+    // A failed publication can still carry an eviction notice from capture.
+    let mut failed = view.runs[2].tools[0].clone();
+    failed.observation.as_mut().unwrap().disposition = ToolDisposition::Failed;
+    failed.checkpoint.as_mut().unwrap().status = CheckpointStatus::NotNeeded;
+    view.runs[2].tools[0]
+        .checkpoint
+        .as_mut()
+        .unwrap()
+        .pruned_before_run = None;
+    view.runs[2].tools.push(failed);
+    assert!(plan(&view, &target).unwrap().files[0].unavailable);
+}
+
+#[test]
 fn rewind_plan_selection_and_payload_bounds_are_exact_and_closed() {
     let (_, view) = fixture();
     let p = plan(&view, &target(&view)).unwrap();
@@ -419,7 +496,18 @@ fn rewind_plan_selection_and_payload_bounds_are_exact_and_closed() {
         " ".repeat(MAX_REWIND_EVENT_BYTES - payload.len())
     );
     assert!(Event::decode(event.kind(), 1, &exact, None, None).is_ok());
-    assert!(Event::decode(event.kind(), 1, &(exact + " "), None, None).is_err());
+    assert!(matches!(
+        Event::decode(event.kind(), 1, &(exact + " "), None, None),
+        Err(ReplayError::InvalidPayload)
+    ));
+    assert!(matches!(
+        Event::decode(event.kind(), 1, &payload, Some(view.runs[0].id), None),
+        Err(ReplayError::InvalidPayload)
+    ));
+    assert!(matches!(
+        Event::decode(event.kind(), 1, &payload, None, Some(AgentRunId::new())),
+        Err(ReplayError::InvalidPayload)
+    ));
     let Event::WorkspaceRewindStarted { mut record } = event.clone() else {
         unreachable!()
     };
@@ -445,6 +533,16 @@ fn rewind_plan_selection_and_payload_bounds_are_exact_and_closed() {
     apply(&mut open, event);
     let event = finished(&open, RewindOutcome::Restored);
     let payload = event.payload().unwrap();
+    for (run, agent, bytes) in [
+        (Some(view.runs[0].id), None, payload.clone()),
+        (None, Some(AgentRunId::new()), payload.clone()),
+        (None, None, " ".repeat(MAX_REWIND_EVENT_BYTES + 1)),
+    ] {
+        assert!(matches!(
+            Event::decode(event.kind(), 1, &bytes, run, agent),
+            Err(ReplayError::InvalidPayload)
+        ));
+    }
     for field in ["checkpoint", "attestation"] {
         let mut v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         v.as_object_mut().unwrap().remove(field);

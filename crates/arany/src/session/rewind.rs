@@ -434,7 +434,7 @@ enum Publication<'a> {
     Rewind(&'a RewindView),
 }
 impl Publication<'_> {
-    fn changes(self) -> Result<(Vec<FilePlan>, bool), ReplayError> {
+    fn changes(self, pruned_through: u64) -> Result<(Vec<FilePlan>, bool), ReplayError> {
         match self {
             Self::Tool(run, tool) => Ok((
                 publication_files(
@@ -443,9 +443,11 @@ impl Publication<'_> {
                         .as_ref()
                         .ok_or(ReplayError::InvalidTransition)?,
                 )?,
-                tool.checkpoint
-                    .as_ref()
-                    .is_none_or(|c| c.status == CheckpointStatus::Skipped),
+                run.accepted_sequence <= pruned_through
+                    || tool
+                        .checkpoint
+                        .as_ref()
+                        .is_none_or(|c| c.status == CheckpointStatus::Skipped),
             )),
             Self::Rewind(r) => Ok((
                 r.files
@@ -458,10 +460,11 @@ impl Publication<'_> {
                         unavailable: false,
                     })
                     .collect(),
-                r.finished
-                    .as_ref()
-                    .and_then(|f| f.checkpoint.as_ref())
-                    .is_none_or(|c| c.status == CheckpointStatus::Skipped),
+                r.started_sequence <= pruned_through
+                    || r.finished
+                        .as_ref()
+                        .and_then(|f| f.checkpoint.as_ref())
+                        .is_none_or(|c| c.status == CheckpointStatus::Skipped),
             )),
         }
     }
@@ -471,6 +474,31 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
     if !view.rewinds.checkpoints.contains(target) || target.sequence() > view.last_sequence {
         return Err(ReplayError::InvalidTransition);
     }
+    let pruned_through = view
+        .runs
+        .iter()
+        .flat_map(|run| &run.tools)
+        .filter_map(|tool| tool.checkpoint.as_ref())
+        .chain(
+            view.rewinds
+                .operations
+                .iter()
+                .filter_map(|r| r.finished.as_ref().and_then(|f| f.checkpoint.as_ref())),
+        )
+        .filter_map(|checkpoint| checkpoint.pruned_before_run)
+        .max()
+        .and_then(|pruned| {
+            view.rewinds
+                .checkpoints
+                .iter()
+                .find_map(|checkpoint| match checkpoint {
+                    CheckpointTarget::Run { run_id, sequence } if *run_id == pruned => {
+                        Some(*sequence)
+                    }
+                    _ => None,
+                })
+        })
+        .unwrap_or(0);
     let mut steps = Vec::new();
     let mut blockers = Vec::new();
     let mut non_rewindable = Vec::new();
@@ -542,7 +570,7 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
     steps.sort_by_key(|s| s.0);
     let mut files: BTreeMap<String, FilePlan> = BTreeMap::new();
     for (_, publication) in steps {
-        let (changes, skipped) = publication.changes()?;
+        let (changes, unavailable) = publication.changes(pruned_through)?;
         for mut change in changes {
             if !crate::tools::types::valid_relative(&change.path, false)
                 || change.restore_to.as_ref().is_some_and(|v| !v.valid())
@@ -557,7 +585,7 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
                 if files.len() == MAX_REWIND_FILES * MAX_PLANNER_PUBLICATIONS {
                     return Err(ReplayError::InvalidTransition);
                 }
-                change.unavailable = skipped && change.restore_to.is_some();
+                change.unavailable = unavailable && change.restore_to.is_some();
                 files.insert(change.path.clone(), change);
             }
         }
