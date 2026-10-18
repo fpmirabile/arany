@@ -1460,7 +1460,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::super::storage::{STORAGE_BYTES_CAP, STORAGE_PENDING, prepare_storage};
-    use super::super::{COMMAND_DENIED_SYSCALLS, COMMAND_PROFILE, SYS_COALITION_INFO, SYS_PERSONA};
+    use super::super::{ProfileKind, SYS_COALITION_INFO, SYS_PERSONA, SeatbeltProfile};
     use super::*;
     use crate::tools::ToolCall;
     use crate::tools::guard::read_capped;
@@ -2990,31 +2990,42 @@ done
             stream.read_exact(&mut go).unwrap();
             assert_eq!(&go, b"G");
             // The runnable ad-hoc key proves the same dynamic predicate, not an Apple entitlement grant.
-            let mut profile = super::super::profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS);
+            let mut profile = SeatbeltProfile::new(ProfileKind::Command);
             for key in [
                 "com.apple.private.coalition-spawn",
                 "com.apple.private.persona-mgmt",
             ] {
-                assert!(profile.contains(&format!("(require-entitlement \"{key}\")")));
-                profile = profile.replace(key, "com.apple.security.get-task-allow");
+                assert!(
+                    profile
+                        .text
+                        .contains(&format!("(require-entitlement \"{key}\")"))
+                );
+                profile.text = profile
+                    .text
+                    .replace(key, "com.apple.security.get-task-allow");
             }
             for path in [
                 root.join("plain"),
                 root.join("actor"),
                 PathBuf::from("/usr/bin/true"),
             ] {
-                super::super::ancestors(&mut profile, &path).unwrap();
-                profile.push_str(&format!(
-                    "(allow file-read* file-map-executable process-exec (literal {}))\n",
-                    super::super::quoted(&path).unwrap(),
-                ));
+                profile
+                    .grant(
+                        "allow file-read* file-map-executable process-exec",
+                        "literal",
+                        &path,
+                    )
+                    .unwrap();
             }
-            profile.push_str(&format!(
-                "(allow file-read* file-write* (literal {}))\n",
-                super::super::quoted(&root.join("entitlement-receipt")).unwrap(),
-            ));
+            profile
+                .rule(
+                    "allow file-read* file-write*",
+                    "literal",
+                    &root.join("entitlement-receipt"),
+                )
+                .unwrap();
             super::super::configure_resources().unwrap();
-            super::super::install_profile(profile).unwrap();
+            super::super::install_profile(profile.text).unwrap();
             verify_actor("plain", "allow");
             verify_actor("actor", "deny");
             std::fs::write(root.join("entitlement-receipt"), b"PROFILE\n").unwrap();

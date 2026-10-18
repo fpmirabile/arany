@@ -56,7 +56,6 @@ Found by the macOS architecture review after A5b; no behavior change is
 claimed until each lands. Keep the existing freeze until item 11 for macOS
 Guard internals.
 
-- **One Seatbelt profile builder.** `install`, `install_command` and `install_git` in `crates/arany/src/tools/guard/macos.rs` repeat rules, ancestors, grants, port detach, install and attestation; one private builder with a single install-and-attest tail keeps digest-relevant logic in one place.
 - **Native Git profile probe hardening (needs a Mac).** Add a service-specific Mach-lookup denial with an unsandboxed success baseline to the Seatbelt Git probe. A direct lookup needs new test-only `unsafe` FFI, which requires the dedicated review in [AGENTS.md](./AGENTS.md#global-rules) rule 7.
 
 ## Terminal continuity evidence
