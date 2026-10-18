@@ -1024,7 +1024,8 @@ fn record_failure(site: &'static str, intent: &EffectIntent, error: &ToolError) 
 
 fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
     let enforcement_cause =
-        matches!(&error, ToolError::GuardBootstrap(_)).then_some(EnforcementCause::GuardBootstrap);
+        matches!(&error, ToolError::GuardBootstrap(failure) if failure.sandbox_setup())
+            .then_some(EnforcementCause::GuardBootstrap);
     let site = match intent.call.facts().site {
         Site::InProcess => "Read",
         Site::Guard => "Guard",

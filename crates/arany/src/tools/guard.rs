@@ -436,6 +436,22 @@ impl BootstrapFailure {
         }
     }
 
+    pub(super) fn sandbox_setup(&self) -> bool {
+        match self.stage {
+            BootstrapStage::RuntimeMounts
+            | BootstrapStage::Capabilities
+            | BootstrapStage::Handshake => true,
+            BootstrapStage::Admission
+            | BootstrapStage::Workspace
+            | BootstrapStage::Payload
+            | BootstrapStage::Receipt
+            | BootstrapStage::ProcessStop
+            | BootstrapStage::LauncherReap
+            | BootstrapStage::StderrDrain
+            | BootstrapStage::StorageCleanup => false,
+        }
+    }
+
     pub(super) fn check(&self) -> Option<&'static str> {
         self.check.map(GuardCheck::label)
     }
@@ -1946,17 +1962,67 @@ mod tests {
         hook.policy_digest = [1; 32];
         hook.enforcement_digest = [2; 32];
         let before = dispatch_result(&hook, false, parse_observation(failure)).unwrap();
-        assert_eq!(
-            before.enforcement_cause,
-            Some(super::super::EnforcementCause::GuardBootstrap)
-        );
+        assert_eq!(before.enforcement_cause, None);
         assert!(before.valid());
-        assert!(!before.stops_run());
+        assert!(before.stops_run());
         assert!(dispatch_result(&hook, true, parse_observation(failure)).is_err());
         assert!(matches!(
             parse_observation(br#"{"stage":"made_up"}"#),
             Err(ToolError::Operation)
         ));
+    }
+
+    #[test]
+    fn bootstrap_continuation_and_hook_reruns_require_sandbox_setup() {
+        let mut hook = intent(ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: String::new(),
+        });
+        hook.policy_digest = [1; 32];
+        hook.enforcement_digest = [2; 32];
+        let unguarded = ToolCall::CommandUnguarded {
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: String::new(),
+            justification: "Run the failed hook once".into(),
+        };
+        for (stage, setup) in [
+            (BootstrapStage::Admission, false),
+            (BootstrapStage::Workspace, false),
+            (BootstrapStage::RuntimeMounts, true),
+            (BootstrapStage::Capabilities, true),
+            (BootstrapStage::Handshake, true),
+            (BootstrapStage::Payload, false),
+            (BootstrapStage::Receipt, false),
+            (BootstrapStage::ProcessStop, false),
+            (BootstrapStage::LauncherReap, false),
+            (BootstrapStage::StderrDrain, false),
+            (BootstrapStage::StorageCleanup, false),
+        ] {
+            let failure = BootstrapFailure::at(stage);
+            let encoded = serde_json::to_vec(&failure).unwrap();
+            let observation = dispatch_result(&hook, false, parse_observation(&encoded)).unwrap();
+            assert_eq!(
+                observation.disposition,
+                ToolDisposition::Failed,
+                "{failure}"
+            );
+            assert!(observation.attestation.is_none(), "{failure}");
+            assert_eq!(
+                observation.enforcement_cause,
+                setup.then_some(EnforcementCause::GuardBootstrap),
+                "{failure}"
+            );
+            assert!(observation.valid(), "{failure}");
+            assert_eq!(observation.stops_run(), !setup, "{failure}");
+            assert_eq!(
+                qualifying_hook_failure(&unguarded, std::iter::once(&observation)).is_some(),
+                setup,
+                "{failure}"
+            );
+            assert!(dispatch_result(&hook, true, parse_observation(&encoded)).is_err());
+        }
     }
 
     #[test]
@@ -2420,6 +2486,36 @@ mod tests {
         let failure = BootstrapFailure::at(BootstrapStage::RuntimeMounts);
         assert_eq!(failure.failure_stage(), "runtime mount topology");
         assert_eq!(failure.to_string(), "runtime mount topology");
+        let encoded = serde_json::to_vec(&failure).unwrap();
+        assert_eq!(encoded, br#"{"stage":"runtime_mounts"}"#);
+        let mut intent = intent(ToolCall::Command {
+            program: "node".into(),
+            args: Vec::new(),
+            cwd: String::new(),
+        });
+        intent.policy_digest = [1; 32];
+        intent.enforcement_digest = [2; 32];
+        let observation = dispatch_result(&intent, false, parse_observation(&encoded)).unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Failed);
+        assert!(observation.attestation.is_none());
+        assert_eq!(
+            observation.enforcement_cause,
+            Some(EnforcementCause::GuardBootstrap)
+        );
+        assert!(observation.valid());
+        assert!(!observation.stops_run());
+        assert_eq!(
+            model_observation(&observation)["enforcement_cause"],
+            "Guard enforcement: bootstrap failed before dispatch"
+        );
+        let unguarded = ToolCall::CommandUnguarded {
+            program: "node".into(),
+            args: Vec::new(),
+            cwd: String::new(),
+            justification: "Run the failed command once".into(),
+        };
+        assert!(qualifying_guard_failure(&unguarded, std::iter::once(&observation)).is_none());
+        assert!(dispatch_result(&intent, true, parse_observation(&encoded)).is_err());
     }
 
     #[test]
