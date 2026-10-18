@@ -132,8 +132,23 @@ pub(super) fn apply(
                     return Err(ReplayError::InvalidTransition);
                 }
             }
+            let chained = run
+                .tools
+                .len()
+                .checked_sub(2)
+                .is_some_and(|index| run.tools[index].narrowed_call().is_some());
             let tool = pending_tool(run, *agent_run_id)?;
-            if tool.intent.digest() != verdict.intent_digest
+            let narrowing_holds = !verdict.narrowed
+                || !chained
+                    && match tool.hooks.last().and_then(|hook| hook.outcome.as_ref()) {
+                        Some(crate::tools::permissions::HookOutcome {
+                            result: HookResult::Narrowed { call },
+                            ..
+                        }) => crate::tools::permissions::narrows(&tool.intent.call, call),
+                        _ => false,
+                    };
+            if !narrowing_holds
+                || tool.intent.digest() != verdict.intent_digest
                 || tool.permission_verdict.is_some()
                 || tool.observation.is_some()
             {
@@ -151,7 +166,7 @@ pub(super) fn apply(
                 .iter()
                 .filter_map(|hook| hook.outcome.as_ref())
                 .fold(Decision::Allow, |folded, outcome| {
-                    folded.narrow(outcome.result.restriction())
+                    folded.narrow(outcome.result.restriction(&tool.intent.call))
                 });
             let stopped = tool.hooks.iter().any(|hook| {
                 hook.outcome
@@ -194,7 +209,7 @@ pub(super) fn apply(
             };
             let finished_restriction = tool.hooks.iter().any(|view| {
                 view.outcome.as_ref().is_none_or(|outcome| {
-                    outcome.result.restriction() == Decision::Deny
+                    outcome.result.restriction(&tool.intent.call) == Decision::Deny
                         || outcome.observation.stops_run()
                 })
             });
@@ -336,6 +351,7 @@ pub(super) fn apply(
                     primary.provider_calls.last().is_some_and(|call| {
                         call.disposition == ProviderCallDisposition::ToolRequested
                     }) && pending_tool_requests(run).is_some_and(|pending| pending >= 1)
+                        && valid_narrowing_source(run, intent)
                         && run
                             .tools
                             .last()
@@ -571,6 +587,14 @@ fn pending_tool(
             .and_then(|agent| agent.tools.last_mut())
     }
     .ok_or(ReplayError::InvalidTransition)
+}
+
+// A narrowed Tool answers nothing itself: the next Tool must be exactly its replacement.
+fn valid_narrowing_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
+    run.tools
+        .last()
+        .and_then(ToolView::narrowed_call)
+        .is_none_or(|call| *call == intent.call)
 }
 
 fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {

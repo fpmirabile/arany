@@ -1397,79 +1397,80 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn seed_cleanup_retains_capacity_on_unsafe_files_and_replaced_roots() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-        let fixture = tempfile::Builder::new()
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir()
+        for include_workspace in [true, false] {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            let fixture = tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap();
+            let directory = open_directory(&fixture.path().join("guard"), true).unwrap();
+            let source = open_directory(&fixture.path().join("source"), true).unwrap();
+            source.dir.write("sample", b"source").unwrap();
+            let permit = acquire_in(
+                &directory,
+                fixture.path(),
+                uuid::Uuid::now_v7(),
+                crate::tools::now_ms() + 60_000,
+                |_| {},
+                crate::tools::now_ms,
+            )
+            .await
             .unwrap();
-        let directory = open_directory(&fixture.path().join("guard"), true).unwrap();
-        let source = open_directory(&fixture.path().join("source"), true).unwrap();
-        source.dir.write("sample", b"source").unwrap();
-        let permit = acquire_in(
-            &directory,
-            fixture.path(),
-            uuid::Uuid::now_v7(),
-            crate::tools::now_ms() + 60_000,
-            |_| {},
-            crate::tools::now_ms,
-        )
-        .await
-        .unwrap();
-        let (path, _) = permit
-            .prepare_seed(&source.dir, &seed_config(), true)
-            .unwrap();
-        let outside = fixture.path().join("outside");
-        std::fs::write(&outside, b"unrelated").unwrap();
-        symlink(&outside, path.join("unexpected")).unwrap();
-        assert!(permit.cleanup().await.is_err());
-        assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 1);
-        assert_eq!(std::fs::read(&outside).unwrap(), b"unrelated");
-        std::fs::remove_file(path.join("unexpected")).unwrap();
-        let moved = fixture.path().join("retained");
-        std::fs::rename(&path, &moved).unwrap();
-        let replacement = open_directory(&path, true).unwrap();
-        replacement.dir.write("outside", b"replacement").unwrap();
-        assert!(permit.cleanup().await.is_err());
-        assert_eq!(replacement.dir.read("outside").unwrap(), b"replacement");
-        assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 1);
-        std::fs::remove_file(path.join("outside")).unwrap();
-        std::fs::remove_dir(&path).unwrap();
-        std::fs::rename(&moved, &path).unwrap();
-        let stale = checked_file(&directory.dir, &permit.name, false).unwrap();
-        permit.cleanup().await.unwrap();
-        assert!(!path.exists());
-        assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 0);
-        assert!(!permit.linked().unwrap());
-        assert!(permit.cleanup().await.is_err());
-        let id = permit.id;
-        drop(permit);
-        let stale = Permit {
-            dir: directory.dir.try_clone().unwrap(),
-            name: format!("{id}.unit"),
-            _lease: try_lock(stale).unwrap().unwrap(),
-            id,
-            seed_parent: fixture.path().to_owned(),
-            boot: boot().unwrap(),
-            release_on_drop: false,
-        };
-        let replacement = open_directory(&path, true).unwrap();
-        replacement
-            .dir
-            .write("unrelated", b"keep after retirement")
-            .unwrap();
-        let _namespace = namespace_lock(&directory.dir).unwrap().unwrap();
-        assert!(
-            !stale.linked().unwrap(),
-            "an opened-before-retirement lease is stale"
-        );
-        assert!(stale.cleanup_seed().is_err());
-        assert_eq!(
-            replacement.dir.read("unrelated").unwrap(),
-            b"keep after retirement"
-        );
+            let (path, _) = permit
+                .prepare_seed(&source.dir, &seed_config(), include_workspace)
+                .unwrap();
+            let outside = fixture.path().join("outside");
+            std::fs::write(&outside, b"unrelated").unwrap();
+            symlink(&outside, path.join("unexpected")).unwrap();
+            assert!(permit.cleanup().await.is_err());
+            assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 1);
+            assert_eq!(std::fs::read(&outside).unwrap(), b"unrelated");
+            std::fs::remove_file(path.join("unexpected")).unwrap();
+            let moved = fixture.path().join("retained");
+            std::fs::rename(&path, &moved).unwrap();
+            let replacement = open_directory(&path, true).unwrap();
+            replacement.dir.write("outside", b"replacement").unwrap();
+            assert!(permit.cleanup().await.is_err());
+            assert_eq!(replacement.dir.read("outside").unwrap(), b"replacement");
+            assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 1);
+            std::fs::remove_file(path.join("outside")).unwrap();
+            std::fs::remove_dir(&path).unwrap();
+            std::fs::rename(&moved, &path).unwrap();
+            let stale = checked_file(&directory.dir, &permit.name, false).unwrap();
+            permit.cleanup().await.unwrap();
+            assert!(!path.exists());
+            assert_eq!(reserved(&directory.dir, fixture.path()).unwrap(), 0);
+            assert!(!permit.linked().unwrap());
+            assert!(permit.cleanup().await.is_err());
+            let id = permit.id;
+            drop(permit);
+            let stale = Permit {
+                dir: directory.dir.try_clone().unwrap(),
+                name: format!("{id}.unit"),
+                _lease: try_lock(stale).unwrap().unwrap(),
+                id,
+                seed_parent: fixture.path().to_owned(),
+                boot: boot().unwrap(),
+                release_on_drop: false,
+            };
+            let replacement = open_directory(&path, true).unwrap();
+            replacement
+                .dir
+                .write("unrelated", b"keep after retirement")
+                .unwrap();
+            let _namespace = namespace_lock(&directory.dir).unwrap().unwrap();
+            assert!(
+                !stale.linked().unwrap(),
+                "an opened-before-retirement lease is stale"
+            );
+            assert!(stale.cleanup_seed().is_err());
+            assert_eq!(
+                replacement.dir.read("unrelated").unwrap(),
+                b"keep after retirement"
+            );
+        }
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn seed_metadata_preserves_maximum_admission_capacity() {
         let fixture = tempfile::tempdir().unwrap();

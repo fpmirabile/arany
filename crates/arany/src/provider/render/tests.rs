@@ -456,3 +456,21 @@ fn hook_feedback_renders_in_the_tool_result_only_when_present() {
     );
     assert!(!plain.iter().any(|block| block.contains("hook_feedback")));
 }
+
+#[test]
+fn a_hook_narrowed_denial_renders_as_data_beside_the_one_tool_result() {
+    let mut narrowed = step("call_1", "src/lib.rs");
+    let mut denied = observation(read("src/lib.rs"), "Hook narrowed this Tool to: Read");
+    denied.disposition = ToolDisposition::Denied;
+    narrowed.observations.insert(0, denied);
+    let blocks = step_results(&narrowed, &request(vec![narrowed.clone()])).unwrap();
+    let results: Vec<_> = blocks
+        .iter()
+        .filter(|block| matches!(block, Block::ToolResult { .. }))
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert!(blocks.iter().any(|block| {
+        let text = format!("{block:?}");
+        text.contains("hook_narrowing") && text.contains("Hook narrowed this Tool to: Read")
+    }));
+}

@@ -824,15 +824,25 @@ pub(super) async fn execute(
     crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
     let mut cache = super::super::build_cache_session(runtime, intent)?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
+    if let Some(private) = &runtime.worker {
+        private.contained.store(false, Ordering::Release);
+    }
     let fallback_started = tokio::time::Instant::now();
     let preparation_deadline = active_window.map_or(
         fallback_started + CONNECT_DEADLINE + PREPARATION_DEADLINE,
         |window| window.preparation_deadline,
     );
     let go_deadline = active_window.map_or(
-        preparation_deadline + Duration::from_millis(u64::from(intent.limits.cache_transfer_ms)),
+        preparation_deadline
+            + Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
+            + super::super::super::worker::transfer_time(intent),
         |window| window.go_deadline,
     );
+    let go_deadline = if super::super::super::worker::transfer_time(intent).is_zero() {
+        go_deadline
+    } else {
+        go_deadline.min(fallback_started + Duration::from_secs(120))
+    };
     let completion_deadline = active_window.map_or_else(
         || {
             fallback_started
@@ -842,10 +852,12 @@ pub(super) async fn execute(
                     u64::from(intent.limits.cache_transfer_ms).saturating_mul(2),
                 )
                 + Duration::from_millis(u64::from(intent.limits.runtime_ms))
+                + super::super::super::worker::transfer_overhead(intent)
                 + Duration::from_secs(10)
         },
         |window| window.completion_deadline,
     );
+    let go_cancellation = cancellation.clone();
     let execution = async {
         let capture = FixtureSpan::begin(FixtureStage::Connect);
         let mut stream = BufReader::new(
@@ -880,6 +892,19 @@ pub(super) async fn execute(
                 .await
                 .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
         }
+        if bytes == b"WORKER_READY\n" {
+            let input =
+                super::super::super::worker::bulk_input(runtime).ok_or(ToolError::Configuration)?;
+            tokio::time::timeout_at(
+                go_deadline,
+                super::super::super::worker::send_frame(stream.get_mut(), input),
+            )
+            .await
+            .map_err(|_| ToolError::Limit)??;
+            bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
+                .await
+                .map_err(|_| ToolError::Limit)??;
+        }
         if let Ok(failure) = serde_json::from_slice::<BootstrapFailure>(&bytes) {
             return Err(ToolError::GuardBootstrap(failure));
         }
@@ -900,6 +925,9 @@ pub(super) async fn execute(
             .map_err(|_| ToolError::GuardRejected(GuardStage::ResourceAttestation))?;
         capture.complete();
         let capture = FixtureSpan::begin(FixtureStage::ControllerReceipt);
+        if go_cancellation.is_cancelled() {
+            return Err(ToolError::Operation);
+        }
         runtime.before_dispatch(active_window, intent.limits.runtime_ms)?;
         dispatched.store(true, Ordering::Release);
         let observation = async {
@@ -949,6 +977,17 @@ pub(super) async fn execute(
                     _ => return Err(ToolError::Operation),
                 }
                 Ok((observation, candidate))
+            } else if runtime.worker.is_some() {
+                super::super::read_worker_observation(
+                    &mut stream,
+                    runtime,
+                    intent,
+                    Duration::from_millis(u64::from(intent.limits.runtime_ms))
+                        + super::super::super::worker::transfer_time(intent)
+                        + TEARDOWN_WAIT,
+                )
+                .await
+                .map(|observation| (observation, super::super::CacheCandidate::Received))
             } else {
                 super::super::read_worker_report(&mut stream, intent)
                     .await
@@ -978,6 +1017,9 @@ pub(super) async fn execute(
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?;
     let result =
         result.map_err(|error| super::super::with_worker_exit(error, &unit.worker_output()));
+    if let Some(private) = &runtime.worker {
+        private.contained.store(true, Ordering::Release);
+    }
     match result {
         Ok((mut observation, candidate)) => {
             super::super::publish_cache_candidate(
@@ -1055,7 +1097,21 @@ pub(super) fn helper_main() -> std::process::ExitCode {
         {
             return Err(ToolError::ProtectionUnavailable);
         }
-        let (runtime, intent, cache) = task.into_runtime();
+        let worker_input = if task.worker.is_some() || task.handover.is_some() {
+            stream
+                .write_all(b"WORKER_READY\n")
+                .map_err(|_| ToolError::Operation)?;
+            let bytes = super::super::super::worker::read_frame(&mut stream)?;
+            if let Some(transfer) = &task.worker {
+                transfer.decode(&bytes)?;
+            } else {
+                super::super::super::worker::decode_handover(&task.intent, &bytes, &task.config)?;
+            }
+            Some(bytes)
+        } else {
+            None
+        };
+        let (runtime, intent, cache) = task.into_runtime(worker_input);
         scope.apply_limits(intent.limits.clone());
         stream
             .set_read_timeout(None)
@@ -1082,7 +1138,15 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             let result = async {
                 stage = super::super::BootstrapStage::Workspace;
                 let capture = FixtureSpan::begin(FixtureStage::SupervisorStorage);
-                storage = if intent.call.is_process() {
+                storage = if runtime.worker.is_some() {
+                    Some(
+                        super::storage::prepare_worker_storage(
+                            path.parent().ok_or(ToolError::Path)?,
+                            &intent.limits,
+                        )
+                        .await?,
+                    )
+                } else if intent.call.is_process() {
                     Some(
                         prepare_command_storage(
                             path.parent().ok_or(ToolError::Path)?,
@@ -1358,6 +1422,17 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     .write_all(b"\n")
                     .await
                     .map_err(|_| ToolError::Operation)?;
+            }
+            if result.is_ok()
+                && let Some(action) = &runtime.worker
+            {
+                let bytes = action
+                    .output
+                    .lock()
+                    .map_err(|_| ToolError::Operation)?
+                    .take()
+                    .ok_or(ToolError::Operation)?;
+                super::super::super::worker::send_frame(&mut output, &bytes).await?;
             }
             output.shutdown().await.map_err(|_| ToolError::Operation)?;
             result.map(|_| ())
@@ -1754,6 +1829,8 @@ done
         )
         .unwrap();
         ToolRuntime {
+            worker: None,
+            handover: None,
             definitions: Default::default(),
             permissions: None,
             unguarded_rules: None,
@@ -2997,6 +3074,8 @@ done
                 std::env::set_current_dir(root).unwrap();
                 let task = Task {
                     definition: None,
+                    worker: None,
+                    handover: None,
                     config: runtime.config.clone(),
                     cache: None,
                     hook_stdin: None,

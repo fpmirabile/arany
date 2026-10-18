@@ -82,6 +82,10 @@ struct Task {
     hook_stdin: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     definition: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    worker: Option<super::worker::Transfer>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    handover: Option<crate::session::worker::WorkerDataRef>,
     #[cfg(target_os = "linux")]
     parent_namespaces: profile::Namespaces,
     #[cfg(target_os = "macos")]
@@ -223,7 +227,12 @@ pub(super) async fn publish_cache_candidate(
     cache: Option<BuildCacheSession>,
     deadline: tokio::time::Instant,
 ) {
-    if observation.disposition != ToolDisposition::Succeeded {
+    if observation.disposition != ToolDisposition::Succeeded
+        || matches!(
+            observation.intent.target,
+            crate::session::worker::EffectTarget::WorkerView { .. }
+        )
+    {
         return;
     }
     let update = match (candidate, cache) {
@@ -585,6 +594,11 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
                 cache: None,
                 hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
                 definition: None,
+                worker: runtime.worker.as_ref().map(|a| a.transfer.clone()),
+                handover: runtime
+                    .handover
+                    .as_ref()
+                    .and_then(|_| super::worker::handover_ref(intent).cloned()),
                 parent_namespaces,
             })
             .is_ok()
@@ -621,6 +635,21 @@ pub(super) async fn execute(
     .await;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let result = Err(ToolError::ProtectionUnavailable);
+    #[cfg(any(test, feature = "test-support"))]
+    if result.is_ok()
+        && runtime.worker.is_some()
+        && crate::fault::FaultPlan::worker_receipt_lost(intent.id)
+    {
+        return Err(ToolError::Uncertain);
+    }
+    dispatch_result(intent, dispatched, result)
+}
+
+pub(super) fn dispatch_result(
+    intent: &EffectIntent,
+    dispatched: bool,
+    result: Result<ToolObservation, ToolError>,
+) -> Result<ToolObservation, ToolError> {
     match result {
         Err(error) if !dispatched => Ok(super::unstarted_observation(intent.clone(), error)),
         result => result,
@@ -863,6 +892,41 @@ pub(super) async fn read_worker_report<R: tokio::io::AsyncBufRead + Unpin>(
         .map_err(|(error, check)| check.map_or(error, execution_failure))
 }
 
+pub(super) async fn read_worker_observation<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    receipt_budget: Duration,
+) -> Result<ToolObservation, ToolError> {
+    let action = runtime.worker.as_ref().ok_or(ToolError::Configuration)?;
+    let bytes = tokio::time::timeout(
+        receipt_budget,
+        read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES),
+    )
+    .await
+    .map_err(|_| ToolError::Limit)??;
+    let observation = parse_observation(&bytes)?;
+    if !super::worker::wire_valid(&observation, intent) {
+        return Err(ToolError::Operation);
+    }
+    tokio::time::timeout(super::worker::transfer_time(intent), async {
+        let bytes = super::worker::receive_frame(reader).await?;
+        let image = super::worker::Image::decode(&bytes, &action.transfer.grant)?;
+        if observation.disposition == ToolDisposition::Succeeded {
+            let before = action.transfer.decode(&action.input)?;
+            super::worker::validate_edit(&before, &image, &intent.call)?;
+        }
+        *action.output.lock().map_err(|_| ToolError::Operation)? = Some(bytes);
+        if !read_capped(reader, 1).await?.is_empty() {
+            return Err(ToolError::Operation);
+        }
+        Ok::<(), ToolError>(())
+    })
+    .await
+    .map_err(|_| ToolError::Limit)??;
+    Ok(observation)
+}
+
 fn parse_observation(bytes: &[u8]) -> Result<ToolObservation, ToolError> {
     serde_json::from_slice(bytes).map_err(|_| {
         serde_json::from_slice::<BootstrapFailure>(bytes)
@@ -1101,7 +1165,14 @@ fn bootstrap_locations(
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), ToolError> {
     *stage = BootstrapStage::Capabilities;
     let root = macos::install(task, stage)?;
-    let workspace = if task.intent.call.is_process() {
+    let workspace = if task.worker.is_some() {
+        // A fresh HFS+ volume gains root metadata, so the image gets its own owner-only directory.
+        let tree = root.join("workspace/tree");
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+            .create(&tree)
+            .map_err(|_| ToolError::Path)?;
+        tree
+    } else if task.intent.call.is_process() {
         root.join("workspace")
     } else {
         task.workspace.clone()
@@ -1128,6 +1199,7 @@ pub(super) struct GuardContext<'a> {
     pub(super) skill: Option<Vec<u8>>,
     pub(super) hook_stdin: Option<&'a str>,
     pub(super) definition: Option<Vec<u8>>,
+    pub(super) handover: Option<crate::session::worker::WorkerChangeset>,
     runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
@@ -1172,11 +1244,26 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         cache.validate(&task.intent, &task.config)?;
     }
     verify_intent_runtime_grants(&task.intent, &task.config)?;
-    if task.intent.target != crate::session::worker::EffectTarget::Workspace
+    if let Some(worker) = &task.worker {
+        worker.validate(&task.intent, &task.config)?;
+    }
+    if task
+        .handover
+        .as_ref()
+        .is_some_and(|data| Some(data) != super::worker::handover_ref(&task.intent))
+        || task.worker.is_some() && task.handover.is_some()
+    {
+        return Err(ToolError::Configuration);
+    }
+    if task.worker.is_none()
+        && task.intent.target != crate::session::worker::EffectTarget::Workspace
         || !task.intent.valid()
         || task.intent.call.facts().site != Site::Guard
         || task.intent.policy_digest != task.config.digest()
-        || !task.config.allows(&task.intent.call)
+        || !(task.config.allows(&task.intent.call)
+            || task.worker.is_some()
+                && super::worker::handover_call(&task.intent.call, task.intent.agent_run_id)
+            || task.handover.is_some() && task.config.write)
         || task.intent.enforcement_digest != task.enforcement_digest()?
         || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
         || task.hook_stdin.as_ref().is_some_and(|stdin| {
@@ -1286,6 +1373,102 @@ fn send_cache_candidate(
     Ok(())
 }
 
+fn receive_bulk(
+    task: &Task,
+    stdin: &mut std::io::BufReader<impl Read>,
+    workspace: &Path,
+) -> Result<
+    (
+        Option<super::worker::Image>,
+        Option<crate::session::worker::WorkerChangeset>,
+    ),
+    ToolError,
+> {
+    if task.worker.is_none() && task.handover.is_none() {
+        return Ok((None, None));
+    }
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(b"WORKER_READY\n")
+        .and_then(|()| stdout.flush())
+        .map_err(|_| ToolError::Operation)?;
+    let bytes = super::worker::read_frame(stdin)?;
+    if !stdin.buffer().is_empty() {
+        return Err(ToolError::Configuration);
+    }
+    if let Some(transfer) = &task.worker {
+        Ok((Some(transfer.decode(&bytes)?), None))
+    } else {
+        let changeset = super::worker::decode_handover(&task.intent, &bytes, &task.config)?;
+        super::fs::worker_publication_paths(
+            &super::fs::open_directory(workspace)?,
+            &changeset.files,
+        )?;
+        Ok((None, Some(changeset)))
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn send_result(
+    task: Task,
+    workspace: &Path,
+    result: Result<String, ToolError>,
+    stdout: &mut impl Write,
+    root: &Path,
+) -> Result<(), ToolError> {
+    let (disposition, output, enforcement_cause) = super::dispatch::outcome(&task.intent, result);
+    let receipt = GuardReceipt {
+        contract_version: 1,
+        intent_digest: task.intent.digest(),
+        enforcement_digest: task.intent.enforcement_digest,
+        limits: task.intent.limits.clone(),
+    };
+    let mut observation = ToolObservation {
+        enforcement_cause,
+        intent: task.intent,
+        disposition,
+        output,
+        attestation: Some(Attestation::Guard(receipt)),
+        cache_update: if task.cache.is_some() {
+            crate::tools::CacheUpdate::NotAttempted
+        } else {
+            crate::tools::CacheUpdate::NotApplicable
+        },
+    };
+    if task.worker.is_none() && !observation.valid() {
+        observation.disposition = ToolDisposition::Limit;
+        observation.enforcement_cause = None;
+        observation.output = "Tool result exceeded its reserved serialized capacity".into();
+    }
+    if task.worker.is_none() && !observation.valid() {
+        return Err(ToolError::Limit);
+    }
+    let candidate = if let Some(worker) = &task.worker {
+        let image = super::fs::worker_image(
+            &super::fs::open_directory(workspace)?,
+            &super::worker::capture_paths(&worker.grant),
+        )?;
+        image.validate(&worker.grant)?;
+        Some(image.encode()?)
+    } else {
+        None
+    };
+    serde_json::to_writer(&mut *stdout, &observation).map_err(|_| ToolError::Operation)?;
+    stdout
+        .write_all(b"\n")
+        .and_then(|()| stdout.flush())
+        .map_err(|_| ToolError::Operation)?;
+    if let Some(bytes) = candidate {
+        super::worker::write_frame(stdout, &bytes)?;
+        stdout.flush().map_err(|_| ToolError::Operation)?;
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(cache) = &task.cache {
+        send_cache_candidate(cache, observation.disposition, stdout, root)?;
+    }
+    Ok(())
+}
+
 pub(super) fn helper_main() -> ExitCode {
     let mut stage = BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
@@ -1308,8 +1491,9 @@ pub(super) fn helper_main() -> ExitCode {
         let workspace = workspace.as_path();
         stage = BootstrapStage::Workspace;
         let family = task.intent.call.facts().family;
-        if (matches!(family, Family::File | Family::Git)
-            || cfg!(target_os = "macos") && family == Family::Skill)
+        if task.worker.is_none()
+            && (matches!(family, Family::File | Family::Git)
+                || cfg!(target_os = "macos") && family == Family::Skill)
             && super::fs::identity(&super::fs::open_directory(workspace)?)?
                 != (task.intent.workspace_device, task.intent.workspace_inode)
         {
@@ -1321,10 +1505,14 @@ pub(super) fn helper_main() -> ExitCode {
         } else {
             None
         };
+        let (image, handover) = receive_bulk(&task, &mut stdin, workspace)?;
         #[cfg(target_os = "linux")]
         {
             stage = BootstrapStage::Capabilities;
             linux::harden()?;
+            if image.is_some() || handover.is_some() {
+                profile::install_non_spawning()?;
+            }
         }
         stage = BootstrapStage::Handshake;
         let ready = Ready {
@@ -1363,8 +1551,21 @@ pub(super) fn helper_main() -> ExitCode {
             task.intent.limits.cache_bytes > 0,
             &mut stage,
         )?;
+        if image.is_some() || handover.is_some() {
+            let mut trailing = [0; 1];
+            if stdin
+                .read(&mut trailing)
+                .map_err(|_| ToolError::Operation)?
+                != 0
+            {
+                return Err(ToolError::Configuration);
+            }
+        }
         drop(stdin);
         stage = BootstrapStage::Payload;
+        if let Some(image) = &image {
+            super::worker::materialize(image, &super::fs::open_directory(workspace)?)?;
+        }
         #[cfg(not(target_os = "macos"))]
         if task.intent.call.is_process() {
             super::fs::copy_seed()?;
@@ -1381,49 +1582,14 @@ pub(super) fn helper_main() -> ExitCode {
             skill,
             hook_stdin: task.hook_stdin.as_deref(),
             definition,
+            handover,
             runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
         let result = runtime.block_on(super::dispatch::run(&site));
-        let (disposition, output, enforcement_cause) =
-            super::dispatch::outcome(&task.intent, result);
         stage = BootstrapStage::Receipt;
-        let receipt = GuardReceipt {
-            contract_version: 1,
-            intent_digest: task.intent.digest(),
-            enforcement_digest: task.intent.enforcement_digest,
-            limits: task.intent.limits.clone(),
-        };
-        let mut observation = ToolObservation {
-            enforcement_cause,
-            intent: task.intent,
-            disposition,
-            output,
-            attestation: Some(Attestation::Guard(receipt)),
-            cache_update: if task.cache.is_some() {
-                crate::tools::CacheUpdate::NotAttempted
-            } else {
-                crate::tools::CacheUpdate::NotApplicable
-            },
-        };
-        if !observation.valid() {
-            observation.disposition = ToolDisposition::Limit;
-            observation.enforcement_cause = None;
-            observation.output = "Tool result exceeded its reserved serialized capacity".into();
-        }
-        if !observation.valid() {
-            return Err(ToolError::Limit);
-        }
-        serde_json::to_writer(&mut stdout, &observation).map_err(|_| ToolError::Operation)?;
-        stdout
-            .write_all(b"\n")
-            .and_then(|()| stdout.flush())
-            .map_err(|_| ToolError::Operation)?;
-        #[cfg(target_os = "linux")]
-        if let Some(cache) = &task.cache {
-            send_cache_candidate(cache, observation.disposition, &mut stdout, &root)?;
-        }
+        send_result(task, workspace, result, &mut stdout, &root)?;
         Ok(())
     })();
     if result.is_ok() {
@@ -1612,6 +1778,8 @@ mod tests {
             cache: None,
             hook_stdin: None,
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+            worker: None,
+            handover: None,
             #[cfg(target_os = "linux")]
             parent_namespaces: profile::Namespaces::read().unwrap(),
             #[cfg(target_os = "macos")]
@@ -1670,6 +1838,8 @@ mod tests {
             cache: None,
             hook_stdin: None,
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+            worker: None,
+            handover: None,
             parent_namespaces: profile::Namespaces::read().unwrap(),
         };
         let encoded = encode_task(&task(config.clone())).unwrap();
@@ -2585,6 +2755,8 @@ mod tests {
         let task = |call: ToolCall| {
             let probe = Task {
                 definition: None,
+                worker: None,
+                handover: None,
                 config: config.clone(),
                 intent: EffectIntent {
                     target: crate::session::worker::EffectTarget::Workspace,

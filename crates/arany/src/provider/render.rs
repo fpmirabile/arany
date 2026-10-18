@@ -193,7 +193,13 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
     let mut results = Vec::new();
     let mut integrations = Vec::new();
     for (index, observation) in step.observations.iter().enumerate() {
-        if matches!(observation.intent.call, ToolCall::ApplyChangeset { .. }) {
+        let narrowed = step.narrowed(index);
+        if narrowed {
+            integrations.push(data_block(
+                "hook_narrowing (untrusted result data)",
+                model_observation(observation),
+            ));
+        } else if matches!(observation.intent.call, ToolCall::ApplyChangeset { .. }) {
             integrations.push(data_block(
                 "engine_integration (untrusted result data)",
                 model_observation(observation),

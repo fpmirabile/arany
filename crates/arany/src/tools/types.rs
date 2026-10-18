@@ -54,13 +54,17 @@ impl FileVersion {
     }
 
     pub fn bytes(&self) -> Option<Vec<u8>> {
-        if !valid_digest(&self.sha256) || self.content.len() > MAX_CHANGESET_BYTES.div_ceil(3) * 4 {
+        self.bytes_with_limit(MAX_CHANGESET_BYTES)
+    }
+
+    pub(crate) fn bytes_with_limit(&self, limit: usize) -> Option<Vec<u8>> {
+        if !valid_digest(&self.sha256) || self.content.len() > limit.div_ceil(3) * 4 {
             return None;
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&self.content)
             .ok()?;
-        (bytes.len() <= MAX_CHANGESET_BYTES
+        (bytes.len() <= limit
             && hex_digest(&bytes) == self.sha256
             && base64::engine::general_purpose::STANDARD.encode(&bytes) == self.content)
             .then_some(bytes)
@@ -942,6 +946,18 @@ pub struct ToolContext {
 impl ToolStep {
     pub(crate) fn feedback(&self, index: usize) -> &[String] {
         self.hook_feedback.get(&index).map_or(&[], Vec::as_slice)
+    }
+
+    // A Tool a hook narrowed is denied and directly followed by its replacement, which answers the request.
+    pub(crate) fn narrowed(&self, index: usize) -> bool {
+        let (Some(denied), Some(next)) = (
+            self.observations.get(index),
+            self.observations.get(index + 1),
+        ) else {
+            return false;
+        };
+        denied.disposition == ToolDisposition::Denied
+            && super::permissions::narrows(&denied.intent.call, &next.intent.call)
     }
 
     fn rendered_len(&self) -> usize {

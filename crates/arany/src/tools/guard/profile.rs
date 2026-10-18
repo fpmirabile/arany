@@ -190,7 +190,10 @@ pub(super) fn programs() -> Result<[BpfProgram; 2], ToolError> {
 
 pub(super) fn profile_digest() -> Result<[u8; 32], ToolError> {
     let mut bytes = Vec::new();
-    for program in programs()? {
+    for program in programs()?
+        .into_iter()
+        .chain(std::iter::once(non_spawning_program()?))
+    {
         bytes.extend_from_slice(&(program.len() as u32).to_le_bytes());
         for instruction in program {
             bytes.extend_from_slice(&instruction.code.to_le_bytes());
@@ -209,4 +212,26 @@ pub(super) fn install() -> Result<(), ToolError> {
             .map_err(|_| ToolError::ProtectionUnavailable)?;
     }
     Ok(())
+}
+
+fn non_spawning_program() -> Result<BpfProgram, ToolError> {
+    let mut rules = BTreeMap::new();
+    for call in [
+        libc::SYS_clone,
+        libc::SYS_clone3,
+        libc::SYS_execve,
+        libc::SYS_execveat,
+    ] {
+        rules.insert(call, Vec::new());
+    }
+    #[cfg(target_arch = "x86_64")]
+    for call in [libc::SYS_fork, libc::SYS_vfork] {
+        rules.insert(call, Vec::new());
+    }
+    compile(rules, SeccompAction::Errno(libc::EPERM as u32))
+}
+
+pub(super) fn install_non_spawning() -> Result<(), ToolError> {
+    seccompiler::apply_filter_all_threads(&non_spawning_program()?)
+        .map_err(|_| ToolError::ProtectionUnavailable)
 }

@@ -64,9 +64,11 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         &site.config.runtime_grants,
         site.intent.limits.cache_bytes > 0,
     )?;
-    if site.hook_stdin.is_some() {
-        command.stdin(std::process::Stdio::piped());
-    }
+    command.stdin(if site.hook_stdin.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    });
     let deadline = tokio::time::Instant::now() + site.remaining_runtime();
     let mut child = spawn_before(&mut command, deadline)?;
     let mut writer = None;

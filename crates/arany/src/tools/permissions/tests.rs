@@ -1138,6 +1138,27 @@ fn hook_output_parsing_copies_peer_exit_codes_and_json_precedence() {
         ),
         (
             Some(0),
+            specific(json!({"updatedInput": {"operation": "read", "path": "a", "offset": 0, "limit": 1}})),
+            "",
+            HookResult::Narrowed { call: read("a") },
+        ),
+        (
+            Some(0),
+            specific(json!({"updatedInput": {"operation": "read", "path": "../a", "offset": 0, "limit": 1}})),
+            "",
+            deny_with(Some("hook input update does not narrow")),
+        ),
+        (
+            Some(0),
+            specific(json!({"permissionDecision": "ask", "updatedInput": {"operation": "read", "path": "a", "offset": 0, "limit": 1}})),
+            "",
+            HookResult::Restricted {
+                decision: Decision::Ask,
+                reason: None,
+            },
+        ),
+        (
+            Some(0),
             specific(json!({"permissionDecision": "deny", "updatedInput": {}})),
             "",
             deny_with(None),
@@ -1177,12 +1198,15 @@ fn hook_output_parsing_copies_peer_exit_codes_and_json_precedence() {
 
 #[test]
 fn hook_results_only_narrow_and_validate_against_their_observation() {
-    assert_eq!(HookResult::Passed.restriction(), Decision::Allow);
+    assert_eq!(HookResult::Passed.restriction(&read("a")), Decision::Allow);
+    let narrowed = HookResult::Narrowed { call: read("a") };
+    assert_eq!(narrowed.restriction(&read("a")), Decision::Allow);
+    assert_eq!(narrowed.restriction(&read("b")), Decision::Deny);
     assert_eq!(
-        ignored(HookIgnoreReason::AllowIsNoOp).restriction(),
+        ignored(HookIgnoreReason::AllowIsNoOp).restriction(&read("a")),
         Decision::Allow
     );
-    assert_eq!(deny_with(None).restriction(), Decision::Deny);
+    assert_eq!(deny_with(None).restriction(&read("a")), Decision::Deny);
     let allow = HookResult::Restricted {
         decision: Decision::Allow,
         reason: None,
@@ -1400,4 +1424,119 @@ fn post_tool_use_output_becomes_bounded_feedback_and_never_replaces_the_result()
     assert_eq!(parsed["tool_response"]["truncated"], true);
     let bare = post_tool_use_input("s", mode, &call, id, huge, 0).unwrap();
     assert!(bare.len() < cut.len() && bare.contains("\"text\":\"\""));
+}
+
+#[test]
+fn updated_input_accepts_only_provable_narrowing() {
+    let window = |path: &str, offset, limit| ToolCall::Read {
+        path: path.into(),
+        offset,
+        limit,
+    };
+    let list = |path: &str| ToolCall::List { path: path.into() };
+    let search = |path: &str, query: &str| ToolCall::Search {
+        path: path.into(),
+        query: query.into(),
+    };
+    let status = |path: &str| ToolCall::GitStatus { path: path.into() };
+    let diff = |path: &str, staged| ToolCall::GitDiff {
+        path: path.into(),
+        base: None,
+        head: None,
+        staged,
+    };
+    let log = |path: &str, max_count| ToolCall::GitLog {
+        path: path.into(),
+        revision: None,
+        max_count,
+    };
+    let mcp = |arguments: &str| ToolCall::McpCall {
+        server: "s".into(),
+        tool: "t".into(),
+        schema_digest: "d".into(),
+        arguments: arguments.into(),
+    };
+    let skill = |resource: Option<&str>| ToolCall::Skill {
+        name: "n".into(),
+        resource: resource.map(str::to_owned),
+    };
+    let cases = [
+        (window("a", 10, 100), window("a", 10, 100), true),
+        (window("a", 10, 100), window("a", 20, 50), true),
+        (window("a", 10, 100), window("a", 10, 1), true),
+        (window("a", 10, 100), window("a", 109, 1), true),
+        (window("a", 10, 100), window("a", 10, 101), false),
+        (window("a", 10, 100), window("a", 9, 10), false),
+        (window("a", 10, 100), window("a", 110, 1), false),
+        (window("a", 10, 100), window("a", u32::MAX, u32::MAX), false),
+        (window("a", 10, 100), window("b", 10, 1), false),
+        (window("a/b", 0, 10), window("a", 0, 10), false),
+        (window("a", 0, 10), window("A", 0, 10), false),
+        (window("a", 0, 10), window("./a", 0, 10), false),
+        (window("a/b", 0, 10), window("a/../a/b", 0, 10), false),
+        (list("src"), list("src"), true),
+        (list("src"), list("src/deep/er"), true),
+        (list("."), list("src"), true),
+        (list(""), list("src"), true),
+        (list("src"), list("."), false),
+        (list("src"), list("src2"), false),
+        (list("src"), list("srcx/a"), false),
+        (list("src"), list("src/../etc"), false),
+        (list("src"), list("src/.."), false),
+        (list("src"), list("../src"), false),
+        (list("src"), list("/src"), false),
+        (list("src"), list("SRC/a"), false),
+        (list("src"), list("src//a"), false),
+        (list("src"), list("link/a"), false),
+        (list("src"), search("src", "x"), false),
+        (search("src", "x"), search("src/a", "x"), true),
+        (search("src", "x"), search("src", "x"), true),
+        (search("src", "x"), search("src/a", "y"), false),
+        (search("src", "x"), search("src", "x*"), false),
+        (search("src", "x"), search("..", "x"), false),
+        (search(".", "x"), search("a", "x"), true),
+        (status("a"), status("a/b"), true),
+        (status("a/b"), status("a"), false),
+        (status("a"), status("a/../b"), false),
+        (diff("a", true), diff("a/b", true), true),
+        (diff("a", true), diff("a/b", false), false),
+        (log("a", 5), log("a/b", 5), true),
+        (log("a", 5), log("a/b", 6), false),
+        (status("a"), diff("a", false), false),
+        (
+            command("ls", &["-l", "-n"]),
+            command("ls", &["-l", "-n"]),
+            false,
+        ),
+        (command("ls", &["-l", "-n"]), command("ls", &["-l"]), false),
+        (command("ls", &["-l"]), command("ls", &["-l", "-n"]), false),
+        (mcp("{}"), mcp("{}"), false),
+        (mcp("{\"a\":1,\"b\":2}"), mcp("{\"a\":1}"), false),
+        (skill(None), skill(None), false),
+        (skill(Some("a")), skill(Some("a")), false),
+        (write("a"), write("a"), false),
+        (
+            ToolCall::Mkdir { path: "a".into() },
+            ToolCall::Mkdir { path: "a/b".into() },
+            false,
+        ),
+        (
+            ToolCall::ParseAgentDefinition {
+                index: 0,
+                raw_digest: [1; 32],
+            },
+            ToolCall::ParseAgentDefinition {
+                index: 0,
+                raw_digest: [1; 32],
+            },
+            false,
+        ),
+    ];
+    for (original, updated, expected) in cases {
+        assert_eq!(
+            narrows(&original, &updated),
+            expected,
+            "{original:?} -> {updated:?}"
+        );
+    }
 }

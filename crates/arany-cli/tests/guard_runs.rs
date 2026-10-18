@@ -2819,3 +2819,26 @@ mod routing {
         assert!(after.runs.last().unwrap().provider_fallbacks.is_empty());
     }
 }
+
+#[tokio::test]
+async fn native_private_guard_target_keeps_edits_disposable_and_reads_assignment_local() {
+    use std::os::unix::fs::PermissionsExt;
+    arany::test_support::isolate_account_root();
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    std::fs::create_dir_all(workspace.join("owned")).unwrap();
+    let mut original = b"original".to_vec();
+    original.extend(vec![b'x'; 96 * 1024]);
+    std::fs::write(workspace.join("owned/a"), original).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let config = state.path().join("tools.json");
+    std::fs::write(&config, br#"{"version":1,"workspace_paths":["owned"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    arany::test_support::exercise_private_guard_target(
+        &state,
+        &workspace,
+        env!("CARGO_BIN_EXE_arany").into(),
+    )
+    .await
+    .unwrap();
+}

@@ -267,6 +267,9 @@ pub enum HookResult {
     Feedback {
         lines: Vec<String>,
     },
+    Narrowed {
+        call: ToolCall,
+    },
     Ignored {
         why: HookIgnoreReason,
     },
@@ -282,9 +285,12 @@ pub enum HookIgnoreReason {
 }
 
 impl HookResult {
-    pub fn restriction(&self) -> Decision {
+    // A replacement identical to the call changes nothing, so it restricts nothing.
+    pub fn restriction(&self, call: &ToolCall) -> Decision {
         match self {
             Self::Restricted { decision, .. } => *decision,
+            Self::Narrowed { call: updated } if updated != call => Decision::Deny,
+            Self::Narrowed { .. } => Decision::Allow,
             Self::Passed | Self::Feedback { .. } | Self::Ignored { .. } => Decision::Allow,
         }
     }
@@ -531,11 +537,22 @@ pub(crate) fn parse_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -
     if decision == Some(Decision::Deny) {
         return deny(reason);
     }
-    if specific
+    // The human decides on the original input; an update never drops the hook's ask.
+    if decision == Some(Decision::Ask) {
+        return HookResult::Restricted {
+            decision: Decision::Ask,
+            reason,
+        };
+    }
+    if let Some(updated) = specific
         .get("updatedInput")
-        .is_some_and(|value| !value.is_null())
+        .filter(|value| !value.is_null())
     {
-        return deny(Some("hook input update does not narrow".into()));
+        // Whether the call narrows the original is the Engine's check; here it only has to be a valid call.
+        return match serde_json::from_value::<ToolCall>(updated.clone()) {
+            Ok(call) if valid_call(&call) => HookResult::Narrowed { call },
+            _ => deny(Some("hook input update does not narrow".into())),
+        };
     }
     match decision {
         Some(Decision::Ask) => HookResult::Restricted {

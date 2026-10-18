@@ -312,11 +312,25 @@ fn all_children_finished(run: &RunView) -> bool {
     run.agents.len() > 1 && run.agents.iter().skip(1).all(worker::child_terminal)
 }
 
+impl ToolView {
+    // The journaled acceptance: the verdict says the Engine narrowed this Tool and the hook result names the call.
+    pub(crate) fn narrowed_call(&self) -> Option<&crate::tools::ToolCall> {
+        if !self.permission_verdict.as_ref()?.narrowed {
+            return None;
+        }
+        match self.hooks.last()?.outcome.as_ref()?.result {
+            crate::tools::permissions::HookResult::Narrowed { ref call } => Some(call),
+            _ => None,
+        }
+    }
+}
+
 fn model_tool_count(run: &RunView) -> usize {
     run.tools
         .iter()
         .filter(|tool| {
-            !is_integration_tool(tool)
+            tool.narrowed_call().is_none()
+                && !is_integration_tool(tool)
                 && !matches!(
                     tool.intent.call,
                     crate::tools::ToolCall::ParseAgentDefinition { .. }
