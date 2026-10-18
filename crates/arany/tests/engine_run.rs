@@ -29,6 +29,9 @@ mod goals;
 #[path = "engine_run/routing.rs"]
 mod routing;
 
+#[path = "engine_run/roster_journeys.rs"]
+mod roster_journeys;
+
 #[path = "engine_run/permissions.rs"]
 mod permissions;
 
