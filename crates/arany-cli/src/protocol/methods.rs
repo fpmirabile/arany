@@ -11,6 +11,8 @@ pub const CAPABILITIES: &[&str] = &[
     "items_v1",
     "interrupt_receipt_v1",
     "approvals_v1",
+    "turn_steer_v1",
+    "goal_pause_v1",
 ];
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -223,6 +225,46 @@ pub struct TurnInterruptParams {
     pub thread_id: SessionId,
     #[schemars(with = "String")]
     pub turn_id: RunId,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TurnSteerParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[schemars(with = "String")]
+    pub turn_id: RunId,
+    #[serde(deserialize_with = "text_input")]
+    #[schemars(length(min = 1, max = 1))]
+    pub input: Vec<UserInput>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TurnSteerResult {
+    #[schemars(with = "String")]
+    pub turn_id: RunId,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalPauseParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[schemars(with = "String")]
+    pub goal_id: GoalId,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalResumeParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[schemars(with = "String")]
+    pub goal_id: GoalId,
+    #[serde(default, deserialize_with = "optional_text_input")]
+    #[schemars(length(min = 1, max = 1))]
+    pub input: Option<Vec<UserInput>>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -549,6 +591,25 @@ fn turn_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<UserInpu
         )));
     }
     Ok(input)
+}
+
+fn single_text<E: Error>(input: Vec<UserInput>) -> Result<Vec<UserInput>, E> {
+    match input.as_slice() {
+        [UserInput::Text { text }] if text.len() <= 64 * 1024 => Ok(input),
+        _ => Err(E::custom("exactly one text of at most 64 KiB")),
+    }
+}
+
+fn text_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<UserInput>, D::Error> {
+    single_text(Vec::deserialize(deserializer)?)
+}
+
+fn optional_text_input<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<UserInput>>, D::Error> {
+    Option::deserialize(deserializer)?
+        .map(single_text)
+        .transpose()
 }
 
 fn optional_effort_schema(_: &mut SchemaGenerator) -> Schema {

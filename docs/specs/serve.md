@@ -4,8 +4,8 @@
 
 This contract owns `arany serve --stdio`: its JSON-RPC vocabulary, bounded
 transport, thread and turn projection, and JSON Schema export. The server runs
-`initialize` / `initialized`, `thread/start|resume` and `turn/start|interrupt`.
-The server sends one-use human approval requests. The remaining methods belong to
+`initialize` / `initialized`, `thread/start|resume`, `turn/start|interrupt|steer`
+and `goal/pause|resume`. The server sends one-use human approval requests. The remaining methods belong to
 [NEXT_STEPS item 8](../../NEXT_STEPS.md#pursue-in-order).
 
 [Session](./session.md) owns durable Session identity and replay,
@@ -47,7 +47,7 @@ journal format. JSON is data; clients must render untrusted content inertly.
 | `-32700` | Malformed message; null ID | Absent |
 | `-32600` | Invalid protocol state or oversized message | `notInitialized`, `alreadyInitialized`, `messageTooLarge`, `busy`, `threadNotLoaded`, `threadLimit`, `turnNotActive`, `serverShuttingDown` |
 | `-32601` | Unknown method | Absent |
-| `-32602` | Invalid parameters or unsupported permission mode | `invalidParams`, `unsupportedPermissionMode`; reserved steering refusals `runFull`, `empty`, `tooLarge`, `unavailable` |
+| `-32602` | Invalid parameters or unsupported permission mode | `invalidParams`, `unsupportedPermissionMode`; steering refusals `runFull`, `empty`, `tooLarge`, `unavailable` |
 | `-32603` | Internal channel or serialization failure | Absent |
 | `-32000` | Engine admission failure | EngineError variant in camelCase; the closed vocabulary is exported as `$defs.Reason` |
 | `-32001` | Provider selection or routing failure | `providerUnavailable`, `providerRejected`, `invalidSelection` |
@@ -83,6 +83,9 @@ entry with the same `$defs`. Output is deterministic for a fixed contract.
 | `thread/resume` | `{threadId,cwd,provider,model,effort?,tools?,permissionMode?,includePaths?}` → `{thread,turns}` | Admits the selected Workspace and Provider configuration, strictly replays history without executing it, and loads the thread. Turns contain historical user, Tool and answer items; an unfinished Run and Goal appear interrupted. |
 | `turn/start` | `{threadId,input:[{type:"text",text}\|{type:"image",mediaType:"image/png",data:base64}],goal?:{autonomous}}` → `{turn}` | Requires a loaded thread. Uses its pinned configuration and the existing Engine submission path. The result follows tapped `MessageAccepted`, before `turn/started` and user item notifications. If that tap is lost, successful finalization answers from the first committed Run accepted after the submission began. The turn ID is the committed Run ID, with a separate Goal ID. One submission may be active per process; another returns `busy`. |
 | `turn/interrupt` | `{threadId,turnId}` → `{}` | Signals the matching active Run's cancellation. Unknown or finished turns return `turnNotActive`. The empty result acknowledges the signal; `turn/completed` reports interruption only after committed `RunFinished`. |
+| `turn/steer` | `{threadId,turnId,input:[{type:"text",text}]}` → `{turnId}` | Offers one note to the matching active Run's `RunSteering`, the call the attached composer makes. Exactly one text of at most 64 KiB, no images. Unknown, finished or completing turns return `turnNotActive`; an `Empty`, `TooLarge` (over 8 KiB with its history label), `RunFull` (the Run's 8 KiB note budget) or `Unavailable` refusal is `-32602` with that reason. Success means the note waits for the Run's next primary reservation (merged with any waiting note); delivery is the committed `GoalSteeringNoteRecorded`, and a note still waiting when the Run ends is discarded. |
+| `goal/pause` | `{threadId,goalId}` → `{}` | Sets the sticky pause on the active Run's steering handle; the Engine stops at its next boundary as for the terminal's `/goal pause`, so the turn ends `interrupted` and the Goal stays resumable. Repeating it is idempotent. No active turn on the thread is `turnNotActive`; a `goalId` other than the active turn's Goal is `-32000 goalUnavailable`. An in-flight Provider call is never aborted: its Finish still commits and the turn can complete. |
+| `goal/resume` | `{threadId,goalId,input?:[{type:"text",text}]}` → `{turn}` | Starts a submission like `turn/start` (same `busy`, `threadNotLoaded`, admission, approval and steering behavior) with `GoalRequest::resume(goalId, true)`. Only the thread's most recent paused Goal resumes, as `/goal resume` does; any other Goal is `-32000 goalUnavailable` before a Run. Absent input runs the pinned objective; text is passed to the Engine unchanged, with no images. The pinned budget and phase are kept. An exhausted paused Goal closes Failed and returns `goalBudgetExhausted` with no Run. |
 
 Providers are `openai`, `anthropic`, `chatgpt` or `custom:NAME`; credentials come
 from the existing selection path. Collaboration defaults to `auto` with three
@@ -94,8 +97,9 @@ Absolute `includePaths` must lie under `cwd` and are translated to
 Workspace-relative include paths before Engine admission. Goal and resource
 settings come from the existing private settings owner and are pinned per
 loaded thread. Plain input starts a new Goal; `goal.autonomous:true` uses the
-Engine's existing autonomous lifecycle. `resumeGoalId` is reserved and rejected
-until explicit Goal resume is implemented.
+Engine's existing autonomous lifecycle. `resumeGoalId` is reserved and rejected;
+use `goal/resume`. Steering and pause add no notification: their effects appear as
+the following committed Events and turn completion.
 
 ## Notifications and items
 
@@ -193,6 +197,7 @@ admission still apply. Hook execution remains owned by the Tools contract.
 | Outbound queue | 256; follower waits and Journal lag is reported through `events/resync`. |
 | Loaded threads / active submissions / pending approval requests | 64 / 1 / 1; `threadLimit` / `busy` / deny excess approvals; loaded threads are never evicted. Reloading a known thread consumes no extra slot. |
 | Resume response | Must fit the outbound line bound; otherwise `-32000 contextTooLarge`, without partial history. |
+| Steering and resume input | One text of at most 64 KiB, bounded further by the 8 KiB per-Run note budget for `turn/steer`; invalid params otherwise. |
 | Event page (future subscription) | 1,000; explicit continuation. |
 | Shutdown grace | 3 seconds total after EOF, input/output failure or a stop signal, covering Run cancellation, Engine closure and output draining; timeout exits 1 with `Run may be interrupted; check Session history`. |
 
@@ -215,7 +220,8 @@ native evidence remains with [NEXT_STEPS](../../NEXT_STEPS.md).
 
 The protocol uses capability strings for feature detection; schema artifact
 versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
-`items_v1`, `interrupt_receipt_v1`, `approvals_v1`. Breaking wire changes require a new
+`items_v1`, `interrupt_receipt_v1`, `approvals_v1`, `turn_steer_v1`, `goal_pause_v1`
+(the latter also covers `goal/resume`). Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
 pre-beta; stored formats retain their existing no-migration contract.
 
@@ -231,4 +237,5 @@ pre-beta; stored formats retain their existing no-migration contract.
 | Protocol state, capacity and transport recovery | Initialization refusals, 64-thread refusal without eviction, 64/256 queue backpressure, oversized/malformed duplex input recovery, tap-gap sequence and missed count | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Cancellation and failure | Busy refusal, interrupt and EOF commit cancellation, three-second grace despite a stalled client, failed accepted turns carry compiled guidance rather than RPC errors | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Tool history and human approvals | Reopened dispositions and uncertain unfinished ToolStarted; approval payload equals committed intent and timestamp; accept dispatches once; decline, invalid result, timeout, EOF and cancel deny; late/duplicate/unknown replies change no decision and get no reply; oversized requests deny unsent; full outbound queue cannot prevent expiry or Journal completion | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
+| Steering, pause and resume | A note is journaled once and refused when empty, over 8 KiB, over the Run budget or over 64 KiB; steer, pause and resume without an active turn or resumable Goal return closed reasons; pause ends the turn `interrupted` and `goal/resume` runs the pinned objective once with one `GoalResumed`; an oversized line is rejected by the line cap | [Serve corpus](../../crates/arany-cli/tests/serve/goal_controls.rs), [protocol bounds](../../crates/arany-cli/src/protocol/tests.rs) |
 | Shipped process | Cleared credentials: initialize succeeds, Provider selection fails, EOF exits 0, schema-valid stdout and empty stderr; argument/TTY admission exits 2 before State | [Session process tests](../../crates/arany-cli/tests/session_run.rs) |

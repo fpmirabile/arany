@@ -1732,3 +1732,6 @@ async fn oversized_resume_does_not_load_the_thread() {
     assert_eq!(provider.requests.lock().unwrap().len(), 3);
     assert!(provider.responses.lock().unwrap().is_empty());
 }
+
+#[path = "goal_controls.rs"]
+mod goal_controls;
