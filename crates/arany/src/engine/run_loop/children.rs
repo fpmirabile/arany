@@ -134,8 +134,7 @@ impl RunLoop<'_> {
         delegate_turn: ProviderTurn,
     ) -> Result<(), EngineError> {
         if objectives.iter().any(|child| child.editor.is_some()) {
-            return self
-                .run_foreground_worker(root_request, objectives, delegate_turn)
+            return Box::pin(self.run_foreground_worker(root_request, objectives, delegate_turn))
                 .await;
         }
         let Some(Spawned {

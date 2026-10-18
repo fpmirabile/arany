@@ -540,7 +540,7 @@ impl<'a> RunLoop<'a> {
                         }
                         Err(error) => return Err(error),
                     }
-                    self.verify_workers().await?;
+                    Box::pin(self.verify_workers()).await?;
                 }
                 CallResult::Cancelled => return self.cancel_primary().await,
                 CallResult::Response(_) if budget_refused => return self.fail_for_budget().await,

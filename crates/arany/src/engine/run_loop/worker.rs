@@ -1,5 +1,5 @@
 use super::children::ChildWork;
-use super::step::Grant;
+use super::step::{BoxedStep, Grant};
 use super::{Action, CallResult, RunLoop, call_record, valid_finish};
 use crate::engine::EngineError;
 use crate::provider::{
@@ -340,6 +340,45 @@ impl RunLoop<'_> {
             .next()
             .and_then(|c| c.editor)
             .ok_or(EngineError::InvalidRequest)?;
+        let Some(mut child) = self.begin_foreground_worker(root, assignment).await? else {
+            return Ok(());
+        };
+        let result = match self.reserve_active_segment(Duration::from_secs(20 * 60)) {
+            Ok(segment) => {
+                let result = self
+                    .drive_foreground_worker(&mut child, root, segment.deadline())
+                    .await;
+                self.settle_active_segment(segment)?;
+                result
+            }
+            Err(error) => Err(error),
+        };
+        let finish = match result {
+            Ok(finish) => finish,
+            Err(
+                EngineError::Tool(crate::tools::ToolError::Limit)
+                | EngineError::GoalBudgetExhausted,
+            ) => None,
+            Err(error) => return Err(error),
+        };
+        let (finish, completed) = self.complete_foreground_worker(&mut child, finish).await?;
+        self.settle_worker_handover(root, turn, &child, finish, completed)
+            .await
+    }
+
+    fn begin_foreground_worker<'a>(
+        &'a self,
+        root: &'a mut ProviderRequest,
+        assignment: Box<EditorAssignment>,
+    ) -> BoxedStep<'a, Option<ChildWork>> {
+        Box::pin(self.begin_foreground_worker_inner(root, assignment))
+    }
+
+    async fn begin_foreground_worker_inner(
+        &self,
+        root: &mut ProviderRequest,
+        assignment: Box<EditorAssignment>,
+    ) -> Result<Option<ChildWork>, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
         if !self.ledger().admits(Action::Delegation {
             children: 1,
@@ -347,9 +386,11 @@ impl RunLoop<'_> {
         }) {
             if self.ledger().remaining_calls() == Some(0) {
                 self.observe_worker_stop().await?;
-                return self.settle_stopped_primary().await;
+                self.settle_stopped_primary().await?;
+                return Ok(None);
             }
-            return self.fail_primary().await;
+            self.fail_primary().await?;
+            return Ok(None);
         }
         let mut allowance = WORKER_DATA_BYTES;
         loop {
@@ -371,7 +412,10 @@ impl RunLoop<'_> {
                 ) if allowance > WORKER_CHUNK_BYTES => allowance /= 2,
                 Err(
                     crate::store::StoreError::StorageFull | crate::store::StoreError::ReplayLimit,
-                ) => return self.fail_primary().await,
+                ) => {
+                    self.fail_primary().await?;
+                    return Ok(None);
+                }
                 Err(error) => return Err(error.into()),
             }
         }
@@ -380,35 +424,13 @@ impl RunLoop<'_> {
             .set(allowance)
             .map_err(|_| EngineError::CoordinatorFailed)?;
         let id = AgentRunId::new();
-        let preparation = ToolCall::PrepareWorker {
-            preparation: WorkerPreparation {
-                assignment_id: id,
-                purpose: WorkerDataPurpose::Base,
-                max_chunks: (WORKER_MANIFEST_BYTES.min(allowance as usize))
-                    .div_ceil(WORKER_CHUNK_BYTES) as u16,
-                max_bytes: (WORKER_MANIFEST_BYTES as u32).min(allowance),
-            },
-        };
-        let intent = self
-            .primary_intent(runtime, preparation.clone())?
-            .ok_or(EngineError::GoalBudgetExhausted)?;
-        let observation = self
-            .run_intent(
-                &Grant::Primary {
-                    request: root,
-                    review_allowed: false,
-                },
-                runtime,
-                intent,
-                &preparation,
-                false,
-            )
-            .await?;
-        let Some((observation, _)) = observation else {
-            return self.fail_primary().await;
+        let Some(observation) = self.prepare_worker_base(root, id, allowance).await? else {
+            self.fail_primary().await?;
+            return Ok(None);
         };
         let Some(Attestation::WorkerData { data: base, .. }) = observation.attestation else {
-            return self.fail_primary().await;
+            self.fail_primary().await?;
+            return Ok(None);
         };
         if self.observe_worker_stop().await? {
             self.worker
@@ -417,7 +439,8 @@ impl RunLoop<'_> {
                 .take()
                 .ok_or(EngineError::CoordinatorFailed)?
                 .dispose()?;
-            return self.settle_stopped_primary().await;
+            self.settle_stopped_primary().await?;
+            return Ok(None);
         }
         let grant = self.editor_grant(&assignment)?;
         self.append(Event::AgentSpawned {
@@ -444,7 +467,7 @@ impl RunLoop<'_> {
                 .unwrap_or(16)
                 .min(16)
         });
-        let mut child = ChildWork {
+        let child = ChildWork {
             agent_run_id: id,
             objective: assignment.mission.clone(),
             definition: self
@@ -457,35 +480,56 @@ impl RunLoop<'_> {
             tools: Some(runtime.editor_context(&grant, remaining)?),
             tool_calls_remaining: remaining,
         };
-        let result = match self.reserve_active_segment(Duration::from_secs(20 * 60)) {
-            Ok(segment) => {
-                let result = self
-                    .drive_foreground_worker(&mut child, root, segment.deadline())
-                    .await;
-                self.settle_active_segment(segment)?;
-                result
-            }
-            Err(error) => Err(error),
-        };
-        let finish = match result {
-            Ok(finish) => finish,
-            Err(
-                EngineError::Tool(crate::tools::ToolError::Limit)
-                | EngineError::GoalBudgetExhausted,
-            ) => None,
-            Err(error) => return Err(error),
-        };
-        self.complete_foreground_worker(&mut child, finish, root, turn)
-            .await
+        Ok(Some(child))
     }
 
-    async fn complete_foreground_worker(
+    async fn prepare_worker_base(
+        &self,
+        root: &mut ProviderRequest,
+        id: AgentRunId,
+        allowance: u32,
+    ) -> Result<Option<crate::tools::ToolObservation>, EngineError> {
+        let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
+        let preparation = ToolCall::PrepareWorker {
+            preparation: WorkerPreparation {
+                assignment_id: id,
+                purpose: WorkerDataPurpose::Base,
+                max_chunks: (WORKER_MANIFEST_BYTES.min(allowance as usize))
+                    .div_ceil(WORKER_CHUNK_BYTES) as u16,
+                max_bytes: (WORKER_MANIFEST_BYTES as u32).min(allowance),
+            },
+        };
+        let intent = self
+            .primary_intent(runtime, preparation.clone())?
+            .ok_or(EngineError::GoalBudgetExhausted)?;
+        let observation = self
+            .run_intent(
+                &Grant::Primary {
+                    request: root,
+                    review_allowed: false,
+                },
+                runtime,
+                intent,
+                &preparation,
+                false,
+            )
+            .await?;
+        Ok(observation.map(|(observation, _)| observation))
+    }
+
+    fn complete_foreground_worker<'a>(
+        &'a self,
+        child: &'a mut ChildWork,
+        finish: Option<crate::provider::Finish>,
+    ) -> BoxedStep<'a, (Option<crate::provider::Finish>, CompletedWorker)> {
+        Box::pin(self.complete_foreground_worker_inner(child, finish))
+    }
+
+    async fn complete_foreground_worker_inner(
         &self,
         child: &mut ChildWork,
         finish: Option<crate::provider::Finish>,
-        root: &mut ProviderRequest,
-        turn: ProviderTurn,
-    ) -> Result<(), EngineError> {
+    ) -> Result<(Option<crate::provider::Finish>, CompletedWorker), EngineError> {
         let id = child.agent_run_id;
         let mut stopped = self.observe_worker_stop().await?;
         let data = if finish.is_some() && !stopped {
@@ -619,10 +663,7 @@ impl RunLoop<'_> {
             }),
         })
         .await?;
-        self.settle_worker_handover(
-            root,
-            turn,
-            child,
+        Ok((
             finish,
             CompletedWorker {
                 stopped,
@@ -630,11 +671,21 @@ impl RunLoop<'_> {
                 data,
                 bytes,
             },
-        )
-        .await
+        ))
     }
 
-    async fn settle_worker_handover(
+    fn settle_worker_handover<'a>(
+        &'a self,
+        root: &'a mut ProviderRequest,
+        turn: ProviderTurn,
+        child: &'a ChildWork,
+        finish: Option<crate::provider::Finish>,
+        completed: CompletedWorker,
+    ) -> BoxedStep<'a, ()> {
+        Box::pin(self.settle_worker_handover_inner(root, turn, child, finish, completed))
+    }
+
+    async fn settle_worker_handover_inner(
         &self,
         root: &mut ProviderRequest,
         turn: ProviderTurn,
@@ -688,7 +739,7 @@ impl RunLoop<'_> {
             })
             .await?;
             let sequence = self.sequence()?;
-            if !self.integrate_worker(root, id, sequence, data).await? {
+            if !Box::pin(self.integrate_worker(root, id, sequence, data)).await? {
                 return if self.observe_worker_stop().await? {
                     self.settle_stopped_primary().await
                 } else {
@@ -711,10 +762,19 @@ impl RunLoop<'_> {
                 result: f.result,
             },
         );
-        self.synthesize(root, vec![Some(report)], turn).await
+        Box::pin(self.synthesize(root, vec![Some(report)], turn)).await
     }
 
-    async fn drive_foreground_worker(
+    fn drive_foreground_worker<'a>(
+        &'a self,
+        child: &'a mut ChildWork,
+        root: &'a ProviderRequest,
+        deadline: tokio::time::Instant,
+    ) -> BoxedStep<'a, Option<crate::provider::Finish>> {
+        Box::pin(self.drive_foreground_worker_inner(child, root, deadline))
+    }
+
+    async fn drive_foreground_worker_inner(
         &self,
         child: &mut ChildWork,
         root: &ProviderRequest,

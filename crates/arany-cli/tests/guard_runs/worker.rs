@@ -219,7 +219,7 @@ async fn worker_case(case: &'static str) {
             WorkerIntegrationOutcome::Uncertain
         );
     } else {
-        let result = result.unwrap();
+        let result = result.expect(case);
         assert!(result.stopped.is_none());
         assert!(worker.released.is_some());
         if case == "success" {

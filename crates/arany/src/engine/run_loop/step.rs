@@ -204,6 +204,10 @@ struct ActiveTime {
     exhausted: bool,
 }
 
+// Boxing a large future in a non-async wrapper keeps debug-build callers from holding it in their own frames.
+pub(super) type BoxedStep<'a, T> =
+    std::pin::Pin<Box<dyn Future<Output = Result<T, EngineError>> + Send + 'a>>;
+
 impl RunLoop<'_> {
     pub(super) async fn execute_step(
         &self,
@@ -237,9 +241,9 @@ impl RunLoop<'_> {
             let source_intent_digest = intent.digest();
             let narrowable = narrowings < MAX_NARROWINGS_PER_STEP;
             // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
-            let Some((observation, narrowed)) =
-                Box::pin(self.run_intent(&grant, runtime, intent, &source_call, narrowable))
-                    .await?
+            let Some((observation, narrowed)) = self
+                .run_intent(&grant, runtime, intent, &source_call, narrowable)
+                .await?
             else {
                 return Ok(false);
             };
@@ -497,7 +501,18 @@ impl RunLoop<'_> {
         Some(intent)
     }
 
-    pub(super) async fn run_intent(
+    pub(super) fn run_intent<'a>(
+        &'a self,
+        grant: &'a Grant<'_>,
+        runtime: &'a ToolRuntime,
+        intent: EffectIntent,
+        post_call: &'a ToolCall,
+        narrowable: bool,
+    ) -> BoxedStep<'a, Option<(ToolObservation, Option<ToolCall>)>> {
+        Box::pin(self.run_intent_inner(grant, runtime, intent, post_call, narrowable))
+    }
+
+    async fn run_intent_inner(
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
@@ -1702,8 +1717,9 @@ impl RunLoop<'_> {
                 review_allowed: false,
             };
             let post_call = intent.call.clone();
-            let Some((observation, _)) =
-                Box::pin(self.run_intent(&grant, runtime, intent, &post_call, false)).await?
+            let Some((observation, _)) = self
+                .run_intent(&grant, runtime, intent, &post_call, false)
+                .await?
             else {
                 return Ok(false);
             };
