@@ -287,11 +287,6 @@ impl RunView {
         view.provider_calls
             .iter()
             .enumerate()
-            .rev()
-            .take_while(|(_, call)| {
-                view.role == crate::session::AgentRole::Child
-                    || call.disposition == ProviderCallDisposition::Finished
-            })
             .filter(|(index, _)| {
                 let subject = crate::tools::permissions::stop_subject(agent, *index);
                 self.lifecycle_hooks.iter().any(|hook| {

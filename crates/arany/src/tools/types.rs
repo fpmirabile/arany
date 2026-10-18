@@ -941,6 +941,7 @@ pub struct ToolContext {
     pub catalog: String,
     pub history_summary: Option<String>,
     pub steps: Vec<ToolStep>,
+    pub stop_bytes: usize,
 }
 
 impl ToolStep {
@@ -1014,14 +1015,29 @@ impl ToolContext {
         self.steps.iter().map(|step| step.observations.len()).sum()
     }
 
+    // Each Stop continuation re-renders the Finish turn beside its feedback.
+    pub(crate) fn has_stop_room(&self, turn: &crate::provider::ProviderTurn, limit: usize) -> bool {
+        self.rendered_len()
+            + turn.len()
+            + super::permissions::MAX_HOOK_REASON_BYTES
+            + RESULT_ENVELOPE_BYTES
+            <= limit
+    }
+
+    pub(crate) fn add_stop_feedback(&mut self, turn: &crate::provider::ProviderTurn, text: &str) {
+        self.stop_bytes += turn.len() + text.len() + RESULT_ENVELOPE_BYTES;
+    }
+
     pub(crate) fn rendered_len(&self) -> usize {
         self.catalog.len()
+            + self.stop_bytes
             + self.history_summary.as_ref().map_or(0, String::len)
             + self.steps.iter().map(ToolStep::rendered_len).sum::<usize>()
     }
 
     pub(crate) fn projected_len(&self, summary: Option<&str>, steps: usize) -> usize {
         self.catalog.len()
+            + self.stop_bytes
             + summary.map_or(0, str::len)
             + self.steps[steps..]
                 .iter()

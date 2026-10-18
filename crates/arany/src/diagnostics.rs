@@ -355,6 +355,7 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::ContextTooLarge => "ContextTooLarge",
         EngineError::ImagesNotAdmitted => "ImagesNotAdmitted",
         EngineError::CompactionInputEmpty => "CompactionInputEmpty",
+        EngineError::CompactionBlockedByHook => "CompactionBlockedByHook",
         EngineError::CompactionInputTooLarge => "CompactionInputTooLarge",
         EngineError::CompactionNotIdle => "CompactionNotIdle",
         EngineError::CancellationDrainTimeout => "CancellationDrainTimeout",

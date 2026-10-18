@@ -73,6 +73,7 @@ fn request(steps: Vec<ToolStep>) -> ProviderRequest {
             }],
             goal_budget: Some(GoalBudget::default()),
             tools: Some(ToolContext {
+                stop_bytes: 0,
                 catalog: catalog(),
                 history_summary: None,
                 steps,

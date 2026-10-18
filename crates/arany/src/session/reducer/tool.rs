@@ -858,6 +858,16 @@ fn start_lifecycle(
     Ok(())
 }
 
+// A crash leaves a lifecycle hook open; the next Run interrupts it as it does an open Tool hook.
+fn opens_other_run(run: &RunView, event: &Event) -> bool {
+    match event {
+        Event::GoalRunLinked { run_id, .. } | Event::MessageAccepted { run_id, .. } => {
+            *run_id != run.id
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn before_lifecycle_event(
     current: &SessionView,
     event: &Event,
@@ -871,8 +881,14 @@ pub(super) fn before_lifecycle_event(
         .is_some_and(|hook| hook.outcome.is_none())
         && !matches!(
             event,
-            Event::HookFinished { .. } | Event::GoalStarted { .. } | Event::GoalResumed { .. }
+            Event::HookFinished { .. }
+                | Event::GoalStarted { .. }
+                | Event::GoalResumed { .. }
+                | Event::GoalFinished { .. }
+                | Event::SessionRenamed { .. }
+                | Event::SessionDefaultChanged { .. }
         )
+        && !opens_other_run(run, event)
     {
         return Err(ReplayError::InvalidTransition);
     }

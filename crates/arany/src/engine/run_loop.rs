@@ -567,6 +567,13 @@ impl<'a> RunLoop<'a> {
         finish: &Finish,
         turn: crate::provider::ProviderTurn,
     ) -> Result<bool, EngineError> {
+        let fits = self
+            .controls
+            .tools
+            .zip(root.input.tools.as_ref())
+            .is_none_or(|(runtime, tools)| {
+                tools.has_stop_room(&turn, runtime.context_limit_bytes())
+            });
         let Some(feedback) = self
             .lifecycle_hooks(
                 self.primary_id,
@@ -574,30 +581,20 @@ impl<'a> RunLoop<'a> {
                 "",
                 &finish.result,
                 None,
+                fits,
             )
             .await?
         else {
             return Ok(false);
         };
-        if root
-            .input
-            .stop_hook_feedback
-            .iter()
-            .map(|feedback| feedback.text.len())
-            .sum::<usize>()
-            + feedback.len()
-            > crate::tools::permissions::MAX_STOP_FEEDBACK_BYTES
-        {
-            return Err(EngineError::ContextTooLarge);
-        }
+        let after_step = root.input.tools.as_mut().map_or(0, |tools| {
+            tools.add_stop_feedback(&turn, &feedback);
+            tools.steps.len()
+        });
         root.input
             .stop_hook_feedback
             .push(crate::provider::StopHookFeedback {
-                after_step: root
-                    .input
-                    .tools
-                    .as_ref()
-                    .map_or(0, |tools| tools.steps.len()),
+                after_step,
                 turn,
                 text: feedback,
             });

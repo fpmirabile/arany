@@ -126,6 +126,16 @@ impl Fixture {
         goal_budget: arany::GoalBudget,
     ) -> (arany::RunOutcome, Vec<ProviderRequest>, usize) {
         let provider = Arc::new(ScriptedProvider::new(outcomes));
+        self.run_provider(provider, mode, team, goal_budget).await
+    }
+
+    async fn run_provider(
+        &self,
+        provider: Arc<ScriptedProvider>,
+        mode: Option<arany::ApprovalMode>,
+        team: bool,
+        goal_budget: arany::GoalBudget,
+    ) -> (arany::RunOutcome, Vec<ProviderRequest>, usize) {
         let (approvals, mut inbox) = arany::ToolApprovals::new(mode.unwrap_or_default());
         let controls = RunControls {
             tools: ToolGrant::Configured,
@@ -2994,7 +3004,7 @@ mod lifecycle_hooks {
                                 fixture.workspace.clone()
                             )
                             .await,
-                        Err(arany::EngineError::CompactionInputEmpty)
+                        Err(arany::EngineError::CompactionBlockedByHook)
                     ));
                 } else {
                     assert!(
@@ -3019,5 +3029,119 @@ mod lifecycle_hooks {
                 Event::ContextCompacted { .. } | Event::GoalCompactionCallReserved { .. }
             )));
         }
+    }
+
+    fn delegate(children: usize) -> ProviderOutcome {
+        ProviderOutcome::Delegate(arany::Delegate {
+            children: (0..children)
+                .map(|index| arany::ChildAssignment {
+                    objective: format!("Research part {index}"),
+                    profile: None,
+                })
+                .collect(),
+            agent: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn interleaved_tool_call_does_not_reset_the_stop_cap() {
+        let settings = json!({"hooks":{"Stop":[{"hooks":[shell_hook("echo again >&2; exit 2")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let mut outcomes = vec![finish("c0"), tool_outcome(call("read"), None)];
+        outcomes.extend((1..9).map(|index| finish(&format!("c{index}"))));
+        let (result, requests, _) = fixture.run(outcomes, None, false).await;
+        assert_eq!(result.run.status, RunStatus::Finished);
+        assert_eq!(requests.len(), 10);
+        assert_eq!(requests.last().unwrap().input.stop_hook_feedback.len(), 8);
+        let (_, view) = fixture.reopen(result.session_id).await;
+        assert_eq!(view.runs[0].lifecycle_hooks.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_subagent_stop_cancels_the_child_not_the_budget() {
+        let settings =
+            json!({"hooks":{"SubagentStop":[{"hooks":[shell_hook("sleep 30; exit 2")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let cancellation = RunCancellation::new();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            delegate(1),
+            finish("child candidate"),
+            finish("synthesis"),
+        ]));
+        let mut input = request(&fixture.workspace, "Inspect and complete the task");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: 1,
+        };
+        let mut events = fixture.engine.subscribe();
+        let watcher = {
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                let started = async {
+                    while let Some(tapped) = events.next().await {
+                        if matches!(
+                            tapped,
+                            arany::Tapped::Committed(ref envelope)
+                                if matches!(envelope.event, Event::HookStarted { .. })
+                        ) {
+                            cancellation.cancel();
+                            return;
+                        }
+                    }
+                };
+                let _ = tokio::time::timeout(Duration::from_secs(60), started).await;
+            })
+        };
+        let outcome = run_with(
+            &fixture.engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                cancellation,
+                ..Default::default()
+            },
+        )
+        .await;
+        watcher.abort();
+        let _ = watcher.await;
+        assert!(
+            matches!(
+                outcome,
+                Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+            ),
+            "a killed hook is unknown, never a budget stop: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_stop_without_time_before_the_deadline_fails_only_that_child() {
+        let settings = json!({"hooks":{"SubagentStop":[{"hooks":[shell_hook("exit 2")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let (result, _, _) = fixture
+            .run_budgeted(
+                vec![delegate(1), finish("child")],
+                None,
+                true,
+                arany::GoalBudget {
+                    max_active_ms: Some(20_000),
+                    ..budget()
+                },
+            )
+            .await;
+        let (events, view) = fixture.reopen(result.session_id).await;
+        assert!(view.runs[0].lifecycle_hooks.is_empty());
+        assert!(
+            view.runs[0]
+                .agents
+                .iter()
+                .skip(1)
+                .all(|agent| agent.status == arany::AgentStatus::Failed)
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.event, Event::RunFinished { .. }))
+        );
     }
 }

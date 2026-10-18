@@ -27,7 +27,7 @@ impl Engine {
     ) -> Result<CompactionRecord, EngineError> {
         self.compact_session_inner(providers, session_id, workspace, None)
             .await
-            .and_then(|record| record.ok_or(EngineError::CompactionInputEmpty))
+            .and_then(|record| record.ok_or(EngineError::CompactionBlockedByHook))
             .inspect_err(crate::diagnostics::engine_failure)
     }
 
@@ -278,6 +278,7 @@ impl Engine {
                 trigger,
                 "",
                 None,
+                true,
             )
             .await?
             .is_some())

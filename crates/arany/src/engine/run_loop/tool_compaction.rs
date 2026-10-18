@@ -103,6 +103,7 @@ impl RunLoop<'_> {
                 "auto",
                 "",
                 None,
+                true,
             )
             .await?
             .is_some()

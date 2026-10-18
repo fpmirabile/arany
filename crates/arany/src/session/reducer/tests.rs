@@ -2485,6 +2485,84 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn crash_with_an_open_lifecycle_hook_leaves_the_session_usable() {
+        use crate::tools::permissions::{HookEvent, HookInvocation, stop_subject};
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let mut pinned = config(CollaborationPolicy::Single, true);
+        pinned.tool_policy.as_mut().unwrap().permissions_digest = Some([3; 32]);
+        let mut events = vec![
+            Event::SessionStarted {
+                title: "Goal".into(),
+                workspace_identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+            },
+            goal_started(goal_id, GoalBudget::default()),
+        ];
+        events.extend(start_run(goal_id, run_id, agent_run_id, pinned));
+        events.extend([
+            Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+                active_ceiling_ms: 7_000,
+            },
+            Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Finished,
+                    Some(0),
+                ),
+            },
+            Event::HookStarted {
+                run_id,
+                agent_run_id,
+                hook: HookInvocation {
+                    event: HookEvent::Stop,
+                    group: 0,
+                    handler: 0,
+                    subject_digest: stop_subject(agent_run_id, 0),
+                    intent: child_intent(
+                        run_id,
+                        agent_run_id,
+                        ToolCall::Command {
+                            program: "sh".into(),
+                            args: vec!["-c".into(), "exit 2".into()],
+                            cwd: String::new(),
+                        },
+                    ),
+                    input_digest: [9; 32],
+                    active_ceiling_ms: Some(5_000),
+                },
+            },
+        ]);
+        let view = SessionView::replay(session_id, &journal(session_id, events.clone()))
+            .expect("crash-left prefix")
+            .expect("Session");
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        assert!(!view.runs[0].hooks_settled());
+        assert!(!view.goal(goal_id).unwrap().can_resume(&view));
+
+        let next_goal = GoalId::new();
+        events.push(goal_started(next_goal, GoalBudget::default()));
+        events.extend(start_run(
+            next_goal,
+            RunId::new(),
+            AgentRunId::new(),
+            config(CollaborationPolicy::Single, true),
+        ));
+        let view = SessionView::replay_open(session_id, &journal(session_id, events))
+            .expect("a new task after the crash")
+            .expect("Session");
+        assert_eq!(view.runs.len(), 2);
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+    }
+
+    #[test]
     fn crash_mid_run_charges_only_the_open_action_and_resume_continues() {
         let session_id = SessionId::new();
         let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());

@@ -989,6 +989,7 @@ mod tests {
 
     fn context() -> crate::tools::ToolContext {
         crate::tools::ToolContext {
+stop_bytes: 0,
             catalog: json!({"write": false, "commands": [], "skills": [], "mcp_servers": [], "tool_calls_remaining": 2}).to_string(),
             history_summary: None,
             steps: Vec::new(),

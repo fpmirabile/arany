@@ -113,6 +113,7 @@ fn engine_reason(error: &EngineError) -> Reason {
         EngineError::ContextTooLarge => Reason::ContextTooLarge,
         EngineError::ImagesNotAdmitted => Reason::ImagesNotAdmitted,
         EngineError::CompactionInputEmpty => Reason::CompactionInputEmpty,
+        EngineError::CompactionBlockedByHook => Reason::CompactionBlockedByHook,
         EngineError::CompactionInputTooLarge => Reason::CompactionInputTooLarge,
         EngineError::CompactionNotIdle => Reason::CompactionNotIdle,
         EngineError::CancellationDrainTimeout => Reason::CancellationDrainTimeout,

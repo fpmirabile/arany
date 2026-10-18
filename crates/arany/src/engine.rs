@@ -128,6 +128,8 @@ pub enum EngineError {
     ImagesNotAdmitted,
     #[error("Session has no new successful conversation to compact")]
     CompactionInputEmpty,
+    #[error("a PreCompact hook blocked compaction")]
+    CompactionBlockedByHook,
     #[error("compaction input exceeds its limit")]
     CompactionInputTooLarge,
     #[error("Session is not idle at a committed Run boundary")]

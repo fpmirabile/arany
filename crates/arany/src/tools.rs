@@ -572,6 +572,7 @@ impl ToolRuntime {
             return Err(ToolError::Limit);
         }
         Ok(ToolContext {
+            stop_bytes: 0,
             catalog,
             history_summary: None,
             steps: Vec::new(),
@@ -597,6 +598,7 @@ impl ToolRuntime {
             return Err(ToolError::Limit);
         }
         Ok(ToolContext {
+            stop_bytes: 0,
             catalog,
             history_summary: None,
             steps: Vec::new(),

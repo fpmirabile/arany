@@ -271,6 +271,7 @@ pub enum HookResult {
         reason: Option<String>,
     },
     Blocked {
+        #[serde(deserialize_with = "Option::deserialize")]
         reason: Option<String>,
     },
     Feedback {
@@ -332,15 +333,9 @@ impl HookResult {
         };
         if !matches!(event, HookEvent::PreToolUse | HookEvent::PostToolUse)
             && observation.disposition == crate::tools::ToolDisposition::Denied
-            && [
-                "hook limit",
-                "hook program is not pinned",
-                "hook input exceeds the Guard task limit",
-            ]
-            .contains(&observation.output.as_str())
         {
             return Self::Blocked {
-                reason: Some(observation.output.clone()),
+                reason: bounded_reason(&observation.output),
             };
         }
         match observation.disposition {

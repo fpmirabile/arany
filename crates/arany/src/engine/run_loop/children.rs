@@ -492,40 +492,13 @@ impl RunLoop<'_> {
                     && !self.controls.cancellation.is_cancelled()
                     && abort_reason.is_none()
                 {
-                    let subject = child
-                        .definition
-                        .as_ref()
-                        .map_or("researcher", |definition| definition.name.as_str());
-                    if let Some(feedback) = self
-                        .lifecycle_hooks(
-                            agent_run_id,
-                            crate::tools::permissions::HookEvent::SubagentStop,
-                            subject,
-                            &finish.result,
-                            Some(deadline),
-                        )
+                    match self
+                        .subagent_stop(child, &finish, turn, abort_reason, deadline)
                         .await?
                     {
-                        child
-                            .stop_hook_feedback
-                            .push(crate::provider::StopHookFeedback {
-                                after_step: child
-                                    .tools
-                                    .as_ref()
-                                    .map_or(0, |tools| tools.steps.len()),
-                                turn,
-                                text: feedback,
-                            });
-                        self.ledger().child_call_finished()?;
-                        if child.turns_remaining > 0
-                            && tokio::time::Instant::now() < deadline
-                            && self.ledger().can_start_provider_call()
-                        {
-                            return Ok(None);
-                        }
-                        self.finish_child(agent_run_id, AgentDisposition::Failed, None, false)
-                            .await?;
-                        return Ok(Some(AgentDisposition::Failed));
+                        ChildStop::Proceed => {}
+                        ChildStop::Reprompt => return Ok(None),
+                        ChildStop::End(disposition) => return Ok(Some(disposition)),
                     }
                 }
                 self.finish_child(
@@ -597,6 +570,83 @@ impl RunLoop<'_> {
             }
         };
         Ok(Some(disposition))
+    }
+
+    async fn subagent_stop(
+        &self,
+        child: &mut ChildWork,
+        finish: &Finish,
+        turn: ProviderTurn,
+        abort_reason: &mut Option<AbortReason>,
+        deadline: Instant,
+    ) -> Result<ChildStop, EngineError> {
+        let agent_run_id = child.agent_run_id;
+        let subject = child
+            .definition
+            .as_ref()
+            .map_or("researcher", |definition| definition.name.as_str());
+        let fits = self
+            .controls
+            .tools
+            .zip(child.tools.as_ref())
+            .is_none_or(|(runtime, tools)| {
+                tools.has_stop_room(&turn, runtime.context_limit_bytes())
+            });
+        let stop = self
+            .lifecycle_hooks(
+                agent_run_id,
+                crate::tools::permissions::HookEvent::SubagentStop,
+                subject,
+                &finish.result,
+                Some(deadline),
+                fits,
+            )
+            .await;
+        let feedback = match stop {
+            Ok(Some(feedback)) => feedback,
+            Ok(None) => return Ok(ChildStop::Proceed),
+            // A cut-off or cancelled hook ends this child only, unless its outcome stops the Run.
+            Err(EngineError::GoalBudgetExhausted | EngineError::ContextTooLarge) => {
+                let settled = self.ledger().view(|view| {
+                    view.runs
+                        .iter()
+                        .find(|run| run.id == self.run_id)
+                        .is_some_and(crate::session::RunView::hooks_settled)
+                })?;
+                if !settled && abort_reason.is_none() {
+                    *abort_reason = Some(AbortReason::Budget);
+                }
+                let disposition = if self.controls.cancellation.is_cancelled() {
+                    AgentDisposition::Cancelled
+                } else {
+                    AgentDisposition::Failed
+                };
+                self.finish_child(agent_run_id, disposition, None, true)
+                    .await?;
+                return Ok(ChildStop::End(disposition));
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(tools) = child.tools.as_mut() {
+            tools.add_stop_feedback(&turn, &feedback);
+        }
+        child
+            .stop_hook_feedback
+            .push(crate::provider::StopHookFeedback {
+                after_step: child.tools.as_ref().map_or(0, |tools| tools.steps.len()),
+                turn,
+                text: feedback,
+            });
+        self.ledger().child_call_finished()?;
+        if child.turns_remaining > 0
+            && tokio::time::Instant::now() < deadline
+            && self.ledger().can_start_provider_call()
+        {
+            return Ok(ChildStop::Reprompt);
+        }
+        self.finish_child(agent_run_id, AgentDisposition::Failed, None, false)
+            .await?;
+        Ok(ChildStop::End(AgentDisposition::Failed))
     }
 
     async fn synthesize(
@@ -810,6 +860,12 @@ impl RunLoop<'_> {
         }
         Ok(())
     }
+}
+
+enum ChildStop {
+    Proceed,
+    Reprompt,
+    End(AgentDisposition),
 }
 
 fn classify_join(

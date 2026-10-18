@@ -1,5 +1,5 @@
 use super::{ActiveTime, Answer, Grant, active_time_limit_observation, not_dispatched};
-use crate::engine::ledger::duration_ms;
+use crate::engine::ledger::{Action, duration_ms};
 use crate::engine::run_loop::{RunLoop, TOOL_CLEANUP_OVERHEAD};
 use crate::engine::{EngineError, STORE_ACTION_OVERHEAD};
 use crate::session::Event;
@@ -36,7 +36,13 @@ pub(super) struct PostFold {
 struct HookRun {
     result: HookResult,
     stops: bool,
+    cancelled: bool,
     exhausted: bool,
+}
+
+enum HookClock {
+    Pause(crate::engine::run_loop::ActivePause),
+    Deadline(tokio::time::Instant),
 }
 
 struct HookPlan {
@@ -142,8 +148,8 @@ fn narrowing_holds(
         && runtime.allows(updated)
 }
 
-fn hook_call(runtime: &ToolRuntime, hook: &CommandHook) -> Option<ToolCall> {
-    let call = match hook.args() {
+fn configured_call(hook: &CommandHook) -> ToolCall {
+    match hook.args() {
         None => ToolCall::Command {
             program: "sh".into(),
             args: vec!["-c".into(), hook.command().into()],
@@ -154,8 +160,25 @@ fn hook_call(runtime: &ToolRuntime, hook: &CommandHook) -> Option<ToolCall> {
             args: args.to_vec(),
             cwd: String::new(),
         },
-    };
+    }
+}
+
+fn hook_call(runtime: &ToolRuntime, hook: &CommandHook) -> Option<ToolCall> {
+    let call = configured_call(hook);
     runtime.allows(&call).then_some(call)
+}
+
+fn occurrence_digest(
+    event: HookEvent,
+    agent: crate::session::AgentRunId,
+    subject: &str,
+    calls: usize,
+) -> [u8; 32] {
+    if event == HookEvent::PreCompact {
+        crate::tools::permissions::compact_subject(subject, calls)
+    } else {
+        crate::tools::permissions::stop_subject(agent, calls.saturating_sub(1))
+    }
 }
 
 impl RunLoop<'_> {
@@ -316,6 +339,7 @@ impl RunLoop<'_> {
                 result,
                 stops,
                 exhausted,
+                ..
             } = run;
             fold.count += 1;
             if stops {
@@ -441,9 +465,11 @@ impl RunLoop<'_> {
         subject: &str,
         message: &str,
         deadline: Option<tokio::time::Instant>,
+        feedback_fits: bool,
     ) -> Result<Option<String>, EngineError> {
         // Boxed so the hook state does not inflate the run loop's future.
-        Box::pin(self.run_lifecycle_hooks(agent, event, subject, message, deadline)).await
+        Box::pin(self.run_lifecycle_hooks(agent, event, subject, message, deadline, feedback_fits))
+            .await
     }
 
     async fn run_lifecycle_hooks(
@@ -453,17 +479,16 @@ impl RunLoop<'_> {
         subject: &str,
         message: &str,
         deadline: Option<tokio::time::Instant>,
+        feedback_fits: bool,
     ) -> Result<Option<String>, EngineError> {
-        use crate::tools::permissions::{
-            MAX_STOP_CONTINUATIONS, compact_subject, lifecycle_input, stop_feedback, stop_subject,
-        };
+        use crate::tools::permissions::{MAX_STOP_CONTINUATIONS, lifecycle_input, stop_feedback};
         let Some(runtime) = self.controls.tools else {
             return Ok(None);
         };
         let Some(config) = runtime.permissions() else {
             return Ok(None);
         };
-        let (index, continuations, existing) = self.ledger().view(|view| {
+        let (index, continuations) = self.ledger().view(|view| {
             let run = view
                 .runs
                 .iter()
@@ -474,59 +499,68 @@ impl RunLoop<'_> {
                 .iter()
                 .find(|view| view.id == agent)
                 .ok_or(EngineError::InvalidHistory)?;
-            let digest = if event == HookEvent::PreCompact {
-                compact_subject(subject, actor.provider_calls.len())
-            } else {
-                stop_subject(agent, actor.provider_calls.len().saturating_sub(1))
-            };
-            Ok::<_, EngineError>((
-                actor.provider_calls.len(),
-                run.stop_continuations(agent),
-                run.lifecycle_hooks.iter().any(|hook| {
-                    hook.invocation.event == event && hook.invocation.subject_digest == digest
-                }),
-            ))
+            Ok::<_, EngineError>((actor.provider_calls.len(), run.stop_continuations(agent)))
         })??;
+        let digest = occurrence_digest(event, agent, subject, index);
         if event != HookEvent::PreCompact && continuations >= MAX_STOP_CONTINUATIONS {
             return Ok(None);
         }
+        let existing = self.ledger().view(|view| {
+            view.runs.iter().any(|run| {
+                run.id == self.run_id
+                    && run.lifecycle_hooks.iter().any(|hook| {
+                        hook.invocation.event == event && hook.invocation.subject_digest == digest
+                    })
+            })
+        })?;
         if existing {
             return Ok(Some("hook occurrence already attempted".into()));
         }
-        let matched = config.matched_hooks(event, |group| group.matches(subject));
-        let plans = matched.map_err(|_| "hook limit").and_then(|matched| {
-            matched
-                .into_iter()
-                .map(|(group, handler, hook)| {
-                    Ok(HookPlan {
-                        group,
-                        handler,
-                        call: hook_call(runtime, hook).ok_or("hook program is not pinned")?,
-                        timeout_ms: u32::try_from(hook.timeout_seconds() * 1000)
-                            .unwrap_or(u32::MAX),
+        let plans = config
+            .matched_hooks(event, |group| group.matches(subject))
+            .map_err(|_| ("hook limit", None))
+            .and_then(|matched| {
+                matched
+                    .into_iter()
+                    .map(|(group, handler, hook)| {
+                        Ok(HookPlan {
+                            group,
+                            handler,
+                            call: hook_call(runtime, hook)
+                                .ok_or(("hook program is not pinned", Some((group, handler))))?,
+                            timeout_ms: u32::try_from(hook.timeout_seconds() * 1000)
+                                .unwrap_or(u32::MAX),
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>, _>>()
-        });
+                    .collect::<Result<Vec<_>, _>>()
+            });
+        if plans.as_ref().is_ok_and(Vec::is_empty) {
+            return Ok(None);
+        }
+        // A block must be able to continue, so a context without room refuses before any hook journals.
+        if !feedback_fits {
+            return Err(EngineError::ContextTooLarge);
+        }
         let plans = match plans {
             Ok(plans) => plans,
-            Err(reason) => {
+            Err((reason, culprit)) => {
+                let (group, handler) = culprit.unwrap_or((0, 0));
+                let first = config
+                    .hooks()
+                    .groups(event)
+                    .get(usize::from(group))
+                    .and_then(|group| group.commands().get(usize::from(handler)))
+                    .map(|hook| (group, handler, configured_call(hook)));
                 return self
-                    .block_lifecycle(agent, event, subject, index, reason)
+                    .block_lifecycle(agent, event, subject, digest, reason, first)
                     .await
                     .map(Some);
             }
         };
-        if plans.is_empty() {
-            return Ok(None);
-        }
         self.journal
             .admit(
                 self.session_id,
-                2 * plans.len()
-                    + self
-                        .primary_call()
-                        .max_events_for_admitted(&self.routing.providers),
+                2 * plans.len() + self.lifecycle_tail(event),
                 plans.len(),
             )
             .await?;
@@ -546,14 +580,22 @@ impl RunLoop<'_> {
                 break (input, sized);
             }
             if budget == 0 {
-                return Err(EngineError::InvalidRequest);
+                let first = plans
+                    .first()
+                    .map(|plan| (plan.group, plan.handler, plan.call.clone()));
+                return self
+                    .block_lifecycle(
+                        agent,
+                        event,
+                        subject,
+                        digest,
+                        "hook input exceeds the Guard task limit",
+                        first,
+                    )
+                    .await
+                    .map(Some);
             }
             budget = if budget < 2048 { 0 } else { budget / 2 };
-        };
-        let digest = if event == HookEvent::PreCompact {
-            compact_subject(subject, index)
-        } else {
-            stop_subject(agent, index.saturating_sub(1))
         };
         for plan in plans {
             let Some(run) = self
@@ -569,16 +611,13 @@ impl RunLoop<'_> {
             else {
                 return Err(EngineError::GoalBudgetExhausted);
             };
-            if self.controls.cancellation.is_cancelled() {
+            if self.controls.cancellation.is_cancelled() || run.stops && run.cancelled {
                 return Err(EngineError::GoalBudgetExhausted);
             }
             if run.stops {
                 return Err(crate::tools::ToolError::Uncertain.into());
             }
-            if run.exhausted {
-                return Err(EngineError::GoalBudgetExhausted);
-            }
-            if self.controls.cancellation.is_cancelled() {
+            if run.exhausted && deadline.is_none() {
                 return Err(EngineError::GoalBudgetExhausted);
             }
             if matches!(run.result, HookResult::Blocked { .. }) {
@@ -586,6 +625,19 @@ impl RunLoop<'_> {
             }
         }
         Ok(None)
+    }
+
+    // A SubagentStop shares the delegation's admission with its siblings, so it reserves a researcher's tail.
+    fn lifecycle_tail(&self, event: HookEvent) -> usize {
+        let tail = if event == HookEvent::SubagentStop {
+            Action::Child {
+                in_flight: self.ledger().in_flight_children(),
+                research: true,
+            }
+        } else {
+            self.primary_call()
+        };
+        tail.max_events_for_admitted(&self.routing.providers)
     }
 
     fn lifecycle_ceiling(&self, pending_ms: u64) -> Result<u64, EngineError> {
@@ -600,15 +652,17 @@ impl RunLoop<'_> {
         Ok(ceiling.min(remaining.unwrap_or(u64::MAX)))
     }
 
+    // A refused occurrence journals the handler's own call as a denied intent that never dispatched.
     async fn block_lifecycle(
         &self,
         agent: crate::session::AgentRunId,
         event: HookEvent,
         subject: &str,
-        index: usize,
+        digest: [u8; 32],
         reason: &str,
+        handler: Option<(u8, u8, ToolCall)>,
     ) -> Result<String, EngineError> {
-        use crate::tools::permissions::{compact_subject, stop_subject};
+        let (group, handler, call) = handler.ok_or(EngineError::InvalidRequest)?;
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
         let config = runtime.permissions().ok_or(EngineError::InvalidRequest)?;
         let input = crate::tools::permissions::lifecycle_input(
@@ -620,46 +674,29 @@ impl RunLoop<'_> {
             subject,
             MAX_HOOK_INPUT_BYTES,
         );
-        let intent = runtime.intent(
-            self.run_id,
-            agent,
-            ToolCall::Command {
-                program: "sh".into(),
-                args: vec!["-c".into(), "exit 2".into()],
-                cwd: String::new(),
-            },
-        );
+        let intent = runtime.intent(self.run_id, agent, call);
         self.journal
-            .admit(
-                self.session_id,
-                2 + self
-                    .primary_call()
-                    .max_events_for_admitted(&self.routing.providers),
-                1,
-            )
+            .admit(self.session_id, 2 + self.lifecycle_tail(event), 1)
             .await?;
+        let active_ceiling_ms = match self
+            .ledger()
+            .view(|view| view.active_goal().map(|goal| goal.active_run.is_some()))?
+        {
+            Some(true) => Some(self.lifecycle_ceiling(0)?),
+            Some(false) => Some(1),
+            None => None,
+        };
         self.append(Event::HookStarted {
             run_id: self.run_id,
             agent_run_id: agent,
             hook: HookInvocation {
                 event,
-                group: 0,
-                handler: 0,
-                subject_digest: if event == HookEvent::PreCompact {
-                    compact_subject(subject, index)
-                } else {
-                    stop_subject(agent, index.saturating_sub(1))
-                },
+                group,
+                handler,
+                subject_digest: digest,
                 intent: intent.clone(),
                 input_digest: crate::tools::types::digest(input.as_bytes()),
-                active_ceiling_ms: if self.ledger().view(|view| {
-                    view.active_goal()
-                        .is_some_and(|goal| goal.active_run.is_some())
-                })? {
-                    Some(self.lifecycle_ceiling(0)?)
-                } else {
-                    self.ledger().view(|view| view.active_goal().map(|_| 1))?
-                },
+                active_ceiling_ms,
             },
         })
         .await?;
@@ -699,8 +736,7 @@ impl RunLoop<'_> {
         &self,
         runtime: &ToolRuntime,
         hook_intent: EffectIntent,
-        pause: Option<crate::engine::run_loop::ActivePause>,
-        deadline: Option<tokio::time::Instant>,
+        clock: HookClock,
     ) -> Result<
         (
             ToolObservation,
@@ -709,20 +745,20 @@ impl RunLoop<'_> {
         ),
         EngineError,
     > {
-        Ok(if let Some(pause) = pause {
-            self.dispatch_guard(runtime, hook_intent, pause).await?
-        } else {
-            let deadline = deadline.expect("delegated hook deadline");
-            let cancellation = crate::engine::RunCancellation::new();
-            let mut parent = self.controls.cancellation.clone();
-            let execution = runtime.execute(hook_intent, cancellation.clone());
-            tokio::pin!(execution);
-            let observation = tokio::select! {
-                observation = &mut execution => observation,
-                () = tokio::time::sleep_until(deadline) => { cancellation.cancel(); execution.await },
-                () = parent.cancelled() => { cancellation.cancel(); execution.await },
-            };
-            (observation, None, tokio::time::Instant::now() >= deadline)
+        Ok(match clock {
+            HookClock::Pause(pause) => self.dispatch_guard(runtime, hook_intent, pause).await?,
+            HookClock::Deadline(deadline) => {
+                let cancellation = crate::engine::RunCancellation::new();
+                let mut parent = self.controls.cancellation.clone();
+                let execution = runtime.execute(hook_intent, cancellation.clone());
+                tokio::pin!(execution);
+                let observation = tokio::select! {
+                    observation = &mut execution => observation,
+                    () = tokio::time::sleep_until(deadline) => { cancellation.cancel(); execution.await },
+                    () = parent.cancelled() => { cancellation.cancel(); execution.await },
+                };
+                (observation, None, tokio::time::Instant::now() >= deadline)
+            }
         })
     }
 
@@ -792,25 +828,25 @@ impl RunLoop<'_> {
         limits.cache_candidate_bytes = 0;
         limits.cache_transfer_ms = 0;
         hook_intent.expires_at_ms = crate::tools::now_ms().saturating_add(u64::from(runtime_ms));
-        let pause = if deadline.is_some() {
-            None
-        } else {
-            Some(match self.reserve_active_pause() {
+        let clock = match deadline {
+            Some(deadline) => HookClock::Deadline(deadline),
+            None => HookClock::Pause(match self.reserve_active_pause() {
                 Ok(pause) => pause,
                 Err(EngineError::GoalBudgetExhausted) => return Ok(None),
                 Err(error) => return Err(error),
-            })
+            }),
         };
+        let boundary_ceiling = boundary_goal.map(|_| {
+            deadline.map_or(0, |deadline| {
+                duration_ms(deadline.saturating_duration_since(boundary_started))
+            })
+        });
         self.append(Event::HookStarted {
             run_id: self.run_id,
             agent_run_id,
             hook: HookInvocation {
                 active_ceiling_ms: if boundary {
-                    boundary_goal.map(|_| {
-                        deadline.map_or(0, |deadline| {
-                            duration_ms(deadline.saturating_duration_since(boundary_started))
-                        })
-                    })
+                    boundary_ceiling
                 } else if matches!(
                     event,
                     HookEvent::Stop | HookEvent::SubagentStop | HookEvent::PreCompact
@@ -832,21 +868,22 @@ impl RunLoop<'_> {
             },
         })
         .await?;
-        let (observation, segment, exhausted) = self
-            .dispatch_hook(runtime, hook_intent, pause, deadline)
-            .await?;
+        let (observation, segment, exhausted) =
+            self.dispatch_hook(runtime, hook_intent, clock).await?;
         self.clear_tool_queue();
         if let Some(segment) = segment {
             self.settle_active_segment(segment)?;
         }
         let stops = observation.stops_run();
+        let cancelled = observation.disposition == ToolDisposition::Cancelled;
         let result = HookResult::for_event(event, &observation);
         self.append(Event::HookFinished {
             run_id: self.run_id,
             agent_run_id,
             outcome: HookOutcome {
                 boundary_active_ms: if boundary {
-                    boundary_goal.map(|_| duration_ms(boundary_started.elapsed()))
+                    boundary_ceiling
+                        .map(|ceiling| duration_ms(boundary_started.elapsed()).min(ceiling))
                 } else {
                     None
                 },
@@ -858,6 +895,7 @@ impl RunLoop<'_> {
         Ok(Some(HookRun {
             result,
             stops,
+            cancelled,
             exhausted,
         }))
     }
