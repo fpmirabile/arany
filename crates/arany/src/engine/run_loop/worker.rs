@@ -662,6 +662,14 @@ impl RunLoop<'_> {
         Box::pin(self.complete_worker_inner(child, finish, deadline, cancelled, failure))
     }
 
+    fn criterion_unmet(&self, id: AgentRunId) -> Result<bool, EngineError> {
+        self.ledger()
+            .view(|v| {
+                crate::session::criterion_unmet_in_view(v.runs.last().expect("active Run"), id)
+            })?
+            .map_err(|_| EngineError::InvalidHistory)
+    }
+
     fn criterion_evidence(&self, id: AgentRunId) -> Result<Vec<u64>, EngineError> {
         self.ledger()
             .view(|v| {
@@ -742,13 +750,7 @@ impl RunLoop<'_> {
             .ok_or(EngineError::CoordinatorFailed)?
             .dispose()?;
         let no_change = bytes.as_ref().is_some_and(|b| matches!(decode_data(b, WorkerDataPurpose::Handover), Ok(WorkerDataFacts::Changes(files)) if files.is_empty()));
-        let criterion_unverified = data.is_some()
-            && self
-                .ledger()
-                .view(|v| {
-                    crate::session::criterion_unmet_in_view(v.runs.last().expect("active Run"), id)
-                })?
-                .map_err(|_| EngineError::InvalidHistory)?;
+        let criterion_unverified = data.is_some() && self.criterion_unmet(id)?;
         let data = data.filter(|_| !criterion_unverified);
         let success = data.is_some();
         let hook_stopped = self.actor_hook_requested_stop(id)?;
