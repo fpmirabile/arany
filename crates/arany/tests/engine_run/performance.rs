@@ -33,6 +33,7 @@ fn team_two_core_latency_on_named_host() {
         for _ in 0..WARMUPS + SAMPLES {
             responses.extend([
                 ProviderOutcome::Delegate(Delegate {
+                    agent: None,
                     children: vec!["A".into(), "B".into()],
                 }),
                 ProviderOutcome::Finish(Finish {

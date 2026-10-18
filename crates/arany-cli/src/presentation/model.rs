@@ -409,6 +409,7 @@ mod tests {
             objective: "task".into(),
             images: Vec::new(),
             config: Some(RunConfig {
+                agent_definitions: None,
                 roster: None,
                 providers: None,
                 provider: "anthropic".into(),
@@ -440,6 +441,7 @@ mod tests {
                 tool_policy: None,
             }),
             agents: std::iter::once(AgentView {
+                definition: None,
                 id: AgentRunId::new(),
                 role: AgentRole::Primary,
                 ordinal: 0,
@@ -452,6 +454,7 @@ mod tests {
                 status: AgentStatus::Active,
             })
             .chain((1..=5).map(|ordinal| AgentView {
+                definition: None,
                 id: AgentRunId::new(),
                 role: AgentRole::Child,
                 ordinal,
@@ -475,6 +478,7 @@ mod tests {
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
+            definitions: Default::default(),
             display: Vec::new(),
             steering_notes: Vec::new(),
             provider_fallbacks: Vec::new(),

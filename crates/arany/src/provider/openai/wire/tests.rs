@@ -1257,7 +1257,7 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     }
     assert!(matches!(
         structured_outcome(r#"{"outcome":{"type":"delegate","children":["a","b"]}}"#).unwrap(),
-        ProviderOutcome::Delegate(Delegate { children }) if children == ["a", "b"]
+        ProviderOutcome::Delegate(Delegate { children, agent: None }) if children == ["a", "b"]
     ));
     let bad_outputs = [
         response("incomplete", json!([message("{}")])),

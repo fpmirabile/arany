@@ -369,6 +369,7 @@ impl GoalPlanContract {
     pub(crate) fn allows_call(&self, call: &crate::tools::ToolCall) -> bool {
         use crate::tools::ToolCall;
         match call {
+            ToolCall::ParseAgentDefinition { .. } => false,
             ToolCall::List { path }
             | ToolCall::Read { path, .. }
             | ToolCall::Search { path, .. }

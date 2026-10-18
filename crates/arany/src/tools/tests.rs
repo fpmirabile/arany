@@ -36,6 +36,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         git: None,
     };
     let runtime = ToolRuntime {
+        definitions: Default::default(),
         permissions: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
@@ -2034,6 +2035,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
     use std::path::PathBuf;
 
     let runtime = |config: Config| ToolRuntime {
+        definitions: Default::default(),
         permissions: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
@@ -2141,6 +2143,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         "git": program,
     });
     let runtime = ToolRuntime {
+        definitions: Default::default(),
         permissions: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
@@ -2197,6 +2200,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
 fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::ToolRuntime {
     let root = super::fs::open_directory(workspace).unwrap();
     super::ToolRuntime {
+        definitions: Default::default(),
         permissions: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,

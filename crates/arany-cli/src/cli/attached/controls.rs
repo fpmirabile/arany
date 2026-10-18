@@ -1232,6 +1232,7 @@ mod tests {
             images: Vec::new(),
             config: None,
             agents: vec![AgentView {
+                definition: None,
                 id: AgentRunId::new(),
                 role: AgentRole::Primary,
                 ordinal: 0,
@@ -1250,6 +1251,7 @@ mod tests {
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
+            definitions: Default::default(),
             display: Vec::new(),
             steering_notes: Vec::new(),
             provider_fallbacks: Vec::new(),
@@ -1259,6 +1261,7 @@ mod tests {
             "Task: working · 1 agent · details: /agents"
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
+            agent_definitions: None,
             roster: None,
             providers: None,
             provider: "openai".into(),

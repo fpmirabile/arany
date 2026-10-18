@@ -764,6 +764,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         }],
         tool_compaction_summary: None,
         tool_compaction_covered_count: 0,
+        definitions: Default::default(),
         display: Vec::new(),
         steering_notes: Vec::new(),
     };
@@ -834,6 +835,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         result: None,
         provider_calls: Vec::new(),
         grant: None,
+        definition: None,
         tools: vec![child_tool],
         status: arany::AgentStatus::Interrupted,
     });

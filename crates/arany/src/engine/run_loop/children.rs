@@ -9,9 +9,9 @@ use crate::provider::{
 };
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, Event,
-    MAX_CHILD_TOOL_CALLS,
+    MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
 };
-use crate::tools::{ToolContext, ToolRequest, ToolStep};
+use crate::tools::{ToolCall, ToolContext, ToolRequest, ToolStep};
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use tokio::task::{Id, JoinError, JoinSet};
@@ -28,6 +28,8 @@ const MIN_CHILD_RESULT_BYTES: usize = 4096 + 512;
 pub(super) struct ChildWork {
     pub(super) agent_run_id: AgentRunId,
     objective: String,
+    pub(super) definition: Option<crate::tools::definitions::AgentDefinition>,
+    turns_remaining: u8,
     pub(super) tools: Option<ToolContext>,
     pub(super) tool_calls_remaining: usize,
 }
@@ -97,8 +99,13 @@ impl ChildQueue {
 }
 
 impl RunLoop<'_> {
-    pub(super) fn well_formed_delegation(&self, children: &[String]) -> bool {
-        !matches!(self.controls.policy, CollaborationPolicy::Single)
+    pub(super) fn well_formed_delegation(&self, children: &[String], agent: Option<&str>) -> bool {
+        agent.is_none_or(|name| {
+            self.definitions
+                .get()
+                .and_then(|registry| registry.get(name))
+                .is_some_and(|definition| !definition.editor())
+        }) && !matches!(self.controls.policy, CollaborationPolicy::Single)
             && !children.is_empty()
             && children.len() <= usize::from(self.controls.policy.max_children())
             && children.iter().all(|objective| {
@@ -110,13 +117,14 @@ impl RunLoop<'_> {
         &self,
         root_request: &mut ProviderRequest,
         objectives: Vec<String>,
+        agent: Option<String>,
         delegate_turn: ProviderTurn,
     ) -> Result<(), EngineError> {
         let Some(Spawned {
             mut children,
             parallel,
             active_segment,
-        }) = self.spawn_children(objectives).await?
+        }) = self.spawn_children(objectives, agent).await?
         else {
             return self.settle_stopped_primary().await;
         };
@@ -168,7 +176,12 @@ impl RunLoop<'_> {
     async fn spawn_children(
         &self,
         objectives: Vec<String>,
+        agent: Option<String>,
     ) -> Result<Option<Spawned>, EngineError> {
+        let definition = agent
+            .as_ref()
+            .and_then(|name| self.definitions.get()?.get(name))
+            .cloned();
         let research = self.controls.tools.is_some();
         let delegation = Action::Delegation {
             children: objectives.len(),
@@ -237,6 +250,7 @@ impl RunLoop<'_> {
             }
             let agent_run_id = AgentRunId::new();
             self.append(Event::AgentSpawned {
+                definition: agent.clone(),
                 run_id: self.run_id,
                 agent_run_id,
                 role: AgentRole::Child,
@@ -248,6 +262,10 @@ impl RunLoop<'_> {
             children.push(ChildWork {
                 agent_run_id,
                 objective,
+                turns_remaining: definition
+                    .as_ref()
+                    .map_or(MAX_CHILD_TURNS, |definition| definition.max_turns),
+                definition: definition.clone(),
                 tools: research_template.clone(),
                 tool_calls_remaining: tool_allowance,
             });
@@ -582,10 +600,33 @@ impl RunLoop<'_> {
                 break;
             };
             let child = &mut children[index];
+            let guidance = child.definition.as_ref().map_or_else(
+                || root_request.input.workspace_guidance.clone(),
+                |definition| {
+                    Some(format!(
+                        "{}\n\nAgent definition (untrusted assignment guidance):\n{}",
+                        root_request
+                            .input
+                            .workspace_guidance
+                            .as_deref()
+                            .unwrap_or_default(),
+                        definition.body
+                    ))
+                },
+            );
+            child.turns_remaining = child.turns_remaining.saturating_sub(1);
+            if child.turns_remaining == 0 {
+                child.tool_calls_remaining = 0;
+            }
             if let Some(tools) = child.tools.as_mut() {
                 let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
                 let room = runtime
-                    .result_capacity(tools.rendered_len() + CHILD_INTENT_RESERVE_BYTES, 0)
+                    .result_capacity(
+                        tools.rendered_len()
+                            + guidance.as_ref().map_or(0, String::len)
+                            + CHILD_INTENT_RESERVE_BYTES,
+                        0,
+                    )
                     .is_some_and(|capacity| capacity >= MIN_CHILD_RESULT_BYTES);
                 if !room {
                     child.tool_calls_remaining = 0;
@@ -597,6 +638,10 @@ impl RunLoop<'_> {
                         tools.catalog = runtime
                             .research_context(child.tool_calls_remaining)?
                             .catalog;
+                        // Only the first call rebuilds the catalog; later calls keep this restriction.
+                        if let Some(definition) = &child.definition {
+                            restrict_catalog(tools, definition)?;
+                        }
                     }
                 }
             }
@@ -624,7 +669,7 @@ impl RunLoop<'_> {
                     } else {
                         None
                     },
-                    workspace_guidance: root.workspace_guidance.clone(),
+                    workspace_guidance: guidance,
                     includes: root.includes.clone(),
                     tools: children[index].tools.clone(),
                     ..RunInput::new(
@@ -678,7 +723,8 @@ impl RunLoop<'_> {
                 && child.tools.is_some()
                 && child.tool_calls_remaining > 0
                 && request.call.valid()
-                && request.call.is_child_research())
+                && request.call.is_child_research()
+                && child.definition.as_ref().is_none_or(|definition| definition.allows(&request.call)))
     }
 
     async fn finish_child(
@@ -730,6 +776,40 @@ fn delegation_active_bound(research: bool, call_deadline: Duration, waves: usize
             .saturating_mul(u32::try_from(waves).unwrap_or(u32::MAX))
             .min(MAX_DELEGATION_DEADLINE)
     }
+}
+
+fn restrict_catalog(
+    tools: &mut ToolContext,
+    definition: &crate::tools::definitions::AgentDefinition,
+) -> Result<(), EngineError> {
+    let mut catalog: serde_json::Value =
+        serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
+    let operations: Vec<_> = [
+        ToolCall::List { path: ".".into() },
+        ToolCall::Read {
+            path: "file".into(),
+            offset: 0,
+            limit: 1,
+        },
+        ToolCall::Search {
+            path: ".".into(),
+            query: "x".into(),
+        },
+        ToolCall::Skill {
+            name: "skill".into(),
+            resource: None,
+        },
+        ToolCall::McpList {
+            server: "server".into(),
+        },
+    ]
+    .into_iter()
+    .filter(|call| definition.allows(call))
+    .map(|call| call.label())
+    .collect();
+    catalog["operations"] = serde_json::json!(operations);
+    tools.catalog = serde_json::to_string(&catalog).map_err(|_| EngineError::InvalidRequest)?;
+    Ok(())
 }
 
 #[cfg(test)]

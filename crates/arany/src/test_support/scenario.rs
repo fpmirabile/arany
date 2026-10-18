@@ -271,6 +271,7 @@ impl Provider for GatedProvider {
         let outcome = match request.phase {
             AgentPhase::ToolReview => return Err(ProviderError::InvalidOutcome),
             AgentPhase::RootPlan => ProviderOutcome::Delegate(Delegate {
+                agent: None,
                 children: vec!["A".into(), "B".into(), "C".into()],
             }),
             AgentPhase::ChildWork => {

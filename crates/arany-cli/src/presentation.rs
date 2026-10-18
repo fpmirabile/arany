@@ -23,6 +23,7 @@ pub enum Output {
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     use arany::{ToolCall, ToolDisposition};
     let operation = match &tool.intent.call {
+        ToolCall::ParseAgentDefinition { .. } => "Parse agent definition".into(),
         ToolCall::List { path } => format!("List {path}"),
         ToolCall::Read { path, .. } => format!("Read {path}"),
         ToolCall::Search { path, .. } => format!("Search {path}"),
@@ -889,6 +890,7 @@ mod exec_jsonl_tests {
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
+            definitions: Default::default(),
             display: Vec::new(),
             steering_notes: Vec::new(),
             provider_fallbacks: Vec::new(),
@@ -1118,6 +1120,7 @@ mod tests {
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
+            definitions: Default::default(),
             display: Vec::new(),
             steering_notes: Vec::new(),
             provider_fallbacks: fallbacks,
@@ -1596,6 +1599,7 @@ mod unguarded_tests {
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
+            definitions: Default::default(),
             display: Vec::new(),
             steering_notes: Vec::new(),
         };
