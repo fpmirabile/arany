@@ -2566,10 +2566,7 @@ async fn hook_post_tool_use_timeout_reports_the_limit_and_keeps_the_effect() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn hook_post_tool_use_uncertain_outcome_stops_the_run_after_the_effect() {
-    let fixture = Fixture::new(
-        Some(&post_settings(shell_hook("kill -9 $PPID; sleep 5"))),
-        true,
-    );
+    let fixture = Fixture::new(Some(&post_settings(shell_hook("kill -9 $PPID"))), true);
     let write = call("edit");
     let (result, requests, _) = fixture
         .run(
@@ -2734,10 +2731,7 @@ async fn hook_post_tool_use_sets_that_cannot_run_deny_the_tool_before_dispatch()
 #[tokio::test]
 async fn hook_researcher_uncertain_outcome_stops_the_run_as_uncertain() {
     let fixture = Fixture::new(
-        Some(&hook_settings(
-            json!({}),
-            vec![shell_hook("kill -9 $PPID; sleep 5")],
-        )),
+        Some(&hook_settings(json!({}), vec![shell_hook("kill -9 $PPID")])),
         false,
     );
     let requests = fixture

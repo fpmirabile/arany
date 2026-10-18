@@ -126,13 +126,13 @@ pub(super) async fn worker_case(case: &'static str) {
                 serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[plain()]}],"PostToolUse":[{"matcher":"Write","hooks":[plain()]}]})
             }
             "hook_stop_uncertain" => {
-                serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command("kill -9 $PPID; sleep 5")]}]})
+                serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command("kill -9 $PPID")]}]})
             }
             "hook_handover_uncertain" => {
-                serde_json::json!({"PreToolUse":[{"matcher":"Edit","hooks":[command("kill -9 $PPID; sleep 5")]}]})
+                serde_json::json!({"PreToolUse":[{"matcher":"Edit","hooks":[command("kill -9 $PPID")]}]})
             }
             "hook_uncertain" => {
-                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("kill -9 $PPID; sleep 5")]}]})
+                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("kill -9 $PPID")]}]})
             }
             "hook_post_stop" => {
                 serde_json::json!({"PostToolUse":[{"matcher":"Edit","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})

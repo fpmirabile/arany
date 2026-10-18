@@ -433,7 +433,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         let hooks = if case == "hook_sibling_stop" {
             serde_json::json!({"SubagentStop":[{"matcher":"researcher","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
         } else {
-            serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("kill -9 $PPID; sleep 5")]}]})
+            serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("kill -9 $PPID")]}]})
         };
         std::fs::write(
             state.join("permissions.json"),
