@@ -48,10 +48,9 @@ fn profile_refusals_precede_workspace_input_and_keep_stdout_empty() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        workspace.join("AGENTS.md"),
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    nix::unistd::mkfifo(
+        &workspace.join("AGENTS.md"),
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
     )
     .unwrap();
     let state = temp.path().join("state");
@@ -149,10 +148,9 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        workspace.join("AGENTS.md"),
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    nix::unistd::mkfifo(
+        &workspace.join("AGENTS.md"),
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
     )
     .unwrap();
     let state = temp.path().join("state");

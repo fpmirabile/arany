@@ -1288,10 +1288,9 @@ mod roster_tests {
         std::fs::hard_link(&target, &file).unwrap();
         assert!(record.read().is_err());
         std::fs::remove_file(&file).unwrap();
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
+        nix::unistd::mkfifo(
             &file,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
         )
         .unwrap();
         assert!(record.read().is_err());
