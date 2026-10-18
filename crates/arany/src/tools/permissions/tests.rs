@@ -1122,6 +1122,12 @@ fn hook_output_parsing_copies_peer_exit_codes_and_json_precedence() {
             deny_with(None),
         ),
         (Some(0), format!("{}{}", "[".repeat(64), "]".repeat(64)), "", HookResult::Passed),
+        (
+            Some(0),
+            json!({"continue": false, "stopReason": "halt"}).to_string(),
+            "",
+            deny_with(Some("halt")),
+        ),
         (Some(2), "{}".into(), "blocked\nby policy", deny_with(Some("blockedby policy"))),
         (Some(2), String::new(), "", deny_with(None)),
         (Some(1), String::new(), "oops", ignored(HookIgnoreReason::NonZeroExit)),
@@ -1184,13 +1190,30 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
     };
     assert!(ignored(HookIgnoreReason::NotCompleted).valid_for(&observation));
     assert!(!HookResult::Passed.valid_for(&observation));
-    assert!(!ignored(HookIgnoreReason::Limit).valid_for(&observation));
     observation.disposition = crate::tools::ToolDisposition::Limit;
-    assert!(ignored(HookIgnoreReason::Limit).valid_for(&observation));
-    assert!(!deny_with(None).valid_for(&observation));
+    let limited = deny_with(Some("hook limit reached"));
+    assert!(limited.valid_for(&observation));
+    assert!(!HookResult::Passed.valid_for(&observation));
     assert!(!allow.valid_for(&observation));
-    let overlong = deny_with(Some(&"x".repeat(MAX_HOOK_REASON_BYTES + 1)));
+    let result = |exit: i32, stdout: &str| {
+        serde_json::to_string(&json!({"exit_code": exit, "stdout": stdout, "stderr": "no", "changeset": {"files": []}}))
+            .unwrap()
+    };
     observation.disposition = crate::tools::ToolDisposition::Failed;
+    observation.attestation = Some(crate::tools::Attestation::for_site(&observation.intent));
+    observation.output = result(2, "");
+    assert!(deny_with(Some("no")).valid_for(&observation));
+    assert!(!HookResult::Passed.valid_for(&observation));
+    observation.output = result(0, "");
+    assert!(HookResult::Passed.valid_for(&observation));
+    assert!(!deny_with(Some("no")).valid_for(&observation));
+    observation.output = "not CommandResult JSON".into();
+    assert_eq!(
+        HookResult::from_observation(&observation),
+        ignored(HookIgnoreReason::NotCompleted)
+    );
+    assert!(ignored(HookIgnoreReason::NotCompleted).valid_for(&observation));
+    let overlong = deny_with(Some(&"x".repeat(MAX_HOOK_REASON_BYTES + 1)));
     assert!(!overlong.valid_for(&observation));
 }
 

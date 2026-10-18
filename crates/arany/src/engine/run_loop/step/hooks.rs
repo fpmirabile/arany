@@ -169,7 +169,8 @@ impl RunLoop<'_> {
                 )
                 .saturating_add(u64::from(plan.timeout_ms))
             })
-            .sum();
+            .sum::<u64>()
+            .min(self.ledger().active_remaining_ms().unwrap_or(u64::MAX));
         (plans.len(), active_ms)
     }
 
@@ -273,6 +274,7 @@ impl RunLoop<'_> {
             }
             if exhausted {
                 fold.stop = HookStop::ActiveTime;
+                fold.restriction = Some(Decision::Deny);
                 return Ok(fold);
             }
             match result {

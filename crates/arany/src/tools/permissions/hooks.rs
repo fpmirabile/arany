@@ -271,7 +271,6 @@ pub enum HookResult {
 #[serde(rename_all = "snake_case")]
 pub enum HookIgnoreReason {
     NonZeroExit,
-    Limit,
     InvalidJson,
     AllowIsNoOp,
     NotCompleted,
@@ -286,45 +285,32 @@ impl HookResult {
     }
 
     pub(crate) fn valid_for(&self, observation: &ToolObservation) -> bool {
-        use crate::tools::ToolDisposition::{Denied, Failed, Limit, Succeeded};
-        let ran = matches!(observation.disposition, Succeeded | Failed)
-            && observation.attestation.is_some();
-        match self {
-            Self::Passed => ran,
-            Self::Restricted { decision, reason } => {
-                ran && *decision != Decision::Allow && reason.as_deref().is_none_or(valid_reason)
+        // The parse is deterministic and bounded, so a recorded result must equal it.
+        *self == Self::from_observation(observation)
+            && match self {
+                Self::Restricted { reason, .. } => reason.as_deref().is_none_or(valid_reason),
+                _ => true,
             }
-            Self::Ignored { why } => match why {
-                HookIgnoreReason::NonZeroExit
-                | HookIgnoreReason::InvalidJson
-                | HookIgnoreReason::AllowIsNoOp => ran,
-                HookIgnoreReason::Limit => observation.disposition == Limit,
-                HookIgnoreReason::NotCompleted => {
-                    observation.disposition == Denied || observation.stops_run()
-                }
-            },
-        }
     }
 
     pub(crate) fn from_observation(observation: &ToolObservation) -> Self {
         use crate::tools::ToolDisposition::{Failed, Limit, Succeeded};
+        let not_completed = Self::Ignored {
+            why: HookIgnoreReason::NotCompleted,
+        };
         match observation.disposition {
             Succeeded | Failed if observation.attestation.is_some() => {
-                match serde_json::from_str::<crate::tools::types::CommandResult>(
-                    &observation.output,
-                ) {
-                    Ok(result) => parse_output(result.exit_code, &result.stdout, &result.stderr),
-                    Err(_) => Self::Ignored {
-                        why: HookIgnoreReason::NotCompleted,
-                    },
-                }
+                serde_json::from_str::<crate::tools::types::CommandResult>(&observation.output)
+                    .map_or(not_completed, |result| {
+                        parse_output(result.exit_code, &result.stdout, &result.stderr)
+                    })
             }
-            Limit => Self::Ignored {
-                why: HookIgnoreReason::Limit,
+            // A cut-off hook cannot be told from a hostile one, so it fails closed.
+            Limit => Self::Restricted {
+                decision: Decision::Deny,
+                reason: Some("hook limit reached".into()),
             },
-            _ => Self::Ignored {
-                why: HookIgnoreReason::NotCompleted,
-            },
+            _ => not_completed,
         }
     }
 }
@@ -391,6 +377,9 @@ pub(crate) fn parse_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -
     let text = |value: Option<&Value>| value.and_then(Value::as_str).and_then(bounded_reason);
     if output.get("decision").and_then(Value::as_str) == Some("block") {
         return deny(text(output.get("reason")));
+    }
+    if output.get("continue") == Some(&Value::Bool(false)) {
+        return deny(text(output.get("stopReason")));
     }
     let Some(specific) = output.get("hookSpecificOutput") else {
         return HookResult::Passed;

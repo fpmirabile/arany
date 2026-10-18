@@ -1081,6 +1081,11 @@ async fn hook_pre_tool_use_exit_two_denies_in_the_guard_with_ordered_evidence() 
         }
     }
     assert!(SessionView::replay(case.session, &forged).is_err());
+    let forged_finish = forged
+        .iter()
+        .find(|event| matches!(event.event, Event::HookFinished { .. }))
+        .unwrap();
+    assert!(forged_finish.event.payload().is_err());
     let mut miscounted = case.events.clone();
     for event in &mut miscounted {
         if let Event::ToolPermissionDecided { verdict, .. } = &mut event.event {
@@ -1237,8 +1242,8 @@ async fn hook_failures_are_non_blocking_and_changes_are_discarded() {
         ),
         ("echo plain; exit 0", arany::permissions::HookResult::Passed),
         (
-            "yes aaaaaaaa | head -c 2000000",
-            ignored(arany::permissions::HookIgnoreReason::Limit),
+            "printf '\\377'; exit 0",
+            ignored(arany::permissions::HookIgnoreReason::NotCompleted),
         ),
         (probe.as_str(), arany::permissions::HookResult::Passed),
         (
@@ -1317,7 +1322,7 @@ async fn hook_hostile_output_is_stripped_bounded_and_never_an_instruction() {
 }
 
 #[tokio::test]
-async fn hook_timeout_reaps_descendants_and_the_tool_still_dispatches() {
+async fn hook_limits_fail_closed_and_timeouts_reap_descendants() {
     let marker = format!("{}", 31_337 + std::process::id() % 1000);
     let case = hook_case(
         hook_settings(
@@ -1325,18 +1330,19 @@ async fn hook_timeout_reaps_descendants_and_the_tool_still_dispatches() {
             vec![json!({
                 "type": "command",
                 "command": format!("sleep {marker} & sleep {marker}"),
-                "timeout": 3,
+                "timeout": 5,
             })],
         ),
         None,
         false,
     )
     .await;
+    assert_eq!(case.hook_results(), vec![deny_result("hook limit reached")]);
     assert_eq!(
-        case.hook_results(),
-        vec![ignored(arany::permissions::HookIgnoreReason::Limit)]
+        case.model_output,
+        "Hook denied this Tool: hook limit reached"
     );
-    assert!(case.dispatched());
+    assert!(!case.dispatched());
     let survivors = std::fs::read_dir("/proc")
         .unwrap()
         .filter_map(Result::ok)
@@ -1458,4 +1464,52 @@ async fn hook_on_a_command_keeps_changeset_integration_valid() {
         tools[1].intent.call,
         arany::ToolCall::ApplyChangeset { .. }
     ));
+}
+
+#[tokio::test]
+async fn hook_output_overflow_cannot_switch_off_a_deny_hook() {
+    let case = hook_case(
+        hook_settings(
+            json!({}),
+            vec![shell_hook("yes aaaaaaaa | head -c 2000000; exit 2")],
+        ),
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(case.hook_results(), vec![deny_result("hook limit reached")]);
+    assert!(!case.dispatched());
+    assert_eq!(case.verdict().hook_restriction, Some(Decision::Deny));
+}
+
+#[tokio::test]
+async fn hook_ask_over_an_auto_review_ask_goes_to_the_human() {
+    let call = call("mcp");
+    let settings = json!({
+        "permissions": {"defaultMode": "auto", "allow": ["mcp__server__echo"]},
+        "hooks": {"PreToolUse": [{"matcher": "mcp__server__echo", "hooks": [shell_hook(&hook_json("ask"))]}]},
+    });
+    let fixture = Fixture::new(Some(&settings), true);
+    let (result, requests, humans) = fixture
+        .run(
+            vec![
+                tool_outcome(call.clone(), Some(Box::new(plan(&call)))),
+                finish("answer"),
+            ],
+            Some(arany::ApprovalMode::Auto),
+            false,
+        )
+        .await;
+    assert_eq!(humans, 1);
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.phase == AgentPhase::ToolReview)
+    );
+    let (_, view) = fixture.reopen(result.session_id).await;
+    let verdict = view.runs[0].tools[0].permission_verdict.as_ref().unwrap();
+    assert_eq!(
+        (verdict.decision, verdict.source, verdict.hook_restriction),
+        (Decision::Ask, PermissionSource::Human, Some(Decision::Ask))
+    );
 }

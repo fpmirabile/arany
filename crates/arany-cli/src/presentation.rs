@@ -89,7 +89,6 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
             hook.outcome.as_ref().map(|outcome| &outcome.result),
             Some(arany::permissions::HookResult::Ignored {
                 why: arany::permissions::HookIgnoreReason::NonZeroExit
-                    | arany::permissions::HookIgnoreReason::Limit
                     | arany::permissions::HookIgnoreReason::InvalidJson
                     | arany::permissions::HookIgnoreReason::NotCompleted
             })

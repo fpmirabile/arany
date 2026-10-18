@@ -3289,7 +3289,9 @@ mod goal_replay_tests {
         };
         assert!(rejected(&view, started(intent.digest(), &hook_intent)));
         apply(&mut view, tool_started(run, agent, &intent)).unwrap();
-        let hook_observation = observation_for(hook_intent.clone(), b"");
+        let mut hook_observation = observation_for(hook_intent.clone(), b"");
+        hook_observation.disposition = ToolDisposition::Failed;
+        hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "changeset": {"files": []}}).to_string();
         assert!(rejected(
             &view,
             finished(hook_observation.clone(), deny.clone())
@@ -3312,6 +3314,8 @@ mod goal_replay_tests {
         ));
         let other = observation_for(second.clone(), b"");
         assert!(rejected(&view, finished(other, deny.clone())));
+        let forged_pass = finished(hook_observation.clone(), HookResult::Passed);
+        assert!(forged_pass.payload().is_err());
         apply(&mut view, finished(hook_observation.clone(), deny.clone())).unwrap();
         assert!(rejected(&view, started(intent.digest(), &second)));
         for (decision, restriction, hooks, basis) in [

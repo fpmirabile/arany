@@ -89,9 +89,11 @@ impl Permission {
                 self.basis = PermissionSource::Hook;
                 self.approval = None;
             }
-            Some(Decision::Ask) if self.decision == Decision::Allow => {
+            Some(Decision::Ask) if self.decision != Decision::Deny => {
+                if self.decision == Decision::Allow {
+                    self.basis = PermissionSource::Hook;
+                }
                 self.decision = Decision::Ask;
-                self.basis = PermissionSource::Hook;
                 self.approval = Some(ApprovalMode::Request);
             }
             _ => {}
