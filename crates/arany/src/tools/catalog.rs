@@ -497,6 +497,10 @@ mod tests {
                 cwd: ".".into(),
                 justification: "Run the failed command once on the host".into(),
             },
+            ToolCall::ParseAgentDefinition {
+                index: 0,
+                raw_digest: [1; 32],
+            },
         ]
     }
 
@@ -548,6 +552,17 @@ mod tests {
             .filter(|facts| !facts.description.is_empty())
             .collect();
         assert_eq!(schemas.len(), offered.len());
+        for facts in offered {
+            assert_eq!(
+                schemas
+                    .iter()
+                    .filter(|call| std::ptr::eq(facts_of(call).unwrap(), facts))
+                    .count(),
+                1,
+                "{}",
+                facts.name
+            );
+        }
         for call in &schemas {
             let facts = facts_of(call).expect("schema operation is in the table");
             assert!(!facts.description.is_empty(), "{}", facts.name);
@@ -555,7 +570,7 @@ mod tests {
         assert!(
             ALL.iter()
                 .filter(|facts| facts.schema().is_none())
-                .all(|facts| facts.name == "apply_changeset")
+                .all(|facts| matches!(facts.name, "apply_changeset" | "parse_agent_definition"))
         );
     }
 }

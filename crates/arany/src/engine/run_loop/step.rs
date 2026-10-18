@@ -588,13 +588,13 @@ impl RunLoop<'_> {
                     request,
                     review_allowed,
                 } => {
-                    self.before_primary_dispatch(
+                    Box::pin(self.before_primary_dispatch(
                         runtime,
                         request,
                         *review_allowed && self.ledger().admits(Action::Review),
                         intent,
                         permission,
-                    )
+                    ))
                     .await?
                 }
                 Grant::Researcher { deadline, .. } => {
@@ -1324,7 +1324,8 @@ impl RunLoop<'_> {
                 request,
                 review_allowed: false,
             };
-            let Some(observation) = self.run_intent(&grant, runtime, intent).await? else {
+            let Some(observation) = Box::pin(self.run_intent(&grant, runtime, intent)).await?
+            else {
                 return Ok(false);
             };
             if observation.disposition != ToolDisposition::Succeeded
