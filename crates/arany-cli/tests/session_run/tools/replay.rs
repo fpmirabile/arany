@@ -35,6 +35,8 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         config_digest: [1; 32],
         max_context_bytes: 65536,
         unguarded_rules_digest: None,
+        unguarded: arany::UnguardedGrant::HumanOnly,
+        child_unguarded: arany::UnguardedGrant::Denied,
     };
     let config = RunConfig {
         supervisor: Some(arany::supervisor::SupervisorPolicy::all_off()),

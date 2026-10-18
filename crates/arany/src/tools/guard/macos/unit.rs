@@ -1851,6 +1851,7 @@ done
                 version: 1,
                 workspace_paths: vec!["selected".into(), "empty".into(), "script".into()],
                 write: true,
+                child_unguarded: crate::tools::UnguardedGrant::Denied,
                 commands: vec![
                     crate::tools::config::Program {
                         name: "shell".into(),

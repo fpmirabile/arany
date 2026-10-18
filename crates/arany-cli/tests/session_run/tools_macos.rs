@@ -1112,10 +1112,14 @@ async fn native_runtime_mount_journey_helper() {
         crate::safe_run_diagnostics(&refused.run)
     );
     assert_eq!(refused.run.tools.len(), 1);
-    assert_eq!(refused_requests.lock().unwrap().len(), 1);
+    assert_eq!(refused_requests.lock().unwrap().len(), 2);
     let refused_observation = refused.run.tools[0].observation.as_ref().unwrap();
     assert_eq!(refused_observation.disposition, ToolDisposition::Failed);
     assert!(refused_observation.attestation.is_none());
+    assert_eq!(
+        refused_observation.enforcement_cause,
+        Some(arany::EnforcementCause::GuardBootstrap)
+    );
     assert!(
         refused_observation
             .output
@@ -1130,6 +1134,15 @@ async fn native_runtime_mount_journey_helper() {
             .observations()
             .len(),
         0
+    );
+    assert_eq!(
+        refused_requests.lock().unwrap()[1]
+            .input
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations(),
+        vec![refused_observation]
     );
     let trace = trace_snapshot(root);
     assert_eq!(trace["stages"]["worker_go"], "unknown");

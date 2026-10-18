@@ -309,7 +309,12 @@ done
             );
             assert_eq!(replay.runs[0].agents.len(), 2, "{case}");
             let child = &replay.runs[0].agents[1];
-            assert_eq!(child.grant, Some(ChildGrant::ReadOnly));
+            assert_eq!(
+                child.grant,
+                Some(ChildGrant::ReadOnly {
+                    unguarded: arany::UnguardedGrant::Denied
+                })
+            );
             assert!(
                 outcome.run.tools.is_empty(),
                 "child facts stay out of primary tools: {case}"

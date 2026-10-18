@@ -1700,6 +1700,7 @@ mod unguarded_tests {
         let prompt = UnguardedPrompt {
             executable: "/usr/bin/bash".into(),
             attribution: None,
+            remember: true,
         };
         let lines = unguarded_approval_lines(&intent(&["-c", "cargo test"], ""), &prompt);
         assert_eq!(

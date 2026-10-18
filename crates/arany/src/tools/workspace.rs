@@ -472,6 +472,7 @@ impl WorkspacePermissions {
             version: 1,
             workspace_paths: vec![".".into()],
             write: true,
+            child_unguarded: crate::tools::UnguardedGrant::Denied,
             commands,
             skills: Vec::new(),
             mcp: Vec::new(),

@@ -61,6 +61,7 @@ impl From<bool> for ApprovalReply {
 pub struct UnguardedPrompt {
     pub executable: String,
     pub attribution: Option<EnforcementCause>,
+    pub remember: bool,
 }
 
 pub struct ToolApproval {
