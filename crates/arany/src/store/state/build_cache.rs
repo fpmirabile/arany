@@ -116,7 +116,7 @@ fn valid_identity_path(path: &Path) -> bool {
 
 pub(crate) struct BuildCacheLease {
     dir: Dir,
-    _identity_lock: File,
+    _identity_lock: FlockGuard,
     identity: BuildCacheIdentity,
     token: String,
     archive: Option<File>,
@@ -406,6 +406,7 @@ impl StateRoot {
         }
         let dir = cache_directory(self, true)?;
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
+        remove_stale_candidates(&dir)?;
         let token = identity.token();
         let archive_size = match open_regular(&dir, &archive_name(&token), MAX_ARCHIVE_BYTES) {
             Ok(file) => file.metadata()?.len(),
@@ -466,8 +467,8 @@ impl StateRoot {
         if identity_count(&dir)? >= MAX_IDENTITIES && !known_identity {
             return Err(StoreError::StorageFull);
         }
-        let (identity_lock, created_lock) = open_lock_file(&dir, &lock_name)?;
-        lock_exclusive(&identity_lock, true)?;
+        let (identity_file, created_lock) = open_lock_file(&dir, &lock_name)?;
+        let identity_lock = FlockGuard::acquire(identity_file, true)?;
         let mut reservation_created = false;
         let archive_result = (|| {
             let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
@@ -545,8 +546,8 @@ impl StateRoot {
         let token = identity.token();
         let _namespace = lock_file(&dir, NAMESPACE_LOCK, true)?;
         let lock_name = identity_lock_name(&token);
-        let (identity_lock, _) = open_lock_file(&dir, &lock_name)?;
-        lock_exclusive(&identity_lock, true)?;
+        let (identity_file, _) = open_lock_file(&dir, &lock_name)?;
+        let _identity_lock = FlockGuard::acquire(identity_file, true)?;
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
         for name in identity_file_names(&token) {
             if name != lock_name {
@@ -592,8 +593,7 @@ impl StateRoot {
         let mut held = Vec::new();
         for name in &names {
             let file = open_regular(&dir, name, 0)?;
-            lock_exclusive(&file, true)?;
-            held.push(file);
+            held.push(FlockGuard::acquire(file, true)?);
         }
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
         let mut locks = Vec::new();
@@ -1373,10 +1373,25 @@ fn open_lock_file(dir: &Dir, name: &str) -> Result<(File, bool), StoreError> {
     }
 }
 
-fn lock_file(dir: &Dir, name: &str, try_only: bool) -> Result<File, StoreError> {
+fn lock_file(dir: &Dir, name: &str, try_only: bool) -> Result<FlockGuard, StoreError> {
     let (file, _) = open_lock_file(dir, name)?;
-    lock_exclusive(&file, try_only)?;
-    Ok(file)
+    FlockGuard::acquire(file, try_only)
+}
+
+// An explicit unlock releases the lock even while a forked child still holds a copy of the descriptor.
+struct FlockGuard(File);
+
+impl FlockGuard {
+    fn acquire(file: File, try_only: bool) -> Result<Self, StoreError> {
+        lock_exclusive(&file, try_only)?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for FlockGuard {
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
 }
 
 fn lock_exclusive(file: &File, try_only: bool) -> Result<(), StoreError> {
@@ -1567,8 +1582,8 @@ fn remove_stale_candidates(dir: &Dir) -> Result<(), StoreError> {
     }
     for token in stale {
         let lock = open_regular(dir, &identity_lock_name(&token), 0)?;
-        match lock_exclusive(&lock, true) {
-            Ok(()) => recover_transaction(dir, &token)?,
+        match FlockGuard::acquire(lock, true) {
+            Ok(_held) => recover_transaction(dir, &token)?,
             Err(StoreError::BuildCacheBusy) => {}
             Err(error) => return Err(error),
         }
@@ -2338,6 +2353,7 @@ mod tests {
         let occupied = inventory(&dir).expect("current aggregate inventory");
         let token = format!("{:064x}", MAX_IDENTITIES - 1);
         let (lock, _) = open_lock_file(&dir, &identity_lock_name(&token)).expect("other lock");
+        lock_exclusive(&lock, true).expect("active cache owner");
         let mut reservation =
             create_private_file(&dir, &reservation_name(&token)).expect("other reservation");
         let reserved = AGGREGATE_BYTES
