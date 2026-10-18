@@ -337,16 +337,6 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
     let goal_resume = admission.resume_goal;
     let restored_settings = controls::restore_settings(&admission).await;
     let mut saved_view = restored_settings.as_ref().copied().unwrap_or_default().view;
-    if let Some(selected) = selected {
-        admission.defaults.account_id = selected.primary().account_id;
-        let mut signals =
-            super::exec::StopSignals::install().map_err(|_| "signal handling unavailable")?;
-        tokio::select! {
-            biased;
-            _ = signals.next() => return Err("interrupted before a Run started; no Run was recorded".into()),
-            result = selected.admit(&admission.state_dir, &admission.workspace) => { result?; }
-        }
-    }
     let mut terminal = AttachedTerminal::acquire_with_mode(
         admission.screen_reader,
         if admission.classic {
@@ -369,6 +359,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         &mut admission,
         &mut composer,
         &mut setup_notice,
+        selected,
     )
     .await?
     .is_break()
@@ -1370,6 +1361,11 @@ async fn submit_idle_run(
 ) -> Result<Option<Feedback>, String> {
     materialize_session(admission, session_id, view).await?;
     let starting_sequence = view.last_sequence;
+    let draft = match start {
+        GoalStart::Plain => objective.clone(),
+        GoalStart::Autonomous => format!("/goal {objective}"),
+        GoalStart::Resume | GoalStart::Continue => String::new(),
+    };
     match submit_objective(
         engine, terminal, admission, start, view, composer, objective,
     )
@@ -1401,6 +1397,10 @@ async fn submit_idle_run(
         }
         Ok(RunSubmission::Shutdown(reason)) => Err(reason),
         Err(error) => {
+            // Roster preflight cannot read the Workspace, so a refusal after admission returns the draft.
+            if admission.roster.is_some() && composer.is_empty() && !draft.is_empty() {
+                let _ = composer.insert_paste(&draft);
+            }
             let text = if composer.is_empty() {
                 format!("Error: {error}")
             } else {
@@ -1764,6 +1764,7 @@ async fn admit_startup(
     admission: &mut Admission,
     composer: &mut Composer,
     setup_notice: &mut Option<String>,
+    selected: Option<super::provider::roster::SelectedRoster>,
 ) -> Result<ControlFlow<()>, String> {
     match permissions::admit(terminal, &admission.workspace, composer, admission.tools).await {
         Ok(permissions::PermissionChoice::Selected(access)) => {
@@ -1785,6 +1786,16 @@ async fn admit_startup(
         Ok(permissions::PermissionChoice::Exit) => return Ok(ControlFlow::Break(())),
         Err(setup::SetupError::Recoverable(error)) => return Err(error),
         Err(error) => return Err(error.into()),
+    }
+    if let Some(selected) = selected {
+        admission.defaults.account_id = selected.primary().account_id;
+        let mut signals =
+            super::exec::StopSignals::install().map_err(|_| "signal handling unavailable")?;
+        tokio::select! {
+            biased;
+            _ = signals.next() => return Err("interrupted before a Run started; no Run was recorded".into()),
+            result = selected.admit(&admission.state_dir, &admission.workspace) => { result?; }
+        }
     }
     match setup::admit_history(terminal, &admission.state_dir, &admission.workspace).await {
         Ok(setup::HistoryAdmission::Ready) => {}

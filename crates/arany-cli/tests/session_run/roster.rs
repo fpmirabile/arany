@@ -2,6 +2,9 @@ use super::*;
 use serde_json::json;
 use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio};
 
+const TERMINAL_REQUIRED: &[u8] =
+    b"error: attached mode requires terminal stdin and stderr; use arany exec for pipes\n";
+
 fn record() -> serde_json::Value {
     json!({"version":1,"profiles":[
         {"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":"low","account_id":null}]},
@@ -38,7 +41,17 @@ fn command(workspace: &Path, state: &Path, extra: &[&str]) -> std::process::Outp
             "attached refusal exit"
         );
         assert_eq!(attached.stdout, output.stdout, "attached refusal stdout");
-        assert_eq!(attached.stderr, output.stderr, "attached refusal stderr");
+        let mut expected = output.stderr.clone();
+        if expected.windows(7).any(|part| part == b"refused") {
+            // Credential admission follows folder consent, which needs a terminal.
+            let error = expected
+                .windows(7)
+                .rposition(|part| part == b"error: ")
+                .unwrap();
+            expected.truncate(error);
+            expected.extend_from_slice(TERMINAL_REQUIRED);
+        }
+        assert_eq!(attached.stderr, expected, "attached refusal stderr");
     }
     output
 }
@@ -171,6 +184,7 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
             &serde_json::to_vec(&roster).unwrap(),
         );
         for entry in [vec!["exec", "answer"], vec!["--screen-reader", "answer"]] {
+            let exec = entry[0] == "exec";
             let output = Command::new(env!("CARGO_BIN_EXE_arany"))
                 .env_clear()
                 .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
@@ -193,7 +207,15 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
             let expected = format!(
                 "Roster preset: coding\nRoles: primary=main, child=main, review=main, compaction=main\nEligible child profiles: main, same, unused\n  main[0]: openai/gpt-5.4 effort=low (native API)\n  same[0]: openai/gpt-6-luna effort=low (native API)\n  unused[0]: anthropic/claude-sonnet-5 effort=high (native API)\n{error}"
             );
-            assert_eq!(output.stderr, expected.as_bytes());
+            if exec {
+                assert_eq!(output.stderr, expected.as_bytes());
+            } else {
+                let manifest = expected.rfind("error: ").unwrap();
+                assert_eq!(
+                    output.stderr,
+                    [&expected.as_bytes()[..manifest], TERMINAL_REQUIRED].concat()
+                );
+            }
             assert_eq!(
                 std::fs::metadata(state.join("events.sqlite3"))
                     .unwrap()
@@ -202,4 +224,89 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
             );
         }
     }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "native Linux PTY workspace consent gate"]
+fn attached_profile_admission_waits_for_folder_consent() {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    StateRoot::admit(&state).unwrap();
+    private_file(
+        &state.join("provider-roster.json"),
+        &serde_json::to_vec(&record()).unwrap(),
+    );
+    let shell = "stty rows 24 cols 80; /arany --screen-reader --no-color --profile coding --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" answer";
+    let mut command = super::isolation::isolated_script(temp.path());
+    command
+        .env_clear()
+        .env("ARANY_TEST_STATE", &state)
+        .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("SHELL", "/bin/sh")
+        .env("TERM", "dumb")
+        .current_dir(&workspace)
+        .args(["-q", "-e", "-c", shell, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+    let mut input = child.child().stdin.take().unwrap();
+    let mut output = child.child().stdout.take().unwrap();
+    let flags = fcntl_getfl(&output).unwrap();
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+    let mut transcript = Vec::new();
+    let mut answered = super::session_picker::PtyResponses::manual_consent();
+    fn wait(
+        output: &mut std::process::ChildStdout,
+        input: &mut std::process::ChildStdin,
+        transcript: &mut Vec<u8>,
+        answered: &mut super::session_picker::PtyResponses,
+        needle: &[u8],
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !transcript.windows(needle.len()).any(|part| part == needle) {
+            super::session_picker::pump(output, input, transcript, answered);
+            assert!(
+                Instant::now() < deadline,
+                "missing {}: {}",
+                String::from_utf8_lossy(needle),
+                super::session_picker::tail(transcript)
+            );
+            std::thread::yield_now();
+        }
+    }
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        b"Do you trust this folder?",
+    );
+    assert!(
+        !transcript
+            .windows(b"refused".len())
+            .any(|part| part == b"refused"),
+        "roster admission must wait for folder consent"
+    );
+    input.write_all(b"read only\r").unwrap();
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        b"roster profile main route 0 refused",
+    );
+    assert_eq!(
+        std::fs::metadata(state.join("events.sqlite3"))
+            .unwrap()
+            .len(),
+        0
+    );
 }
