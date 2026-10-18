@@ -3144,6 +3144,13 @@ mod lifecycle_hooks {
     #[tokio::test]
     async fn in_run_auto_pre_compact_journals_before_reservation_or_skips_and_continues() {
         use arany::permissions::{HookEvent, HookResult};
+        use arany::test_support::{MAX_TOOL_CONTEXT_BYTES, tool_context_bytes};
+
+        const THRESHOLD: usize = (MAX_TOOL_CONTEXT_BYTES * 2).div_ceil(3);
+        // Half-size pages leave room for shrinking result grants near the threshold.
+        let page = arany::ToolLimits::default().result_bytes / 2;
+        let reads = THRESHOLD.div_ceil(usize::try_from(page).unwrap()) + 2;
+        let call_budget = u32::try_from(2 * reads + 1).unwrap();
 
         for (script, expected) in [
             ("exit 0", HookResult::Passed),
@@ -3163,17 +3170,18 @@ mod lifecycle_hooks {
             let settings =
                 json!({"hooks":{"PreCompact":[{"matcher":"auto","hooks":[shell_hook(script)]}]}});
             let fixture = Fixture::new(Some(&settings), false);
-            const READS: usize = 8;
-            const PAGE: usize = 64 * 1024;
-            std::fs::write(fixture.workspace.join("notes/data.txt"), "x".repeat(PAGE)).unwrap();
-            // Large bounded in-process reads reach the real threshold without a context-limit seam.
-            let mut outcomes: Vec<_> = (0..READS)
+            std::fs::write(
+                fixture.workspace.join("notes/data.txt"),
+                "x".repeat(usize::try_from(page).unwrap()),
+            )
+            .unwrap();
+            let mut outcomes: Vec<_> = (0..reads)
                 .map(|_| {
                     tool_outcome(
                         arany::ToolCall::Read {
                             path: "notes/data.txt".into(),
                             offset: 0,
-                            limit: PAGE as u32,
+                            limit: page,
                         },
                         None,
                     )
@@ -3182,7 +3190,7 @@ mod lifecycle_hooks {
             outcomes.push(finish("done"));
             let provider = Arc::new(
                 ScriptedProvider::new(outcomes).with_compactions(
-                    (0..READS)
+                    (0..reads)
                         .map(|_| {
                             Ok(CompactionResponse {
                                 summary: "Earlier reads remain recorded in the journal.".into(),
@@ -3195,22 +3203,34 @@ mod lifecycle_hooks {
                 ),
             );
             let (result, requests, humans) = fixture
-                .run_provider(provider.clone(), None, false, budget())
+                .run_provider(
+                    provider.clone(),
+                    None,
+                    false,
+                    arany::GoalBudget {
+                        max_provider_calls: Some(call_budget),
+                        ..budget()
+                    },
+                )
                 .await;
             assert_eq!(result.run.status, RunStatus::Finished, "{expected:?}");
-            assert_eq!(requests.len(), READS + 1);
+            assert_eq!(requests.len(), reads + 1);
             assert_eq!(humans, 0);
             let compactions = provider.compact_requests.lock().unwrap().len();
             let passed = expected == HookResult::Passed;
             let final_context = requests.last().unwrap().input.tools.as_ref().unwrap();
             assert_eq!(final_context.history_summary.is_some(), passed);
             if !passed {
-                assert_eq!(final_context.observation_count(), READS);
+                assert_eq!(final_context.observation_count(), reads);
+                assert!(
+                    tool_context_bytes(final_context) >= THRESHOLD,
+                    "read workload must reach automatic compaction pressure"
+                );
             }
             let (events, view) = fixture.reopen(result.session_id).await;
             let run = &view.runs[0];
             assert_eq!(run.status, RunStatus::Finished);
-            assert_eq!(run.tools.len(), READS);
+            assert_eq!(run.tools.len(), reads);
             assert!(run.tools.iter().all(|tool| {
                 tool.observation.as_ref().unwrap().disposition == arany::ToolDisposition::Succeeded
             }));
@@ -3221,6 +3241,7 @@ mod lifecycle_hooks {
             );
             assert_eq!(run.tool_compaction_covered_count > 0, passed);
             let mut calls = 0_usize;
+            let mut hook_calls = Vec::new();
             let mut subjects = std::collections::HashSet::new();
             let mut starts = Vec::new();
             let mut finishes = Vec::new();
@@ -3237,7 +3258,8 @@ mod lifecycle_hooks {
                         assert_eq!(*run_id, run.id);
                         assert_eq!(*agent_run_id, run.agents[0].id);
                         assert_eq!(hook.event, HookEvent::PreCompact);
-                        assert!((1..=READS).contains(&calls), "hook is inside the Tool loop");
+                        assert!((1..=reads).contains(&calls), "hook is inside the Tool loop");
+                        hook_calls.push(calls);
                         let subject: [u8; 32] =
                             Sha256::digest(serde_json::to_vec(&("auto", calls)).unwrap()).into();
                         assert_eq!(hook.subject_digest, subject);
@@ -3275,6 +3297,15 @@ mod lifecycle_hooks {
             assert_eq!(finishes.len(), starts.len());
             assert_eq!(reservations.len(), compactions);
             assert_eq!(compacted, compactions);
+            if !passed {
+                let first = *hook_calls.first().unwrap();
+                assert!(first < reads, "must exercise later occurrences");
+                assert_eq!(
+                    hook_calls,
+                    (first..=reads).collect::<Vec<_>>(),
+                    "fresh hook at every eligible call count"
+                );
+            }
             for (occurrence, (start, end)) in starts.iter().zip(&finishes).enumerate() {
                 assert!(start < end);
                 if passed {
