@@ -517,9 +517,15 @@ impl RunLoop<'_> {
             preparation: WorkerPreparation {
                 assignment_id: id,
                 purpose: WorkerDataPurpose::Base,
-                max_chunks: (WORKER_MANIFEST_BYTES.min(allowance as usize))
-                    .div_ceil(WORKER_CHUNK_BYTES) as u16,
-                max_bytes: (WORKER_MANIFEST_BYTES as u32).min(allowance),
+                max_chunks: u16::try_from(
+                    WORKER_MANIFEST_BYTES
+                        .min(allowance as usize)
+                        .div_ceil(WORKER_CHUNK_BYTES),
+                )
+                .map_err(|_| EngineError::CoordinatorFailed)?,
+                max_bytes: u32::try_from(WORKER_MANIFEST_BYTES)
+                    .map_err(|_| EngineError::CoordinatorFailed)?
+                    .min(allowance),
             },
         };
         let intent = self
