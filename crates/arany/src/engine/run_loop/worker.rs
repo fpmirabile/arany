@@ -255,7 +255,19 @@ impl RunLoop<'_> {
                 });
             }
         };
-        let bytes = view.manifest()?;
+        let bytes = match view.manifest() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Ok(ToolObservation {
+                    intent,
+                    disposition: ToolDisposition::Failed,
+                    output: error.to_string(),
+                    attestation: None,
+                    cache_update: CacheUpdate::NotApplicable,
+                    enforcement_cause: None,
+                });
+            }
+        };
         let data = self
             .seal_worker_data(
                 &intent,
@@ -427,7 +439,15 @@ impl RunLoop<'_> {
             .set(allowance)
             .map_err(|_| EngineError::CoordinatorFailed)?;
         let id = AgentRunId::new();
-        let Some(observation) = self.prepare_worker_base(root, id, allowance).await? else {
+        let observation = match self.prepare_worker_base(root, id, allowance).await {
+            Ok(observation) => observation,
+            Err(EngineError::GoalBudgetExhausted) => {
+                self.settle_stopped_primary().await?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(observation) = observation else {
             self.fail_primary().await?;
             return Ok(None);
         };

@@ -675,6 +675,15 @@ impl RunLoop<'_> {
         Ok(true)
     }
 
+    fn plan_allows(&self, call: &ToolCall) -> bool {
+        matches!(
+            call,
+            ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+            }
+        ) || self.ledger().allows_tool(call)
+    }
+
     fn review_will_run(
         &self,
         runtime: &ToolRuntime,
@@ -683,7 +692,7 @@ impl RunLoop<'_> {
         permission: Permission,
     ) -> Result<bool, EngineError> {
         Ok(self.ledger().command_timeout_limit(call)?.is_none()
-            && self.ledger().allows_tool(call)
+            && self.plan_allows(call)
             && runtime.allows(call)
             && permission
                 .narrow_terminal(self.terminal_mode(), call)
@@ -950,14 +959,7 @@ impl RunLoop<'_> {
             }
         }
         let mut unsaved_rule = false;
-        let goal_allows = intent.call.is_internal()
-            || matches!(
-                intent.call,
-                ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                }
-            )
-            || self.ledger().allows_tool(&intent.call);
+        let goal_allows = intent.call.is_internal() || self.plan_allows(&intent.call);
         let mut approved = true;
         let mut active_time_exhausted = false;
         if goal_allows
@@ -1124,7 +1126,20 @@ impl RunLoop<'_> {
             if let Some(pause) = queue_pause {
                 self.settle_active_pause(pause, None)?;
             }
-            let segment = self.reserve_active_segment(tool_action_bound(runtime, &intent))?;
+            let segment = match self.reserve_active_segment(tool_action_bound(runtime, &intent)) {
+                Ok(segment) => segment,
+                Err(EngineError::GoalBudgetExhausted) => {
+                    return Ok(Answer {
+                        observation: active_time_limit_observation(intent),
+                        refused: false,
+                        active_time: Some(ActiveTime {
+                            segment: None,
+                            exhausted: true,
+                        }),
+                    });
+                }
+                Err(error) => return Err(error),
+            };
             let observation = self.capture_worker_base(runtime, intent).await?;
             return Ok(Answer {
                 observation,

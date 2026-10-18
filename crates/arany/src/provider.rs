@@ -507,14 +507,6 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
     schema["properties"]["outcome"]["anyOf"][1]["properties"]["children"]["items"]["properties"]
         ["profile"]["enum"] = json!(profiles);
     if request.input.role == PromptRole::Primary
-        && (request.input.goal_plan_contract.is_some()
-            || request.input.tools.as_ref().is_some_and(|tools| {
-                tools
-                    .steps
-                    .iter()
-                    .flat_map(|step| &step.requests)
-                    .any(|request| request.plan_contract.is_some())
-            }))
         && let Some(tools) = &request.input.tools
         && let Ok(catalog) = serde_json::from_str::<Value>(&tools.catalog)
         && let Some(agents) = catalog["agents"].as_array()
@@ -1038,6 +1030,21 @@ mod tests {
             history_summary: None,
             steps: Vec::new(),
         }
+    }
+
+    #[test]
+    fn editor_delegate_schema_does_not_change_when_the_plan_contract_arrives() {
+        let mut before = test_support::primary_request("scope-model");
+        before.collaboration = CollaborationPolicy::Auto {
+            max_active_children: 3,
+        };
+        let tools = before.input.tools.as_mut().unwrap();
+        let mut catalog: Value = serde_json::from_str(&tools.catalog).unwrap();
+        catalog["agents"] = json!([{"name": "editor", "editor": true, "supported": true, "digest": "d", "max_turns": 4}]);
+        tools.catalog = catalog.to_string();
+        let mut after = before.clone();
+        after.input.goal_plan_contract = Some(test_support::goal_plan_contract());
+        assert_eq!(run_outcome_schema(&before), run_outcome_schema(&after));
     }
 
     #[test]
