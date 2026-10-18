@@ -338,9 +338,8 @@ impl Store {
                                 } = &envelope.event
                                 && let Some(pruned) = checkpoint.pruned_before_run
                             {
-                                let session = session_id.to_string();
-                                if pending_prunes.get(&session).is_some_and(|pending| pending <= &pruned.to_string()) {
-                                    pending_prunes.remove(&session);
+                                if pending_prunes.get(&session_id).is_some_and(|pending| pending <= &pruned) {
+                                    pending_prunes.remove(&session_id);
                                 }
                                 pruning_notified_run = Some(*run_id);
                             }
@@ -428,19 +427,19 @@ impl Store {
                                     let _ = reply.send(Err(StoreError::InvalidHistory));
                                     continue;
                                 };
-                                let (run, session) = (capture.run, capture.session.to_string());
+                                let (run, session) = (capture.run, capture.session);
                                 let mut checkpoint = state::checkpoints::capture(
                                     &root, capture, u64::try_from(started).unwrap_or_default(),
                                     i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
                                     &mut checkpoint_checked,
                                 );
                                 if let Some(pruned) = checkpoint.pruned_before_run {
-                                    let pending = pending_prunes.entry(session.clone()).or_insert_with(|| pruned.to_string());
-                                    *pending = std::cmp::max(pending.clone(), pruned.to_string());
+                                    let pending = pending_prunes.entry(session).or_insert(pruned);
+                                    *pending = (*pending).max(pruned);
                                 }
                                 checkpoint.pruned_before_run = pending_prunes.get(&session)
-                                    .filter(|_| pruning_notified_run != Some(run))
-                                    .and_then(|run| run.parse().ok());
+                                    .copied()
+                                    .filter(|_| pruning_notified_run != Some(run));
                                 Ok(checkpoint)
                             };
                             let _ = reply.send(result);

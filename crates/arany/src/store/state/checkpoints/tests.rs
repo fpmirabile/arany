@@ -57,13 +57,8 @@ fn capture_inner(
     now: i64,
     limits: Limits,
 ) -> Result<Option<RunId>, StoreError> {
-    super::capture_inner(root, &batch.capture, batch.sequence, now, limits, &mut None).map(
-        |pruned| {
-            pruned
-                .get(&batch.session.to_string())
-                .and_then(|run| run.parse().ok())
-        },
-    )
+    super::capture_inner(root, &batch.capture, batch.sequence, now, limits, &mut None)
+        .map(|pruned| pruned.get(&batch.session).copied())
 }
 fn load(root: &StateRoot, digest: [u8; 32]) -> Result<Option<Vec<u8>>, StoreError> {
     super::load(root, digest, &mut None)
@@ -430,13 +425,10 @@ fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_sessio
         started.elapsed()
     );
     assert_eq!(count(&root, "SELECT COUNT(DISTINCT run_id) FROM refs"), 100);
+    assert_eq!(pruned.get(&session), Some(&runs[19_900]));
     assert_eq!(
-        pruned.get(&session.to_string()),
-        Some(&runs[19_900].to_string())
-    );
-    assert_eq!(
-        pruned.get(&foreign.to_string()),
-        Some(&foreign_run.to_string()),
+        pruned.get(&foreign),
+        Some(&foreign_run),
         "foreign expiry is kept per Session, never attributed to this one"
     );
 }

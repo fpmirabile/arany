@@ -23,7 +23,7 @@ const MAX_CAPTURE: usize = 32 * 1024 * 1024;
 const MAX_FILES: usize = 2048;
 const HEADROOM: u64 = 4 * 1024 * 1024;
 
-pub(crate) type Pruned = BTreeMap<String, String>;
+pub(crate) type Pruned = BTreeMap<SessionId, RunId>;
 pub(crate) type Checked = Option<i64>;
 
 const SCHEMA: &[(&str, &str)] = &[
@@ -423,10 +423,13 @@ fn evict(
             }
         };
         if lost && let Some(run) = &victim.run {
-            let newest = pruned.get(&victim.session).is_none_or(|known| known < run);
-            if newest {
-                pruned.insert(victim.session.clone(), run.clone());
-            }
+            let session = victim
+                .session
+                .parse()
+                .map_err(|_| StoreError::CheckpointUnavailable)?;
+            let run = run.parse().map_err(|_| StoreError::CheckpointUnavailable)?;
+            let pending = pruned.entry(session).or_insert(run);
+            *pending = (*pending).max(run);
         }
     }
     Ok(())
@@ -523,9 +526,7 @@ pub(crate) fn capture(
         Ok(pruned) => Checkpoint {
             status: CheckpointStatus::Captured,
             reason: None,
-            pruned_before_run: pruned
-                .get(&capture.session.to_string())
-                .and_then(|run| run.parse().ok()),
+            pruned_before_run: pruned.get(&capture.session).copied(),
         },
         Err(StoreError::StorageFull) => Checkpoint::skipped(CheckpointReason::Quota),
         Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)))
