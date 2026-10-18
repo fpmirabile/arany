@@ -5,9 +5,9 @@ use crate::accounts::credentials::{self, AccountStorage, CredentialError, SavedA
 use crate::terminal::{AttachedTerminal, Composer, ShutdownSignal, TerminalError, TerminalInput};
 use arany::RecordKind;
 use arany::{
-    CollaborationPolicy, Effort, MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_NATIVE_API_KEY_BYTES,
-    ModelEntry, NativeApiCredentials, SessionDefaults, StateRoot, Store, StoreError,
-    list_native_models_with_credentials, validate_native_api_key,
+    CollaborationPolicy, Effort, HistoryRecovery, MAX_ANTHROPIC_WORKSPACE_ID_BYTES,
+    MAX_NATIVE_API_KEY_BYTES, ModelEntry, NativeApiCredentials, SessionDefaults, StateRoot, Store,
+    StoreError, list_native_models_with_credentials, validate_native_api_key,
 };
 use std::future::Future;
 use std::path::Path;
@@ -157,15 +157,7 @@ pub(super) async fn admit_history(
             }
             Err(error) => error,
         };
-        let resettable = matches!(
-            error,
-            StoreError::InvalidHistory | StoreError::InvalidStateDirectory
-        ) || matches!(
-            &error,
-            StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
-                if matches!(code.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
-        );
-        let reset = if resettable {
+        let reset = if error.history_recovery().is_resettable() {
             StateRoot::open_existing(state_dir)
                 .and_then(|root| root.prepare_history_reset(workspace))
                 .map(Some)
@@ -175,25 +167,18 @@ pub(super) async fn admit_history(
         let reason = if uncertain {
             "Reset may be incomplete; check storage access and retry."
         } else {
-            match reset.as_ref().err().unwrap_or(&error) {
-                StoreError::InvalidHistory => "Saved history is incompatible or damaged.",
-                StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
-                    if matches!(
-                        code.code,
-                        rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
-                    ) =>
-                {
-                    "Saved history is damaged."
-                }
-                StoreError::HistoryBusy => "History is in use; close the other Arany and retry.",
-                StoreError::HistoryChanged => "History changed during recovery; retry.",
-                StoreError::StorageFull => "Storage is full; free space and retry.",
-                StoreError::StateNotPrivate
-                | StoreError::InvalidStateDirectory
-                | StoreError::Io(_) => {
+            match reset.as_ref().err().unwrap_or(&error).history_recovery() {
+                HistoryRecovery::InvalidHistory => "Saved history is incompatible or damaged.",
+                HistoryRecovery::Damaged => "Saved history is damaged.",
+                HistoryRecovery::Busy => "History is in use; close the other Arany and retry.",
+                HistoryRecovery::Changed => "History changed during recovery; retry.",
+                HistoryRecovery::StorageFull => "Storage is full; free space and retry.",
+                HistoryRecovery::Inaccessible | HistoryRecovery::InvalidStateDirectory => {
                     "History files are unsafe or inaccessible; check permissions and retry."
                 }
-                _ => "History cannot be opened; check storage access and retry.",
+                HistoryRecovery::Unavailable => {
+                    "History cannot be opened; check storage access and retry."
+                }
             }
         };
         let reset = reset.ok().flatten();
