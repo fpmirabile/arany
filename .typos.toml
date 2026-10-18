@@ -1,10 +1,21 @@
 [files]
-extend-exclude = [".env", ".env.*", "**/.env", "**/.env.*",
-                  "Cargo.lock", "target/**", ".lavish/**"]
+extend-exclude = [
+  ".env",
+  ".env.*",
+  "**/.env",
+  "**/.env.*",
+  "Cargo.lock",
+  "target/**",
+  ".lavish/**",
+]
 
 [default]
 # Deliberately incomplete or misspelled terminal input and a partial frame title.
-extend-ignore-re = ['"(?:/provder(?:\\[nr])?|/hel|/hepl|alway)"', 'b"/helX\\x1b\[Dp"', 'b"Choose Provid"']
+extend-ignore-re = [
+  '"(?:/provder(?:\\[nr])?|/hel|/hepl|alway)"',
+  'b"/helX\\x1b\[Dp"',
+  'b"Choose Provid"',
+]
 
 [default.extend-words]
 # Terminal library name and the shared Ctrl+P/N navigation shorthand.
