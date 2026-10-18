@@ -789,6 +789,25 @@ pub(super) fn execution_failure(check: GuardCheck) -> ToolError {
 
 #[cfg(any(target_os = "macos", test))]
 const WORKER_STDERR_TAIL: u64 = 4096;
+#[cfg(any(target_os = "macos", test))]
+const WORKER_OUTPUT_BYTES: usize = 4096;
+
+#[cfg(any(target_os = "macos", test))]
+fn output_share(written: &std::sync::atomic::AtomicUsize, wanted: usize) -> usize {
+    let previous = written.fetch_add(wanted, std::sync::atomic::Ordering::Relaxed);
+    WORKER_OUTPUT_BYTES.saturating_sub(previous).min(wanted)
+}
+
+// The supervisor's only output is panic text; all of it together stays within one bounded share.
+#[cfg(target_os = "macos")]
+pub(super) fn bound_worker_output() {
+    static WRITTEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::panic::set_hook(Box::new(|info| {
+        let text = format!("{info}\n");
+        let allowed = output_share(&WRITTEN, text.len());
+        let _ = std::io::stderr().write_all(&text.as_bytes()[..allowed]);
+    }));
+}
 
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn read_tail(
@@ -1719,6 +1738,15 @@ mod tests {
                 > supervisor_go + runtime + PAYLOAD_KILL_WAIT
         );
         assert!(payload_report_deadline(supervisor_go, u32::MAX) > supervisor_go);
+    }
+
+    #[test]
+    fn worker_output_shares_never_exceed_the_cap_and_drop_the_rest() {
+        let written = std::sync::atomic::AtomicUsize::new(0);
+        assert_eq!(output_share(&written, 1_000), 1_000);
+        assert_eq!(output_share(&written, 5_000), WORKER_OUTPUT_BYTES - 1_000);
+        assert_eq!(output_share(&written, 10), 0);
+        assert_eq!(output_share(&written, 0), 0);
     }
 
     #[test]
