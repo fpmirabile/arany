@@ -46,6 +46,7 @@ const RECOVERY_ATTEMPT_LIMIT: usize = super::super::admission::RECOVERY_ATTEMPTS
 // Bounds the directory scan itself; an unverifiable listing fails closed.
 const UNIT_ROOT_SCAN_LIMIT: usize = 4096;
 const RECOVERY_RECORD: &str = "recovery.json";
+const WORKER_OUTPUT: &str = "worker.output";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -683,7 +684,11 @@ impl Unit {
             "--internal-native-tool-unit",
             socket.to_str().ok_or(ToolError::Path)?,
         ]);
-        let path = self.write_job(&arguments, "/dev/null")?;
+        // The supervisor's stdout and stderr carry only its bounded panic text; a tail names a silent exit.
+        super::super::admission::open_file(&self._directory.dir, WORKER_OUTPUT, true)?
+            .ok_or(ToolError::Path)?;
+        let output = self.root.join(WORKER_OUTPUT);
+        let path = self.write_job(&arguments, output.to_str().ok_or(ToolError::Path)?)?;
         self.manager(ManagerAction::Bootstrap(&path)).await?;
         let launched = self.manager(ManagerAction::Kickstart).await?;
         let launched = std::str::from_utf8(&launched)
@@ -725,6 +730,19 @@ impl Unit {
             return Err(ToolError::ProtectionUnavailable);
         }
         Ok(stream.into_inner())
+    }
+
+    fn worker_output(&self) -> Vec<u8> {
+        use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        self._directory
+            .dir
+            .open_with(WORKER_OUTPUT, &options)
+            .ok()
+            .filter(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
+            .and_then(|mut file| super::super::read_tail(&mut file).ok())
+            .unwrap_or_default()
     }
 
     async fn stop(&mut self) -> Result<(), ToolError> {
@@ -997,6 +1015,8 @@ pub(super) async fn execute(
         .await
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?
         .map_err(|_| ToolError::GuardRejected(GuardStage::ProcessCleanup))?;
+    let result =
+        result.map_err(|error| super::super::with_worker_exit(error, &unit.worker_output()));
     if let Some(private) = &runtime.worker {
         private.contained.store(true, Ordering::Release);
     }
@@ -1033,6 +1053,7 @@ fn connect_control(path: &Path) -> Result<(PrivateDirectory, UnixStream), ToolEr
 
 #[expect(clippy::too_many_lines, reason = "frozen until C2")]
 pub(super) fn helper_main() -> std::process::ExitCode {
+    super::super::bound_worker_output();
     let mut diagnostic = None;
     let mut stage = super::super::BootstrapStage::Admission;
     let result = (|| -> Result<(), ToolError> {
@@ -1360,7 +1381,11 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 (Err(_), Some(stage)) => {
                     let check = storage_check
                         .filter(|_| matches!(stage, super::super::BootstrapStage::StorageCleanup));
-                    Err(ToolError::GuardBootstrap(BootstrapFailure { stage, check }))
+                    Err(ToolError::GuardBootstrap(BootstrapFailure {
+                        stage,
+                        check,
+                        detail: None,
+                    }))
                 }
                 (result, _) => result,
             };
@@ -1370,10 +1395,9 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     Err(error) => {
                         let failure = match error {
                             ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
-                            _ => serde_json::to_vec(&BootstrapFailure {
-                                stage: super::super::BootstrapStage::StorageCleanup,
-                                check: None,
-                            }),
+                            _ => serde_json::to_vec(&BootstrapFailure::at(
+                                super::super::BootstrapStage::StorageCleanup,
+                            )),
                         }
                         .map_err(|_| ToolError::Operation)?;
                         [&b"CACHE_FAILED\n"[..], failure.as_slice(), &b"\n"[..]].concat()
@@ -1387,10 +1411,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 let bytes = match &result {
                     Ok(observation) => serde_json::to_vec(observation),
                     Err(ToolError::GuardBootstrap(failure)) => serde_json::to_vec(failure),
-                    Err(_) => serde_json::to_vec(&BootstrapFailure {
-                        stage: stage.clone(),
-                        check: None,
-                    }),
+                    Err(_) => serde_json::to_vec(&BootstrapFailure::at(stage.clone())),
                 }
                 .map_err(|_| ToolError::Operation)?;
                 output
@@ -1422,7 +1443,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
     {
         let failure = match error {
             ToolError::GuardBootstrap(failure) => serde_json::to_vec(failure),
-            _ => serde_json::to_vec(&BootstrapFailure { stage, check: None }),
+            _ => serde_json::to_vec(&BootstrapFailure::at(stage)),
         };
         if let Ok(mut bytes) = failure {
             bytes.push(b'\n');

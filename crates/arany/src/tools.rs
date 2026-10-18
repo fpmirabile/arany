@@ -940,6 +940,13 @@ pub(crate) fn failure_check(error: &ToolError) -> Option<&'static str> {
     }
 }
 
+pub(crate) fn failure_detail(error: &ToolError) -> Option<&str> {
+    match error {
+        ToolError::GuardBootstrap(failure) => failure.detail(),
+        _ => None,
+    }
+}
+
 fn record_failure(site: &'static str, intent: &EffectIntent, error: &ToolError) {
     crate::diagnostics::tool_failure(site, error);
     #[cfg(any(test, feature = "test-support"))]
@@ -948,6 +955,7 @@ fn record_failure(site: &'static str, intent: &EffectIntent, error: &ToolError) 
         site,
         failure_stage(error),
         failure_check(error),
+        failure_detail(error).map(str::to_owned),
     );
     #[cfg(not(any(test, feature = "test-support")))]
     let _ = intent;
