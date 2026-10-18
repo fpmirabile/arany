@@ -68,6 +68,9 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 collaboration,
                 "answer",
             ]);
+        if collaboration == "team" {
+            command.args(["--profile", "coding"]);
+        }
         if let Some(key) = key {
             command.env("ARANY_PROVIDER_LOCAL_KEY", key);
         }
@@ -112,9 +115,10 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
     std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o600))
         .expect("private profile file");
 
+    let mutation_path = state_path.join("provider-roster.json");
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..9 {
+        for index in 0..10 {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -174,7 +178,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 if index == 0 || index >= 3 { 4096 } else { 128 }
             );
             let input: serde_json::Value = crate::semantic::input(&body);
-            if (3..8).contains(&index) {
+            if (3..9).contains(&index) {
                 assert_eq!(
                     input["phase"],
                     match index {
@@ -184,7 +188,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                     }
                 );
                 assert_eq!(input["workspace_guidance"], "EXPECTED_WORKSPACE_GUIDANCE");
-                if matches!(index, 3 | 4 | 6) {
+                if matches!(index, 3 | 4 | 6 | 8) {
                     assert_eq!(input["objective"], "answer");
                 }
                 if index == 7 {
@@ -205,13 +209,16 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                     .windows(b"OMITTED_WORKSPACE_CANARY".len())
                     .any(|bytes| { bytes == b"OMITTED_WORKSPACE_CANARY" })
             );
-            if index == 8 {
+            if index == 9 {
                 write!(
                     stream,
                     "HTTP/1.1 302 Found\r\nLocation: http://{proxy_addr}/v1/responses\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 )
                 .expect("synthetic redirect");
                 continue;
+            }
+            if index == 4 {
+                std::fs::write(&mutation_path, b"invalid roster after admission").unwrap();
             }
             let text = match index {
                 0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
@@ -233,6 +240,9 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 }
                 7 => {
                     serde_json::json!({"outcome":{"type":"finish","summary":"unsafe summary","result":"test-key"}})
+                }
+                8 => {
+                    serde_json::json!({"outcome":{"type":"finish","summary":"roster summary","result":"roster answer"}})
                 }
                 _ => unreachable!(),
             };
@@ -378,6 +388,13 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
             .expect("first Session ID"),
     )
     .expect("first Session ID format");
+    let roster = serde_json::json!({"version":1,"profiles":[
+        {"name":"main","routes":[{"provider":"custom:local","model":"model-1","effort":null,"account_id":null}]},
+        {"name":"inspect","routes":[{"provider":"custom:local","model":"model-1","effort":null,"account_id":null}]}
+    ],"presets":[{"name":"coding","providers":{"primary":"main","child":"inspect","review":null,"compaction":null},"child_profiles":["inspect","main"]}]});
+    let roster_path = state_path.join("provider-roster.json");
+    std::fs::write(&roster_path, serde_json::to_vec(&roster).unwrap()).unwrap();
+    std::fs::set_permissions(&roster_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let team = run_exec_policy(
         &workspace,
         &state_path,
@@ -394,6 +411,42 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
         "single",
         Some(continued_session_id),
     );
+    std::fs::write(&roster_path, serde_json::to_vec(&roster).unwrap()).unwrap();
+    let mut jsonl_command = Command::new(env!("CARGO_BIN_EXE_arany"));
+    jsonl_command
+        .env_clear()
+        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .current_dir(&workspace)
+        .args([
+            "exec",
+            "--profile",
+            "coding",
+            "--output",
+            "jsonl",
+            "--collaboration",
+            "single",
+            "--state-dir",
+        ])
+        .arg(&state_path)
+        .arg("answer");
+    let roster_jsonl = run_product(&mut jsonl_command);
+    assert!(roster_jsonl.status.success());
+    let jsonl_lines: Vec<serde_json::Value> = roster_jsonl
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    let jsonl_session =
+        SessionId::from_str(jsonl_lines[0]["session_id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        jsonl_lines
+            .iter()
+            .find(|line| line["kind"] == "RunStarted")
+            .unwrap()["event_version"],
+        11
+    );
+    std::fs::write(&roster_path, b"invalid roster after admission").unwrap();
     let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
         .expect("inspect pre-recheck Events");
     let events_before_recheck: i64 = connection
@@ -451,7 +504,16 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
     );
     assert!(team.status.success());
     assert_eq!(team.stdout, b"Answer:\n  team answer\n");
-    let team_receipt = std::str::from_utf8(&team.stderr).expect("team receipt UTF-8");
+    let manifest = "Roster preset: coding\nRoles: primary=main, child=inspect, review=main, compaction=main\nEligible child profiles: inspect, main\n  inspect[0]: custom:local/model-1 effort=default (exact custom; unknown pricing)\n  main[0]: custom:local/model-1 effort=default (exact custom; unknown pricing)\n";
+    assert_eq!(
+        roster_jsonl.stderr,
+        manifest.as_bytes(),
+        "successful JSONL keeps the entire manifest on stderr"
+    );
+    let team_receipt = std::str::from_utf8(&team.stderr)
+        .expect("team receipt UTF-8")
+        .strip_prefix(manifest)
+        .expect("complete manifest on stderr");
     let team_receipt: Vec<_> = team_receipt.lines().collect();
     assert_eq!(team_receipt.len(), 4);
     let team_session_id = SessionId::from_str(team_receipt[0].strip_prefix("Session: ").unwrap())
@@ -541,6 +603,22 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
     assert_eq!(team_view.runs.len(), 1);
     assert_eq!(team_view.runs[0].status, RunStatus::Finished);
     assert_eq!(team_view.runs[0].agents.len(), 2);
+    let snapshot = team_view.runs[0]
+        .config
+        .as_ref()
+        .unwrap()
+        .roster
+        .as_ref()
+        .unwrap();
+    assert!(snapshot.valid());
+    assert_eq!(snapshot.preset, "coding");
+    assert_eq!(snapshot.providers.child, "inspect");
+    assert_eq!(snapshot.profiles.len(), 2);
+    assert_eq!(snapshot.child_profiles, ["inspect", "main"]);
+    assert_eq!(
+        std::fs::read(state_path.join("provider-roster.json")).unwrap(),
+        b"invalid roster after admission"
+    );
     assert_eq!(
         team_view.runs[0]
             .agents
@@ -565,6 +643,25 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
             .provider_concurrency,
         1
     );
+    let jsonl_events = runtime.block_on(store.load_session(jsonl_session)).unwrap();
+    let jsonl_view = SessionView::replay(jsonl_session, &jsonl_events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        jsonl_view.runs[0].assistant_message.as_deref(),
+        Some("roster answer")
+    );
+    assert_eq!(jsonl_view.runs[0].agents[0].provider_calls.len(), 1);
+    assert_eq!(
+        roster_jsonl.stdout,
+        arany_cli::presentation::render_exec(
+            &jsonl_view.runs[0],
+            &jsonl_events,
+            arany_cli::presentation::Output::Jsonl,
+            true
+        )
+        .as_bytes()
+    );
     let reflected_events = runtime
         .block_on(store.load_session(reflected_session_id))
         .expect("failed Run Events");
@@ -587,6 +684,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
         (run_id, &events, &view),
         (team_view.runs[0].id, &team_events, &team_view),
         (reflected_run_id, &reflected_events, &reflected_view),
+        (jsonl_view.runs[0].id, &jsonl_events, &jsonl_view),
     ] {
         let selected: Vec<_> = events
             .iter()

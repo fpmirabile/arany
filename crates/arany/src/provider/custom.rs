@@ -1,4 +1,4 @@
-use crate::provider::Effort;
+use crate::provider::{Effort, valid_profile_name as valid_name};
 use crate::store::RecordKind;
 use crate::store::{StateRoot, StoreError};
 use reqwest::Url;
@@ -203,18 +203,6 @@ fn effort_index(effort: Effort) -> usize {
         .iter()
         .position(|value| *value == effort)
         .unwrap()
-}
-
-fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && name
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase())
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 fn valid_credential_env(name: &str) -> bool {

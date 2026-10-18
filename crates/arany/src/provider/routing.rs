@@ -73,12 +73,64 @@ impl<T: Clone> Providers<T> {
 }
 
 pub type ProviderRoutes = Providers<Vec<ProviderIdentity>>;
-pub type AdmittedProviders = Providers<Vec<Arc<dyn Provider>>>;
+#[derive(Clone)]
+pub struct AdmittedProviders {
+    pub roles: Providers<Vec<Arc<dyn Provider>>>,
+    pub roster: Option<super::AdmittedRoster>,
+}
+
+impl std::ops::Deref for AdmittedProviders {
+    type Target = Providers<Vec<Arc<dyn Provider>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.roles
+    }
+}
 
 impl AdmittedProviders {
-    /// One Provider for every role, with no fallback.
     pub fn single(provider: Arc<dyn Provider>) -> Self {
-        Self::all(vec![provider])
+        Self {
+            roles: Providers::all(vec![provider]),
+            roster: None,
+        }
+    }
+
+    pub fn from_roles(roles: Providers<Vec<Arc<dyn Provider>>>) -> Self {
+        Self {
+            roles,
+            roster: None,
+        }
+    }
+
+    pub(crate) fn child_chains(&self) -> Vec<&Vec<Arc<dyn Provider>>> {
+        let mut chains = vec![&self.roles.child];
+        if let Some(roster) = &self.roster {
+            for name in &roster.snapshot.child_profiles {
+                if let Some((_, chain)) = roster
+                    .profiles
+                    .iter()
+                    .find(|(candidate, _)| candidate == name)
+                {
+                    chains.push(chain);
+                }
+            }
+        }
+        chains
+    }
+
+    pub(crate) fn agent_chains(&self) -> Vec<&Vec<Arc<dyn Provider>>> {
+        let mut chains = vec![&self.roles.primary];
+        chains.extend(self.child_chains());
+        chains
+    }
+
+    pub(crate) fn agent_concurrency(&self) -> u8 {
+        self.agent_chains()
+            .into_iter()
+            .flatten()
+            .map(|provider| provider.identity().limits.concurrency)
+            .min()
+            .unwrap_or(1)
     }
 
     pub(crate) fn identities(&self) -> ProviderRoutes {

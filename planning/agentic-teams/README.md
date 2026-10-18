@@ -284,38 +284,11 @@ and evidence owners are in [execution](#execution).
 
 ### D. Provider roster and per-agent routing
 
-Extend the admitted per-role routes with a private roster and assignment
-selection. Existing Tool-history adapter/account restrictions remain in force;
-this proposal does not claim arbitrary mixed-account Tool replay is available.
+Named private presets now pin and admit all reachable routes for the four current roles (`primary`, `child`, `review`, `compaction`), with explicit `--profile`, bounded immutable Run metadata, same-selection Goal recovery and pinned compaction. The [Provider contract](../../docs/specs/provider.md#named-roster-presets) owns that behavior and its limits; current selected-account loaders and Tool-history adapter/account restrictions still apply.
 
-1. **Roster.** The user keeps a private roster of admitted profiles (account,
-   model and effort), each with a capability class: `agent` (Finish, Delegate
-   and Tool outcomes) or `judge` (typed verdicts only). Judge-only Providers
-   never act as agents. Per-profile Tool capability still follows
-   [Provider spec](../../docs/specs/provider.md); exact custom profiles stay
-   read-only until tool-capable conformance exists.
-   The roster is a private, owner-only file outside the Workspace.
-2. **Role binding.** The user binds a default profile per role (primary,
-   worker, reviewer, judge, compaction). The primary composes the team from
-   the user's request and may pick a profile per assignment only among roster
-   entries the user marked eligible for that role. Model output can never add
-   a profile or reach an ineligible one.
-3. **Admission.** At start the user picks a named roster preset in one
-   explicit choice listing every route and its billing; this replaces today's
-   single mixed-access choice. Every profile in the preset is admitted
-   (credential, usage consent, conformance) before Workspace disclosure. An
-   unadmittable profile rejects the start and names the failing profile.
-   `RunStarted` and each AgentRun record the exact profile provenance.
-4. **Roster failure and pause.** Preserve the implemented
-   [fallback boundary](../../docs/specs/provider.md#per-role-selection-and-fallback):
-   only admitted ordered HTTP-5xx fallbacks, with visible journaled switches,
-   shared budgets and no uncertain Tool redispatch. For roster-bound agents
-   still unable to proceed, add an explicit pause at the next call boundary;
-   independent agents continue until they need that result. The user can retry,
-   switch to an eligible admitted profile or cancel. Paused time does not count
-   against active Goal time; in-flight Guard units keep their deadlines.
-   Judge-only routing and any broader failure recovery need their own accepted
-   contract before implementation.
+Remaining item-9 work: let the primary select an eligible, already admitted profile per child assignment, journal exact spawn/call/switch provenance and complete cancellation, crash and Guard-continuity evidence. Children remain read-only and bounded by the parent grant; model output cannot introduce a destination or another preset.
+
+Separately proposed D work, excluded from item 9 by decision O1: judge-only adapters and a durable per-agent pause/retry/switch lifecycle after exhausted routes. Those need accepted Events, dependency blocking, active-time and user-command contracts before implementation. Existing ordered HTTP-5xx fallback, failed-child → sibling drain → failed Run, shared budgets and explicit new-Run recovery remain authoritative. Worker/reviewer/judge taxonomy, writable workers, leases and handover belong to C2/C3 rather than this preset slice.
 
 ### E. Goal lifecycle and terminal
 

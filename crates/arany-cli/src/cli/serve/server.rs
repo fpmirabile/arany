@@ -74,7 +74,9 @@ impl Fault {
 fn engine_reason(error: &EngineError) -> Reason {
     match error {
         EngineError::IncompatibleProviderChain => Reason::IncompatibleProviderChain,
-        EngineError::InvalidRequest => Reason::InvalidRequest,
+        EngineError::RosterSelectionMismatch | EngineError::InvalidRequest => {
+            Reason::InvalidRequest
+        }
         EngineError::MissingSession => Reason::MissingSession,
         EngineError::NoSessionForWorkspace => Reason::NoSessionForWorkspace,
         EngineError::TooManySessions => Reason::TooManySessions,

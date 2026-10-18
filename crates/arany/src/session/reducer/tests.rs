@@ -149,6 +149,7 @@ mod goal_replay_tests {
 
     fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
         RunConfig {
+            roster: None,
             providers: None,
             provider: "openai".into(),
             model: "gpt-5.4".into(),
@@ -386,6 +387,146 @@ mod goal_replay_tests {
                 let mut no_tools = config.clone();
                 no_tools.tool_policy = None;
                 assert!(no_tools.validate().is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn roster_resume_and_unused_candidates_cannot_widen_pinned_routing() {
+        use crate::provider::{NamedProviderRoutes, Providers, RosterSnapshot};
+        let mut pinned = config(CollaborationPolicy::Single, true);
+        let identity = pinned.identity().unwrap();
+        let mut snapshot = RosterSnapshot {
+            preset: "coding".into(),
+            selection_digest: [0; 32],
+            profiles: vec![NamedProviderRoutes {
+                name: "main".into(),
+                routes: vec![identity.clone()],
+            }],
+            providers: Providers::all("main".into()),
+            child_profiles: vec!["main".into()],
+        };
+        snapshot.selection_digest = snapshot.digest().unwrap();
+        pinned.roster = Some(Box::new(snapshot));
+        assert!(pinned.validate().is_ok());
+        for custom in [false, true] {
+            let mut invalid = pinned.clone();
+            let snapshot = invalid.roster.as_mut().unwrap();
+            let mut alternate = identity.clone();
+            if custom {
+                alternate.profile = "custom:exact".into();
+                alternate.provenance =
+                    crate::provider::Provenance::Custom(crate::provider::CustomProfileProvenance {
+                        endpoint: "https://example.com/responses".into(),
+                        evidence_digest: [1; 32],
+                        capability_evidence_version: 2,
+                    });
+            } else {
+                alternate.profile = "anthropic".into();
+            }
+            snapshot.profiles.push(NamedProviderRoutes {
+                name: "spare".into(),
+                routes: if custom {
+                    vec![alternate]
+                } else {
+                    vec![identity.clone(), alternate]
+                },
+            });
+            snapshot.child_profiles.push("spare".into());
+            snapshot.selection_digest = snapshot.digest().unwrap();
+            assert!(invalid.validate().is_err());
+            invalid.tool_policy = None;
+            assert!(invalid.validate().is_ok());
+        }
+        let (session, goal, run, actor) = (
+            SessionId::new(),
+            GoalId::new(),
+            RunId::new(),
+            AgentRunId::new(),
+        );
+        let mut prefix = vec![goal_started(goal, GoalBudget::default())];
+        prefix.extend(start_run(goal, run, actor, pinned.clone()));
+        prefix.extend(cancel_run(run, actor));
+        let paused = SessionView::replay_open(session, &session_with(session, prefix.clone()))
+            .unwrap()
+            .unwrap();
+        for drifted in [false, true] {
+            let mut compacted = prefix.clone();
+            compacted.push(Event::GoalCompactionCallReserved {
+                goal_id: goal,
+                run_id: run,
+                active_ceiling_ms: 0,
+            });
+            compacted.push(Event::ContextCompacted {
+                active_ms: Some(0),
+                record: crate::session::events::CompactionRecord {
+                    covered_run_id: run,
+                    covered_sequence: paused.runs[0].finished_sequence.unwrap(),
+                    source_digest: crate::session::lineage::prefix_digest(
+                        &session_with(session, prefix.clone()),
+                        paused.runs[0].finished_sequence.unwrap(),
+                    )
+                    .unwrap(),
+                    provider: "openai".into(),
+                    model: if drifted { "different" } else { "gpt-5.4" }.into(),
+                    prompt_version: 1,
+                    schema_version: 1,
+                    compiler_version: 3,
+                    source_bytes: 1,
+                    source_tokens_estimate: 1,
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    response_id: None,
+                    wire_provenance: None,
+                    chatgpt_provenance: None,
+                    output_token_bound: OutputTokenBound::ProviderEnforced,
+                    status: crate::session::events::CompactionStatus::Failed {
+                        reason: crate::session::events::CompactionFailure::ProviderUnavailable,
+                    },
+                },
+            });
+            let replayed = SessionView::replay_open(session, &session_with(session, compacted));
+            assert_eq!(
+                replayed.is_ok(),
+                !drifted,
+                "compaction drift {drifted}: {:?}",
+                replayed.as_ref().err()
+            );
+        }
+        prefix.push(Event::GoalResumed { goal_id: goal });
+        for change in 0..3 {
+            let mut next = pinned.clone();
+            match change {
+                1 => next.roster = None,
+                2 => {
+                    let roster = next.roster.as_mut().unwrap();
+                    roster.preset = "drifted".into();
+                    roster.selection_digest = roster.digest().unwrap();
+                }
+                _ => (),
+            }
+            for prestart in [false, true] {
+                let mut events = prefix.clone();
+                if prestart {
+                    events.extend(
+                        start_run(goal, RunId::new(), AgentRunId::new(), pinned.clone())
+                            .into_iter()
+                            .take(2),
+                    );
+                    events.push(Event::GoalResumed { goal_id: goal });
+                }
+                events.extend(start_run(
+                    goal,
+                    RunId::new(),
+                    AgentRunId::new(),
+                    next.clone(),
+                ));
+                assert_eq!(
+                    SessionView::replay_open(session, &session_with(session, events)).is_ok(),
+                    change == 0
+                );
             }
         }
     }

@@ -409,6 +409,7 @@ mod tests {
             objective: "task".into(),
             images: Vec::new(),
             config: Some(RunConfig {
+                roster: None,
                 providers: None,
                 provider: "anthropic".into(),
                 model: "claude-sonnet-5".into(),

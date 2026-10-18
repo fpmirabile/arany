@@ -737,8 +737,8 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
         ScriptedProvider::new(vec![finish("approve")]).with_profile("scripted", "review-fallback"),
     );
     let mut bindings = routes(&primary);
-    bindings.child = vec![child.clone()];
-    bindings.review = vec![review.clone(), fallback.clone()];
+    bindings.roles.child = vec![child.clone()];
+    bindings.roles.review = vec![review.clone(), fallback.clone()];
     let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
     let mut request = input(&fixture.workspace);
     request.policy = CollaborationPolicy::Auto {
