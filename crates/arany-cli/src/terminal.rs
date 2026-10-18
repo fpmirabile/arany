@@ -53,6 +53,10 @@ use view::{
 
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
 
+pub fn report_error(message: impl std::fmt::Display) {
+    let _ = writeln!(io::stderr().lock(), "error: {message}");
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalMode {

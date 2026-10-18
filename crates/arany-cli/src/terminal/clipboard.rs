@@ -59,17 +59,17 @@ pub(super) fn shutdown() -> std::io::Result<()> {
 
 #[cfg(unix)]
 fn warn_cleanup_unconfirmed() {
-    use std::io::Write;
-
     static WARNED: AtomicBool = AtomicBool::new(false);
     if WARNED.swap(true, Ordering::Relaxed) {
         return;
     }
-    // Detach the single best-effort warning so stderr cannot delay teardown or exit.
+    // A blocked warning must never hold Rust's stderr lock during teardown or exit.
     let _ = std::thread::Builder::new()
         .name("arany-clipboard-warning".into())
         .spawn(|| {
-            let _ = writeln!(std::io::stderr(), "{CLEANUP_UNCONFIRMED}");
+            if let Ok(stderr) = rustix::io::dup(std::io::stderr()) {
+                let _ = rustix::io::write(stderr, format!("{CLEANUP_UNCONFIRMED}\n").as_bytes());
+            }
         });
 }
 
@@ -657,6 +657,41 @@ mod cleanup_tests {
             start.elapsed() < CLEANUP_TIMEOUT,
             "warning blocked teardown"
         );
+        #[cfg(target_os = "linux")]
+        if case == "full" {
+            use std::io::{Read, Seek};
+            use std::os::fd::AsRawFd;
+
+            let deadline = Instant::now() + CLEANUP_TIMEOUT;
+            loop {
+                let blocked = std::fs::read_dir("/proc/self/task")
+                    .unwrap()
+                    .take(256)
+                    .filter_map(Result::ok)
+                    .any(|entry| {
+                        std::fs::read_to_string(entry.path().join("comm"))
+                            .is_ok_and(|name| name.trim() == "arany-clipboard")
+                            && std::fs::read_to_string(entry.path().join("wchan"))
+                                .is_ok_and(|state| state.trim().ends_with("pipe_write"))
+                    });
+                if blocked {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "warning did not block on full pipe"
+                );
+                std::thread::yield_now();
+            }
+            // Keep the warning's pipe full while exercising the normal error reporter.
+            let mut sink = tempfile::tempfile().unwrap();
+            nix::unistd::dup2(sink.as_raw_fd(), std::io::stderr().as_raw_fd()).unwrap();
+            super::super::report_error("clipboard shutdown failed");
+            sink.rewind().unwrap();
+            let mut reported = String::new();
+            sink.read_to_string(&mut reported).unwrap();
+            assert_eq!(reported, "error: clipboard shutdown failed\n");
+        }
     }
 
     #[test]
