@@ -98,6 +98,49 @@ pub enum StoreError {
     Sqlite(#[source] rusqlite::Error),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryRecovery {
+    InvalidHistory,
+    Damaged,
+    InvalidStateDirectory,
+    Inaccessible,
+    Busy,
+    Changed,
+    StorageFull,
+    Unavailable,
+}
+
+impl HistoryRecovery {
+    pub fn is_resettable(self) -> bool {
+        matches!(
+            self,
+            Self::InvalidHistory | Self::Damaged | Self::InvalidStateDirectory
+        )
+    }
+}
+
+impl StoreError {
+    pub fn history_recovery(&self) -> HistoryRecovery {
+        match self {
+            Self::InvalidHistory => HistoryRecovery::InvalidHistory,
+            Self::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                ) =>
+            {
+                HistoryRecovery::Damaged
+            }
+            Self::InvalidStateDirectory => HistoryRecovery::InvalidStateDirectory,
+            Self::StateNotPrivate | Self::Io(_) => HistoryRecovery::Inaccessible,
+            Self::HistoryBusy => HistoryRecovery::Busy,
+            Self::HistoryChanged => HistoryRecovery::Changed,
+            Self::StorageFull => HistoryRecovery::StorageFull,
+            _ => HistoryRecovery::Unavailable,
+        }
+    }
+}
+
 impl From<io::Error> for StoreError {
     fn from(source: io::Error) -> Self {
         Self::Io(source)
