@@ -5270,8 +5270,8 @@ async fn steered_run_near_the_event_cap_is_refused_up_front_never_stranded() {
     let steered_bound = arany::Action::ProviderCall {
         previews: false,
         steering: true,
-    }
-    .max_events();
+    };
+    let steered_bound = steered_bound.max_events() + steered_bound.verdict_slots();
     for free in steered_bound - 3..=steered_bound + 2 {
         let case = steered_run(temp.path(), &format!("free-{free}"), Some(free), run_offset).await;
         let count = |matches: fn(&Event) -> bool| {
@@ -5430,7 +5430,7 @@ async fn reviewed_tool_step_at_the_event_cap_closes_its_tool_and_leaves_no_tool_
     };
     let run_start = index_of(1, |event| matches!(event, Event::GoalStarted { .. }));
     let tool_start = index_of(1, |event| matches!(event, Event::ToolStarted { .. }));
-    let free = arany::Action::Tool.max_events() - 1;
+    let free = arany::Action::Tool.max_events() + arany::Action::Tool.verdict_slots() - 1;
     let (events, view) = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         reviewed_write_run(temp.path(), "capped", Some(free), tool_start - run_start),

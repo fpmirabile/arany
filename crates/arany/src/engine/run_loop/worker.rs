@@ -216,7 +216,8 @@ impl RunLoop<'_> {
         self.journal
             .admit(
                 self.session_id,
-                action.max_events_for_admitted(&self.routing.providers),
+                action.max_events_for_admitted(&self.routing.providers)
+                    + self.ledger().verdicts(action),
                 action.tool_observations(),
             )
             .await
@@ -456,7 +457,8 @@ impl RunLoop<'_> {
                 .journal
                 .admit(
                     self.session_id,
-                    action.max_events_for_admitted(&self.routing.providers),
+                    action.max_events_for_admitted(&self.routing.providers)
+                        + self.ledger().verdicts(action),
                     2,
                 )
                 .await

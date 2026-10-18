@@ -58,7 +58,7 @@ impl Default for SupervisorPolicy {
                 distinct_denied: u16::MAX,
                 alias: 1,
                 files: 16,
-                files_per_root: u16::MAX,
+                files_per_root: 4,
                 delete_permille: 250,
                 deleted_files: 1,
                 growth_permille: u16::MAX,
@@ -214,7 +214,7 @@ pub enum Features {
     Probing(ProbingFeatures),
     Disproportion(DisproportionFeatures),
 }
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalKind {
     Loop,
@@ -327,17 +327,7 @@ impl SupervisorState {
             return Ok(true);
         }
         if run.supervisor.pending.is_some() {
-            let new_run = envelope.run_id.is_some_and(|id| id != run.id);
-            let closed = matches!(
-                envelope.event,
-                Event::GoalStarted { .. }
-                    | Event::GoalResumed { .. }
-                    | Event::GoalFinished { .. }
-                    | Event::SessionRenamed { .. }
-                    | Event::SessionDefaultChanged { .. }
-                    | Event::ContextCompacted { .. }
-            );
-            if !new_run && !closed {
+            if envelope.run_id == Some(run.id) {
                 return Err(ReplayError::InvalidTransition);
             }
             run.supervisor.pending = None;
@@ -346,9 +336,9 @@ impl SupervisorState {
     }
     pub(crate) fn after(view: &mut SessionView, envelope: &EventEnvelope) {
         let Some(run) = view.runs.last() else { return };
-        let Some(policy) = run.config.as_ref().and_then(|c| c.supervisor.clone()) else {
+        if run.config.as_ref().is_none_or(|c| c.supervisor.is_none()) {
             return;
-        };
+        }
         if matches!(
             envelope.event,
             Event::RunStarted { .. } | Event::GoalPlanContractRecorded { .. }
@@ -375,6 +365,9 @@ impl SupervisorState {
             return;
         };
         let run = view.runs.last_mut().expect("subject Run");
+        let Some(policy) = run.config.as_ref().and_then(|c| c.supervisor.clone()) else {
+            return;
+        };
         let state = &mut run.supervisor;
         let index = match state.windows.iter().position(|(id, _)| *id == actor) {
             Some(index) => index,
@@ -390,6 +383,7 @@ impl SupervisorState {
         }
         window.push_back(step);
         let signals = evaluate(window, footprint, &policy);
+        let signals = new_facts(signals, site, envelope.sequence);
         if !signals.is_empty() && state.verdicts < MAX_VERDICTS {
             state.pending = Some((
                 run.id,
@@ -405,6 +399,16 @@ impl SupervisorState {
             ));
         }
     }
+}
+
+// Call-pattern signals report new facts only: the subject must be part of the evidence.
+fn new_facts(mut signals: Vec<Signal>, site: Site, subject: u64) -> Vec<Signal> {
+    signals.retain(|s| {
+        s.signal == SignalKind::Disproportion
+            || !matches!(site, Site::WorkerCapture | Site::Handover)
+                && s.evidence.contains(&subject)
+    });
+    signals
 }
 
 fn hash(bytes: &[u8]) -> [u8; 32] {
@@ -479,7 +483,8 @@ fn evaluate(
     );
     if let Some(f) = footprint {
         let notice = f.files >= policy.floors.files
-            || f.files >= 4 && f.delete_permille >= policy.floors.delete_permille;
+            || f.files_per_root >= policy.floors.files_per_root
+                && f.delete_permille >= policy.floors.delete_permille;
         let t = &policy.candidates;
         let narrow = f.files >= t.files && f.files_per_root >= t.files_per_root
             || f.deleted_files >= t.deleted_files && f.delete_permille >= t.delete_permille

@@ -3001,6 +3001,18 @@ mod goal_replay_tests {
                     ));
                     let interrupted = SessionView::replay(session, &envelopes).unwrap().unwrap();
                     assert_eq!(interrupted.runs[0].status, RunStatus::Interrupted);
+                    let mut resumed: Vec<_> = envelopes.iter().map(|e| e.event.clone()).collect();
+                    resumed.push(Event::GoalResumed { goal_id: goal });
+                    resumed.extend(start_run(
+                        goal,
+                        RunId::new(),
+                        AgentRunId::new(),
+                        view.runs[0].config.clone().unwrap(),
+                    ));
+                    assert!(
+                        SessionView::replay_open(session, &journal(session, resumed)).is_ok(),
+                        "a new Run follows an interrupted prefix with a pending verdict"
+                    );
                     for case in 0..6 {
                         let mut forged = verdict.clone();
                         if let Event::SupervisorVerdictRecorded {

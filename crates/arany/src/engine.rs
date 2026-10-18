@@ -1476,6 +1476,11 @@ impl Engine {
         };
         let event_slots = RUN_START_EVENTS
             + first_action.max_events_for_admitted(&submission.providers)
+            + if submission.tools.is_some() {
+                first_action.verdict_slots()
+            } else {
+                0
+            }
             + usize::from(request.session_id.is_none());
         self.journal
             .admit_run_start(session_id, event_slots)

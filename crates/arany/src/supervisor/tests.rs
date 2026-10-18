@@ -329,3 +329,26 @@ fn supervisor_worst_case_verdict_fits_its_byte_bound() {
     };
     assert!(verdict.valid());
 }
+
+#[test]
+fn supervisor_one_crossing_journals_one_verdict_not_a_stream() {
+    let policy = SupervisorPolicy::default();
+    let mut window = VecDeque::new();
+    let mut journaled = Vec::new();
+    for n in 1..=8 {
+        let mut s = step(n, n as u8, true);
+        if n == 2 {
+            s.succeeded = false;
+            s.denied = true;
+            s.alias = true;
+        }
+        window.push_back(s);
+        let signals = new_facts(evaluate(&window, None, &policy), Site::ToolOutcome, n);
+        if !signals.is_empty() {
+            journaled.push(n);
+        }
+    }
+    assert_eq!(journaled, [2]);
+    let capture = new_facts(evaluate(&window, None, &policy), Site::WorkerCapture, 2);
+    assert!(capture.is_empty());
+}

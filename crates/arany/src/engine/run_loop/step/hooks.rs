@@ -675,7 +675,7 @@ impl RunLoop<'_> {
         } else {
             self.primary_call()
         };
-        tail.max_events_for_admitted(&self.routing.providers)
+        tail.max_events_for_admitted(&self.routing.providers) + self.ledger().verdicts(tail)
     }
 
     fn lifecycle_ceiling(&self, pending_ms: u64) -> Result<u64, EngineError> {

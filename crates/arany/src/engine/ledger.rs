@@ -30,25 +30,45 @@ impl Action {
         match self {
             // Reserve terminal Events through the Goal receipt even when no further step runs.
             Self::ProviderCall { previews, steering } => {
-                7 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
+                6 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
             }
             Self::Child {
                 in_flight,
                 research,
-            } => (if research { 15_usize } else { 10_usize }).saturating_add(
+            } => (if research { 14_usize } else { 9_usize }).saturating_add(
                 usize::try_from(in_flight)
                     .unwrap_or(usize::MAX)
-                    .saturating_mul(3),
+                    .saturating_mul(2),
             ),
-            Self::Tool | Self::Review => 10,
-            Self::Worker { chunks } => chunks.saturating_add(12 + 5 * 8 + 6 + 4),
+            Self::Tool | Self::Review => 8,
+            Self::Worker { chunks } => chunks.saturating_add(12 + 4 * 8 + 6),
             Self::Compaction => 6,
             Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
             Self::Delegation { children, research } => {
                 if research {
-                    children * (8 * MAX_CHILD_TOOL_CALLS + 5) + 8
+                    children * (7 * MAX_CHILD_TOOL_CALLS + 4) + 8
                 } else {
-                    5 * children + 7
+                    4 * children + 6
+                }
+            }
+        }
+    }
+
+    // Shadow verdicts follow their subject Events, and only Runs pinned with a Supervisor reserve them.
+    pub fn verdict_slots(self) -> usize {
+        match self {
+            Self::ProviderCall { .. } => 1,
+            Self::Child { in_flight, .. } => usize::try_from(in_flight)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+            Self::Tool | Self::Review => 2,
+            Self::Worker { .. } => 12,
+            Self::Compaction | Self::BoundaryCompaction { .. } => 0,
+            Self::Delegation { children, research } => {
+                if research {
+                    children * (MAX_CHILD_TOOL_CALLS + 1)
+                } else {
+                    children + 1
                 }
             }
         }
@@ -225,6 +245,17 @@ impl GoalLedger {
                 in_flight: InFlight::default(),
             }),
             admission: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    pub(super) fn verdicts(&self, action: Action) -> usize {
+        match self.view(|v| {
+            v.runs
+                .last()
+                .is_some_and(|r| r.config.as_ref().is_some_and(|c| c.supervisor.is_some()))
+        }) {
+            Ok(false) => 0,
+            _ => action.verdict_slots(),
         }
     }
 
