@@ -12,10 +12,10 @@ use std::process::Command;
 fn account_path_uses_the_private_binary_fixture() {
     let root = arany::test_support::isolate_account_root();
     if cfg!(not(debug_assertions)) && std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
-        assert!(
-            StateRoot::account_path().is_err(),
-            "release rejects the override"
-        );
+        assert!(matches!(
+            StateRoot::account_path(),
+            Err(arany::StoreError::InvalidStateDirectory)
+        ));
         return;
     }
     assert_eq!(StateRoot::account_path().unwrap(), root);
