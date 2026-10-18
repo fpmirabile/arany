@@ -223,34 +223,42 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
                 0
             );
         }
+        attached_pty_refusal(
+            temp.path(),
+            &workspace,
+            &state,
+            Some(&account_root),
+            if other {
+                b"roster profile same route 0 refused"
+            } else {
+                b"roster profile unused route 0 refused"
+            },
+        );
     }
 }
 
-#[test]
 #[cfg(target_os = "linux")]
-fn attached_profile_admission_waits_for_folder_consent() {
+fn attached_pty_refusal(
+    temp: &Path,
+    workspace: &Path,
+    state: &Path,
+    account_root: Option<&Path>,
+    refusal: &[u8],
+) {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::io::Write;
     use std::time::{Duration, Instant};
 
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("project");
-    std::fs::create_dir(&workspace).unwrap();
-    let state = temp.path().join("state");
-    StateRoot::admit(&state).unwrap();
-    private_file(
-        &state.join("provider-roster.json"),
-        &serde_json::to_vec(&record()).unwrap(),
-    );
     let shell = "stty rows 24 cols 80; /arany --screen-reader --no-color --profile coding --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" answer";
-    let mut command = super::isolation::isolated_script(temp.path());
+    let mut command = super::isolation::isolated_script(temp);
     command
         .env_clear()
-        .env("ARANY_TEST_STATE", &state)
-        .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("ARANY_TEST_STATE", state)
+        .env("ARANY_TEST_WORKSPACE", workspace)
         .env("SHELL", "/bin/sh")
+        .envs(account_root.map(|root| ("ARANY_TEST_ACCOUNT_ROOT", root)))
         .env("TERM", "dumb")
-        .current_dir(&workspace)
+        .current_dir(workspace)
         .args(["-q", "-e", "-c", shell, "/dev/null"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -269,11 +277,12 @@ fn attached_profile_admission_waits_for_folder_consent() {
         answered: &mut super::session_picker::PtyResponses,
         needle: &[u8],
     ) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Watchdog only: it aborts a hung child and never decides the assertion.
+        let watchdog = Instant::now() + Duration::from_secs(120);
         while !transcript.windows(needle.len()).any(|part| part == needle) {
             super::session_picker::pump(output, input, transcript, answered);
             assert!(
-                Instant::now() < deadline,
+                Instant::now() < watchdog,
                 "missing {}: {}",
                 String::from_utf8_lossy(needle),
                 super::session_picker::tail(transcript)
@@ -300,12 +309,33 @@ fn attached_profile_admission_waits_for_folder_consent() {
         &mut input,
         &mut transcript,
         &mut answered,
-        b"roster profile main route 0 refused",
+        refusal,
     );
     assert_eq!(
         std::fs::metadata(state.join("events.sqlite3"))
             .unwrap()
             .len(),
         0
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn attached_profile_admission_waits_for_folder_consent() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    StateRoot::admit(&state).unwrap();
+    private_file(
+        &state.join("provider-roster.json"),
+        &serde_json::to_vec(&record()).unwrap(),
+    );
+    attached_pty_refusal(
+        temp.path(),
+        &workspace,
+        &state,
+        None,
+        b"roster profile main route 0 refused",
     );
 }
