@@ -599,6 +599,19 @@ pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<
     }
 }
 
+// A device gone at the re-check may still be detaching; never detach it, and let a fresh attempt confirm.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn require_listed<T: PartialEq>(
+    mut listed: impl Iterator<Item = T>,
+    device: T,
+) -> Result<(), ToolError> {
+    if listed.any(|candidate| candidate == device) {
+        Ok(())
+    } else {
+        Err(ToolError::ProtectionUnavailable)
+    }
+}
+
 pub(super) fn bootstrap_failure(stderr: &[u8]) -> Option<ToolError> {
     serde_json::from_slice::<BootstrapFailure>(stderr)
         .ok()
@@ -1401,6 +1414,50 @@ mod tests {
             ),
             Err(ToolError::Operation)
         ));
+    }
+
+    #[tokio::test]
+    async fn an_unlisted_device_is_refused_retryably_and_retried_within_the_bound() {
+        assert!(require_listed(["disk4", "disk5"].into_iter(), "disk4").is_ok());
+        assert!(matches!(
+            require_listed(["disk5"].into_iter(), "disk4"),
+            Err(ToolError::ProtectionUnavailable)
+        ));
+        let recheck = |listings: &'static [&'static [&'static str]]| {
+            let attempt = std::cell::Cell::new(0);
+            move || {
+                let listed = listings[attempt.get().min(listings.len() - 1)];
+                attempt.set(attempt.get() + 1);
+                std::future::ready(require_listed(listed.iter().copied(), "disk4"))
+            }
+        };
+        let far = tokio::time::Instant::now() + Duration::from_secs(60);
+        assert!(
+            retry_transient(8, Duration::ZERO, far, recheck(&[&[], &["disk4"]]))
+                .await
+                .is_ok(),
+            "a later attempt re-lists before acting"
+        );
+        let calls = std::cell::Cell::new(0);
+        let unlisted = recheck(&[&[]]);
+        let never_listed = retry_transient(8, Duration::ZERO, far, || {
+            calls.set(calls.get() + 1);
+            unlisted()
+        })
+        .await;
+        assert!(matches!(
+            never_listed,
+            Err(ToolError::ProtectionUnavailable)
+        ));
+        assert_eq!(calls.get(), 8);
+        let lapsed = retry_transient(
+            8,
+            Duration::ZERO,
+            tokio::time::Instant::now(),
+            recheck(&[&[]]),
+        )
+        .await;
+        assert!(matches!(lapsed, Err(ToolError::ProtectionUnavailable)));
     }
 
     #[tokio::test]
