@@ -8,6 +8,22 @@ use arany::{
 use process::BoundedOutput;
 use std::process::Command;
 
+#[test]
+fn account_path_uses_the_private_binary_fixture() {
+    let root = arany::test_support::isolate_account_root();
+    if cfg!(not(debug_assertions)) && std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
+        assert!(matches!(
+            StateRoot::account_path(),
+            Err(arany::StoreError::InvalidStateDirectory)
+        ));
+        return;
+    }
+    assert_eq!(StateRoot::account_path().unwrap(), root);
+    if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_none() {
+        assert!(root.starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()));
+    }
+}
+
 /// A scripted one-request Tool step; the id only has to be unique within its step.
 fn tool_outcome(
     call: arany::ToolCall,
@@ -2659,9 +2675,15 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         .expect("committed pinned Session");
 
         let ready_path = temp.path().join("holder-ready");
+        let mut holder_command = Command::new(std::env::current_exe().expect("test executable"));
+        holder_command.env_clear();
+        #[cfg(debug_assertions)]
+        holder_command.env(
+            "ARANY_TEST_ACCOUNT_ROOT",
+            arany::test_support::isolate_account_root(),
+        );
         let mut holder = SupervisedChild(Some(
-            Command::new(std::env::current_exe().expect("test executable"))
-                .env_clear()
+            holder_command
                 .env("ARANY_TEST_STATE_PATH", &state_path)
                 .env("ARANY_TEST_WORKSPACE_PATH", &workspace)
                 .env("ARANY_TEST_SESSION_ID", session_id.to_string())
@@ -2685,8 +2707,13 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
 
         let contender = |resume_goal: Option<arany::GoalId>| {
             let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+            command.env_clear();
+            #[cfg(debug_assertions)]
+            command.env(
+                "ARANY_TEST_ACCOUNT_ROOT",
+                arany::test_support::isolate_account_root(),
+            );
             command
-                .env_clear()
                 .env("OPENAI_API_KEY", "test-placeholder-key")
                 .current_dir(temp.path())
                 .args(["exec", "--state-dir"])
