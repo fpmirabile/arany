@@ -1217,12 +1217,8 @@ mod tests {
             let version = match line["kind"].as_str() {
                 Some("RunStarted") => 13,
                 Some("AgentSpawned") => 9,
-                Some(
-                    "AgentFinished"
-                    | "ProviderCallRecorded"
-                    | "GoalProviderCallReserved"
-                    | "RunFinished",
-                ) => 7,
+                Some("AgentFinished" | "RunFinished") => 8,
+                Some("ProviderCallRecorded" | "GoalProviderCallReserved") => 7,
                 _ => 6,
             };
             assert_eq!(line["event_version"], version);

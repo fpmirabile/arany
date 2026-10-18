@@ -1607,6 +1607,7 @@ mod payload_version_tests {
             let version = match event {
                 Event::RunStarted { .. } => 13,
                 Event::ToolStarted { .. } => 10,
+                Event::RunFinished { .. } => 8,
                 _ => 7,
             };
             assert_eq!(event.version(), version, "{}", event.kind());

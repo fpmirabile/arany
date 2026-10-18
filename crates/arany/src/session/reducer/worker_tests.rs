@@ -1386,7 +1386,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         ("RunStarted", 13),
         ("AgentSpawned", 9),
         ("ProviderCallRecorded", 7),
-        ("AgentFinished", 7),
+        ("AgentFinished", 8),
         ("ToolStarted", 10),
         ("ToolFinished", 11),
         ("WorkerStopObserved", 1),

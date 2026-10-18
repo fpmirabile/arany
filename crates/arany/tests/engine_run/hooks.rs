@@ -133,15 +133,16 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
     assert_eq!(view.runs[0].status, RunStatus::StoppedByHook);
     assert_eq!(view.runs[0].hook_stop_reason(), Some(Some(reason)));
     assert!(view.runs[0].assistant_message.is_none());
-    assert_eq!(view.goals[0].status, arany::GoalStatus::Running);
+    assert_eq!(view.goals[0].status, arany::GoalStatus::Interrupted);
     store.close().await.unwrap();
     let engine =
         engine_support::open(StateRoot::admit(&state).unwrap(), EngineConfig::default()).unwrap();
     let provider = Arc::new(ScriptedProvider::new(vec![
         arany::test_support::goals::finish_with("resumed"),
     ]));
-    let mut input = request(&workspace, "");
+    let mut input = request(&workspace, "Continue after the hook stop");
     input.session_id = Some(result.session_id);
+    input.title = None;
     input.include_paths.clear();
     input.goal = arany::GoalRequest::resume(result.goal_id, true);
     run_to_end(&engine, &provider, input).await.unwrap();
