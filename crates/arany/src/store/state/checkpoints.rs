@@ -7,7 +7,8 @@ use rusqlite::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 const FILE: &str = "checkpoints.sqlite";
 const FILES: [&str; 4] = [
