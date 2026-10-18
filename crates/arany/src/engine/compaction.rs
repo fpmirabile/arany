@@ -7,8 +7,8 @@ use crate::provider::{
 use crate::session::input::WorkspaceInputs;
 use crate::session::{
     CompactionFailure, CompactionInputError, CompactionRecord, CompactionStatus, Event,
-    MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES, PreparedCompaction, RunStatus,
-    SessionId, prefix_digest,
+    MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES, PreparedCompaction, SessionId,
+    prefix_digest,
 };
 use crate::telemetry::{ProviderTraceOutcome, TraceProvider};
 use sha2::{Digest, Sha256};
@@ -68,10 +68,7 @@ impl Engine {
         if expected_run_id.is_some_and(|run_id| run_id != last_run.id) {
             return Ok(None);
         }
-        if !matches!(
-            last_run.status,
-            RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
-        ) {
+        if last_run.finished_sequence.is_none() {
             return Err(EngineError::CompactionNotIdle);
         }
         validate_compaction_routes(last_run, providers)?;

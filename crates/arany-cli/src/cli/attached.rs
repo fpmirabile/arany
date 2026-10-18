@@ -1447,7 +1447,10 @@ fn submission_notice(
     let feedback = match paused_goal {
         Some(notice) if run_status == RunStatus::Cancelled => Some(notice.to_owned()),
         Some(notice) => Some(match run_feedback {
-            Some(feedback) => format!("{feedback} {notice}"),
+            Some(feedback) if feedback.ends_with(['.', '!', '?']) => {
+                format!("{feedback} {notice}")
+            }
+            Some(feedback) => format!("{feedback}. {notice}"),
             None => notice.to_owned(),
         }),
         None => run_feedback,
@@ -2105,14 +2108,11 @@ async fn load_confirmed_outcome(
 }
 
 fn confirm_outcome(view: &SessionView, outcome: &RunOutcome) -> Result<(), String> {
-    if !view.runs.iter().any(|run| {
-        run.id == outcome.run.id
-            && run == &outcome.run
-            && matches!(
-                run.status,
-                RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
-            )
-    }) {
+    if !view
+        .runs
+        .iter()
+        .any(|run| run.id == outcome.run.id && run == &outcome.run && run.status.is_outcome())
+    {
         return Err("Run history unavailable or invalid".into());
     }
     Ok(())
@@ -2134,6 +2134,7 @@ fn emit_outcome(
         RunStatus::Finished => "finished",
         RunStatus::Failed => "failed",
         RunStatus::Cancelled => "cancelled",
+        RunStatus::StoppedByHook => "stopped_by_hook",
         _ => return Err("Run did not reach a terminal state".into()),
     };
     if !user_recorded && visual_mode != Some(crate::terminal::TerminalMode::Fullscreen) {
@@ -2327,6 +2328,21 @@ mod tests {
         assert!(!super::committed_nothing(None, 7));
     }
     use super::*;
+
+    #[test]
+    fn hook_stop_feedback_joins_the_pause_notice_as_a_sentence() {
+        assert_eq!(
+            submission_notice(
+                Some(INTERRUPTED_GOAL_NOTICE),
+                RunStatus::StoppedByHook,
+                Some("Run stopped by hook: halt".into()),
+                None
+            ),
+            Some(format!(
+                "Run stopped by hook: halt. {INTERRUPTED_GOAL_NOTICE}"
+            ))
+        );
+    }
 
     #[test]
     fn interrupted_goal_notice_replaces_only_cancelled_run_feedback() {

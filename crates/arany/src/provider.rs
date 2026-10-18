@@ -149,6 +149,7 @@ pub(crate) fn compaction_input(request: &CompactionRequest) -> Value {
                     UnansweredStatus::Failed => "failed",
                     UnansweredStatus::Cancelled => "cancelled",
                     UnansweredStatus::Interrupted => "interrupted",
+                    UnansweredStatus::StoppedByHook => "stopped_by_hook",
                 };
                 json!({"status": status, "user": user})
             }
@@ -599,6 +600,7 @@ pub struct CompactionRequest {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnansweredStatus {
+    StoppedByHook,
     Failed,
     Cancelled,
     Interrupted,

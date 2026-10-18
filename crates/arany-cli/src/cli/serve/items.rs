@@ -141,15 +141,20 @@ pub(super) fn turn_summary(run: &RunView, goal: &GoalView, history: bool) -> Tur
             RunStatus::Pending | RunStatus::Active => TurnStatus::InProgress,
             RunStatus::Finished => TurnStatus::Completed,
             RunStatus::Failed => TurnStatus::Failed,
-            RunStatus::Cancelled | RunStatus::Interrupted => TurnStatus::Interrupted,
+            RunStatus::Cancelled | RunStatus::Interrupted | RunStatus::StoppedByHook => {
+                TurnStatus::Interrupted
+            }
         },
         items: if history {
             history_items(run)
         } else {
             Vec::new()
         },
-        error: (run.status == RunStatus::Failed).then(|| TurnError {
-            message: crate::presentation::run_feedback(run).unwrap_or_else(|| "Run failed".into()),
+        error: matches!(run.status, RunStatus::Failed | RunStatus::StoppedByHook).then(|| {
+            TurnError {
+                message: crate::presentation::run_feedback(run)
+                    .unwrap_or_else(|| "Run failed".into()),
+            }
         }),
         goal: Some(goal_summary(goal)),
     }

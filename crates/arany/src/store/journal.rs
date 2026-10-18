@@ -1,7 +1,7 @@
 use super::replay::{MAX_SESSION_EVENTS, replay_through, resolve_open_view, resolve_view};
 use super::{DATABASE_FILE, MAX_DATABASE_BYTES, StateRoot, StoreError, event_payload_limit};
 use crate::session::{
-    CompactionStatus, Event, EventEnvelope, RunStatus, SessionId, SessionView, prefix_digest,
+    CompactionStatus, Event, EventEnvelope, SessionId, SessionView, prefix_digest,
     validate_compaction_references,
 };
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, config::DbConfig, params};
@@ -336,10 +336,7 @@ pub(super) fn fork_session(
     let (events, view) = resolve_view(&transaction, source_session_id, 0, &mut 0)?;
     let view = view.ok_or(StoreError::InvalidHistory)?;
     let last_run = view.runs.last().ok_or(StoreError::InvalidHistory)?;
-    if !matches!(
-        last_run.status,
-        RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
-    ) {
+    if !last_run.status.is_outcome() {
         return Err(StoreError::InvalidHistory);
     }
     let source_run_id = last_run.id;

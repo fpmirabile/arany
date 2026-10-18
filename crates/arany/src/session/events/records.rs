@@ -301,6 +301,7 @@ pub enum ChildGrant {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentDisposition {
+    StoppedByHook,
     Finished,
     Failed,
     Cancelled,
@@ -309,6 +310,7 @@ pub enum AgentDisposition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunDisposition {
+    StoppedByHook,
     Finished,
     Failed,
     Cancelled,

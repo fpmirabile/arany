@@ -61,6 +61,7 @@ struct ActiveChild {
 
 enum AbortReason {
     Failed,
+    Hook,
     Budget,
     Cancelled,
     Paused,
@@ -183,6 +184,7 @@ impl RunLoop<'_> {
                     self.settle_stopped_primary().await
                 }
                 AbortReason::Failed => self.fail_primary().await,
+                AbortReason::Hook => self.finish_hook_stop().await,
                 AbortReason::Budget | AbortReason::Cancelled | AbortReason::Paused => {
                     self.settle_stopped_primary().await
                 }
@@ -442,6 +444,8 @@ impl RunLoop<'_> {
                     Some(AbortReason::Cancelled)
                 } else if self.pause_requested() {
                     Some(AbortReason::Paused)
+                } else if step_disposition == Some(AgentDisposition::StoppedByHook) {
+                    Some(AbortReason::Hook)
                 } else if step_disposition == Some(AgentDisposition::Failed) {
                     Some(AbortReason::Failed)
                 } else if step_disposition == Some(AgentDisposition::Cancelled) {
@@ -491,6 +495,11 @@ impl RunLoop<'_> {
             record: call_record(AgentPhase::ChildWork, &result, valid_response, None),
         })
         .await?;
+        if matches!(abort_reason, Some(AbortReason::Hook)) {
+            self.finish_child(agent_run_id, AgentDisposition::Cancelled, None, true)
+                .await?;
+            return Ok(Some(AgentDisposition::Cancelled));
+        }
         let disposition = match result {
             CallResult::Response(ProviderResponse {
                 outcome: ProviderOutcome::Finish(finish),
@@ -613,7 +622,19 @@ impl RunLoop<'_> {
             .await;
         let feedback = match stop {
             Ok(Some(feedback)) => feedback,
-            Ok(None) => return Ok(ChildStop::Proceed),
+            Ok(None) => {
+                let stopped = self.ledger().view(|view| {
+                    view.runs
+                        .iter()
+                        .any(|run| run.id == self.run_id && run.actor_stopped_by_hook(agent_run_id))
+                })?;
+                if stopped {
+                    self.finish_child(agent_run_id, AgentDisposition::StoppedByHook, None, true)
+                        .await?;
+                    return Ok(ChildStop::End(AgentDisposition::StoppedByHook));
+                }
+                return Ok(ChildStop::Proceed);
+            }
             // A cut-off or cancelled hook ends this child only, unless its outcome stops the Run.
             Err(EngineError::GoalBudgetExhausted | EngineError::ContextTooLarge) => {
                 let settled = self.ledger().view(|view| {

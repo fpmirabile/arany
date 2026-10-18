@@ -1542,6 +1542,20 @@ mod payload_version_tests {
     }
 
     #[test]
+    fn superseded_hook_and_terminal_versions_are_rejected() {
+        for (kind, old) in [
+            ("HookFinished", 2),
+            ("AgentFinished", 7),
+            ("RunFinished", 7),
+        ] {
+            assert!(matches!(
+                Event::decode(kind, old, "{}", None, None),
+                Err(ReplayError::UnknownEvent)
+            ));
+        }
+    }
+
+    #[test]
     fn ledger_diet_kinds_reject_their_stale_version_while_unbumped_kinds_decode() {
         let run = RunId::new();
         let agent = AgentRunId::new();
@@ -1607,6 +1621,7 @@ mod payload_version_tests {
             let version = match event {
                 Event::RunStarted { .. } => 13,
                 Event::ToolStarted { .. } => 10,
+                Event::RunFinished { .. } => 8,
                 _ => 7,
             };
             assert_eq!(event.version(), version, "{}", event.kind());

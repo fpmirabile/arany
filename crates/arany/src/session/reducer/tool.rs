@@ -815,13 +815,7 @@ fn start_lifecycle(
             if pending
                 || run.tools.iter().any(|tool| tool.observation.is_none())
                 || agent.role != AgentRole::Primary
-                || !matches!(
-                    run.status,
-                    RunStatus::Active
-                        | RunStatus::Finished
-                        | RunStatus::Failed
-                        | RunStatus::Cancelled
-                )
+                || !(run.status == RunStatus::Active || run.status.is_outcome())
                 || !["manual", "auto"]
                     .iter()
                     .any(|trigger| hook.subject_digest == compact_subject(trigger, count))

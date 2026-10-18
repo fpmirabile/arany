@@ -547,6 +547,10 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                     .into(),
             )
         }
+        RunStatus::StoppedByHook => Some(match run.hook_stop_reason().flatten() {
+            Some(reason) => format!("Run stopped by hook: {}", escape_terminal(reason)),
+            None => "Run stopped by hook".into(),
+        }),
         RunStatus::Cancelled => {
             Some("Run cancelled. No answer was committed. You can submit a new task.".to_owned())
         }
