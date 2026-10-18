@@ -233,3 +233,25 @@ Developers running an explicitly authorized live gate should follow the
 [native/live evidence procedure](../agents/references/testing-details.md#native-and-live-evidence)
 and its test owner. This guide does not establish support for an untested model,
 account, OS or credential backend.
+
+## Use an ACP editor
+
+Configure your editor's ACP agent with the absolute path to `arany` and arguments
+like these (the editor supplies piped stdin/stdout):
+
+```text
+acp --provider openai --model gpt-5.4
+```
+
+Use your admitted model/effort tuple, or `acp --profile NAME` for a private
+roster. `arany --setup` configures accounts in a terminal; ACP's authentication
+method only rechecks existing access and never accepts a key. Explicit native
+API flags use environment credentials, as `exec` does; a roster can select a
+saved account. A GUI-launched macOS editor may not inherit shell environment
+keys, so configure the editor launch environment or use an admitted saved
+account roster. Do not put credentials in ACP messages.
+
+The [ACP contract](./specs/acp.md) lists the supported core text surface. Tools
+and rich attachments are unavailable in this slice; ignored editor MCP entries
+produce one stderr notice. Native editor compatibility remains a user-owned
+check in NEXT_STEPS.

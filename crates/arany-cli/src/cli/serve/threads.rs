@@ -20,10 +20,11 @@ use std::{
 pub(super) const MAX_THREADS: usize = 64;
 
 #[derive(Default)]
-pub(super) struct Threads {
-    pub map: HashMap<SessionId, LoadedThread>,
+pub(in crate::cli) struct Threads {
+    pub(super) map: HashMap<SessionId, LoadedThread>,
+    pub(super) roster: Option<crate::cli::provider::roster::SelectedRoster>,
     #[cfg(test)]
-    pub provider: Option<std::sync::Arc<dyn arany::Provider>>,
+    pub(super) provider: Option<std::sync::Arc<dyn arany::Provider>>,
 }
 
 #[derive(Clone)]
@@ -39,14 +40,22 @@ pub(super) struct LoadedThread {
 }
 
 impl Threads {
-    pub fn check_capacity(&self, id: Option<SessionId>) -> Result<(), Fault> {
+    #[cfg(test)]
+    pub(in crate::cli) fn with_provider(provider: std::sync::Arc<dyn arany::Provider>) -> Self {
+        Self {
+            provider: Some(provider),
+            ..Default::default()
+        }
+    }
+
+    pub(super) fn check_capacity(&self, id: Option<SessionId>) -> Result<(), Fault> {
         if self.map.len() >= MAX_THREADS && !id.is_some_and(|id| self.map.contains_key(&id)) {
             return Err(Fault::state(Reason::ThreadLimit));
         }
         Ok(())
     }
 
-    pub async fn admit(
+    pub(super) async fn admit(
         &self,
         state_dir: &Path,
         params: &ThreadStartParams,
@@ -119,21 +128,28 @@ impl Threads {
                     .map_err(|_| Fault::params())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let primary = self
-            .select(&provider, params, workspace.clone(), state_dir)
-            .await?;
-        if primary.identity().profile != params.provider || primary.identity().model != params.model
-        {
-            return Err(Fault::selection(
-                "selected Provider changed before Workspace admission",
-                Reason::ProviderRejected,
-            ));
-        }
-        let providers = configured_providers(state_dir, &workspace, primary)
-            .await
-            .map_err(|_| {
-                Fault::selection("Provider routing unavailable", Reason::ProviderUnavailable)
-            })?;
+        let providers = if let Some(roster) = &self.roster {
+            roster.admit(state_dir, &workspace).await.map_err(|_| {
+                Fault::selection("Provider unavailable", Reason::ProviderUnavailable)
+            })?
+        } else {
+            let primary = self
+                .select(&provider, params, workspace.clone(), state_dir)
+                .await?;
+            if primary.identity().profile != params.provider
+                || primary.identity().model != params.model
+            {
+                return Err(Fault::selection(
+                    "selected Provider changed before Workspace admission",
+                    Reason::ProviderRejected,
+                ));
+            }
+            configured_providers(state_dir, &workspace, primary)
+                .await
+                .map_err(|_| {
+                    Fault::selection("Provider routing unavailable", Reason::ProviderUnavailable)
+                })?
+        };
         let (goal_budget, resource_settings) = execution_limits(state_dir)
             .await
             .map_err(|_| Fault::engine(arany::EngineError::InvalidRequest))?;
