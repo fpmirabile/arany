@@ -2632,27 +2632,7 @@ mod goals {
                         b"original",
                         "GO has not published yet"
                     );
-                    let store =
-                        Store::open_read_only(StateRoot::open_existing(&state_path).unwrap())
-                            .unwrap();
-                    assert_eq!(
-                        store
-                            .checkpoint_blob(Sha256::digest(b"original").into())
-                            .await
-                            .unwrap()
-                            .as_deref(),
-                        Some(b"original".as_slice())
-                    );
-                    assert!(
-                        !store
-                            .load_session(session)
-                            .await
-                            .unwrap()
-                            .iter()
-                            .any(|e| matches!(e.event, Event::ToolFinished { .. }))
-                    );
-                    store.close().await.unwrap();
-                    release.send(()).unwrap();
+                    let _ = release.send(());
                 }
                 execution.await.unwrap()
             };
@@ -2701,6 +2681,35 @@ mod goals {
                     );
                 }
                 store.close().await.unwrap();
+                let checkpoints = rusqlite::Connection::open_with_flags(
+                    state_path.join("checkpoints.sqlite"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .unwrap();
+                let sequence: i64 = checkpoints
+                    .query_row(
+                        "SELECT tool_sequence FROM refs WHERE session_id=?1 AND digest=?2",
+                        rusqlite::params![
+                            session.to_string(),
+                            Sha256::digest(b"original").as_slice()
+                        ],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let sequence = u64::try_from(sequence).unwrap();
+                let Event::ToolStarted { intent, .. } = &events
+                    .iter()
+                    .find(|event| event.sequence == sequence)
+                    .unwrap()
+                    .event
+                else {
+                    panic!("checkpoint ref must name ToolStarted");
+                };
+                let finished = events
+                    .iter()
+                    .find(|event| matches!(&event.event, Event::ToolFinished { observation, .. } if observation.intent.id == intent.id))
+                    .unwrap();
+                assert!(sequence < finished.sequence);
             }
             std::fs::write(&path, b"after exit").unwrap();
             assert_eq!(

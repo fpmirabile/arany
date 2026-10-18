@@ -186,6 +186,12 @@ pub(crate) fn validate_finished(
     let checkpoint = checkpoint
         .filter(|c| c.valid())
         .ok_or(ReplayError::InvalidTransition)?;
+    if checkpoint
+        .pruned_before_run
+        .is_some_and(|pruned| !view.runs.iter().any(|run| run.id == pruned))
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
     let run = view
         .runs
         .iter()

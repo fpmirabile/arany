@@ -92,20 +92,22 @@ impl Fixture {
                         crate::session::checkpoint::capture_needed(&view, self.run, path, digest)
                     })
                 });
-            Some(if !needed {
-                crate::Checkpoint::not_needed()
-            } else if matches!(
-                disposition,
-                ToolDisposition::Succeeded | ToolDisposition::Uncertain
-            ) {
-                crate::Checkpoint {
-                    status: crate::CheckpointStatus::Captured,
-                    reason: None,
-                    pruned_before_run: None,
-                }
-            } else {
-                crate::Checkpoint::skipped(crate::CheckpointReason::StoreUnavailable)
-            })
+            Some(
+                if needed
+                    && matches!(
+                        disposition,
+                        ToolDisposition::Succeeded | ToolDisposition::Uncertain
+                    )
+                {
+                    crate::Checkpoint {
+                        status: crate::CheckpointStatus::Captured,
+                        reason: None,
+                        pruned_before_run: None,
+                    }
+                } else {
+                    crate::Checkpoint::not_needed()
+                },
+            )
         } else {
             None
         };

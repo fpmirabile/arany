@@ -5739,12 +5739,20 @@ mod goal_replay_tests {
                     pruned_before_run: None
                 }))
             ));
+            assert!(rejected(
+                &view,
+                finish(Some(Checkpoint {
+                    status,
+                    reason: None,
+                    pruned_before_run: Some(RunId::new()),
+                }))
+            ));
             apply(
                 &mut view,
                 finish(Some(Checkpoint {
                     status,
                     reason: None,
-                    pruned_before_run: None,
+                    pruned_before_run: Some(run),
                 })),
             )
             .unwrap();
