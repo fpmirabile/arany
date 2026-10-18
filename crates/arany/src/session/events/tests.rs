@@ -23,6 +23,7 @@ mod goal_success_tests {
         output: String,
     ) -> ToolObservation {
         let intent = EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: RunId::new(),
             agent_run_id: AgentRunId::new(),
@@ -644,6 +645,7 @@ mod account_default_tests {
     #[test]
     fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         let mut config = RunConfig {
+            worker_policy: None,
             agent_definitions: None,
             roster: None,
             providers: None,
@@ -678,7 +680,7 @@ mod account_default_tests {
         };
         assert_eq!(
             event.payload().unwrap(),
-            r#"{"config":{"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
+            r#"{"config":{"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
         );
         let Event::RunStarted {
             config: ordinary, ..
@@ -754,8 +756,8 @@ mod account_default_tests {
         let mut missing_roster = serde_json::to_value(ordinary).unwrap();
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(12));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(6));
+        assert_eq!(payload_version("RunStarted"), Some(13));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(7));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
@@ -955,11 +957,12 @@ mod provider_call_tests {
     use super::*;
 
     #[test]
-    fn provider_call_record_v6_rejects_v5_and_inconsistent_cache_fields() {
+    fn provider_call_record_v7_rejects_v6_and_inconsistent_cache_fields() {
         let current = payload_version("ProviderCallRecorded").expect("payload version");
         let run = RunId::new();
         let agent = AgentRunId::new();
         let mut record = ProviderCallRecord {
+            delegation: None,
             phase: crate::provider::AgentPhase::RootPlan,
             disposition: ProviderCallDisposition::Finished,
             requested_tools: 0,
@@ -1034,6 +1037,7 @@ mod provider_call_tests {
     fn rejects_unbounded_or_unearned_provider_metadata() {
         let current = payload_version("ProviderCallRecorded").expect("payload version");
         let mut record = ProviderCallRecord {
+            delegation: None,
             phase: crate::provider::AgentPhase::RootPlan,
             disposition: ProviderCallDisposition::Finished,
             response_id: Some("response-1".into()),
@@ -1163,6 +1167,7 @@ mod provider_call_tests {
                 ProviderCallDisposition::TaskPanic,
             ] {
                 let record = ProviderCallRecord {
+                    delegation: None,
                     phase: crate::provider::AgentPhase::RootPlan,
                     disposition,
                     response_id: None,
@@ -1267,6 +1272,7 @@ mod child_grant_tests {
         let (run_id, agent_run_id) = (RunId::new(), AgentRunId::new());
         let spawned = |role, ordinal, objective: Option<&str>, grant| Event::AgentSpawned {
             profile: None,
+            assignment: None,
             definition: None,
             run_id,
             agent_run_id,
@@ -1299,7 +1305,7 @@ mod child_grant_tests {
             Some("inspect"),
             Some(ChildGrant::ReadOnly),
         );
-        assert_eq!(payload_version(child.kind()), Some(8));
+        assert_eq!(payload_version(child.kind()), Some(9));
         let payload = child.payload().expect("child payload");
         let mut named = child.clone();
         if let Event::AgentSpawned { profile, .. } = &mut named {
@@ -1386,6 +1392,7 @@ mod payload_version_tests {
 
     fn read_observation(run: RunId, agent: AgentRunId) -> crate::tools::ToolObservation {
         let intent = crate::tools::EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: run,
             agent_run_id: agent,
@@ -1426,12 +1433,12 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(10));
+        assert_eq!(payload_version("ToolFinished"), Some(11));
         assert_eq!(
-            Event::decode("ToolFinished", 10, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 11, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
-        for previous in [9, 8, 7] {
+        for previous in [10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1483,7 +1490,7 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(9));
+        assert_eq!(payload_version("ToolStarted"), Some(10));
         assert_eq!(payload_version("ToolPermissionDecided"), Some(3));
     }
 
@@ -1539,6 +1546,7 @@ mod payload_version_tests {
         let agent = AgentRunId::new();
         let goal_id = GoalId::new();
         let config = RunConfig {
+            worker_policy: None,
             agent_definitions: None,
             roster: None,
             providers: None,
@@ -1596,8 +1604,8 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 12,
-                Event::ToolStarted { .. } => 9,
+                Event::RunStarted { .. } => 13,
+                Event::ToolStarted { .. } => 10,
                 _ => 7,
             };
             assert_eq!(event.version(), version, "{}", event.kind());

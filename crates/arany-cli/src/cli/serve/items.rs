@@ -229,7 +229,10 @@ pub(super) fn tool_item(
                 .and_then(|a| match a {
                     arany::Attestation::Guard(_) => Some(Attestation::Guard),
                     arany::Attestation::InProcess { .. } => Some(Attestation::InProcess),
-                    arany::Attestation::Unguarded(_) => None,
+                    arany::Attestation::Unguarded(_)
+                    | arany::Attestation::WorkerRead { .. }
+                    | arany::Attestation::WorkerMutation { .. }
+                    | arany::Attestation::WorkerData { .. } => None,
                 }),
         },
         ToolCall::Write {
@@ -264,7 +267,9 @@ pub(super) fn tool_item(
             disposition,
             output,
         },
-        ToolCall::ApplyChangeset { changeset, .. } => Item::FileChange {
+        ToolCall::ApplyChangeset {
+            source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
+        } => Item::FileChange {
             id,
             changes: changeset
                 .files

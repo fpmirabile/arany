@@ -376,8 +376,10 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
     let result = super::fs::native(
         &workspace,
         &ToolCall::ApplyChangeset {
-            source_intent_digest: [1; 32],
-            changeset,
+            source: crate::session::worker::ChangesetSource::CommandReceipt {
+                source_intent_digest: [1; 32],
+                changeset,
+            },
         },
         &config,
     )
@@ -642,8 +644,10 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
         let result = super::fs::native(
             &workspace,
             &ToolCall::ApplyChangeset {
-                source_intent_digest,
-                changeset,
+                source: crate::session::worker::ChangesetSource::CommandReceipt {
+                    source_intent_digest,
+                    changeset,
+                },
             },
             &config,
         );
@@ -697,20 +701,22 @@ fn command_changesets_reject_invalid_snapshots_and_batches_before_publication() 
     let result = super::fs::native(
         &workspace,
         &ToolCall::ApplyChangeset {
-            source_intent_digest: [1; 32],
-            changeset: CommandChangeset {
-                files: vec![
-                    FileChange {
-                        path: "a/new".into(),
-                        before: Some(FileVersion::from_bytes(b"original", false)),
-                        after: Some(FileVersion::from_bytes(b"published", false)),
-                    },
-                    FileChange {
-                        path: "z/new".into(),
-                        before: None,
-                        after: Some(FileVersion::from_bytes(b"blocked", false)),
-                    },
-                ],
+            source: crate::session::worker::ChangesetSource::CommandReceipt {
+                source_intent_digest: [1; 32],
+                changeset: CommandChangeset {
+                    files: vec![
+                        FileChange {
+                            path: "a/new".into(),
+                            before: Some(FileVersion::from_bytes(b"original", false)),
+                            after: Some(FileVersion::from_bytes(b"published", false)),
+                        },
+                        FileChange {
+                            path: "z/new".into(),
+                            before: None,
+                            after: Some(FileVersion::from_bytes(b"blocked", false)),
+                        },
+                    ],
+                },
             },
         },
         &config,
@@ -1263,6 +1269,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         assert!(!call.valid());
     }
     let intent = EffectIntent {
+        target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: crate::session::RunId::new(),
         agent_run_id: crate::session::AgentRunId::new(),
@@ -1514,6 +1521,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
     );
 
     let intent = EffectIntent {
+        target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: crate::session::RunId::new(),
         agent_run_id: crate::session::AgentRunId::new(),
@@ -1540,6 +1548,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
 #[test]
 fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_build() {
     let intent = |call| EffectIntent {
+        target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: crate::session::RunId::new(),
         agent_run_id: crate::session::AgentRunId::new(),
@@ -1652,6 +1661,7 @@ fn goal_success_criterion_without_admitted_calls_omits_the_call_alternative() {
 async fn cache_receipt_states_preserve_success_without_publication_uncertainty() {
     fn make_observation(call: ToolCall, cache_requested_bytes: u64) -> ToolObservation {
         let mut intent = EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::session::RunId::new(),
             agent_run_id: crate::session::AgentRunId::new(),

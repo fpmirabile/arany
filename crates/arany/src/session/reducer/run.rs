@@ -32,6 +32,7 @@ pub(super) fn apply(
                 previous.interrupt();
             }
             current.runs.push(RunView {
+                workers: Default::default(),
                 id: *run_id,
                 objective: text.clone(),
                 images: images.clone(),
@@ -118,6 +119,7 @@ pub(super) fn apply(
             let run = active_run(current, *run_id)?;
             let primary = run.primary().ok_or(ReplayError::InvalidTransition)?;
             let candidate = ProviderCallRecord {
+                delegation: None,
                 phase: chunk.phase,
                 disposition: ProviderCallDisposition::Finished,
                 requested_tools: 0,
@@ -208,10 +210,12 @@ pub(super) fn apply(
             run.status = match disposition {
                 RunDisposition::Finished
                     if run.assistant_message.is_some()
-                        && run
-                            .agents
-                            .iter()
-                            .all(|agent| agent.status == AgentStatus::Finished) =>
+                        && run.agents.iter().all(|agent| {
+                            agent.role == crate::session::AgentRole::Primary
+                                && agent.status == AgentStatus::Finished
+                                || agent.role == crate::session::AgentRole::Child
+                                    && super::worker::child_terminal(agent)
+                        }) =>
                 {
                     RunStatus::Finished
                 }

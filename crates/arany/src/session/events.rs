@@ -3,6 +3,7 @@ mod records;
 #[cfg(test)]
 mod tests;
 mod validate;
+use super::worker::*;
 
 use super::{
     MAX_ASSISTANT_MESSAGE_BYTES, MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES,
@@ -139,23 +140,30 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "GoalResumed"
         | "GoalPlanContractRecorded"
         | "MessageAccepted"
-        | "ProviderCallRecorded"
         | "GoalContextCompacted"
         | "GoalSteeringNoteRecorded"
         | "AssistantDisplayRecorded"
-        | "AgentFinished"
         | "MessageCommitted" => Some(6),
-        "AgentSpawned" => Some(8),
+        "AgentSpawned" => Some(9),
+        "AgentFinished" | "ProviderCallRecorded" => Some(7),
+        "WorkerDataChunk"
+        | "WorkerDataSealed"
+        | "WorkerStopObserved"
+        | "WorkerHandoverRecorded"
+        | "WorkerIntegrationRecorded"
+        | "WorkerHandoverDiscarded"
+        | "WorkerLeaseReleased"
+        | "WorkerVerificationRecorded" => Some(1),
         "GoalStarted" | "GoalFinished" => Some(7),
         "ProviderFallbackUsed" => Some(1),
         "ToolPermissionDecided" => Some(3),
         "HookStarted" | "HookFinished" => Some(1),
-        "ToolFinished" => Some(10),
-        "RunStarted" => Some(12),
+        "ToolFinished" => Some(11),
+        "RunStarted" => Some(13),
         "RunFinished" => Some(7),
         "GoalProviderCallReserved" => Some(7),
         "GoalCompactionCallReserved" => Some(7),
-        "ToolStarted" => Some(9),
+        "ToolStarted" => Some(10),
         "ContextCompacted" => Some(7),
         _ => None,
     }
@@ -176,6 +184,10 @@ impl AgentRunId {
     #[must_use]
     pub fn new() -> Self {
         Self(Uuid::now_v7())
+    }
+
+    pub(crate) fn valid(self) -> bool {
+        self.0.get_version() == Some(Version::SortRand)
     }
 }
 impl Default for AgentRunId {
@@ -272,6 +284,7 @@ pub enum Event {
         grant: Option<ChildGrant>,
         definition: Option<String>,
         profile: Option<String>,
+        assignment: Option<WorkerAssignment>,
     },
     ProviderFallbackUsed {
         run_id: RunId,
@@ -343,6 +356,47 @@ pub enum Event {
         disposition: AgentDisposition,
         summary: Option<String>,
         result: Option<String>,
+        worker: Option<WorkerOutcome>,
+    },
+    WorkerDataChunk {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        record: WorkerDataChunk,
+    },
+    WorkerDataSealed {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        record: WorkerDataSealed,
+    },
+    WorkerHandoverRecorded {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        record: WorkerHandover,
+    },
+    WorkerIntegrationRecorded {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        record: WorkerIntegration,
+    },
+    WorkerHandoverDiscarded {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        record: WorkerSettlement,
+    },
+    WorkerLeaseReleased {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        record: WorkerSettlement,
+    },
+    WorkerVerificationRecorded {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        record: WorkerVerification,
+    },
+    WorkerStopObserved {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        record: WorkerStopRecord,
     },
     MessageCommitted {
         run_id: RunId,
@@ -496,6 +550,8 @@ struct SpawnPayload {
     #[serde(deserialize_with = "Option::deserialize")]
     profile: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
+    assignment: Option<WorkerAssignment>,
+    #[serde(deserialize_with = "Option::deserialize")]
     definition: Option<String>,
     role: AgentRole,
     ordinal: u8,
@@ -507,6 +563,8 @@ struct SpawnPayload {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentFinishedPayload {
+    #[serde(deserialize_with = "Option::deserialize")]
+    worker: Option<WorkerOutcome>,
     disposition: AgentDisposition,
     #[serde(deserialize_with = "Option::deserialize")]
     summary: Option<String>,
@@ -530,6 +588,7 @@ struct RunStartedPayload {
 impl Event {
     pub(crate) fn finished_payload_size(summary: &str, result: &str) -> Result<usize, ReplayError> {
         serialize(&AgentFinishedPayload {
+            worker: None,
             disposition: AgentDisposition::Finished,
             summary: Some(summary.into()),
             result: Some(result.into()),
@@ -569,6 +628,14 @@ impl Event {
             Self::HookStarted { .. } => "HookStarted",
             Self::HookFinished { .. } => "HookFinished",
             Self::AgentFinished { .. } => "AgentFinished",
+            Self::WorkerDataChunk { .. } => "WorkerDataChunk",
+            Self::WorkerDataSealed { .. } => "WorkerDataSealed",
+            Self::WorkerHandoverRecorded { .. } => "WorkerHandoverRecorded",
+            Self::WorkerIntegrationRecorded { .. } => "WorkerIntegrationRecorded",
+            Self::WorkerHandoverDiscarded { .. } => "WorkerHandoverDiscarded",
+            Self::WorkerLeaseReleased { .. } => "WorkerLeaseReleased",
+            Self::WorkerVerificationRecorded { .. } => "WorkerVerificationRecorded",
+            Self::WorkerStopObserved { .. } => "WorkerStopObserved",
             Self::MessageCommitted { .. } => "MessageCommitted",
             Self::RunFinished { .. } => "RunFinished",
         }
@@ -593,7 +660,47 @@ impl Event {
             | Self::RunStarted { run_id, .. }
             | Self::MessageCommitted { run_id, .. }
             | Self::RunFinished { run_id, .. } => (Some(*run_id), None),
-            Self::AgentSpawned {
+            Self::WorkerDataChunk {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::WorkerDataSealed {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::WorkerHandoverRecorded {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::WorkerIntegrationRecorded {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::WorkerHandoverDiscarded {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::WorkerLeaseReleased {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::WorkerVerificationRecorded {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::WorkerStopObserved {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::AgentSpawned {
                 run_id,
                 agent_run_id,
                 ..
@@ -755,9 +862,11 @@ impl Event {
                 grant,
                 definition,
                 profile,
+                assignment,
                 ..
             } => serialize(&SpawnPayload {
                 profile: profile.clone(),
+                assignment: assignment.clone(),
                 definition: definition.clone(),
                 role: *role,
                 ordinal: *ordinal,
@@ -812,12 +921,22 @@ impl Event {
                 disposition,
                 summary,
                 result,
+                worker,
                 ..
             } => serialize(&AgentFinishedPayload {
+                worker: worker.clone(),
                 disposition: *disposition,
                 summary: summary.clone(),
                 result: result.clone(),
             }),
+            Self::WorkerDataChunk { record, .. } => serialize(record),
+            Self::WorkerDataSealed { record, .. } => serialize(record),
+            Self::WorkerHandoverRecorded { record, .. } => serialize(record),
+            Self::WorkerIntegrationRecorded { record, .. } => serialize(record),
+            Self::WorkerHandoverDiscarded { record, .. } => serialize(record),
+            Self::WorkerLeaseReleased { record, .. } => serialize(record),
+            Self::WorkerVerificationRecorded { record, .. } => serialize(record),
+            Self::WorkerStopObserved { record, .. } => serialize(record),
             Self::RunFinished {
                 disposition,
                 active_ms,
@@ -840,6 +959,47 @@ impl Event {
             return Err(ReplayError::UnknownEvent);
         }
         let event = match kind {
+            "WorkerDataChunk" => Self::WorkerDataChunk {
+                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                record: parse(payload)?,
+            },
+            "WorkerDataSealed" => Self::WorkerDataSealed {
+                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                record: parse(payload)?,
+            },
+            "WorkerHandoverRecorded" => Self::WorkerHandoverRecorded {
+                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                record: parse(payload)?,
+            },
+            "WorkerIntegrationRecorded" => Self::WorkerIntegrationRecorded {
+                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                record: parse(payload)?,
+            },
+            "WorkerHandoverDiscarded" => Self::WorkerHandoverDiscarded {
+                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                record: parse(payload)?,
+            },
+            "WorkerLeaseReleased" => Self::WorkerLeaseReleased {
+                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                record: parse(payload)?,
+            },
+            "WorkerVerificationRecorded" => Self::WorkerVerificationRecorded {
+                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                record: parse(payload)?,
+            },
+            "WorkerStopObserved" => Self::WorkerStopObserved {
+                run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                record: parse(payload)?,
+            },
+
             "SessionStarted" if run_id.is_none() && agent_run_id.is_none() => {
                 let data: StartedPayload = parse(payload)?;
                 Self::SessionStarted {
@@ -949,6 +1109,7 @@ impl Event {
                     grant: data.grant,
                     definition: data.definition,
                     profile: data.profile,
+                    assignment: data.assignment,
                 }
             }
             "AgentFinished" if run_id.is_some() && agent_run_id.is_some() => {
@@ -959,6 +1120,7 @@ impl Event {
                     disposition: data.disposition,
                     summary: data.summary,
                     result: data.result,
+                    worker: data.worker,
                 }
             }
             "ProviderFallbackUsed" if run_id.is_some() && agent_run_id.is_some() => {
@@ -1075,6 +1237,7 @@ impl Event {
             | "RunStarted"
             | "AgentSpawned"
             | "ProviderCallRecorded"
+            | "AgentFinished"
             | "GoalCompactionCallReserved"
             | "GoalContextCompacted"
             | "GoalSteeringNoteRecorded"
@@ -1084,7 +1247,6 @@ impl Event {
             | "ToolPermissionDecided"
             | "HookStarted"
             | "HookFinished"
-            | "AgentFinished"
             | "MessageCommitted"
             | "RunFinished" => {
                 return Err(ReplayError::InvalidPayload);

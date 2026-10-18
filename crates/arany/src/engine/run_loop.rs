@@ -361,6 +361,15 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
+    // The profile an unassigned child resolves to; spawns and their proposals must agree on it.
+    pub(super) fn default_child_profile(&self) -> Option<String> {
+        self.routing
+            .providers
+            .roster
+            .as_ref()
+            .map(|roster| roster.snapshot.providers.child.clone())
+    }
+
     pub(super) fn pause_requested(&self) -> bool {
         self.controls
             .steering
@@ -465,7 +474,7 @@ impl<'a> RunLoop<'a> {
             self.append(Event::ProviderCallRecorded {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
-                record: call_record(phase, &first, valid_response),
+                record: call_record(phase, &first, valid_response, self.default_child_profile()),
             })
             .await?;
             self.settle_active_segment(active_segment)?;
@@ -777,6 +786,7 @@ impl<'a> RunLoop<'a> {
                 call,
                 crate::tools::ToolCall::ApplyChangeset { .. }
                     | crate::tools::ToolCall::ParseAgentDefinition { .. }
+                    | crate::tools::ToolCall::PrepareWorker { .. }
             )
     }
 
@@ -809,6 +819,7 @@ impl<'a> RunLoop<'a> {
             };
         }
         self.append(Event::AgentFinished {
+            worker: None,
             run_id: self.run_id,
             agent_run_id: self.primary_id,
             disposition: AgentDisposition::Finished,
@@ -860,6 +871,7 @@ impl<'a> RunLoop<'a> {
             return self.cancel_primary().await;
         }
         self.append(Event::AgentFinished {
+            worker: None,
             run_id: self.run_id,
             agent_run_id: self.primary_id,
             disposition: AgentDisposition::Failed,
@@ -878,6 +890,7 @@ impl<'a> RunLoop<'a> {
 
     async fn cancel_primary(&self) -> Result<(), EngineError> {
         self.append(Event::AgentFinished {
+            worker: None,
             run_id: self.run_id,
             agent_run_id: self.primary_id,
             disposition: AgentDisposition::Cancelled,
@@ -968,7 +981,12 @@ fn call_usage(result: &CallResult) -> (Option<u32>, Option<u32>) {
     }
 }
 
-fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> ProviderCallRecord {
+fn call_record(
+    phase: AgentPhase,
+    result: &CallResult,
+    valid_response: bool,
+    default_profile: Option<String>,
+) -> ProviderCallRecord {
     let disposition = match result {
         CallResult::Response(ProviderResponse {
             outcome: ProviderOutcome::Finish(_),
@@ -1002,6 +1020,28 @@ fn call_record(phase: AgentPhase, result: &CallResult, valid_response: bool) -> 
         CallResult::Failed(_) | CallResult::Cancelled => (None, Usage::default(), None),
     };
     ProviderCallRecord {
+        delegation: if disposition == ProviderCallDisposition::Delegated {
+            match result {
+                CallResult::Response(ProviderResponse {
+                    outcome: ProviderOutcome::Delegate(d),
+                    ..
+                }) => Some(
+                    d.children
+                        .iter()
+                        .map(
+                            |child| crate::session::worker::ChildAssignment::Researcher {
+                                objective: child.objective.clone(),
+                                definition: d.agent.clone(),
+                                profile: child.profile.clone().or_else(|| default_profile.clone()),
+                            },
+                        )
+                        .collect(),
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        },
         phase,
         disposition,
         requested_tools: match result {
