@@ -48,6 +48,9 @@ pub(super) fn apply(
                 definitions: Default::default(),
                 display: Vec::new(),
                 steering_notes: Vec::new(),
+                lifecycle_hooks: Vec::new(),
+                lifecycle_hook_sequence: None,
+                provider_sequences: Default::default(),
                 provider_fallbacks: Vec::new(),
             });
         }

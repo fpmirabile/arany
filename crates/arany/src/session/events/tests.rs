@@ -1374,7 +1374,7 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        for kind in ["ToolFinished", "RunStarted"] {
+        for kind in ["ToolFinished", "RunStarted", "HookStarted", "HookFinished"] {
             let version = payload_version(kind).expect("known kind");
             for stale in [version - 1, version + 1] {
                 assert!(matches!(

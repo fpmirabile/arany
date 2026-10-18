@@ -157,6 +157,7 @@ fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
     coding.input.role = PromptRole::Primary;
     coding.input.goal_budget = Some(crate::session::GoalBudget::default());
     coding.input.tools = Some(crate::tools::ToolContext {
+        stop_bytes: 0,
         catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
         history_summary: None,
         steps: Vec::new(),
@@ -645,6 +646,7 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
     let mut coding = request();
     coding.input.role = PromptRole::Primary;
     coding.input.tools = Some(crate::tools::ToolContext {
+        stop_bytes: 0,
         catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
         history_summary: None,
         steps: Vec::new(),
@@ -1180,6 +1182,7 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
     let mut coding = request();
     coding.input.role = PromptRole::Primary;
     coding.input.tools = Some(crate::tools::ToolContext {
+        stop_bytes: 0,
         catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
         history_summary: None,
         steps: Vec::new(),

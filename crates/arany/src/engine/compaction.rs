@@ -27,7 +27,7 @@ impl Engine {
     ) -> Result<CompactionRecord, EngineError> {
         self.compact_session_inner(providers, session_id, workspace, None)
             .await
-            .and_then(|record| record.ok_or(EngineError::CompactionInputEmpty))
+            .and_then(|record| record.ok_or(EngineError::CompactionBlockedByHook))
             .inspect_err(crate::diagnostics::engine_failure)
     }
 
@@ -60,8 +60,10 @@ impl Engine {
         let view = view.ok_or(EngineError::MissingSession)?;
         session_lock.keep();
         let _lineage_locks = self.lock_lineage(&view).await?;
-        let workspace_identity = WorkspaceInputs::admit_identity(&workspace, &self.state)?;
-        ensure_session_workspace(&view, workspace_identity)?;
+        ensure_session_workspace(
+            &view,
+            WorkspaceInputs::admit_identity(&workspace, &self.state)?,
+        )?;
         let last_run = view.runs.last().ok_or(EngineError::CompactionInputEmpty)?;
         if expected_run_id.is_some_and(|run_id| run_id != last_run.id) {
             return Ok(None);
@@ -74,17 +76,32 @@ impl Engine {
         }
         validate_compaction_routes(last_run, providers)?;
         let covered_run_id = last_run.id;
-        let open_view = self
-            .journal
-            .store()
-            .load_open_view(session_id)
-            .await?
-            .ok_or(EngineError::MissingSession)?;
+        let open_view = self.compaction_view(session_id).await?;
         let goal = open_view.goals.iter().find(|goal| {
             goal.status == crate::session::GoalStatus::Running
                 && goal.run_ids.last() == Some(&covered_run_id)
         });
         let goal_id = goal.map(|goal| goal.id);
+        if self
+            .pre_compact_hooks(
+                providers,
+                session_id,
+                &workspace,
+                &open_view,
+                if expected_run_id.is_some() {
+                    "auto"
+                } else {
+                    "manual"
+                },
+            )
+            .await?
+        {
+            return Ok(None);
+        }
+        // Hooks may consume Goal active time; all later reservations use the new committed facts.
+        let open_view = self.compaction_view(session_id).await?;
+        let goal = open_view.goals.iter().find(|goal| Some(goal.id) == goal_id);
+
         // The call's interval is bounded by the remaining Goal time and settles in ContextCompacted.
         let active_reservation_ms = goal.map(goal_compaction_reservation).transpose()?;
         let covered_sequence = covered_sequence(&events, covered_run_id)?;
@@ -183,6 +200,90 @@ impl Engine {
         trace.event_committed(&committed);
         trace.finish(provider_outcome.into());
         Ok(Some(record))
+    }
+
+    async fn compaction_view(
+        &self,
+        session_id: SessionId,
+    ) -> Result<crate::session::SessionView, EngineError> {
+        self.journal
+            .store()
+            .load_open_view(session_id)
+            .await?
+            .ok_or(EngineError::MissingSession)
+    }
+
+    async fn pre_compact_hooks(
+        &self,
+        providers: &AdmittedProviders,
+        session_id: SessionId,
+        workspace: &std::path::Path,
+        view: &crate::session::SessionView,
+        trigger: &str,
+    ) -> Result<bool, EngineError> {
+        let run = view.runs.last().ok_or(EngineError::CompactionInputEmpty)?;
+        let Some(pin) = run
+            .config
+            .as_ref()
+            .and_then(|config| config.tool_policy.as_ref())
+            .filter(|policy| policy.permissions_digest.is_some())
+        else {
+            return Ok(false);
+        };
+        let Some(runtime) = crate::tools::ToolRuntime::readmit_compaction_hooks(
+            &self.state,
+            workspace,
+            self.config.guard_executable.clone(),
+            pin,
+        )?
+        else {
+            return Ok(false);
+        };
+        let primary_id = run.primary().ok_or(EngineError::InvalidHistory)?.id;
+        // A fork inherits Runs without their Goals, so its hook runs without Goal time.
+        let goal = view
+            .goals
+            .iter()
+            .find(|goal| goal.run_ids.contains(&run.id));
+        let goal_id = goal.map(|goal| goal.id);
+        let ledger = super::ledger::GoalLedger::new(view.clone(), goal_id);
+        let runner = super::run_loop::RunLoop::new(
+            &self.journal,
+            providers.clone(),
+            super::run_loop::RunIdentity {
+                session_id,
+                run_id: run.id,
+                goal_id,
+                primary_id,
+            },
+            super::run_loop::LoopControls {
+                policy: run
+                    .config
+                    .as_ref()
+                    .ok_or(EngineError::InvalidHistory)?
+                    .policy,
+                concurrency: 1,
+                goal_phase: goal
+                    .map_or(crate::session::GoalPhase::Implementation, |goal| goal.phase),
+                cancellation: super::RunCancellation::new(),
+                tools: Some(&runtime),
+                approvals: None,
+                steering: None,
+            },
+            &ledger,
+            None,
+        );
+        Ok(runner
+            .lifecycle_hooks(
+                primary_id,
+                crate::tools::permissions::HookEvent::PreCompact,
+                trigger,
+                "",
+                None,
+                true,
+            )
+            .await?
+            .is_some())
     }
 
     async fn compaction_ledger(

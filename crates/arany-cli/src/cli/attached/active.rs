@@ -1412,6 +1412,9 @@ mod goal_request_tests {
             definitions: Default::default(),
             display: Vec::new(),
             steering_notes: Vec::new(),
+            lifecycle_hooks: Vec::new(),
+            lifecycle_hook_sequence: None,
+            provider_sequences: Default::default(),
         };
         view.goals[0].run_ids.push(run.id);
         view.runs.push(run);

@@ -164,10 +164,12 @@ impl GoalView {
                 .iter()
                 .find(|run| run.id == *run_id)
                 .is_some_and(|run| {
-                    run.tools
-                        .iter()
-                        .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
-                        .all(ToolView::settled_without_stop)
+                    run.hooks_settled()
+                        && run
+                            .tools
+                            .iter()
+                            .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
+                            .all(ToolView::settled_without_stop)
                 })
         })
     }
@@ -215,6 +217,9 @@ pub struct RunView {
     pub definitions: DefinitionCache,
     pub display: Vec<super::events::DisplayChunk>,
     pub steering_notes: Vec<String>,
+    pub lifecycle_hooks: Vec<HookView>,
+    pub lifecycle_hook_sequence: Option<u64>,
+    pub provider_sequences: std::collections::HashMap<AgentRunId, u64>,
 }
 
 impl RunView {
@@ -233,13 +238,69 @@ impl RunView {
 
     // No Tool of the Run has an open or run-stopping hook; a Command's hooks sit on its source Tool.
     pub(crate) fn hooks_settled(&self) -> bool {
-        self.tools.iter().all(|tool| {
+        self.lifecycle_hooks.iter().all(|hook| {
+            hook.outcome
+                .as_ref()
+                .is_some_and(|outcome| !outcome.observation.stops_run())
+        }) && self.tools.iter().all(|tool| {
             tool.hooks.iter().all(|hook| {
                 hook.outcome
                     .as_ref()
                     .is_some_and(|outcome| !outcome.observation.stops_run())
             })
         })
+    }
+
+    pub(crate) fn stop_hooks(&self, agent: AgentRunId) -> impl Iterator<Item = &HookView> {
+        let index = self
+            .agents
+            .iter()
+            .find(|view| view.id == agent)
+            .map_or(0, |view| view.provider_calls.len());
+        let subject = crate::tools::permissions::stop_subject(agent, index.saturating_sub(1));
+        self.lifecycle_hooks.iter().filter(move |hook| {
+            hook.invocation.intent.agent_run_id == agent
+                && hook.invocation.subject_digest == subject
+                && matches!(
+                    hook.invocation.event,
+                    crate::tools::permissions::HookEvent::Stop
+                        | crate::tools::permissions::HookEvent::SubagentStop
+                )
+        })
+    }
+
+    pub(crate) fn stop_blocked(&self, agent: AgentRunId) -> bool {
+        self.stop_hooks(agent).any(|hook| {
+            hook.outcome.as_ref().is_some_and(|outcome| {
+                matches!(
+                    outcome.result,
+                    crate::tools::permissions::HookResult::Blocked { .. }
+                )
+            })
+        })
+    }
+
+    pub(crate) fn stop_continuations(&self, agent: AgentRunId) -> usize {
+        let Some(view) = self.agents.iter().find(|view| view.id == agent) else {
+            return 0;
+        };
+        view.provider_calls
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                let subject = crate::tools::permissions::stop_subject(agent, *index);
+                self.lifecycle_hooks.iter().any(|hook| {
+                    hook.invocation.intent.agent_run_id == agent
+                        && hook.invocation.subject_digest == subject
+                        && hook.outcome.as_ref().is_some_and(|outcome| {
+                            matches!(
+                                outcome.result,
+                                crate::tools::permissions::HookResult::Blocked { .. }
+                            )
+                        })
+                })
+            })
+            .count()
     }
 
     pub(crate) fn model_tools(&self) -> &[ToolView] {
@@ -262,6 +323,7 @@ pub struct ToolView {
 pub struct HookView {
     pub invocation: crate::tools::permissions::HookInvocation,
     pub outcome: Option<crate::tools::permissions::HookOutcome>,
+    pub(crate) idle: bool,
 }
 
 impl ToolView {
@@ -746,6 +808,7 @@ impl SessionView {
         {
             previous.interrupt();
         }
+        tool::before_lifecycle_event(current, &envelope.event)?;
         worker::before_event(current, &envelope.event)?;
         match &envelope.event {
             Event::SessionStarted { .. } | Event::SessionForked { .. } => {
@@ -789,6 +852,20 @@ impl SessionView {
             | Event::ToolPermissionDecided { .. }
             | Event::HookStarted { .. }
             | Event::HookFinished { .. } => tool::apply(current, &envelope.event, prior)?,
+        }
+        if let Event::ProviderCallRecorded {
+            run_id,
+            agent_run_id,
+            ..
+        } = &envelope.event
+        {
+            current
+                .runs
+                .iter_mut()
+                .find(|run| run.id == *run_id)
+                .ok_or(ReplayError::InvalidTransition)?
+                .provider_sequences
+                .insert(*agent_run_id, prior);
         }
         worker::after_event(current, &envelope.event, prior)?;
         current.last_sequence = prior;

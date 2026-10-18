@@ -106,7 +106,7 @@ pub(super) struct RunLoop<'a> {
     routing: super::routing::CallRouter<'a>,
     session_id: SessionId,
     run_id: RunId,
-    goal_id: crate::session::GoalId,
+    goal_id: Option<crate::session::GoalId>,
     primary_id: AgentRunId,
     controls: LoopControls<'a>,
     ledger: &'a GoalLedger,
@@ -132,7 +132,7 @@ pub(super) struct LoopControls<'a> {
 pub(super) struct RunIdentity {
     pub(super) session_id: SessionId,
     pub(super) run_id: RunId,
-    pub(super) goal_id: crate::session::GoalId,
+    pub(super) goal_id: Option<crate::session::GoalId>,
     pub(super) primary_id: AgentRunId,
 }
 
@@ -167,6 +167,11 @@ impl<'a> RunLoop<'a> {
         }
     }
 
+    // Only a fork boundary hook runs without a Goal.
+    pub(super) fn goal(&self) -> Result<crate::session::GoalId, EngineError> {
+        self.goal_id.ok_or(EngineError::InvalidHistory)
+    }
+
     fn ledger(&self) -> &GoalLedger {
         self.ledger
     }
@@ -194,7 +199,7 @@ impl<'a> RunLoop<'a> {
             primary_active,
             other_agents_closed,
         ) = self.ledger().view(|view| -> Result<_, EngineError> {
-            let goal = view.goal(self.goal_id).ok_or(EngineError::InvalidHistory)?;
+            let goal = view.goal(self.goal()?).ok_or(EngineError::InvalidHistory)?;
             let run = view
                 .runs
                 .iter()
@@ -206,7 +211,13 @@ impl<'a> RunLoop<'a> {
             let other_agents_closed = run.agents.iter().all(|agent| {
                 agent.id == self.primary_id || agent.status != crate::session::AgentStatus::Active
             });
-            let has_uncertain_tool = run.tools.iter().any(|tool| {
+            let has_uncertain_tool = run.lifecycle_hooks.iter().any(|hook| {
+                hook.outcome.as_ref().is_some_and(|outcome| {
+                    outcome.observation.stops_run()
+                        && outcome.observation.disposition
+                            != crate::tools::ToolDisposition::Cancelled
+                })
+            }) || run.tools.iter().any(|tool| {
                 tool.observation
                     .iter()
                     .chain(tool.hooks.iter().filter_map(|hook| {
@@ -216,7 +227,11 @@ impl<'a> RunLoop<'a> {
                         observation.disposition == crate::tools::ToolDisposition::Uncertain
                     })
             });
-            let action_cancelled = run.tools.iter().any(|tool| {
+            let action_cancelled = run.lifecycle_hooks.iter().any(|hook| {
+                hook.outcome.as_ref().is_some_and(|outcome| {
+                    outcome.observation.disposition == crate::tools::ToolDisposition::Cancelled
+                })
+            }) || run.tools.iter().any(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {
                     observation.disposition == crate::tools::ToolDisposition::Cancelled
                 })
@@ -320,7 +335,7 @@ impl<'a> RunLoop<'a> {
                 .await?;
         }
         self.append(Event::GoalProviderCallReserved {
-            goal_id: self.goal_id,
+            goal_id: self.goal()?,
             run_id: self.run_id,
             agent_run_id,
             active_ceiling_ms: self.ledger().active_ceiling(pending_ms)?,
@@ -348,20 +363,24 @@ impl<'a> RunLoop<'a> {
             return Ok(());
         };
         self.append(Event::GoalSteeringNoteRecorded {
-            goal_id: self.goal_id,
+            goal_id: self.goal()?,
             run_id: self.run_id,
             text: text.clone(),
         })
         .await?;
         steering.note_recorded();
-        match request
-            .input
-            .tools
-            .as_mut()
-            .and_then(|tools| tools.steps.last_mut())
-        {
-            Some(step) => step.steering_notes.push(text),
-            None => request.input.steering_notes.push(text),
+        if let Some(feedback) = continuation_feedback(&mut request.input) {
+            feedback.steering_notes.push(text);
+        } else {
+            match request
+                .input
+                .tools
+                .as_mut()
+                .and_then(|tools| tools.steps.last_mut())
+            {
+                Some(step) => step.steering_notes.push(text),
+                None => request.input.steering_notes.push(text),
+            }
         }
         Ok(())
     }
@@ -405,7 +424,7 @@ impl<'a> RunLoop<'a> {
             )
             .await?;
         self.append(Event::GoalPlanContractRecorded {
-            goal_id: self.goal_id,
+            goal_id: self.goal()?,
             run_id: self.run_id,
             contract,
         })
@@ -495,8 +514,19 @@ impl<'a> RunLoop<'a> {
             match first {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
+                    turn,
                     ..
-                }) if valid_response => return self.finish_primary(finish).await,
+                }) if valid_response => {
+                    match self.stop_primary(root_request, &finish, turn).await {
+                        Ok(true) => continue,
+                        Ok(false) => return self.finish_primary(finish).await,
+                        Err(EngineError::GoalBudgetExhausted) => {
+                            return self.settle_stopped_primary().await;
+                        }
+                        Err(EngineError::ContextTooLarge) => return self.fail_primary().await,
+                        Err(error) => return Err(error),
+                    }
+                }
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Delegate(delegation),
                     turn,
@@ -547,6 +577,48 @@ impl<'a> RunLoop<'a> {
         }
     }
 
+    async fn stop_primary(
+        &self,
+        root: &mut ProviderRequest,
+        finish: &Finish,
+        turn: crate::provider::ProviderTurn,
+    ) -> Result<bool, EngineError> {
+        let fits = self
+            .controls
+            .tools
+            .zip(root.input.tools.as_ref())
+            .is_none_or(|(runtime, tools)| {
+                tools.has_stop_room(&turn, runtime.context_limit_bytes())
+            });
+        let Some(feedback) = self
+            .lifecycle_hooks(
+                self.primary_id,
+                crate::tools::permissions::HookEvent::Stop,
+                "",
+                &finish.result,
+                None,
+                fits,
+            )
+            .await?
+        else {
+            return Ok(false);
+        };
+        let after_step = root.input.tools.as_mut().map_or(0, |tools| {
+            tools.add_stop_feedback(&turn, &feedback);
+            tools.steps.len()
+        });
+        root.input
+            .stop_hook_feedback
+            .push(crate::provider::StopHookFeedback {
+                after_step,
+                turn,
+                text: feedback,
+                facts: None,
+                steering_notes: Vec::new(),
+            });
+        Ok(true)
+    }
+
     async fn invoke_primary(
         &self,
         root: &mut ProviderRequest,
@@ -573,14 +645,18 @@ impl<'a> RunLoop<'a> {
         }
         self.record_steering_note(root).await?;
         let facts = self.ledger().context_facts()?;
-        match root
-            .input
-            .tools
-            .as_mut()
-            .and_then(|tools| tools.steps.last_mut())
-        {
-            Some(step) => step.facts = Some(facts),
-            None => root.input.goal_context_facts = Some(facts),
+        if let Some(feedback) = continuation_feedback(&mut root.input) {
+            feedback.facts = Some(facts);
+        } else {
+            match root
+                .input
+                .tools
+                .as_mut()
+                .and_then(|tools| tools.steps.last_mut())
+            {
+                Some(step) => step.facts = Some(facts),
+                None => root.input.goal_context_facts = Some(facts),
+            }
         }
         let request = root.clone();
         let context = self
@@ -1093,6 +1169,17 @@ fn call_record(
             _ => None,
         },
     }
+}
+
+// The Stop feedback directly before the next call owns that call's facts and notes.
+fn continuation_feedback(
+    input: &mut crate::provider::RunInput,
+) -> Option<&mut crate::provider::StopHookFeedback> {
+    let steps = input.tools.as_ref().map_or(0, |tools| tools.steps.len());
+    input
+        .stop_hook_feedback
+        .last_mut()
+        .filter(|feedback| feedback.after_step == steps)
 }
 
 fn valid_finish(finish: &Finish, result_limit: usize) -> bool {

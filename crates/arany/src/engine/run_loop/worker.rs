@@ -500,6 +500,7 @@ impl RunLoop<'_> {
                 .cloned(),
             editor: true,
             turns_remaining: assignment.max_turns,
+            stop_hook_feedback: Vec::new(),
             tools: Some(runtime.editor_context(&grant, remaining)?),
             tool_calls_remaining: remaining,
         };
@@ -1241,8 +1242,9 @@ impl RunLoop<'_> {
             let Some(run) = view.runs.last() else {
                 return Vec::new();
             };
-            let Some(plan) = view
-                .goal(self.goal_id)
+            let Some(plan) = self
+                .goal_id
+                .and_then(|id| view.goal(id))
                 .and_then(|g| g.plan_contract.as_ref())
             else {
                 return Vec::new();

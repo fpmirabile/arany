@@ -771,6 +771,9 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         definitions: Default::default(),
         display: Vec::new(),
         steering_notes: Vec::new(),
+        lifecycle_hooks: Vec::new(),
+        lifecycle_hook_sequence: None,
+        provider_sequences: Default::default(),
     };
     assert_eq!(
         serde_json::to_value(items::history_items(&run)).unwrap()[1]["status"],

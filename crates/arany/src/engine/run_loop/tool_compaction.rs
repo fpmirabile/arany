@@ -96,6 +96,20 @@ impl RunLoop<'_> {
         if !self.ledger().admits(Action::Compaction) {
             return Ok(());
         }
+        if self
+            .lifecycle_hooks(
+                self.primary_id,
+                crate::tools::permissions::HookEvent::PreCompact,
+                "auto",
+                "",
+                None,
+                true,
+            )
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
         let reservation = match self.ledger().reserve(Action::Compaction).await {
             Ok(reservation) => reservation,
             Err(EngineError::GoalBudgetExhausted) => return Ok(()),
@@ -113,7 +127,7 @@ impl RunLoop<'_> {
             )
             .await?;
         self.append(Event::GoalCompactionCallReserved {
-            goal_id: self.goal_id,
+            goal_id: self.goal()?,
             run_id: self.run_id,
             active_ceiling_ms: self.ledger().active_ceiling(0)?,
         })
@@ -385,7 +399,7 @@ impl RunLoop<'_> {
             )
             .await?;
         self.append(Event::GoalContextCompacted {
-            goal_id: self.goal_id,
+            goal_id: self.goal()?,
             run_id: self.run_id,
             covered_tool_count: window.covered_tool_count,
             record: record.clone(),
@@ -395,6 +409,10 @@ impl RunLoop<'_> {
             let input = &mut request.input;
             let context = input.tools.as_mut().ok_or(EngineError::InvalidRequest)?;
             context.history_summary = Some(summary.clone());
+            for feedback in &mut input.stop_hook_feedback {
+                feedback.after_step = feedback.after_step.saturating_sub(window.prefix_steps);
+                feedback.turn.without_thinking();
+            }
             for step in context.steps.drain(..window.prefix_steps) {
                 input.steering_notes.extend(step.steering_notes);
             }

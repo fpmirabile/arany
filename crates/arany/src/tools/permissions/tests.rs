@@ -1590,3 +1590,75 @@ fn updated_input_accepts_only_provable_narrowing() {
         );
     }
 }
+
+#[test]
+fn lifecycle_hook_inputs_and_results_are_bounded_and_fail_closed() {
+    use super::hooks::{lifecycle_input, parse_lifecycle_output, stop_feedback};
+    for event in [
+        HookEvent::Stop,
+        HookEvent::SubagentStop,
+        HookEvent::PreCompact,
+    ] {
+        let input = lifecycle_input(
+            "session",
+            PermissionMode::Default,
+            event,
+            true,
+            &"\"é".repeat(32 * 1024),
+            "auto",
+            MAX_HOOK_INPUT_BYTES,
+        );
+        assert!(input.len() <= MAX_HOOK_INPUT_BYTES);
+        let value: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(value["cwd"], "/workspace");
+        if event == HookEvent::PreCompact {
+            assert_eq!(value["trigger"], "auto");
+            assert_eq!(value["custom_instructions"], "");
+        } else {
+            assert_eq!(value["stop_hook_active"], true);
+        }
+    }
+    for (exit, stdout, stderr, expected) in [
+        (0, "", "", HookResult::Passed),
+        (
+            1,
+            "",
+            "ignored",
+            HookResult::Ignored {
+                why: HookIgnoreReason::NonZeroExit,
+            },
+        ),
+        (
+            2,
+            "",
+            "verify\n",
+            HookResult::Blocked {
+                reason: Some("verify".into()),
+            },
+        ),
+        (
+            0,
+            r#"{"decision":"block","reason":"verify"}"#,
+            "",
+            HookResult::Blocked {
+                reason: Some("verify".into()),
+            },
+        ),
+        (
+            0,
+            r#"{"continue":false,"stopReason":"halt","decision":"block","reason":"verify"}"#,
+            "",
+            HookResult::Passed,
+        ),
+    ] {
+        assert_eq!(
+            parse_lifecycle_output(HookEvent::Stop, Some(exit), stdout, stderr),
+            expected
+        );
+    }
+    let result = HookResult::Blocked {
+        reason: Some("é".repeat(MAX_HOOK_REASON_BYTES / 2)),
+    };
+    let feedback = stop_feedback(std::iter::repeat_n(&result, 9));
+    assert!(feedback.len() <= MAX_STOP_FEEDBACK_BYTES);
+}
