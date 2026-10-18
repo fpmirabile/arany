@@ -207,6 +207,26 @@ pub enum UserInput {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum TextInput {
+    Text {
+        #[schemars(length(max = 65536))]
+        text: String,
+    },
+}
+
+impl From<TextInput> for UserInput {
+    fn from(TextInput::Text { text }: TextInput) -> Self {
+        UserInput::Text { text }
+    }
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 pub enum ImageMediaType {
     #[serde(rename = "image/png")]
     Png,
@@ -239,7 +259,7 @@ pub struct TurnSteerParams {
     pub turn_id: RunId,
     #[serde(deserialize_with = "text_input")]
     #[schemars(length(min = 1, max = 1))]
-    pub input: Vec<UserInput>,
+    pub input: Vec<TextInput>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -267,7 +287,7 @@ pub struct GoalResumeParams {
     pub goal_id: GoalId,
     #[serde(default, deserialize_with = "optional_text_input")]
     #[schemars(length(min = 1, max = 1))]
-    pub input: Option<Vec<UserInput>>,
+    pub input: Option<Vec<TextInput>>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -700,20 +720,20 @@ fn turn_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<UserInpu
     Ok(input)
 }
 
-fn single_text<E: Error>(input: Vec<UserInput>) -> Result<Vec<UserInput>, E> {
+fn single_text<E: Error>(input: Vec<TextInput>) -> Result<Vec<TextInput>, E> {
     match input.as_slice() {
-        [UserInput::Text { text }] if text.len() <= 64 * 1024 => Ok(input),
+        [TextInput::Text { text }] if text.len() <= 64 * 1024 => Ok(input),
         _ => Err(E::custom("exactly one text of at most 64 KiB")),
     }
 }
 
-fn text_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<UserInput>, D::Error> {
+fn text_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<TextInput>, D::Error> {
     single_text(Vec::deserialize(deserializer)?)
 }
 
 fn optional_text_input<'de, D: Deserializer<'de>>(
     deserializer: D,
-) -> Result<Option<Vec<UserInput>>, D::Error> {
+) -> Result<Option<Vec<TextInput>>, D::Error> {
     Option::deserialize(deserializer)?
         .map(single_text)
         .transpose()

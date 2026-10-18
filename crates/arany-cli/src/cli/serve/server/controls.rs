@@ -20,7 +20,12 @@ impl Submission {
             let input: GoalResumeParams = params(value)?;
             return Ok(Self {
                 thread_id: input.thread_id,
-                input: input.input.unwrap_or_default(),
+                input: input
+                    .input
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(UserInput::from)
+                    .collect(),
                 start: Start::Resume(input.goal_id),
             });
         }
@@ -97,7 +102,8 @@ fn running(
 pub(super) fn steer(active: Option<&ActiveTurn>, value: Option<Value>) -> Result<Value, Fault> {
     let input: TurnSteerParams = params(value)?;
     let turn = running(active, input.thread_id, Some(input.turn_id))?;
-    let note = text(input.input).ok_or_else(Fault::params)?;
+    let note =
+        text(input.input.into_iter().map(UserInput::from).collect()).ok_or_else(Fault::params)?;
     turn.steering.offer_note(note).map_err(refusal)?;
     Ok(json!(TurnSteerResult {
         turn_id: input.turn_id

@@ -424,7 +424,7 @@
         "input": {
           "default": null,
           "items": {
-            "$ref": "#/$defs/UserInput"
+            "$ref": "#/$defs/TextInput"
           },
           "maxItems": 1,
           "minItems": 1,
@@ -1214,6 +1214,28 @@
       ],
       "type": "object"
     },
+    "TextInput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "maxLength": 65536,
+              "type": "string"
+            },
+            "type": {
+              "const": "text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Thread": {
       "additionalProperties": false,
       "properties": {
@@ -1603,7 +1625,7 @@
       "properties": {
         "input": {
           "items": {
-            "$ref": "#/$defs/UserInput"
+            "$ref": "#/$defs/TextInput"
           },
           "maxItems": 1,
           "minItems": 1,

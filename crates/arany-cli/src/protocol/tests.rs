@@ -316,7 +316,31 @@ fn steering_and_resume_input_is_exactly_one_bounded_text() {
         )
         .is_ok(),
     };
-    for name in ["steer", "resume"] {
+    let schema = protocol_schema();
+    let accepts = |method: &str, ids: Value, input: &Value| {
+        let mut params = ids;
+        params["input"] = input.clone();
+        let mut reference = schema["methods"][method]["params"].clone();
+        reference["$schema"] = schema["$schema"].clone();
+        reference["$defs"] = schema["$defs"].clone();
+        jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .offline()
+            .build(&reference)
+            .unwrap()
+            .is_valid(&params)
+    };
+    for (name, method) in [("steer", "turn/steer"), ("resume", "goal/resume")] {
+        let wire_ids = if name == "steer" {
+            json!({"threadId": ids["threadId"], "turnId": ids["turnId"]})
+        } else {
+            json!({"threadId": ids["threadId"], "goalId": ids["goalId"]})
+        };
+        assert!(accepts(method, wire_ids.clone(), &text("hello".into())));
+        assert!(
+            !accepts(method, wire_ids, &json!([image.clone()])),
+            "{method}"
+        );
         assert!(with(name, text("x".repeat(64 * 1024))), "{name}");
         for input in [
             json!([]),
