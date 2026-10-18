@@ -1,6 +1,6 @@
 use crate::{
-    AdmittedProviders, Engine, EngineConfig, Event, Finish, ProviderOutcome, RunControls,
-    RunRequest, SessionId, SessionView, StateRoot, Store, ToolGrant,
+    AdmittedProviders, Engine, EngineConfig, Event, Finish, Provider, ProviderOutcome, Providers,
+    RunControls, RunRequest, SessionId, SessionView, StateRoot, Store, ToolGrant,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -50,4 +50,42 @@ pub fn configured() -> RunControls {
         tools: ToolGrant::Configured,
         ..RunControls::default()
     }
+}
+
+pub fn pin_roster(bindings: &mut AdmittedProviders, spare: Option<Vec<Arc<dyn Provider>>>) {
+    let mut profiles = vec![
+        ("child".to_owned(), bindings.roles.child.clone()),
+        ("compaction".to_owned(), bindings.roles.compaction.clone()),
+        ("primary".to_owned(), bindings.roles.primary.clone()),
+        ("review".to_owned(), bindings.roles.review.clone()),
+    ];
+    let mut eligible = vec!["child".to_owned()];
+    if let Some(spare) = spare {
+        profiles.push(("spare".into(), spare));
+        eligible.push("spare".into());
+    }
+    let mut snapshot = crate::RosterSnapshot {
+        preset: "coding".into(),
+        selection_digest: [0; 32],
+        profiles: profiles
+            .iter()
+            .map(|(name, chain)| crate::NamedProviderRoutes {
+                name: name.clone(),
+                routes: chain
+                    .iter()
+                    .map(|provider| provider.identity().clone())
+                    .collect(),
+            })
+            .collect(),
+        providers: Providers {
+            primary: "primary".into(),
+            child: "child".into(),
+            review: "review".into(),
+            compaction: "compaction".into(),
+        },
+        child_profiles: eligible,
+    };
+    snapshot.selection_digest = snapshot.digest().unwrap();
+    assert!(snapshot.valid());
+    bindings.roster = Some(crate::AdmittedRoster { snapshot, profiles });
 }

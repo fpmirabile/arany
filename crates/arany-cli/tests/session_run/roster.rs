@@ -339,3 +339,336 @@ fn attached_profile_admission_waits_for_folder_consent() {
         b"roster profile main route 0 refused",
     );
 }
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+mod journey {
+    use super::*;
+    use arany::{GoalId, GoalStatus, RunStatus, SessionView, StateRoot, Store};
+    use std::{
+        io::Read,
+        net::TcpListener,
+        str::FromStr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
+        thread,
+        time::Duration,
+    };
+
+    fn preset(child_profiles: &[&str]) -> Vec<u8> {
+        let route =
+            json!({"provider":"custom:local","model":"model-1","effort":null,"account_id":null});
+        serde_json::to_vec(&json!({"version":1,"profiles":[
+            {"name":"main","routes":[route]},
+            {"name":"inspect","routes":[route]}
+        ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":child_profiles}]})).unwrap()
+    }
+
+    fn delegate_to_inspect() -> serde_json::Value {
+        json!({"outcome":{"type":"delegate","children":[{"objective":"inspect it","profile":"inspect"}]}})
+    }
+
+    fn serve(
+        listener: TcpListener,
+        served: Arc<AtomicUsize>,
+        held: mpsc::Sender<()>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            listener.set_nonblocking(true).expect("bounded accept");
+            for index in 0..8 {
+                let mut stream = crate::process::accept_with_deadline(
+                    &listener,
+                    Duration::from_secs(60),
+                    "roster request",
+                );
+                let body: serde_json::Value =
+                    serde_json::from_slice(&super::super::loopback::read_request(&mut stream))
+                        .expect("request JSON");
+                served.fetch_add(1, Ordering::SeqCst);
+                let input = crate::semantic::input(&body);
+                let text = match index {
+                    0 => json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                    1 => {
+                        json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
+                    }
+                    2 => json!({"summary":"synthetic summary"}),
+                    3 | 5 => {
+                        assert_eq!(input["phase"], "root_plan");
+                        assert!(body.to_string().contains("\"inspect\""));
+                        delegate_to_inspect()
+                    }
+                    4 => {
+                        assert_eq!(input["phase"], "child_work");
+                        held.send(()).expect("observed child request");
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(30)))
+                            .expect("hold deadline");
+                        // Returns when exec drops the connection after cancellation.
+                        let _ = stream.read(&mut [0; 1]);
+                        continue;
+                    }
+                    6 => {
+                        assert_eq!(input["phase"], "child_work");
+                        json!({"outcome":{"type":"finish","summary":"child summary","result":"child result"}})
+                    }
+                    _ => {
+                        assert_eq!(input["phase"], "root_synthesis");
+                        json!({"outcome":{"type":"finish","summary":"team summary","result":"resumed answer"}})
+                    }
+                };
+                super::super::loopback::send_response_for(
+                    &mut stream,
+                    index,
+                    text,
+                    body["stream"] == true,
+                );
+            }
+        })
+    }
+
+    fn exec(workspace: &Path, state: &Path, extra: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+        command
+            .env_clear()
+            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+            .current_dir(workspace)
+            .args(["exec", "--state-dir"])
+            .arg(state)
+            .arg("--workspace")
+            .arg(workspace)
+            .args([
+                "--provider",
+                "custom:local",
+                "--model",
+                "model-1",
+                "--collaboration",
+                "team",
+            ])
+            .args(extra)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    fn exec_leg(
+        workspace: &Path,
+        state: &Path,
+        held_rx: &mpsc::Receiver<()>,
+        served: &AtomicUsize,
+    ) -> (SessionId, GoalId) {
+        let mut child = super::super::loopback::ChildGuard::new(
+            exec(workspace, state, &["--profile", "coding", "answer"])
+                .spawn()
+                .unwrap(),
+        );
+        held_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("child request before interrupt");
+        let pid = child.child().id().to_string();
+        assert!(
+            Command::new("kill")
+                .args(["-INT", &pid])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let output =
+            super::super::process::capture(child.child(), Duration::from_secs(10), 64 * 1024);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(output.stdout.is_empty());
+        assert!(stderr.contains("Status: cancelled\n"), "{stderr}");
+        let hint = stderr
+            .lines()
+            .find(|line| line.starts_with("Goal paused; resume with arany exec --profile coding "))
+            .unwrap_or_else(|| panic!("selector-bearing resume hint: {stderr}"));
+        let words: Vec<&str> = hint.split_whitespace().collect();
+        let session_id = SessionId::from_str(words[9]).unwrap();
+        let goal_id = GoalId::from_str(words[11]).unwrap();
+        assert_eq!(served.load(Ordering::SeqCst), 5);
+        (session_id, goal_id)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn attached_leg(
+        temp: &Path,
+        workspace: &Path,
+        state: &Path,
+        held_rx: &mpsc::Receiver<()>,
+        served: &AtomicUsize,
+    ) -> (SessionId, GoalId) {
+        use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+        use std::{io::Write, time::Instant};
+
+        let shell = "stty rows 24 cols 80; exec \"$ARANY_TEST_EXE\" --screen-reader --no-color --profile coding --provider custom:local --model model-1 --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"";
+        let mut command = crate::isolation::account_isolated_script(temp);
+        command
+            .env_clear()
+            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+            .env("ARANY_TEST_STATE", state)
+            .env("ARANY_TEST_WORKSPACE", workspace)
+            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+            .env("SHELL", "/bin/sh")
+            .env("TERM", "dumb")
+            .current_dir(workspace)
+            .args(["-q", "-e", "-c", shell, "/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = super::super::loopback::ChildGuard::new(command.spawn().unwrap());
+        let mut input = child.child().stdin.take().unwrap();
+        let mut output = child.child().stdout.take().unwrap();
+        let flags = fcntl_getfl(&output).unwrap();
+        fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+        let mut transcript = Vec::new();
+        let mut answered = super::super::session_picker::PtyResponses::default();
+        // Watchdog only: it aborts a hung child and never decides the assertion.
+        let watchdog = Instant::now() + Duration::from_secs(120);
+        let mut pump = |input: &mut std::process::ChildStdin, transcript: &mut Vec<u8>| {
+            super::super::session_picker::pump(&mut output, input, transcript, &mut answered);
+            assert!(
+                Instant::now() < watchdog,
+                "attached journey stalled: {}",
+                super::super::session_picker::tail(transcript)
+            );
+            thread::yield_now();
+        };
+        for (needle, send) in [
+            (&b"Input:"[..], &b"/agents team 1\r"[..]),
+            (&b"Next-Run collaboration: team"[..], &b"answer\r"[..]),
+        ] {
+            while !transcript.windows(needle.len()).any(|part| part == needle) {
+                pump(&mut input, &mut transcript);
+            }
+            input.write_all(send).unwrap();
+        }
+        while held_rx.try_recv().is_err() {
+            pump(&mut input, &mut transcript);
+        }
+        input.write_all(b"\x03").unwrap();
+        for (needle, send) in [
+            (&b"Goal paused"[..], &b"\x03"[..]),
+            (&b"Ctrl+C again exits"[..], &b"\x03"[..]),
+        ] {
+            while !transcript.windows(needle.len()).any(|part| part == needle) {
+                pump(&mut input, &mut transcript);
+            }
+            input.write_all(send).unwrap();
+        }
+        while child.child().try_wait().unwrap().is_none() {
+            pump(&mut input, &mut transcript);
+        }
+        assert_eq!(served.load(Ordering::SeqCst), 5);
+        let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
+        let session: String = connection
+            .query_row("SELECT DISTINCT session_id FROM events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let session_id = SessionId::from_str(&session).unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let events = runtime.block_on(store.load_session(session_id)).unwrap();
+        runtime.block_on(store.close()).unwrap();
+        let view = SessionView::replay(session_id, &events).unwrap().unwrap();
+        (session_id, view.goals[0].id)
+    }
+
+    fn cancel_then_resume(attached: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = temp.path().join("state");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        super::super::loopback::write_profile(&state, port);
+        let roster = state.join("provider-roster.json");
+        private_file(&roster, &preset(&["main", "inspect"]));
+        let served = Arc::new(AtomicUsize::new(0));
+        let (held_tx, held_rx) = mpsc::channel();
+        let server = serve(listener, served.clone(), held_tx);
+        super::super::loopback::check_profile(&workspace, &state);
+
+        let (session_id, goal_id) = if attached {
+            attached_leg(temp.path(), &workspace, &state, &held_rx, &served)
+        } else {
+            exec_leg(&workspace, &state, &held_rx, &served)
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let replay = || {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            let events = runtime.block_on(store.load_session(session_id)).unwrap();
+            runtime.block_on(store.close()).unwrap();
+            SessionView::replay(session_id, &events).unwrap().unwrap()
+        };
+        let view = replay();
+        assert_eq!(view.runs[0].status, RunStatus::Cancelled);
+        assert_eq!(view.runs[0].agents[1].profile.as_deref(), Some("inspect"));
+        assert_eq!(view.goal(goal_id).unwrap().status, GoalStatus::Interrupted);
+
+        let resume = |profile: bool| {
+            let mut extra = vec![];
+            if profile {
+                extra.extend(["--profile", "coding"]);
+            }
+            let session_id = session_id.to_string();
+            let goal_id = goal_id.to_string();
+            let mut command = exec(&workspace, &state, &extra);
+            command.args(["--session-id", &session_id, "--resume-goal", &goal_id]);
+            super::super::loopback::wait_product(command.spawn().unwrap())
+        };
+        for (name, profile, edited) in [("omitted", false, false), ("drifted", true, true)] {
+            if edited {
+                private_file(&roster, &preset(&["main"]));
+            }
+            let refused = resume(profile);
+            let stderr = String::from_utf8(refused.stderr).unwrap();
+            assert_eq!(refused.status.code(), Some(1), "{name}: {stderr}");
+            assert!(refused.stdout.is_empty(), "{name}");
+            assert!(
+                stderr.ends_with("error: restore the matching --profile preset to resume this Goal, or start a new Goal\n"),
+                "{name}: {stderr}"
+            );
+            assert_eq!(served.load(Ordering::SeqCst), 5, "{name}: no request");
+        }
+        private_file(&roster, &preset(&["main", "inspect"]));
+        let resumed = resume(true);
+        assert!(
+            resumed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert!(String::from_utf8_lossy(&resumed.stdout).contains("resumed answer"));
+        server.join().unwrap();
+        assert_eq!(served.load(Ordering::SeqCst), 8);
+
+        let view = replay();
+        assert_eq!(view.runs.len(), 2);
+        assert_eq!(view.runs[1].status, RunStatus::Finished);
+        assert_eq!(view.runs[1].agents[1].profile.as_deref(), Some("inspect"));
+        assert_ne!(view.runs[1].agents[1].id, view.runs[0].agents[1].id);
+        assert_eq!(view.goal(goal_id).unwrap().status, GoalStatus::Completed);
+        assert_eq!(
+            std::fs::read(&roster).unwrap(),
+            preset(&["main", "inspect"])
+        );
+    }
+
+    #[test]
+    fn exec_cancellation_resumes_only_with_the_same_preset_and_keeps_assignment_provenance() {
+        cancel_then_resume(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn attached_cancellation_resumes_through_exec_only_with_the_same_preset() {
+        cancel_then_resume(true);
+    }
+}
