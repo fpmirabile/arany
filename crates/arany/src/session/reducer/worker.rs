@@ -135,7 +135,12 @@ fn base_version(entries: &[WorkerManifestEntry], path: &str) -> Option<WorkerBas
         .or_else(|| {
             entries
                 .iter()
-                .any(|e| e.version == WorkerBaseVersion::Directory && contains(&e.path, path))
+                .any(|e| {
+                    matches!(
+                        e.version,
+                        WorkerBaseVersion::Directory | WorkerBaseVersion::Absent
+                    ) && contains(&e.path, path)
+                })
                 .then_some(WorkerBaseVersion::Absent)
         })
 }

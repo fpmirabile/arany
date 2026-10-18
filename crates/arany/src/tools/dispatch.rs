@@ -7,6 +7,10 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let call = &site.intent.call;
     let facts = call.facts();
     match facts.family {
+        Family::File if site.handover.is_some() => fs::apply_worker_changeset(
+            site.workspace,
+            site.handover.as_ref().ok_or(ToolError::Configuration)?,
+        ),
         Family::File => fs::native(site.workspace, call, site.config),
         Family::Process => process::run(site).await,
         Family::Skill => skills::run(call, site.skill.as_deref().ok_or(ToolError::Configuration)?),
@@ -20,6 +24,9 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
             .await
         }
         Family::Git => git::run(site).await,
+        Family::Preparation if matches!(call, ToolCall::PrepareWorker { .. }) => {
+            Ok("Private candidate captured".into())
+        }
         Family::Preparation => {
             super::definitions::parse(site.definition.as_deref().ok_or(ToolError::Configuration)?)
         }

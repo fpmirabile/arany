@@ -8,6 +8,7 @@ use tokio::sync::oneshot;
 type Admits = fn(&Event) -> bool;
 
 enum Fault {
+    WorkerReceipt(uuid::Uuid),
     GoalAppend(SessionId, Admits),
     GoalAcknowledgment(
         SessionId,
@@ -21,7 +22,7 @@ enum Fault {
     CommitMarker(String),
 }
 
-// Faults are keyed by Session ID or cache identity so parallel tests never see each other's.
+// Faults use Session, Tool intent or cache identity to keep fixtures isolated.
 static PLAN: Mutex<Vec<Fault>> = Mutex::new(Vec::new());
 
 fn plan() -> std::sync::MutexGuard<'static, Vec<Fault>> {
@@ -69,6 +70,14 @@ impl FaultPlan {
     #[cfg(test)]
     pub(crate) fn fail_commit_marker(identity: &BuildCacheIdentity) {
         plan().push(Fault::CommitMarker(identity.token()));
+    }
+
+    pub(crate) fn lose_worker_receipt(intent: uuid::Uuid) {
+        plan().push(Fault::WorkerReceipt(intent));
+    }
+
+    pub(crate) fn worker_receipt_lost(intent: uuid::Uuid) -> bool {
+        take(|fault| matches!(fault, Fault::WorkerReceipt(id) if *id == intent)).is_some()
     }
 
     pub(crate) fn append_fails(session_id: SessionId, event: &Event) -> bool {

@@ -1,7 +1,7 @@
 use super::{
-    BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, TASK_BYTES_CAP, TEARDOWN_WAIT,
-    Task, bootstrap_failure, drain_stderr, parse_ready, read_capped, read_line_capped,
-    read_observation,
+    BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, Ready, TASK_BYTES_CAP,
+    TEARDOWN_WAIT, Task, bootstrap_failure, drain_stderr, parse_ready, read_capped,
+    read_line_capped, read_observation,
 };
 use crate::session::WorkspaceIdentity;
 use crate::tools::Cancellation;
@@ -211,6 +211,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
         return Err(ToolError::ProtectionUnavailable);
     }
     let mut bytes = b"arany-macos-guard-v15:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go".to_vec();
+    bytes.extend_from_slice(b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-workspace-grant");
     bytes.extend_from_slice(profile(PROFILE, FILE_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
@@ -308,14 +309,30 @@ pub(super) fn install(
     }
     configure_file_cpu()?;
     let mut profile = profile(PROFILE, FILE_DENIED_SYSCALLS);
-    if !matches!(task.intent.call, ToolCall::ParseAgentDefinition { .. }) {
+    let worker_root = if task.worker.is_some() {
+        Some(std::env::current_dir().map_err(|_| ToolError::Path)?)
+    } else {
+        None
+    };
+    if let Some(root) = &worker_root {
+        super::super::fs::reject_overlap(root, &task.workspace)?;
+        storage::verify_storage(root, &task.intent.limits)?;
+        for name in ["workspace", "scratch"] {
+            let path = root.join(name);
+            ancestors(&mut profile, &path)?;
+            profile.push_str(&format!(
+                "(allow file-read* file-write* (subpath {}))\n",
+                quoted(&path)?
+            ));
+        }
+    } else if !matches!(task.intent.call, ToolCall::ParseAgentDefinition { .. }) {
         ancestors(&mut profile, &task.workspace)?;
         profile.push_str(&format!(
             "(allow file-read* (subpath {}))\n",
             quoted(&task.workspace)?
         ));
     }
-    if task.intent.call.mutates() {
+    if task.worker.is_none() && task.intent.call.mutates() {
         profile.push_str(&format!(
             "(allow file-write* (subpath {}))\n",
             quoted(&task.workspace)?
@@ -345,7 +362,7 @@ pub(super) fn install(
         FILE_DENIED_SYSCALLS,
     )?;
     verify_cpu_controls()?;
-    Ok(PathBuf::from("/"))
+    Ok(worker_root.unwrap_or_else(|| PathBuf::from("/")))
 }
 
 fn install_profile(profile: String) -> Result<(), ToolError> {
@@ -890,6 +907,11 @@ impl Task {
             cache,
             hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
             definition: runtime.definitions.payload(&intent.call)?,
+            worker: runtime.worker.as_ref().map(|a| a.transfer.clone()),
+            handover: runtime
+                .handover
+                .as_ref()
+                .and_then(|_| super::super::worker::handover_ref(intent).cloned()),
             workspace: runtime.workspace.clone(),
             guard_executable: runtime.guard_executable.clone(),
             system_programs: if intent.call.is_process() {
@@ -900,9 +922,26 @@ impl Task {
         })
     }
 
-    fn into_runtime(self) -> (ToolRuntime, EffectIntent, Option<super::BuildCacheTransfer>) {
+    fn into_runtime(
+        self,
+        worker_input: Option<Vec<u8>>,
+    ) -> (ToolRuntime, EffectIntent, Option<super::BuildCacheTransfer>) {
         let cache = self.cache;
+        let handover = self
+            .handover
+            .as_ref()
+            .and(worker_input.as_ref())
+            .map(|bytes| Arc::from(bytes.as_slice()));
         let runtime = ToolRuntime {
+            handover,
+            worker: self.worker.zip(worker_input).map(|(transfer, input)| {
+                Arc::new(super::super::worker::Action {
+                    transfer,
+                    input: input.into(),
+                    output: std::sync::Mutex::new(None),
+                    contained: AtomicBool::new(false),
+                })
+            }),
             definitions: super::super::definitions::DefinitionSnapshots::from_payload(
                 &self.intent.call,
                 self.definition,
@@ -931,6 +970,40 @@ impl Task {
     }
 }
 
+async fn worker_ready(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    task: &[u8],
+    stdin: &mut tokio::process::ChildStdin,
+    stdout: &mut BufReader<tokio::process::ChildStdout>,
+) -> Result<Ready, ToolError> {
+    tokio::time::timeout(
+        (PREPARATION_DEADLINE + super::super::worker::transfer_time(intent))
+            .min(Duration::from_secs(120)),
+        async {
+            stdin
+                .write_all(task)
+                .await
+                .map_err(|_| ToolError::Operation)?;
+            let mut bytes = read_line_capped(stdout, 2048).await?;
+            if bytes == b"WORKER_READY\n" {
+                let input =
+                    super::super::worker::bulk_input(runtime).ok_or(ToolError::Configuration)?;
+                super::super::worker::send_frame(stdin, input).await?;
+                bytes = read_line_capped(stdout, 2048).await?;
+            }
+            parse_ready(&bytes, intent)
+        },
+    )
+    .await
+    .map_err(|_| {
+        ToolError::GuardBootstrap(BootstrapFailure {
+            stage: BootstrapStage::Handshake,
+            check: None,
+        })
+    })?
+}
+
 async fn execute_worker(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -945,11 +1018,13 @@ async fn execute_worker(
     let mut child = Command::new(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
-        .current_dir(if intent.call.is_process() || intent.call.is_git_read() {
-            root
-        } else {
-            Path::new("/")
-        })
+        .current_dir(
+            if runtime.worker.is_some() || intent.call.is_process() || intent.call.is_git_read() {
+                root
+            } else {
+                Path::new("/")
+            },
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -964,20 +1039,7 @@ async fn execute_worker(
     let (result, status) = {
         let execution = async {
             let capture = fixture::Span::begin(fixture::Stage::WorkerReady);
-            let ready = tokio::time::timeout(PREPARATION_DEADLINE, async {
-                stdin
-                    .write_all(&task)
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                parse_ready(&read_line_capped(&mut stdout, 2048).await?, intent)
-            })
-            .await
-            .map_err(|_| {
-                ToolError::GuardBootstrap(BootstrapFailure {
-                    stage: BootstrapStage::Handshake,
-                    check: None,
-                })
-            })??;
+            let ready = worker_ready(runtime, intent, &task, &mut stdin, &mut stdout).await?;
             if ready.pid != pid {
                 return Err(ToolError::ProtectionUnavailable);
             }
@@ -1002,15 +1064,29 @@ async fn execute_worker(
             let payload_deadline = super::payload_report_deadline(
                 tokio::time::Instant::now(),
                 intent.limits.runtime_ms,
-            );
+            ) + if runtime.worker.is_some() {
+                super::super::worker::transfer_time(intent)
+            } else {
+                Duration::ZERO
+            };
             tokio::time::timeout_at(payload_deadline, async {
                 let capture = fixture::Span::begin(fixture::Stage::WorkerReceipt);
                 stdin
                     .write_all(b"GO\n")
                     .await
                     .map_err(|_| ToolError::Operation)?;
-                stdin.shutdown().await.map_err(|_| ToolError::Operation)?;
-                let observation = read_observation(&mut stdout, intent).await?;
+                drop(stdin);
+                let observation = if runtime.worker.is_some() {
+                    super::read_worker_observation(
+                        &mut stdout,
+                        runtime,
+                        intent,
+                        Duration::from_millis(u64::from(intent.limits.runtime_ms)),
+                    )
+                    .await?
+                } else {
+                    read_observation(&mut stdout, intent).await?
+                };
                 capture.complete();
                 Ok(observation)
             })
@@ -1019,7 +1095,8 @@ async fn execute_worker(
         };
         let deadline = tokio::time::Instant::now()
             + RESERVATION_OVERHEAD
-            + Duration::from_millis(u64::from(intent.limits.runtime_ms));
+            + Duration::from_millis(u64::from(intent.limits.runtime_ms))
+            + super::super::worker::transfer_overhead(intent);
         let execution = tokio::time::timeout_at(deadline, execution);
         tokio::pin!(execution);
         let mut samples = tokio::time::interval(SUPERVISION_INTERVAL);
@@ -1217,6 +1294,8 @@ mod tests {
         .unwrap();
         let task = Task {
             definition: None,
+            worker: None,
+            handover: None,
             intent: EffectIntent {
                 target: crate::session::worker::EffectTarget::Workspace,
                 id: uuid::Uuid::now_v7(),
@@ -1423,6 +1502,8 @@ mod tests {
         let call = ToolCall::GitStatus { path: ".".into() };
         let task = Task {
             definition: None,
+            worker: None,
+            handover: None,
             intent: EffectIntent {
                 target: crate::session::worker::EffectTarget::Workspace,
                 id: uuid::Uuid::now_v7(),

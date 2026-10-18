@@ -192,6 +192,7 @@ impl Fixture {
             ProviderCallDisposition::ToolRequested,
             None,
         );
+        let revision = self.events.iter().filter(|e| matches!(e, Event::ToolFinished { agent_run_id, observation, .. } if *agent_run_id == self.child && matches!(observation.attestation, Some(Attestation::WorkerMutation { .. })))).count() as u32;
         let intent = self.intent(
             self.child,
             ToolCall::Write {
@@ -199,7 +200,7 @@ impl Fixture {
                 expected_digest: None,
                 content: "new".into(),
             },
-            self.target(0),
+            self.target(revision),
         );
         self.started(&intent);
         let data = self.data(
@@ -213,8 +214,8 @@ impl Fixture {
             Some(Attestation::WorkerMutation {
                 receipt: receipt(&intent),
                 mutation: Box::new(WorkerMutation {
-                    previous_revision: 0,
-                    next_revision: 1,
+                    previous_revision: revision,
+                    next_revision: revision + 1,
                     data,
                 }),
             }),
@@ -416,6 +417,23 @@ fn receipt(intent: &EffectIntent) -> GuardReceipt {
 }
 
 pub(crate) fn fixture() -> Fixture {
+    fixture_with_manifest(
+        WorkerManifest {
+            entries: vec![WorkerManifestEntry {
+                path: "src".into(),
+                version: WorkerBaseVersion::Directory,
+            }],
+        },
+        vec!["read".into(), "write".into()],
+        vec![WorkerTool::Read, WorkerTool::Write],
+    )
+}
+
+fn fixture_with_manifest(
+    manifest: WorkerManifest,
+    definition_tools: Vec<String>,
+    tools: Vec<WorkerTool>,
+) -> Fixture {
     let (session, goal, run, primary, child) = (
         SessionId::new(),
         GoalId::new(),
@@ -427,7 +445,7 @@ pub(crate) fn fixture() -> Fixture {
         version: 1,
         name: "editor".into(),
         description: "Edit".into(),
-        tools: Some(vec!["read".into(), "write".into()]),
+        tools: Some(definition_tools),
         disallowed_tools: Vec::new(),
         model: None,
         permission_mode: None,
@@ -444,7 +462,7 @@ pub(crate) fn fixture() -> Fixture {
     let grant = WorkerGrant {
         read_paths: vec!["src".into()],
         write_paths: vec!["src".into()],
-        tools: vec![WorkerTool::Read, WorkerTool::Write],
+        tools,
         skills: Vec::new(),
         mcp_servers: Vec::new(),
         permission_mode: None,
@@ -655,13 +673,7 @@ pub(crate) fn fixture() -> Fixture {
     f.base = f.data(
         &prep,
         WorkerDataPurpose::Base,
-        &serde_json::to_vec(&WorkerManifest {
-            entries: vec![WorkerManifestEntry {
-                path: "src".into(),
-                version: WorkerBaseVersion::Directory,
-            }],
-        })
-        .unwrap(),
+        &serde_json::to_vec(&manifest).unwrap(),
     );
     f.observed(
         &prep,
@@ -2790,4 +2802,65 @@ fn worker_protocol_stop_blocks_an_otherwise_admitted_provider_fallback() {
         },
     });
     refused(&f, fallback, "stopped fallback dispatch");
+}
+
+#[test]
+fn worker_protocol_absent_subtree_accepts_private_mkdir_then_file_creation() {
+    let mut f = fixture_with_manifest(
+        WorkerManifest {
+            entries: vec![WorkerManifestEntry {
+                path: "src/a".into(),
+                version: WorkerBaseVersion::Absent,
+            }],
+        },
+        vec!["mkdir".into(), "read".into(), "write".into()],
+        vec![WorkerTool::Read, WorkerTool::Write, WorkerTool::Mkdir],
+    );
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let mkdir = f.intent(
+        f.child,
+        ToolCall::Mkdir {
+            path: "src/a".into(),
+        },
+        f.target(0),
+    );
+    f.started(&mkdir);
+    let data = f.data(
+        &mkdir,
+        WorkerDataPurpose::Mutation,
+        &serde_json::to_vec(&WorkerChangeset { files: Vec::new() }).unwrap(),
+    );
+    f.observed(
+        &mkdir,
+        ToolDisposition::Succeeded,
+        Some(Attestation::WorkerMutation {
+            receipt: receipt(&mkdir),
+            mutation: Box::new(WorkerMutation {
+                previous_revision: 0,
+                next_revision: 1,
+                data,
+            }),
+        }),
+        "{}",
+    );
+    f.changes.files[0].path = "src/a/file".into();
+    f.mutation();
+    f.finish_worker();
+    let view = f.view();
+    let worker = view.runs[0]
+        .agents
+        .iter()
+        .find(|a| a.id == f.child)
+        .unwrap()
+        .assignment
+        .as_ref()
+        .unwrap();
+    assert_eq!(worker.revision, 2);
+    assert_eq!(worker.overlay.len(), 1);
+    assert_eq!(worker.overlay[0].before, WorkerBaseVersion::Absent);
 }

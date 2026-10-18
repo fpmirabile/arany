@@ -298,3 +298,332 @@ mod account_roots {
         }
     }
 }
+
+pub async fn exercise_private_guard_target(
+    state: &crate::StateRoot,
+    workspace: &std::path::Path,
+    executable: std::path::PathBuf,
+) -> Result<(), crate::tools::ToolError> {
+    use crate::session::worker::*;
+    use crate::tools::{Cancellation, ToolCall, ToolDisposition, ToolRuntime, worker::View};
+    let runtime = ToolRuntime::admit(
+        crate::tools::config::Config::load(state)?,
+        None,
+        None,
+        workspace,
+        state,
+        executable,
+    )?;
+    let grant = WorkerGrant {
+        read_paths: vec!["owned".into()],
+        write_paths: vec!["owned".into()],
+        tools: vec![
+            WorkerTool::Read,
+            WorkerTool::Write,
+            WorkerTool::Edit,
+            WorkerTool::Mkdir,
+        ],
+        skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        permission_mode: None,
+    };
+    let run_id = crate::RunId::new();
+    let mut view = View::capture(
+        &runtime,
+        run_id,
+        crate::AgentRunId::new(),
+        grant.clone(),
+        WORKER_DATA_BYTES as u32,
+    )?;
+    view.manifest()?;
+    let sibling = View::capture(
+        &runtime,
+        run_id,
+        crate::AgentRunId::new(),
+        grant.clone(),
+        WORKER_DATA_BYTES as u32,
+    )?;
+    let original =
+        std::fs::read(workspace.join("owned/a")).map_err(|_| crate::tools::ToolError::Operation)?;
+    let call = ToolCall::Edit {
+        path: "owned/a".into(),
+        expected_digest: crate::tools::types::hex_digest(&original),
+        old: "original".into(),
+        new: "private".into(),
+    };
+    let mut intent = runtime.intent(view.run_id(), view.assignment(), call);
+    intent.target = view.target();
+    intent.limits.cache_bytes = 0;
+    intent.limits.cache_requested_bytes = 0;
+    intent.limits.cache_candidate_bytes = 0;
+    let candidate = view
+        .edit(&runtime, intent, Cancellation::new())
+        .await
+        .map_err(|observation| {
+            assert_eq!(
+                observation.disposition,
+                ToolDisposition::Succeeded,
+                "private Guard: {:?} {}",
+                observation.disposition,
+                observation.output
+            );
+            crate::tools::ToolError::Operation
+        })?;
+    let chunks: Vec<_> = candidate.chunks().collect();
+    assert!(!chunks.is_empty());
+    let reference = WorkerDataRef {
+        assignment_id: view.assignment(),
+        purpose: WorkerDataPurpose::Mutation,
+        first_sequence: 1,
+        seal_sequence: chunks.len() as u64 + 1,
+        chunks: chunks.len() as u16,
+        bytes: candidate.data.len() as u32,
+        sha256: crate::tools::types::digest(&candidate.data),
+    };
+    let observation = view.acknowledge(candidate, reference.clone())?;
+    assert!(observation.valid());
+    for (actor, text) in [(&view, "private"), (&sibling, "original")] {
+        let mut read = runtime.intent(
+            actor.run_id(),
+            actor.assignment(),
+            ToolCall::Read {
+                path: "owned/a".into(),
+                offset: 0,
+                limit: text.len() as u32,
+            },
+        );
+        read.target = actor.target();
+        let read = actor.read(read);
+        assert_eq!(read.disposition, ToolDisposition::Succeeded);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&read.output).unwrap()["text"],
+            text
+        );
+    }
+    assert!(
+        std::fs::read(workspace.join("owned/a")).unwrap() == original,
+        "Workspace changed before private integration"
+    );
+    let mut idle = View::capture(
+        &runtime,
+        run_id,
+        crate::AgentRunId::new(),
+        grant.clone(),
+        WORKER_DATA_BYTES as u32,
+    )?;
+    let mut idle_intent = runtime.intent(
+        run_id,
+        idle.assignment(),
+        ToolCall::Edit {
+            path: "owned/a".into(),
+            expected_digest: crate::tools::types::hex_digest(&original),
+            old: "original".into(),
+            new: "never".into(),
+        },
+    );
+    idle_intent.target = idle.target();
+    idle_intent.limits.cache_requested_bytes = 0;
+    idle_intent.limits.cache_bytes = 0;
+    idle_intent.limits.cache_candidate_bytes = 0;
+    let cancelled = Cancellation::new();
+    cancelled.cancel();
+    assert!(idle.edit(&runtime, idle_intent, cancelled).await.is_err());
+    assert_eq!(idle.dispose()?.revision, 0);
+    let mut lost = View::capture(
+        &runtime,
+        run_id,
+        crate::AgentRunId::new(),
+        grant,
+        WORKER_DATA_BYTES as u32,
+    )?;
+    let mut lost_intent = runtime.intent(
+        run_id,
+        lost.assignment(),
+        ToolCall::Edit {
+            path: "owned/a".into(),
+            expected_digest: crate::tools::types::hex_digest(&original),
+            old: "original".into(),
+            new: "discarded".into(),
+        },
+    );
+    lost_intent.target = lost.target();
+    lost_intent.limits.cache_requested_bytes = 0;
+    lost_intent.limits.cache_bytes = 0;
+    lost_intent.limits.cache_candidate_bytes = 0;
+    crate::fault::FaultPlan::lose_worker_receipt(lost_intent.id);
+    let unknown = lost
+        .edit(&runtime, lost_intent.clone(), Cancellation::new())
+        .await
+        .err()
+        .expect("lost private receipt");
+    assert_eq!(unknown.disposition, ToolDisposition::Uncertain);
+    assert!(matches!(
+        unknown.intent.target,
+        EffectTarget::WorkerView { .. }
+    ));
+    assert!(
+        lost.edit(&runtime, lost_intent, Cancellation::new())
+            .await
+            .is_err()
+    );
+    assert_eq!(lost.dispose()?.revision, 0);
+    assert!(
+        std::fs::read(workspace.join("owned/a")).unwrap() == original,
+        "uncertain private edit published to the Workspace"
+    );
+    let bytes = view.handover()?;
+    assert!(bytes.len() > crate::tools::types::MAX_CHANGESET_BYTES);
+    let mut capture = runtime.intent(
+        view.run_id(),
+        view.assignment(),
+        ToolCall::PrepareWorker {
+            preparation: WorkerPreparation {
+                assignment_id: view.assignment(),
+                purpose: WorkerDataPurpose::Handover,
+                max_chunks: reference.chunks,
+                max_bytes: reference.bytes,
+            },
+        },
+    );
+    capture.target = view.target();
+    capture.limits.cache_bytes = 0;
+    capture.limits.cache_requested_bytes = 0;
+    capture.limits.cache_candidate_bytes = 0;
+    let candidate = view
+        .edit(&runtime, capture, Cancellation::new())
+        .await
+        .map_err(|observation| {
+            assert_eq!(
+                observation.disposition,
+                ToolDisposition::Succeeded,
+                "private capture: {:?} {}",
+                observation.disposition,
+                observation.output
+            );
+            crate::tools::ToolError::Operation
+        })?;
+    let observation = view.acknowledge(candidate, reference.clone())?;
+    assert!(matches!(
+        observation.attestation,
+        Some(crate::tools::Attestation::WorkerData { .. })
+    ));
+    assert_eq!(view.dispose()?.revision, 1);
+    let publication = runtime.intent(
+        run_id,
+        crate::AgentRunId::new(),
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::WorkerHandover {
+                assignment_id: reference.assignment_id,
+                handover_sequence: reference.seal_sequence + 1,
+                data: reference,
+            },
+        },
+    );
+    let observation = runtime
+        .apply_worker_handover(publication, bytes.into(), Cancellation::new())
+        .await;
+    assert_eq!(
+        observation.disposition,
+        ToolDisposition::Succeeded,
+        "private publication: {:?} {}",
+        observation.disposition,
+        observation.output
+    );
+    let updated = std::fs::read(workspace.join("owned/a")).unwrap();
+    assert!(updated.starts_with(b"private"));
+    assert_eq!(updated.len() + 1, original.len());
+    let changes = WorkerChangeset {
+        files: (0..WORKER_FILES)
+            .map(|i| crate::tools::FileChange {
+                path: format!("owned/batch-{i:04}"),
+                before: None,
+                after: Some(crate::tools::FileVersion::from_bytes(b"", false)),
+            })
+            .collect(),
+    };
+    let result = publish_worker_fixture(&runtime, run_id, &changes).await;
+    assert_eq!(
+        result.disposition,
+        ToolDisposition::Succeeded,
+        "maximum-count Guard publication: {:?} {}",
+        result.disposition,
+        result.output
+    );
+    assert_eq!(
+        std::fs::read_dir(workspace.join("owned")).unwrap().count(),
+        WORKER_FILES + 1
+    );
+
+    let before = vec![b'a'; 1024 * 1024];
+    let after = vec![b'b'; 1024 * 1024];
+    let mut maximum = WorkerChangeset { files: Vec::new() };
+    for i in 0..16 {
+        let path = format!("owned/sized-{i:04}");
+        std::fs::write(workspace.join(&path), &before).unwrap();
+        maximum.files.push(crate::tools::FileChange {
+            path,
+            before: Some(crate::tools::FileVersion::from_bytes(&before, false)),
+            after: Some(crate::tools::FileVersion::from_bytes(&after, false)),
+        });
+    }
+    let mut overflow = maximum.clone();
+    overflow.files.push(crate::tools::FileChange {
+        path: "owned/sized-overflow".into(),
+        before: None,
+        after: Some(crate::tools::FileVersion::from_bytes(b"x", false)),
+    });
+    let refused = publish_worker_fixture(&runtime, run_id, &overflow).await;
+    assert_eq!(refused.disposition, ToolDisposition::Failed);
+    assert!(refused.attestation.is_none());
+    assert!(!workspace.join("owned/sized-overflow").exists());
+    let result = publish_worker_fixture(&runtime, run_id, &maximum).await;
+    assert_eq!(
+        result.disposition,
+        ToolDisposition::Succeeded,
+        "maximum-byte Guard publication: {:?} {}",
+        result.disposition,
+        result.output
+    );
+    for change in &maximum.files {
+        assert!(
+            std::fs::read(workspace.join(&change.path)).unwrap() == after,
+            "maximum-byte file content"
+        );
+    }
+
+    Ok(())
+}
+
+async fn publish_worker_fixture(
+    runtime: &crate::tools::ToolRuntime,
+    run_id: crate::RunId,
+    changes: &crate::session::worker::WorkerChangeset,
+) -> crate::tools::ToolObservation {
+    use crate::session::worker::*;
+    let bytes = serde_json::to_vec(changes).unwrap();
+    let assignment_id = crate::AgentRunId::new();
+    let data = WorkerDataRef {
+        assignment_id,
+        purpose: WorkerDataPurpose::Handover,
+        first_sequence: 1,
+        seal_sequence: bytes.len().div_ceil(WORKER_CHUNK_BYTES) as u64 + 1,
+        chunks: u16::try_from(bytes.len().div_ceil(WORKER_CHUNK_BYTES)).unwrap(),
+        bytes: u32::try_from(bytes.len()).unwrap(),
+        sha256: crate::tools::types::digest(&bytes),
+    };
+    let mut publication = runtime.intent(
+        run_id,
+        crate::AgentRunId::new(),
+        crate::tools::ToolCall::ApplyChangeset {
+            source: ChangesetSource::WorkerHandover {
+                assignment_id,
+                handover_sequence: data.seal_sequence + 1,
+                data,
+            },
+        },
+    );
+    publication.limits.runtime_ms = 120_000;
+    runtime
+        .apply_worker_handover(publication, bytes.into(), crate::tools::Cancellation::new())
+        .await
+}
