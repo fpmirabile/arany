@@ -870,7 +870,6 @@ enum ApprovalCase {
     Invalid,
     ClientError,
     Backpressure,
-    PendingBound,
 }
 
 #[cfg(unix)]
@@ -927,13 +926,6 @@ async fn approval_expires_and_journal_finishes_while_outbound_is_full() {
     approval_scenario(ApprovalCase::Backpressure).await;
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn approval_pending_bound_denies_concurrent_excess_requests() {
-    let _deadline = deadline();
-    approval_scenario(ApprovalCase::PendingBound).await;
-}
-
 fn decision(id: Value, result: Value) -> ClientMessage {
     ClientMessage::Message(Message::Response(Response {
         jsonrpc: Default::default(),
@@ -983,18 +975,7 @@ async fn approval_scenario(case: ApprovalCase) {
         summary: "Answer".into(),
         result: "Finished".into(),
     });
-    let outcomes = if case == ApprovalCase::PendingBound {
-        vec![
-            arany::ProviderOutcome::Delegate(arany::Delegate {
-                children: vec!["A".into(), "B".into()],
-            }),
-            read.clone(),
-            read,
-            finish.clone(),
-            finish.clone(),
-            finish,
-        ]
-    } else if case == ApprovalCase::Duplicate {
+    let outcomes = if case == ApprovalCase::Duplicate {
         vec![read.clone(), read, finish]
     } else {
         vec![read, finish]
@@ -1025,11 +1006,7 @@ async fn approval_scenario(case: ApprovalCase) {
                 .unwrap()
                 .contains(&json!("approvals_v1"))
         );
-        let team = case == ApprovalCase::PendingBound;
-        let mut start = json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4","tools":true,"permissionMode":"auto","collaboration":if team {"team"} else {"single"}});
-        if team {
-            start["maxActiveChildren"] = json!(2);
-        }
+        let start = json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4","tools":true,"permissionMode":"auto","collaboration":"single"});
         input.send(request(2, "thread/start", start)).await.unwrap();
         let thread = next(&mut output).await["result"]["thread"]["id"].clone();
         next(&mut output).await;
@@ -1198,23 +1175,6 @@ async fn approval_scenario(case: ApprovalCase) {
                     })))
                     .await
                     .unwrap(),
-                ApprovalCase::PendingBound => {
-                    loop {
-                        if let Some(arany::Tapped::Committed(event)) = events.next().await
-                            && let Event::ToolPermissionDecided { verdict, .. } = &event.event
-                        {
-                            assert!(!verdict.approved);
-                            break;
-                        }
-                    }
-                    input
-                        .send(decision(
-                            approval["id"].clone(),
-                            json!({"decision":"accept"}),
-                        ))
-                        .await
-                        .unwrap();
-                }
                 ApprovalCase::Backpressure => unreachable!(),
             }
         }
@@ -1308,13 +1268,10 @@ async fn approval_scenario(case: ApprovalCase) {
                 .flat_map(|agent| agent.tools.iter()),
         )
         .collect();
-    let accepted = matches!(
-        case,
-        ApprovalCase::Accept | ApprovalCase::Duplicate | ApprovalCase::PendingBound
-    );
+    let accepted = matches!(case, ApprovalCase::Accept | ApprovalCase::Duplicate);
     assert_eq!(
         tools.len(),
-        if matches!(case, ApprovalCase::PendingBound | ApprovalCase::Duplicate) {
+        if case == ApprovalCase::Duplicate {
             2
         } else {
             1
@@ -1374,13 +1331,7 @@ async fn approval_scenario(case: ApprovalCase) {
                 .all(|request| !format!("{request:?}").contains("private fact"))
         );
     }
-    assert!(
-        provider.responses.lock().unwrap().is_empty()
-            || matches!(
-                case,
-                ApprovalCase::Cancel | ApprovalCase::Interrupt | ApprovalCase::Eof
-            )
-    );
+    assert_eq!(provider.responses.lock().unwrap().is_empty(), accepted);
 }
 
 #[cfg(unix)]
