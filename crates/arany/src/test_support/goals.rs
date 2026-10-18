@@ -320,6 +320,7 @@ pub struct ForegroundWorkerProvider {
     pub budget: crate::GoalBudget,
     pub requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     pub violations: std::sync::Mutex<Vec<&'static str>>,
+    background_started: tokio::sync::Notify,
 }
 
 impl ForegroundWorkerProvider {
@@ -330,6 +331,7 @@ impl ForegroundWorkerProvider {
             budget,
             requests: Default::default(),
             violations: Default::default(),
+            background_started: Default::default(),
         }
     }
 
@@ -375,7 +377,11 @@ impl ForegroundWorkerProvider {
                 direction: "Return one whole changeset".into(),
                 lease: vec!["notes".into()],
                 criterion: self.plan().success_criterion,
-                mode: crate::worker::WorkerMode::Foreground,
+                mode: if self.case == "headroom_background" {
+                    crate::worker::WorkerMode::Background
+                } else {
+                    crate::worker::WorkerMode::Foreground
+                },
                 max_turns: 17,
                 wave: 1,
                 resumes: None,
@@ -422,6 +428,33 @@ impl crate::Provider for ForegroundWorkerProvider {
                 Some(Box::new(self.plan())),
             ),
             (AgentPhase::RootPlan, 1) => self.delegation(&request),
+            (AgentPhase::ChildWork, _) if self.case == "headroom_background" => {
+                self.background_started.notify_one();
+                std::future::pending().await
+            }
+            (AgentPhase::ChildWork, _) if self.case == "headroom_child" => {
+                super::scenario::tool_outcome(
+                    ToolCall::Read {
+                        path: "notes/a".into(),
+                        offset: 0,
+                        limit: 128,
+                    },
+                    None,
+                )
+            }
+            (AgentPhase::RootSynthesis, _) if self.case == "headroom_background" => {
+                if step == 0 {
+                    self.background_started.notified().await;
+                }
+                super::scenario::tool_outcome(
+                    ToolCall::Read {
+                        path: "notes/a".into(),
+                        offset: 0,
+                        limit: 128,
+                    },
+                    None,
+                )
+            }
             (AgentPhase::ChildWork, 0) if self.case == "calls" => {
                 finish_with("No Tool allowance remains")
             }

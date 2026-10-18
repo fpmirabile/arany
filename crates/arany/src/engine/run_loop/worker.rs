@@ -219,13 +219,7 @@ impl RunLoop<'_> {
                 action.max_events_for_admitted(&self.routing.providers),
                 action.tool_observations(),
             )
-            .await
-            .map_err(|error| match error {
-                crate::store::StoreError::StorageFull | crate::store::StoreError::ReplayLimit => {
-                    EngineError::Tool(crate::tools::ToolError::Limit)
-                }
-                error => error.into(),
-            })?;
+            .await?;
         Ok(())
     }
 
@@ -1015,7 +1009,7 @@ impl RunLoop<'_> {
         })
         .await
     }
-    async fn record_capacity_stop(&self) -> Result<(), EngineError> {
+    pub(super) async fn record_capacity_stop(&self) -> Result<(), EngineError> {
         if self
             .ledger()
             .view(|v| v.runs.last().is_some_and(|r| r.workers.stop.is_some()))?

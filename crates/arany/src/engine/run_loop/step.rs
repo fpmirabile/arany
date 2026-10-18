@@ -628,7 +628,14 @@ impl RunLoop<'_> {
                 }
         ) {
             self.admit_worker_action(self.worker_call_chunks(intent.agent_run_id, &intent.call)?)
-                .await?;
+                .await
+                .map_err(|error| match error {
+                    EngineError::Store(
+                        crate::store::StoreError::StorageFull
+                        | crate::store::StoreError::ReplayLimit,
+                    ) => EngineError::Tool(ToolError::Limit),
+                    error => error,
+                })?;
         }
         let (tail, observations) = match grant {
             Grant::Primary { review_allowed, .. } => {
