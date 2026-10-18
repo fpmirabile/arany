@@ -2,10 +2,11 @@
 
 ## Scope and related contracts
 
-This contract owns the JSON-RPC vocabulary, codec and JSON Schema export for
-`arany serve --stdio`. Schema export is available; the stdio server and method
-handlers are accepted but unimplemented under [NEXT_STEPS item 8](../../NEXT_STEPS.md#pursue-in-order).
-Exported types describe that reserved surface, not running server capabilities.
+This contract owns `arany serve --stdio`: its JSON-RPC vocabulary, bounded
+transport, thread and turn projection, and JSON Schema export. The server runs
+`initialize` / `initialized`, `thread/start|resume` and `turn/start|interrupt`.
+Approval transport and the remaining methods belong to
+[NEXT_STEPS item 8](../../NEXT_STEPS.md#pursue-in-order).
 
 [Session](./session.md) owns durable Session identity and replay,
 [execution](./execution.md) owns committed Runs and Events,
@@ -21,7 +22,7 @@ are rejected. Encoded strings escape embedded newlines and control bytes.
 Outbound envelopes always include `"jsonrpc":"2.0"`; inbound envelopes accept
 its absence, matching Codex app-server clients, but reject any other value,
 including null. Request IDs are strings or signed 64-bit integers; only error
-responses can carry a null ID. Server request IDs use a separate integer
+responses can carry a null ID. Server request IDs reserve a separate integer
 namespace starting at 1.
 
 Requests carry `id`, `method` and optional `params`; notifications omit `id`.
@@ -29,6 +30,7 @@ Responses carry `id` and `result`; error responses carry `id` and
 `error: {code, message, data?}`. `data` contains a closed camelCase `reason`.
 Envelope fields and typed params/results reject unknown fields, except
 `initialize.capabilities`, whose unknown keys are ignored for feature detection.
+Unknown notifications and unmatched client responses are ignored.
 
 Protocol fields use camelCase. Embedded journal vocabulary (`EventLine`, Event
 payloads, Tool calls and intents) retains its existing snake_case bytes.
@@ -36,9 +38,6 @@ payloads, Tool calls and intents) retains its existing snake_case bytes.
 journal format. JSON is data; clients must render untrusted content inertly.
 
 ### Error model
-
-These codes and reasons reserve the server's error contract. The codec reports
-`Parse` or `TooLarge`; a server adapter supplies the corresponding response.
 
 | Code | Meaning | `data.reason` |
 |---|---|---|
@@ -50,15 +49,20 @@ These codes and reasons reserve the server's error contract. The codec reports
 | `-32000` | Engine admission failure | EngineError variant in camelCase; the closed vocabulary is exported as `$defs.Reason` |
 | `-32001` | Provider selection or routing failure | `providerUnavailable`, `providerRejected`, `invalidSelection` |
 
-A failed accepted turn is represented by `turn/completed` with status `failed`
-and compiled recovery guidance in `error.message`; cancellation is
+Engine errors use their compiled Display message. A failed accepted turn is
+represented by `turn/completed` with status `failed` and compiled recovery
+guidance in `error.message`, never a JSON-RPC error. Cancellation is
 `interrupted`. An unknown Tool effect remains `uncertain`, never successful or
-merely failed, preserving the honest-uncertainty guarantee.
+merely failed, preserving the honest-uncertainty guarantee. If an Engine error
+leaves an accepted submission without a committed terminal Run, the process
+exits unsuccessfully with Session-history recovery guidance rather than
+inventing a completion.
 
 ## Methods
 
 | CLI entry | Observable behavior |
 |---|---|
+| `arany serve --stdio [--state-dir DIR]` | Refuses terminal stdin or stdout before State admission, exit 2 with `error: serve requires piped stdin and stdout`. Omitting `--stdio` exits 2 with `error: unsupported transport; pass --stdio`. Clean EOF cancels any active submission, drains its committed notifications, closes the Engine and exits 0. Input failure performs the same shutdown and exits 1. Transport, storage or shutdown failure exits 1 with `error: …` on stderr. |
 | `arany generate-schema` | Writes one pretty-printed JSON Schema document plus a final newline to stdout; stderr is empty on success; no State, credentials or Engine are opened. |
 | `arany generate-schema --out DIR` | Creates DIR as needed and atomically replaces `DIR/arany-protocol.schema.json` using an exclusively created temporary file in DIR; success leaves stdout and stderr empty. Refuses an existing symlink or non-file target. Failure exits 1 with a compiled `error: …` diagnostic on stderr. Success exits 0. |
 
@@ -69,24 +73,64 @@ schemas in `$defs`; the document root validates JSON-RPC envelopes. Consumers
 validate method-specific params/results through the corresponding registry
 entry with the same `$defs`. Output is deterministic for a fixed contract.
 
-The reserved method registry contains `initialize`, `thread/start`,
-`thread/resume`, `turn/start` and `turn/interrupt`. A thread maps to a durable
-Session and a turn to a Run with a separate Goal ID. `thread/start` must commit
-`SessionStarted` before responding. Method execution and ordering evidence
-belong to the remaining server work, not schema generation. Permission modes
-use Claude Code spellings `default`, `acceptEdits` and `auto`; `plan` and
-`dontAsk` are rejected until the [permission-rule work](../../NEXT_STEPS.md#pursue-in-order).
+| Method | Params and result | Ordering and admission |
+|---|---|---|
+| `initialize` | `{clientInfo:{name,title?,version},capabilities?:{optOutNotificationMethods?:[string]}}` → `{userAgent,platformOs,capabilities}` | First request; other requests before it return `notInitialized`; a second initialize returns `alreadyInitialized`. Returns no paths or credentials. `initialized {}` is the following client notification and has no response. |
+| `thread/start` | `{cwd,provider,model,effort?,title?,collaboration?,maxActiveChildren?,tools?,permissionMode?,includePaths?}` → `{thread}` | Selects the Provider and configured role chains as `exec` does. `Engine::create_session` commits `SessionStarted` before the result and subsequent `thread/started`. A thread is a durable Session, including when no turn follows. |
+| `thread/resume` | `{threadId,cwd,provider,model,effort?,tools?,permissionMode?,includePaths?}` → `{thread,turns}` | Admits the selected Workspace and Provider configuration, strictly replays history without executing it, and loads the thread. Turns contain historical user, Tool and answer items; an unfinished Run and Goal appear interrupted. |
+| `turn/start` | `{threadId,input:[{type:"text",text}\|{type:"image",mediaType:"image/png",data:base64}],goal?:{autonomous}}` → `{turn}` | Requires a loaded thread. Uses its pinned configuration and the existing Engine submission path. The result follows tapped `MessageAccepted`, before `turn/started` and user item notifications. If that tap is lost, successful finalization answers from the first committed Run accepted after the submission began. The turn ID is the committed Run ID, with a separate Goal ID. One submission may be active per process; another returns `busy`. |
+| `turn/interrupt` | `{threadId,turnId}` → `{}` | Signals the matching active Run's cancellation. Unknown or finished turns return `turnNotActive`. The empty result acknowledges the signal; `turn/completed` reports interruption only after committed `RunFinished`. |
+
+Providers are `openai`, `anthropic`, `chatgpt` or `custom:NAME`; credentials come
+from the existing selection path. Collaboration defaults to `auto` with three
+children and accepts `single`, `auto` and `team` with the Engine's existing
+limits. Permission modes use Claude Code spellings `default`, `acceptEdits`
+and `auto`; `plan` and `dontAsk` are rejected on this wire surface. Tools default
+to disabled; enabled Tools use the same private configured grant as `exec`.
+Absolute `includePaths` must lie under `cwd` and are translated to
+Workspace-relative include paths before Engine admission. Goal and resource
+settings come from the existing private settings owner and are pinned per
+loaded thread. Plain input starts a new Goal; `goal.autonomous:true` uses the
+Engine's existing autonomous lifecycle. `resumeGoalId` is reserved and rejected
+until explicit Goal resume is implemented.
 
 ## Notifications and items
 
-The reserved notification registry contains `initialized`, `thread/started`,
-`turn/started`, `turn/completed`, `item/started`, `item/completed` and
-`events/resync`. Item tags are `userMessage`, `agentMessage`,
-`commandExecution`, `fileChange`, `mcpToolCall` and `toolCall`. Tool item status
-is `inProgress`, `completed`, `failed`, `declined` or `uncertain`;
-`disposition` preserves the journaled value when available. The additional
-`uncertain` status diverges from Codex to preserve an unknown effect outcome.
-Times represent committed Event timestamps, not a presentation clock.
+All live facts come from committed Events on `RunHandle.events`, never
+Provider previews or `RunProgress`. Completion reloads the strict reduced view
+to include a following Goal receipt and recover a missing terminal tap. Each
+submission is driven independently of the bounded outbound follower, so a slow
+client cannot hold Journal appends. Notification opt-outs from initialize are
+honored.
+
+| Notification | Committed source and payload |
+|---|---|
+| `thread/started` | Durable Session creation; `{thread}` after the thread/start result. |
+| `turn/started` | `MessageAccepted`; `{threadId,turn:{id,goalId,status:"inProgress",items:[]}}`. Each subsequent Run of an autonomous Goal has a new turn ID and the same Goal ID. |
+| `item/started` | `MessageAccepted` or `ToolStarted`; `{threadId,turnId,item,startedAtMs}`. |
+| `item/completed` | `MessageAccepted`, `MessageCommitted` or `ToolFinished`; `{threadId,turnId,item,completedAtMs}`. User items start and complete together; final answer items complete without a started notification. |
+| `turn/completed` | `RunFinished` plus reduced Goal state; `{threadId,turn:{id,goalId,status,items:[],error?,goal:{status,stopped?}}}`. Status is `completed`, `interrupted` or `failed`. An autonomous submission can complete several turns before its final receipt. |
+| `events/resync` | A tap `Resync {missed}`; `{threadId,missed,lastSequence}`. The sequence is the last observed committed Event; recover through `thread/resume`. Live delivery is best effort: a lost append acknowledgment can leave a gap without Resync. Future paged event subscription supplies completeness. |
+
+Times are committed Event timestamps, never a presentation clock. Item IDs are
+`<runId>:user`, `<runId>:answer`, or the immutable Tool intent UUID.
+
+| Item tag | Fields and projection |
+|---|---|
+| `userMessage` | `id,text,images:[{index,mediaType,bytes}]`; metadata only, no pixels. |
+| `agentMessage` | `id,text,phase:"final_answer"`; committed final answer only. |
+| `commandExecution` | `id,command,args,cwd,status,disposition?,output?,attestation?`; program/argv from the intent, attestation `guard` or `inProcess`. |
+| `fileChange` | `id,changes:[{path,kind}],status,disposition?,output?`; Write/Edit/Mkdir/ApplyChangeset; kinds `add`, `update`, `delete`, `mkdir`; no diff bytes. |
+| `mcpToolCall` | `id,server,tool?,arguments?,status,disposition?,output?`; MCP call or catalog listing. |
+| `toolCall` | `id,call,status,disposition?,output?`; remaining typed Tool calls retain their journal JSON. |
+
+Tool item status maps `succeeded` to `completed`, `denied` to `declined`,
+`failed|conflict|limit|cancelled` to `failed`, and `uncertain` to `uncertain`.
+A Tool with `cache_update:uncertain` is also uncertain even if its disposition
+is succeeded. Unfinished historical intents are uncertain with no invented
+observation or disposition. Output is the bounded journaled observation.
+The additional uncertain status diverges from Codex to preserve an unknown
+effect outcome.
 
 ## Server requests
 
@@ -94,40 +138,49 @@ The schema reserves `item/commandExecution/requestApproval`,
 `item/fileChange/requestApproval` and `item/tool/requestApproval`, with the
 journaled intent, its identity and expiry, and sanitized display lines. Decisions
 are `accept`, `decline` or `cancel`. `acceptForSession` is excluded because an
-immutable one-use intent cannot become a remembered permission rule. Dispatch
-and approval handling are not implemented by schema export.
+immutable one-use intent cannot become a remembered permission rule.
+
+Approval transport is not implemented in this slice. The server supplies an
+approval channel and explicitly declines every request, including an ask from
+private permission settings. It never interprets a missing adapter as approval,
+and does not advertise `approvals_v1`. Engine policy owns the subsequent denied
+observation and Run outcome.
 
 ## Limits and compatibility
 
 | Bound | Limit and overflow |
 |---|---|
-| Encoded or decoded line, including newline when present | 1 MiB; codec returns `TooLarge` before decoding and stops outbound serialization at the bound |
-| `initialize.clientInfo` strings | 256 UTF-8 bytes each; invalid params |
-| Notification opt-outs | At most 32; invalid params |
-| Turn input | At most one text of 64 KiB; base64-encoded images follow the [terminal image contract](./terminal.md#paste-and-attachments), including its aggregate decoded-byte limit; invalid params |
-| Pending inbound requests (reserved server) | 64; pipe backpressure |
-| Outbound queue (reserved server) | 256; follower waits and Journal lag is reported through `events/resync` |
-| Loaded threads / active turns / pending approval requests (reserved server) | 64 / 1 / 1; `threadLimit` / `busy` / sequential approval |
-| Event page (future subscription) | 1,000; explicit continuation |
-| Shutdown grace (reserved server) | 3 seconds after cancellation; unsuccessful exit with recovery guidance on timeout |
-
-A future stdio reader must discard an oversized line through its newline
-without retaining the overflow and return `-32600`, null ID,
-`reason: "messageTooLarge"`. Malformed input returns `-32700`, null ID. A
-rejected line must not consume the next valid message. No stdio reader runs
-in this slice.
+| Encoded or decoded line, including newline when present | 1 MiB; reader discards overflow through its newline and emits `-32600`, null ID, `messageTooLarge`; malformed input emits `-32700`, null ID; the next valid line remains usable. Outbound serialization stops at the bound. |
+| `initialize.clientInfo` strings | 256 UTF-8 bytes each; invalid params. |
+| Notification opt-outs | At most 32; invalid params. |
+| Turn input | At least one input item, at most one text of 64 KiB; base64-encoded images follow the [terminal image contract](./terminal.md#paste-and-attachments), including its image count and aggregate decoded-byte limit; invalid params. Text or images must be nonempty. |
+| Pending inbound requests | 64; reader awaits capacity, applying pipe backpressure; reader buffer 64 KiB. |
+| Outbound queue | 256; follower waits and Journal lag is reported through `events/resync`. |
+| Loaded threads / active submissions / pending approval requests | 64 / 1 / 1; `threadLimit` / `busy` / sequential decline; loaded threads are never evicted. Reloading a known thread consumes no extra slot. |
+| Resume response | Must fit the outbound line bound; otherwise `-32000 contextTooLarge`, without partial history. |
+| Event page (future subscription) | 1,000; explicit continuation. |
+| Shutdown grace | 3 seconds total after EOF, input/output failure or a stop signal, covering Run cancellation, Engine closure and output draining; timeout exits 1 with `Run may be interrupted; check Session history`. |
 
 Schema string lengths are character constraints; typed admission additionally
-checks the stated UTF-8 byte limits, text/image counts and base64 data. Paths
-from clients are absolute; schema validation never replaces Workspace admission,
-Provider selection or Guard enforcement. Embedded open objects are journal data,
-not executable configuration. No socket listener, authentication, multi-user
-isolation, encryption or native platform-support claim is introduced.
+checks UTF-8 byte limits, text/image counts, aggregate image bytes and PNG data.
+Paths from clients are absolute; schema validation never replaces Workspace
+admission, Provider selection or Guard enforcement.
+
+The OS user's parent process is the principal. State path, Guard executable and
+telemetry configuration are fixed before stdin is consumed. Client text/images,
+repository content and Tool output are untrusted data. Client configuration can
+only narrow the existing Tool grant; repository or model text never grants
+trust. Credentials, account records and native keys are absent from the wire.
+Existing Goal budgets and per-action/storage bounds apply unchanged; no child
+gets broader authority. Startup, path admission, permission asks and inert JSON
+encoding form the security pass for this local transport. No socket listener,
+authentication, multi-user isolation, encryption, live Provider compatibility or
+native platform-support claim is introduced. Linux and macOS use the same loop;
+native evidence remains with [NEXT_STEPS](../../NEXT_STEPS.md).
 
 The protocol uses capability strings for feature detection; schema artifact
-versioning is separate. The reserved initial strings are `threads_v1`,
-`turns_v1`, `items_v1`, `interrupt_receipt_v1`. Approval capability advertisement
-waits for an implemented approval handler. Breaking wire changes require a new
+versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
+`items_v1`, `interrupt_receipt_v1`. Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
 pre-beta; stored formats retain their existing no-migration contract.
 
@@ -136,9 +189,11 @@ pre-beta; stored formats retain their existing no-migration contract.
 | Scenario | Required observation | Evidence owner |
 |---|---|---|
 | Stable schema contract | Byte-identical pretty JSON and final newline; intentional golden changes only | [Protocol tests](../../crates/arany-cli/src/protocol/tests.rs), [schema golden](../../crates/arany-cli/tests/fixtures/serve/schema.json) |
-| Envelope conformance and bounds | Both version forms accepted; emitted version present; all four envelopes round-trip; malformed, ambiguous and oversized lines rejected; exact 1 MiB boundary accepted | [Protocol codec table](../../crates/arany-cli/src/protocol/tests.rs) |
-| Typed conformance | Hand-reviewed method, item, notification and approval examples validate against the registered schema; unknown fields, unsupported modes and input overflow rejected | [Protocol conformance corpus](../../crates/arany-cli/src/protocol/tests.rs) |
-| CLI export and refusal | Fresh process exits 0 with exact stdout or file bytes; repeat export replaces safely; symlink/non-file refusal exits 1 with exact diagnostic and preserves external bytes | [Schema process test](../../crates/arany-cli/tests/generate_schema.rs) |
-
-Server execution, journal reopen, interruption, approval dispatch and transport
-recovery are acceptance work for [NEXT_STEPS item 8](../../NEXT_STEPS.md#pursue-in-order).
+| Envelope conformance and bounds | Both version forms accepted; malformed, ambiguous and oversized lines rejected; exact 1 MiB boundary accepted | [Protocol codec table](../../crates/arany-cli/src/protocol/tests.rs) |
+| Typed conformance | Method, item, notification and reserved approval examples validate against registered schemas | [Protocol conformance corpus](../../crates/arany-cli/src/protocol/tests.rs) |
+| CLI export and refusal | Fresh process output/file bytes and safe target replacement/refusal | [Schema process test](../../crates/arany-cli/tests/generate_schema.rs) |
+| Durable start and ordered completion | Exact canonical transcript, schema validation, reopened SessionStarted/MessageAccepted/MessageCommitted/RunFinished and reduced history; resume returns the same items | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [transcript](../../crates/arany-cli/tests/fixtures/serve/basic.jsonl), [Engine creation scenario](../../crates/arany/tests/engine_run.rs) |
+| Protocol state, capacity and transport recovery | Initialization refusals, 64-thread refusal without eviction, 64/256 queue backpressure, oversized/malformed duplex input recovery, tap-gap sequence and missed count | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
+| Cancellation and failure | Busy refusal, interrupt and EOF commit cancellation, three-second grace despite a stalled client, failed accepted turns carry compiled guidance rather than RPC errors | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
+| Tool history and safe approval decline | Reopened dispositions, unfinished ToolStarted projected uncertain, private-settings ask declined with a journaled denied verdict | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
+| Shipped process | Cleared credentials: initialize succeeds, Provider selection fails, EOF exits 0, schema-valid stdout and empty stderr; argument/TTY admission exits 2 before State | [Session process tests](../../crates/arany-cli/tests/session_run.rs) |

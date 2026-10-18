@@ -83,6 +83,8 @@ Malformed, non-object or duplicate-key MCP arguments, and selected-credential re
 
 ## Admission, persistence and recovery
 
+A `serve --stdio` process opens one Engine shared by all its loaded threads; the [serve contract](./serve.md) owns its client loop.
+
 Persist only SQLite schema 4, compaction compiler 3 and one current payload version per Event kind:
 
 | Event kinds | Version |
