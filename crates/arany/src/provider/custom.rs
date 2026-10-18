@@ -202,7 +202,7 @@ fn effort_index(effort: Effort) -> usize {
     Effort::ALL
         .iter()
         .position(|value| *value == effort)
-        .unwrap()
+        .expect("Effort::ALL contains every Effort variant")
 }
 
 fn valid_credential_env(name: &str) -> bool {

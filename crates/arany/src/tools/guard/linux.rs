@@ -1062,7 +1062,7 @@ pub(super) async fn execute_inner(
         () = cancellation.cancelled() => Err(ToolError::Operation),
         result = tokio::time::timeout_at(deadline, execution) => result.unwrap_or(Err(ToolError::Limit)),
     };
-    settle_launch(
+    Box::pin(settle_launch(
         &mut unit,
         &permit,
         &mut child,
@@ -1070,7 +1070,7 @@ pub(super) async fn execute_inner(
         deadline,
         result,
         (&mut cache, runtime.worker.as_deref()),
-    )
+    ))
     .await
 }
 

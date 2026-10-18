@@ -64,7 +64,7 @@ async fn closed_bundle(
     }
 }
 
-async fn worker_case(case: &'static str) {
+pub(super) async fn worker_case(case: &'static str) {
     arany::test_support::isolate_account_root();
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");

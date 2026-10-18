@@ -184,7 +184,11 @@ impl<'a> RunLoop<'a> {
         self.ledger().settle(input, output)
     }
 
-    async fn append(&self, event: Event) -> Result<(), EngineError> {
+    fn append(&self, event: Event) -> step::BoxedStep<'_, ()> {
+        Box::pin(self.append_inner(event))
+    }
+
+    async fn append_inner(&self, event: Event) -> Result<(), EngineError> {
         self.ledger
             .append(self.journal, self.session_id, event)
             .await?;
