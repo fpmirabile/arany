@@ -79,6 +79,7 @@ fn synthetic_server(
     case: CompactionCase,
     compaction_started: mpsc::Sender<()>,
     compaction_release: mpsc::Receiver<()>,
+    roster_path: std::path::PathBuf,
 ) {
     listener.set_nonblocking(true).expect("bounded accept");
     let request_count = if matches!(case, CompactionCase::ProviderFailure) {
@@ -163,6 +164,9 @@ fn synthetic_server(
                 assert!(input.get("includes").is_none());
                 assert_eq!(input["items"].as_array().unwrap().len(), 2);
             }
+        }
+        if index == 4 && matches!(case, CompactionCase::Success) {
+            std::fs::write(&roster_path, b"changed preset after Run admission").unwrap();
         }
         if index == 5 {
             compaction_started
@@ -271,8 +275,19 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         .expect("private profile");
     let (request_sender, request_ready) = mpsc::channel();
     let (release_compaction, compaction_release) = mpsc::sync_channel(1);
-    let server =
-        thread::spawn(move || synthetic_server(listener, case, request_sender, compaction_release));
+    let roster_path = state.join("provider-roster.json");
+    if matches!(case, CompactionCase::Success) {
+        private_file(&roster_path, &serde_json::to_vec(&serde_json::json!({"version":1,"profiles":[{"name":"main","routes":[{"provider":"custom:local","model":"model-1","effort":null,"account_id":null}]}],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]})).unwrap());
+    }
+    let server = thread::spawn(move || {
+        synthetic_server(
+            listener,
+            case,
+            request_sender,
+            compaction_release,
+            roster_path,
+        )
+    });
 
     let mut check = Command::new(env!("CARGO_BIN_EXE_arany"));
     check
@@ -297,6 +312,14 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     } else {
         "printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; exec \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 --include a.txt --include b.txt \"$ARANY_TEST_FIRST_OBJECTIVE\""
     };
+    let shell = if matches!(case, CompactionCase::Success) {
+        shell.replace(
+            "--provider custom:local",
+            "--profile coding --provider custom:local",
+        )
+    } else {
+        shell.to_owned()
+    };
     let mut attached =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     attached
@@ -309,7 +332,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         .env("SHELL", "/bin/sh")
         .env("TERM", "dumb")
         .current_dir(&workspace)
-        .args(["-q", "-e", "-c", shell, "/dev/null"])
+        .args(["-q", "-e", "-c", &shell, "/dev/null"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -668,7 +691,12 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             let config = run.config.as_ref().expect("pinned config");
             assert_eq!(config.provider, "custom:local");
             assert_eq!(config.saved_api_account_id, None);
+            assert!(config.roster.as_ref().unwrap().valid());
         }
+        assert_eq!(
+            std::fs::read(state.join("provider-roster.json")).unwrap(),
+            b"changed preset after Run admission"
+        );
     }
     assert!(
         view.runs

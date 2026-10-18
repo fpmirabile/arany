@@ -43,7 +43,7 @@ The workspace has two crates: the `arany` library owns the harness, and
 process. The CLI calls `Engine::open(state, EngineConfig)` once, then
 `submit(providers, request, controls) -> RunHandle` for each submission. The
 handle exposes cancel, steer, approvals and events; completion yields
-`RunResult { run, stopped }`. Per-role Provider chains are chosen per submission.
+`RunResult { run, stopped }`. The CLI/account edge constructs an admitted Provider bundle per submission: four role chains plus an optional immutable named roster. JSON file types and credentials stay at that edge; the Engine independently validates bounded semantic snapshots, named identities and fixed role defaults. RunStarted pins the cross-validated roster/digest with role provenance. Child assignments remain objective strings until the assignment-selection slice; no new process or privilege boundary is added.
 A concurrent submission or compaction is refused with `EngineError::Busy`;
 Session and ancestor locks remain scoped to a Run, while the Store thread lives
 until the Engine is closed or dropped. The [execution contract](../specs/execution.md#admission-persistence-and-recovery)

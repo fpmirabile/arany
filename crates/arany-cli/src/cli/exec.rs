@@ -23,10 +23,16 @@ pub(crate) struct ExecArgs {
     pub state_dir: Option<PathBuf>,
     #[arg(long)]
     pub workspace: Option<PathBuf>,
-    #[arg(long, help = "openai, anthropic, chatgpt, or custom:NAME")]
-    pub provider: ProviderArg,
+    #[arg(
+        long,
+        required_unless_present = "profile",
+        help = "openai, anthropic, chatgpt, or custom:NAME"
+    )]
+    pub provider: Option<ProviderArg>,
+    #[arg(long, required_unless_present = "profile")]
+    pub model: Option<String>,
     #[arg(long)]
-    pub model: String,
+    pub profile: Option<String>,
     #[arg(long, help = "Model-specific reasoning effort")]
     pub effort: Option<Effort>,
     #[arg(long)]
@@ -91,22 +97,28 @@ struct Admission {
 impl ExecArgs {
     fn admit(&self) -> Result<Admission, &'static str> {
         if matches!(
-            self.provider,
-            ProviderArg::Openai | ProviderArg::Anthropic | ProviderArg::Chatgpt
-        ) && validate_native_model_id(&self.model).is_err()
+            self.provider.as_ref(),
+            Some(ProviderArg::Openai | ProviderArg::Anthropic | ProviderArg::Chatgpt)
+        ) && validate_native_model_id(self.model.as_deref().unwrap_or_default()).is_err()
         {
             return Err("invalid native model ID");
         }
-        if matches!(self.provider, ProviderArg::Chatgpt) && self.effort.is_none() {
+        if matches!(self.provider, Some(ProviderArg::Chatgpt)) && self.effort.is_none() {
             return Err("ChatGPT requires --effort LEVEL");
         }
-        if matches!(self.provider, ProviderArg::Openai | ProviderArg::Anthropic)
-            && resolve_native_effort_for_run(
-                &self.provider.profile_label(),
-                &self.model,
-                self.effort,
-            )
-            .is_err()
+        if matches!(
+            self.provider,
+            Some(ProviderArg::Openai | ProviderArg::Anthropic)
+        ) && resolve_native_effort_for_run(
+            &self
+                .provider
+                .as_ref()
+                .expect("native Provider")
+                .profile_label(),
+            self.model.as_deref().unwrap_or_default(),
+            self.effort,
+        )
+        .is_err()
         {
             return Err("invalid native model/effort; unknown models require --effort LEVEL");
         }
@@ -182,11 +194,45 @@ impl ExecArgs {
     }
 }
 
-pub(crate) async fn run(args: ExecArgs, telemetry: Telemetry) -> Result<CommandOutput, String> {
+pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<CommandOutput, String> {
+    if let Some(name) = &args.profile {
+        let (workspace, state_dir) =
+            super::admit_workspace(args.workspace.clone(), args.state_dir.clone())
+                .map_err(str::to_owned)?;
+        let selected = super::provider::roster::load(&state_dir, &workspace, name)?;
+        selected.matches(args.provider.as_ref(), args.model.as_deref(), args.effort)?;
+        let primary = selected.primary();
+        args.provider = Some(ProviderArg::from_str(&primary.provider).map_err(str::to_owned)?);
+        args.model = Some(primary.model.clone());
+        args.effort = primary.effort;
+        let admission = args.admit().map_err(str::to_owned)?;
+        use std::io::Write;
+        std::io::stderr()
+            .write_all(selected.manifest()?.as_bytes())
+            .map_err(|_| "roster manifest output failed")?;
+        let mut signals = StopSignals::install().map_err(|_| "signal handling unavailable")?;
+        let providers = tokio::select! {
+            biased;
+            _ = signals.next() => return Err("interrupted before a Run started; no Run was recorded".into()),
+            result = selected.admit(&state_dir, &workspace) => result?,
+        };
+        let state = StateRoot::open_existing(&state_dir)
+            .map_err(|_| "state directory unavailable or unsafe")?;
+        arany::enable_development_diagnostics(&state);
+        let engine = Engine::open(
+            state,
+            EngineConfig {
+                telemetry,
+                guard_executable: std::env::current_exe().ok(),
+            },
+        )
+        .map_err(|_| "state store unavailable")?;
+        return run_on_engine(args, admission, providers, engine, Some(signals)).await;
+    }
     let admission = args.admit().map_err(str::to_owned)?;
     let provider = super::provider::select::select_env_provider(
-        &args.provider,
-        &args.model,
+        args.provider.as_ref().ok_or("--provider is required")?,
+        args.model.as_deref().ok_or("--model is required")?,
         args.effort,
         admission.workspace.clone(),
         &admission.state_dir,
@@ -202,8 +248,13 @@ async fn run_with_provider(
     provider: Arc<dyn Provider>,
     telemetry: Telemetry,
 ) -> Result<CommandOutput, String> {
-    if provider.identity().profile != args.provider.profile_label()
-        || provider.identity().model != args.model
+    if provider.identity().profile
+        != args
+            .provider
+            .as_ref()
+            .ok_or("--provider is required")?
+            .profile_label()
+        || Some(provider.identity().model.as_str()) != args.model.as_deref()
     {
         return Err("selected Provider changed before Workspace admission".into());
     }
@@ -225,7 +276,7 @@ async fn run_with_provider(
         },
     )
     .map_err(|_| "state store unavailable".to_owned())?;
-    run_on_engine(args, admission, providers, engine).await
+    run_on_engine(args, admission, providers, engine, None).await
 }
 
 async fn run_on_engine(
@@ -233,6 +284,7 @@ async fn run_on_engine(
     admission: Admission,
     providers: AdmittedProviders,
     engine: Engine,
+    signals: Option<StopSignals>,
 ) -> Result<CommandOutput, String> {
     let new_session = admission.session_id.is_none();
     let tools = if args.tools {
@@ -264,6 +316,7 @@ async fn run_on_engine(
             policy: admission.policy,
             goal,
         },
+        signals,
     )
     .await;
     engine
@@ -389,7 +442,14 @@ async fn run_on_engine(
     let stderr = if paused {
         format!(
             "{stderr}{}",
-            resume_hint(outcome.session_id, outcome.goal_id)
+            resume_hint(
+                outcome.session_id,
+                outcome.goal_id,
+                run.config
+                    .as_ref()
+                    .and_then(|config| config.roster.as_ref())
+                    .map(|roster| roster.preset.as_str())
+            )
         )
     } else {
         stderr
@@ -430,9 +490,10 @@ fn stop_step(cancelling: bool, signal: StopSignal) -> StopStep {
     }
 }
 
-fn resume_hint(session_id: SessionId, goal_id: GoalId) -> String {
+fn resume_hint(session_id: SessionId, goal_id: GoalId, preset: Option<&str>) -> String {
+    let selector = preset.map_or_else(String::new, |name| format!(" --profile {name}"));
     format!(
-        "Goal paused; resume with arany exec --session-id {session_id} --resume-goal {goal_id}\n"
+        "Goal paused; resume with arany exec{selector} --session-id {session_id} --resume-goal {goal_id}\n"
     )
 }
 
@@ -489,7 +550,11 @@ async fn run_signalled(
     providers: AdmittedProviders,
     tools: ToolGrant,
     request: RunRequest,
+    signals: Option<StopSignals>,
 ) -> Result<SignalledRun, String> {
+    let mut signals = signals
+        .map_or_else(StopSignals::install, Ok)
+        .map_err(|_| "signal handling unavailable".to_owned())?;
     let cancellation = RunCancellation::new();
     let mut run = engine
         .submit(
@@ -503,14 +568,10 @@ async fn run_signalled(
         )
         .map_err(|error| error.to_string())?
         .result;
-    let mut signals =
-        StopSignals::install().map_err(|_| "signal handling unavailable".to_owned())?;
     let mut interrupted = false;
     let forced = loop {
         tokio::select! {
-            result = &mut run => {
-                return Ok(SignalledRun { result, interrupted, forced: None });
-            }
+            biased;
             signal = signals.next() => match stop_step(interrupted, signal) {
                 StopStep::Cancel => {
                     interrupted = true;
@@ -521,6 +582,9 @@ async fn run_signalled(
                     break reason;
                 }
             },
+            result = &mut run => {
+                return Ok(SignalledRun { result, interrupted, forced: None });
+            }
         }
     };
     match tokio::time::timeout(SHUTDOWN_GRACE, &mut run).await {
@@ -591,8 +655,9 @@ mod tests {
         ExecArgs {
             state_dir: Some(state_dir),
             workspace: Some(workspace),
-            provider: ProviderArg::Openai,
-            model: "gpt-5.4".into(),
+            provider: Some(ProviderArg::Openai),
+            model: Some("gpt-5.4".into()),
+            profile: None,
             effort: None,
             session_id: None,
             resume_goal: None,
@@ -629,9 +694,15 @@ mod tests {
         let session = SessionId::new();
         let goal = GoalId::new();
         assert_eq!(
-            resume_hint(session, goal),
+            resume_hint(session, goal, None),
             format!(
                 "Goal paused; resume with arany exec --session-id {session} --resume-goal {goal}\n"
+            )
+        );
+        assert_eq!(
+            resume_hint(session, goal, Some("coding")),
+            format!(
+                "Goal paused; resume with arany exec --profile coding --session-id {session} --resume-goal {goal}\n"
             )
         );
     }
@@ -936,7 +1007,8 @@ mod tests {
                 command,
                 admission,
                 AdmittedProviders::single(provider),
-                engine
+                engine,
+                None
             ),
             collect
         );
@@ -1132,7 +1204,7 @@ mod tests {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
             let version = match line["kind"].as_str() {
-                Some("RunStarted") => 10,
+                Some("RunStarted") => 11,
                 Some("GoalProviderCallReserved" | "RunFinished") => 7,
                 _ => 6,
             };

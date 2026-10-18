@@ -30,7 +30,14 @@ pub(super) fn apply(
             if boundary != Some((record.covered_run_id, record.covered_sequence)) {
                 return Err(ReplayError::InvalidSnapshot);
             }
-            if own_last.is_some_and(|run| !run.compaction_matches(record)) {
+            if current.runs.last().is_some_and(|run| {
+                (own_last.is_some()
+                    || run
+                        .config
+                        .as_ref()
+                        .is_some_and(|config| config.roster.is_some()))
+                    && !run.compaction_matches(record)
+            }) {
                 return Err(ReplayError::InvalidTransition);
             }
             let goal = current.goals.iter_mut().find(|goal| {

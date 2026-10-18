@@ -595,6 +595,7 @@ fn child_routes() -> ProviderRoutes {
 
 fn run_config(providers: Option<ProviderRoutes>) -> crate::session::RunConfig {
     crate::session::RunConfig {
+        roster: None,
         providers,
         provider: "other".into(),
         model: "model-1".into(),
@@ -1476,7 +1477,7 @@ async fn session_compaction_span_uses_the_previously_switched_route() {
         ),
     });
     let mut providers = crate::provider::AdmittedProviders::single(first.clone());
-    providers.compaction.push(second.clone());
+    providers.roles.compaction.push(second.clone());
     let state = temp.path().join("state");
     let engine = Engine::open(
         StateRoot::admit(&state).expect("private State"),

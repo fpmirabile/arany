@@ -52,6 +52,8 @@ pub(crate) struct AttachedArgs {
     #[arg(long, help = "openai, anthropic, chatgpt, or custom:NAME")]
     provider: Option<ProviderArg>,
     #[arg(long)]
+    profile: Option<String>,
+    #[arg(long)]
     model: Option<String>,
     #[arg(long, help = "Model-specific reasoning effort")]
     effort: Option<Effort>,
@@ -169,6 +171,7 @@ struct Admission {
     telemetry: Telemetry,
     state_dir: PathBuf,
     explicit_state_dir: bool,
+    roster: Option<String>,
     workspace: PathBuf,
     include_paths: Vec<PathBuf>,
     tools: bool,
@@ -187,6 +190,7 @@ impl AttachedArgs {
     pub(crate) fn is_empty(&self) -> bool {
         self.state_dir.is_none()
             && self.workspace.is_none()
+            && self.profile.is_none()
             && self.provider.is_none()
             && self.model.is_none()
             && self.effort.is_none()
@@ -289,6 +293,7 @@ impl AttachedArgs {
             telemetry,
             state_dir,
             explicit_state_dir,
+            roster: self.profile,
             workspace,
             include_paths: self.include_paths,
             tools: self.tools,
@@ -306,7 +311,28 @@ impl AttachedArgs {
     }
 }
 
-pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), String> {
+pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<(), String> {
+    let selected = if let Some(name) = &args.profile {
+        if args.setup {
+            return Err("--setup cannot be combined with --profile".into());
+        }
+        let (workspace, state_dir) =
+            super::admit_workspace(args.workspace.clone(), args.state_dir.clone())
+                .map_err(str::to_owned)?;
+        let selected = super::provider::roster::load(&state_dir, &workspace, name)?;
+        selected.matches(args.provider.as_ref(), args.model.as_deref(), args.effort)?;
+        let primary = selected.primary();
+        args.provider = Some(ProviderArg::from_str(&primary.provider).map_err(str::to_owned)?);
+        args.model = Some(primary.model.clone());
+        args.effort = primary.effort;
+        use std::io::Write;
+        std::io::stderr()
+            .write_all(selected.manifest()?.as_bytes())
+            .map_err(|_| "roster manifest output failed")?;
+        Some(selected)
+    } else {
+        None
+    };
     let mut admission = args.admit(telemetry)?;
     let goal_resume = admission.resume_goal;
     let restored_settings = controls::restore_settings(&admission).await;
@@ -333,6 +359,7 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         &mut admission,
         &mut composer,
         &mut setup_notice,
+        selected,
     )
     .await?
     .is_break()
@@ -343,7 +370,9 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         append_notice(&mut setup_notice, permissions::UNAVAILABLE_NOTICE);
     }
     let explicit_provider = admission.defaults.provider.is_some();
-    if admission.defaults.provider.as_deref() == Some("chatgpt") {
+    if admission.defaults.provider.as_deref() == Some("chatgpt")
+        && admission.defaults.account_id.is_none()
+    {
         match chatgpt::selected_account_id() {
             Ok(id) => admission.defaults.account_id = Some(id),
             Err(error) => {
@@ -1332,6 +1361,11 @@ async fn submit_idle_run(
 ) -> Result<Option<Feedback>, String> {
     materialize_session(admission, session_id, view).await?;
     let starting_sequence = view.last_sequence;
+    let draft = match start {
+        GoalStart::Plain => objective.clone(),
+        GoalStart::Autonomous => format!("/goal {objective}"),
+        GoalStart::Resume | GoalStart::Continue => String::new(),
+    };
     match submit_objective(
         engine, terminal, admission, start, view, composer, objective,
     )
@@ -1363,6 +1397,21 @@ async fn submit_idle_run(
         }
         Ok(RunSubmission::Shutdown(reason)) => Err(reason),
         Err(error) => {
+            let reloaded = load_view(&admission.state_dir, *session_id).await;
+            // Roster preflight cannot read the Workspace; return the draft only when nothing was committed.
+            if admission.roster.is_some()
+                && composer.is_empty()
+                && !draft.is_empty()
+                && committed_nothing(
+                    reloaded
+                        .as_ref()
+                        .ok()
+                        .map(|reloaded| reloaded.last_sequence),
+                    starting_sequence,
+                )
+            {
+                let _ = composer.insert_paste(&draft);
+            }
             let text = if composer.is_empty() {
                 format!("Error: {error}")
             } else {
@@ -1371,13 +1420,7 @@ async fn submit_idle_run(
                     composer.character_count()
                 )
             };
-            Ok(reload_view_or_keep(
-                view,
-                load_view(&admission.state_dir, *session_id).await,
-                Some(text),
-                None,
-            )
-            .map(Feedback::History))
+            Ok(reload_view_or_keep(view, reloaded, Some(text), None).map(Feedback::History))
         }
     }
 }
@@ -1726,6 +1769,7 @@ async fn admit_startup(
     admission: &mut Admission,
     composer: &mut Composer,
     setup_notice: &mut Option<String>,
+    selected: Option<super::provider::roster::SelectedRoster>,
 ) -> Result<ControlFlow<()>, String> {
     match permissions::admit(terminal, &admission.workspace, composer, admission.tools).await {
         Ok(permissions::PermissionChoice::Selected(access)) => {
@@ -1747,6 +1791,16 @@ async fn admit_startup(
         Ok(permissions::PermissionChoice::Exit) => return Ok(ControlFlow::Break(())),
         Err(setup::SetupError::Recoverable(error)) => return Err(error),
         Err(error) => return Err(error.into()),
+    }
+    if let Some(selected) = selected {
+        admission.defaults.account_id = selected.primary().account_id;
+        let mut signals =
+            super::exec::StopSignals::install().map_err(|_| "signal handling unavailable")?;
+        tokio::select! {
+            biased;
+            _ = signals.next() => return Err("interrupted before a Run started; no Run was recorded".into()),
+            result = selected.admit(&admission.state_dir, &admission.workspace) => { result?; }
+        }
     }
     match setup::admit_history(terminal, &admission.state_dir, &admission.workspace).await {
         Ok(setup::HistoryAdmission::Ready) => {}
@@ -2176,6 +2230,10 @@ async fn load_view(state_dir: &Path, session_id: SessionId) -> Result<SessionVie
     Ok(view)
 }
 
+fn committed_nothing<T: PartialEq>(reloaded: Option<T>, starting: T) -> bool {
+    reloaded.is_some_and(|sequence| sequence == starting)
+}
+
 fn reload_view_or_keep(
     view: &mut SessionView,
     reloaded: Result<SessionView, String>,
@@ -2262,6 +2320,12 @@ fn print_run_answer(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn draft_returns_only_when_no_sequence_was_committed() {
+        assert!(super::committed_nothing(Some(7), 7));
+        assert!(!super::committed_nothing(Some(8), 7));
+        assert!(!super::committed_nothing(None, 7));
+    }
     use super::*;
 
     #[test]
@@ -2408,6 +2472,7 @@ mod tests {
             policy: CollaborationPolicy::Single,
         };
         let new = Admission {
+            roster: None,
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
             explicit_state_dir: false,
@@ -2441,6 +2506,7 @@ mod tests {
             .expect("first submission saves the conversation");
 
         let resumed = Admission {
+            roster: None,
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
             explicit_state_dir: false,
@@ -2469,6 +2535,7 @@ mod tests {
         assert_eq!(resumed_view.defaults.model.as_deref(), Some("gpt-5.4-mini"));
 
         let continued = Admission {
+            roster: None,
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
             explicit_state_dir: false,
@@ -2513,6 +2580,7 @@ mod tests {
         assert_eq!(preserved.defaults, defaults);
 
         let forked = Admission {
+            roster: None,
             telemetry: Telemetry::disabled(),
             state_dir,
             explicit_state_dir: false,

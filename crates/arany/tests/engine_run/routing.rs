@@ -3,98 +3,160 @@ use super::*;
 use arany::test_support::routing::*;
 use arany::{ProviderRole, Providers};
 
+fn pin_roster(bindings: &mut arany::AdmittedProviders, spare: Option<Arc<dyn Provider>>) {
+    let mut profiles = vec![
+        ("child".to_owned(), bindings.roles.child.clone()),
+        ("compaction".to_owned(), bindings.roles.compaction.clone()),
+        ("primary".to_owned(), bindings.roles.primary.clone()),
+        ("review".to_owned(), bindings.roles.review.clone()),
+    ];
+    let mut eligible = vec!["child".to_owned()];
+    if let Some(spare) = spare {
+        profiles.push(("spare".into(), vec![spare]));
+        eligible.push("spare".into());
+    }
+    let mut snapshot = arany::RosterSnapshot {
+        preset: "coding".into(),
+        selection_digest: [0; 32],
+        profiles: profiles
+            .iter()
+            .map(|(name, chain)| arany::NamedProviderRoutes {
+                name: name.clone(),
+                routes: chain
+                    .iter()
+                    .map(|provider| provider.identity().clone())
+                    .collect(),
+            })
+            .collect(),
+        providers: Providers {
+            primary: "primary".into(),
+            child: "child".into(),
+            review: "review".into(),
+            compaction: "compaction".into(),
+        },
+        child_profiles: eligible,
+    };
+    snapshot.selection_digest = snapshot.digest().unwrap();
+    assert!(snapshot.valid());
+    bindings.roster = Some(arany::AdmittedRoster { snapshot, profiles });
+}
+
 #[tokio::test]
 async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsistent_provenance() {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let state = temp.path().join("state");
-    let primary = route(
-        ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                children: vec!["Inspect".into()],
-            }),
-            finish("done"),
-        ])
-        .with_profile("scripted", "primary-model"),
-    );
-    let child = route(
-        ScriptedProvider::new(vec![finish("child report")]).with_profile("scripted", "child-model"),
-    );
-    let compact = route(
-        ScriptedProvider::new(vec![])
-            .with_profile("scripted", "compact-model")
-            .with_compactions(vec![Ok(CompactionResponse {
-                summary: "summary".into(),
-                response_id: None,
-                usage: arany::Usage::default(),
-                wire_provenance: None,
-            })]),
-    );
-    let mut bindings = routes(&primary);
-    bindings.child = vec![child.clone()];
-    bindings.compaction = vec![compact.clone()];
-    let engine = open(&state);
-    let mut request = input(&workspace);
-    request.policy = CollaborationPolicy::Auto {
-        max_active_children: 1,
-    };
-    let result = run_routed(&engine, bindings.clone(), request, RunControls::default())
-        .await
-        .unwrap();
-    assert_eq!(result.run.status, RunStatus::Finished);
-    let record = engine
-        .compact_session(&bindings, result.session_id, workspace)
-        .await
-        .unwrap();
-    assert_eq!(record.model, "compact-model");
-    engine.close().await.unwrap();
-    let (events, view) = reopen(&state, result.session_id).await;
-    assert_eq!(
-        view.runs[0]
-            .config
-            .as_ref()
-            .unwrap()
-            .providers
-            .as_ref()
-            .unwrap()
-            .child[0],
-        child.identity
-    );
-    assert_eq!(
-        primary
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|request| (request.phase, request.model.as_str()))
-            .collect::<Vec<_>>(),
-        [
-            (AgentPhase::RootPlan, "primary-model"),
-            (AgentPhase::RootSynthesis, "primary-model")
-        ]
-    );
-    assert_eq!(child.requests.lock().unwrap()[0].model, "child-model");
-    assert_eq!(
-        compact.compact_requests.lock().unwrap()[0].model,
-        "compact-model"
-    );
-    for change in 0..3 {
-        let mut invalid = events.clone();
-        let config = invalid
-            .iter_mut()
-            .find_map(|event| match &mut event.event {
-                Event::RunStarted { config, .. } => Some(config),
-                _ => None,
-            })
-            .unwrap();
-        let bindings = config.providers.as_mut().unwrap();
-        match change {
-            0 => bindings.primary[0].model = "different-primary".into(),
-            1 => bindings.child[0].profile = "custom:unverified".into(),
-            _ => bindings.review.clear(),
+    for named in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = temp.path().join("state");
+        let primary = route(
+            ScriptedProvider::new(vec![
+                ProviderOutcome::Delegate(Delegate {
+                    children: vec!["Inspect".into()],
+                }),
+                finish("done"),
+            ])
+            .with_profile("scripted", "primary-model"),
+        );
+        let child = route(
+            ScriptedProvider::new(vec![finish("child report")])
+                .with_profile("scripted", "child-model"),
+        );
+        let compact = route(
+            ScriptedProvider::new(vec![])
+                .with_profile("scripted", "compact-model")
+                .with_compactions(vec![Ok(CompactionResponse {
+                    summary: "summary".into(),
+                    response_id: None,
+                    usage: arany::Usage::default(),
+                    wire_provenance: None,
+                })]),
+        );
+        let mut bindings = routes(&primary);
+        bindings.roles.child = vec![child.clone()];
+        bindings.roles.compaction = vec![compact.clone()];
+        let spare = route(ScriptedProvider::new(vec![]).with_profile("scripted", "unused-model"));
+        if named {
+            pin_roster(&mut bindings, Some(spare.clone()));
         }
-        assert!(SessionView::replay(result.session_id, &invalid).is_err());
+        let engine = open(&state);
+        let mut request = input(&workspace);
+        request.policy = CollaborationPolicy::Auto {
+            max_active_children: 1,
+        };
+        let result = run_routed(&engine, bindings.clone(), request, RunControls::default())
+            .await
+            .unwrap();
+        assert_eq!(result.run.status, RunStatus::Finished);
+        let record = engine
+            .compact_session(&bindings, result.session_id, workspace)
+            .await
+            .unwrap();
+        assert_eq!(record.model, "compact-model");
+        engine.close().await.unwrap();
+        let (events, view) = reopen(&state, result.session_id).await;
+        assert_eq!(
+            view.runs[0]
+                .config
+                .as_ref()
+                .unwrap()
+                .providers
+                .as_ref()
+                .unwrap()
+                .child[0],
+            child.identity
+        );
+        assert_eq!(
+            primary
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| (request.phase, request.model.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (AgentPhase::RootPlan, "primary-model"),
+                (AgentPhase::RootSynthesis, "primary-model")
+            ]
+        );
+        assert_eq!(child.requests.lock().unwrap()[0].model, "child-model");
+        assert_eq!(
+            compact.compact_requests.lock().unwrap()[0].model,
+            "compact-model"
+        );
+        assert!(spare.requests.lock().unwrap().is_empty());
+        assert_eq!(
+            view.runs[0].config.as_ref().unwrap().roster.is_some(),
+            named
+        );
+        for change in 0..if named { 10 } else { 3 } {
+            let mut invalid = events.clone();
+            let config = invalid
+                .iter_mut()
+                .find_map(|event| match &mut event.event {
+                    Event::RunStarted { config, .. } => Some(config),
+                    _ => None,
+                })
+                .unwrap();
+            let bindings = config.providers.as_mut().unwrap();
+            match change {
+                0 => bindings.primary[0].model = "different-primary".into(),
+                1 => bindings.child[0].profile = "custom:unverified".into(),
+                2 => bindings.review.clear(),
+                change => {
+                    let roster = config.roster.as_mut().unwrap();
+                    match change {
+                        3 => roster.selection_digest[0] ^= 1,
+                        4 => roster.providers.primary = "child".into(),
+                        5 => roster.child_profiles.push("missing".into()),
+                        6 => roster.profiles.swap(0, 1),
+                        7 => roster.profiles[0].routes[0].model = "forged".into(),
+                        8 => roster.profiles[0].routes.clear(),
+                        _ => roster.profiles[0].name = "../escape".into(),
+                    }
+                }
+            }
+            assert!(SessionView::replay(result.session_id, &invalid).is_err());
+        }
     }
 }
 
@@ -114,7 +176,7 @@ async fn fallback_chain_is_ordered_and_call_and_unknown_token_budgets_stop_it() 
         let third =
             route(ScriptedProvider::new(vec![finish("third")]).with_profile("scripted", "third"));
         let mut bindings = routes(&primary);
-        bindings.primary.extend([
+        bindings.roles.primary.extend([
             second.clone() as Arc<dyn Provider>,
             third.clone() as Arc<dyn Provider>,
         ]);
@@ -194,8 +256,8 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
             })]),
     );
     let mut bindings = routes(&primary);
-    bindings.child = vec![child.clone(), fallback.clone()];
-    bindings.compaction = vec![compaction.clone(), compaction_fallback.clone()];
+    bindings.roles.child = vec![child.clone(), fallback.clone()];
+    bindings.roles.compaction = vec![compaction.clone(), compaction_fallback.clone()];
     let engine = open(&state);
     let mut request = input(&workspace);
     request.policy = CollaborationPolicy::Auto {
@@ -278,7 +340,7 @@ async fn exhausted_compaction_routes_settle_the_reservation_for_the_next_compact
             ]),
     );
     let mut bindings = routes(&primary);
-    bindings.compaction = vec![compaction.clone(), compaction_fallback.clone()];
+    bindings.roles.compaction = vec![compaction.clone(), compaction_fallback.clone()];
     let engine = open(&state);
     let result = run_routed(
         &engine,
@@ -345,7 +407,7 @@ async fn refused_fallback_admission_settles_the_known_compaction_failure() {
             .with_compactions(vec![summary_response()]),
     );
     let mut bindings = routes(&primary);
-    bindings.compaction = vec![compaction.clone(), compaction_fallback.clone()];
+    bindings.roles.compaction = vec![compaction.clone(), compaction_fallback.clone()];
     let engine = open(&state);
     let result = run_routed(
         &engine,
@@ -421,7 +483,7 @@ async fn tool_enabled_fallback_between_models_of_one_chatgpt_account_is_admitted
             .with_chatgpt_account(account, [2; 32]),
     );
     let mut bindings = routes(&first);
-    bindings.primary = vec![first.clone(), second.clone()];
+    bindings.roles.primary = vec![first.clone(), second.clone()];
     let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
     let result = run_routed(&engine, bindings, input(&workspace), configured())
         .await
@@ -455,7 +517,7 @@ async fn fallback_after_a_tool_observation_never_redispatches_the_tool() {
         route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "fallback"));
     let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
     let mut bindings = routes(&primary);
-    bindings.primary.push(fallback.clone());
+    bindings.roles.primary.push(fallback.clone());
     let result = run_routed(&engine, bindings, input(&workspace), configured())
         .await
         .unwrap();
@@ -498,7 +560,7 @@ async fn tool_enabled_chains_refuse_different_adapters_and_accounts_before_dispa
                 _ => ScriptedProvider::new(vec![]).with_chatgpt_account(Uuid::now_v7(), [4; 32]),
             });
             let mut bindings = routes(&primary);
-            bindings.get_mut(role).push(alternate.clone());
+            bindings.roles.get_mut(role).push(alternate.clone());
             let state = temp.path().join("state");
             let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
             assert!(matches!(
@@ -513,6 +575,26 @@ async fn tool_enabled_chains_refuse_different_adapters_and_accounts_before_dispa
 }
 
 #[tokio::test]
+async fn roster_disagreeing_with_role_chains_is_refused_before_any_call() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let first =
+        route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "first"));
+    let other = route(ScriptedProvider::new(vec![]).with_profile("scripted", "other"));
+    let mut bindings = routes(&first);
+    pin_roster(&mut bindings, None);
+    bindings.roles.child = vec![other];
+    let engine = open(&temp.path().join("state"));
+    assert!(matches!(
+        run_routed(&engine, bindings, input(&workspace), RunControls::default()).await,
+        Err(EngineError::InvalidRequest)
+    ));
+    assert!(first.requests.lock().unwrap().is_empty());
+    engine.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_route() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -523,7 +605,8 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
     let first = route(first);
     let next = route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "next"));
     let mut bindings = routes(&first);
-    bindings.primary.push(next.clone());
+    bindings.roles.primary.push(next.clone());
+    pin_roster(&mut bindings, None);
     let engine = open(&state);
     let mut initial = input(&workspace);
     initial.goal = arany::GoalRequest::new(
@@ -584,7 +667,8 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
         route(ScriptedProvider::new(vec![finish("recovered")]).with_profile("scripted", "first"));
     let next = route(ScriptedProvider::new(vec![]).with_profile("scripted", "next"));
     let mut bindings = routes(&first);
-    bindings.primary.push(next.clone());
+    bindings.roles.primary.push(next.clone());
+    pin_roster(&mut bindings, None);
     let engine = engine_support::open(
         StateRoot::open_existing(&recovered_state).unwrap(),
         EngineConfig::default(),
@@ -594,6 +678,25 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
     resume.session_id = Some(outcome.session_id);
     resume.title = None;
     resume.goal = arany::GoalRequest::resume(outcome.goal_id, true);
+    for omitted in [true, false] {
+        let mut changed = bindings.clone();
+        if omitted {
+            changed.roster = None;
+        } else {
+            let snapshot = &mut changed.roster.as_mut().unwrap().snapshot;
+            snapshot.preset = "changed".into();
+            snapshot.selection_digest = snapshot.digest().unwrap();
+        }
+        let mut attempted_resume = input(&workspace);
+        attempted_resume.session_id = Some(outcome.session_id);
+        attempted_resume.title = None;
+        attempted_resume.goal = arany::GoalRequest::resume(outcome.goal_id, true);
+        assert!(matches!(
+            run_routed(&engine, changed, attempted_resume, RunControls::default()).await,
+            Err(EngineError::RosterSelectionMismatch)
+        ));
+        assert!(first.requests.lock().unwrap().is_empty());
+    }
     let recovered = run_routed(&engine, bindings, resume, RunControls::default())
         .await
         .unwrap();
@@ -602,7 +705,26 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
     assert!(next.requests.lock().unwrap().is_empty());
     assert!(recovered.run.provider_fallbacks.is_empty());
     engine.close().await.unwrap();
-    let (_, view) = reopen(&recovered_state, outcome.session_id).await;
+    let (events, view) = reopen(&recovered_state, outcome.session_id).await;
+    for omitted in [false, true] {
+        let mut forged = events.clone();
+        let config = forged
+            .iter_mut()
+            .rev()
+            .find_map(|event| match &mut event.event {
+                Event::RunStarted { config, .. } => Some(config),
+                _ => None,
+            })
+            .unwrap();
+        if omitted {
+            config.roster = None;
+        } else {
+            let snapshot = config.roster.as_mut().unwrap();
+            snapshot.preset = "forged".into();
+            snapshot.selection_digest = snapshot.digest().unwrap();
+        }
+        assert!(SessionView::replay(outcome.session_id, &forged).is_err());
+    }
     assert_eq!(view.goals[0].provider_calls, 3);
     assert_eq!(view.goals[0].uncertain_active_ms, ceiling);
 }
@@ -640,10 +762,10 @@ async fn fallback_only_on_pre_output_call_failure_and_never_after_partial_output
             ScriptedProvider::new(vec![finish("fallback answer")])
                 .with_profile("scripted", "fallback-model"),
         );
-        let bindings = Providers::all(vec![
+        let bindings = arany::AdmittedProviders::from_roles(Providers::all(vec![
             primary.clone() as Arc<dyn Provider>,
             fallback.clone() as Arc<dyn Provider>,
-        ]);
+        ]));
         let engine = open(&state);
         let result = run_routed(
             &engine,

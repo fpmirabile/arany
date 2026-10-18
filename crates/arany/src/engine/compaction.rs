@@ -392,6 +392,18 @@ fn validate_compaction_routes(
     last_run: &crate::session::RunView,
     providers: &AdmittedProviders,
 ) -> Result<(), EngineError> {
+    if let Some(roster) = last_run
+        .config
+        .as_ref()
+        .and_then(|config| config.roster.as_ref())
+    {
+        if roster.chain(&roster.providers.compaction)
+            != Some(providers.identities().compaction.as_slice())
+        {
+            return Err(EngineError::InvalidRequest);
+        }
+        return Ok(());
+    }
     match last_run
         .config
         .as_ref()
