@@ -345,6 +345,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         for (label, pointer, value) in [
             ("gapped index", "/output_index", json!(1)),
             ("negative index", "/output_index", json!(-1)),
+            ("maximal index", "/output_index", json!(u64::MAX)),
             ("unfinished message", "/item/status", json!("in_progress")),
             ("missing item identity", "/item/id", Value::Null),
         ] {
@@ -1154,6 +1155,7 @@ fn attached_stream_preview_is_in_place_and_never_exposes_wire_arguments() {
     for event in [
         json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"unknown","delta":"unsafe"}),
         json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg","type":"message","role":"assistant","phase":"reasoning","content":[]}}),
+        json!({"type":"response.output_item.added","output_index":u64::MAX,"item":{"id":"msg","type":"message","role":"assistant","phase":"final_answer","content":[]}}),
     ] {
         let (publisher, observed) = ResponsePreview::new();
         let mut decoder = StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher));
