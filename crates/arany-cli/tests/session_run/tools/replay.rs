@@ -37,6 +37,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         unguarded_rules_digest: None,
     };
     let config = RunConfig {
+        supervisor: Some(arany::supervisor::SupervisorPolicy::all_off()),
         worker_policy: None,
         agent_definitions: None,
         roster: None,
@@ -501,6 +502,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             9 => {
                 if let Event::RunStarted { config, .. } = &mut row[4] {
                     config.tool_policy = None;
+                    config.supervisor = None;
                 }
             }
             10 => {

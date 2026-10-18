@@ -923,6 +923,7 @@ mod exec_jsonl_tests {
             ),
         ];
         let run = RunView {
+            supervisor: Default::default(),
             workers: Default::default(),
             id: current_run,
             objective: "Current Run".into(),
@@ -1157,6 +1158,7 @@ mod tests {
             )
         }
         let run = |fallbacks: Vec<_>| super::RunView {
+            supervisor: Default::default(),
             workers: Default::default(),
             id: RunId::new(),
             objective: String::new(),
@@ -1648,6 +1650,7 @@ mod unguarded_tests {
     #[test]
     fn answer_headings_count_unguarded_effects() {
         let mut run = arany::RunView {
+            supervisor: Default::default(),
             workers: Default::default(),
             id: RunId::new(),
             objective: "Run".into(),

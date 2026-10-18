@@ -15,6 +15,7 @@ mod private_fs;
 mod provider;
 mod session;
 mod store;
+pub mod supervisor;
 mod telemetry;
 mod tools;
 
