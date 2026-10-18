@@ -802,7 +802,6 @@ mod tests {
         );
     }
 
-    /// Two commits, then a worktree with a modified file, a modified secret, a rewritten large file and a new file.
     fn fixture(temp: &Path) -> PathBuf {
         let workspace = temp.join("workspace");
         let home = temp.join("home");
@@ -833,7 +832,6 @@ mod tests {
         workspace
     }
 
-    /// Writes repository configuration and hooks that would run user code if Git ever read them.
     fn arm_hostile(temp: &Path, workspace: &Path) -> PathBuf {
         let markers = temp.join("markers");
         let scripts = temp.join("scripts");
@@ -910,7 +908,6 @@ mod tests {
         markers
     }
 
-    /// A sorted recursive snapshot of regular files, symlink targets and directories.
     fn tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         fn walk(root: &Path, path: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
             let mut entries: Vec<PathBuf> = std::fs::read_dir(path)

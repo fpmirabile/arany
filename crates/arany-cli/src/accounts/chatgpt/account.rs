@@ -879,6 +879,7 @@ fn save_keyring_at_with(
         .map_err(|_| AuthorizationError::Unavailable)?
 }
 
+#[cfg(test)]
 pub(super) fn load_selected_private_file_at(
     state: &StateRoot,
     id: Uuid,
@@ -903,6 +904,7 @@ pub(super) fn load_selected_private_file_at(
     Ok(token.credentials)
 }
 
+#[cfg(test)]
 pub(super) fn load_selected_keyring_at(
     state: &StateRoot,
     id: Uuid,
