@@ -399,6 +399,50 @@
       ],
       "type": "object"
     },
+    "GoalPauseParams": {
+      "additionalProperties": false,
+      "properties": {
+        "goalId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "goalId"
+      ],
+      "type": "object"
+    },
+    "GoalResumeParams": {
+      "additionalProperties": false,
+      "properties": {
+        "goalId": {
+          "type": "string"
+        },
+        "input": {
+          "default": null,
+          "items": {
+            "$ref": "#/$defs/TextInput"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "goalId"
+      ],
+      "type": "object"
+    },
     "GoalStatus": {
       "enum": [
         "running",
@@ -1170,6 +1214,28 @@
       ],
       "type": "object"
     },
+    "TextInput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "text": {
+              "maxLength": 65536,
+              "type": "string"
+            },
+            "type": {
+              "const": "text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Thread": {
       "additionalProperties": false,
       "properties": {
@@ -1554,6 +1620,43 @@
       ],
       "type": "string"
     },
+    "TurnSteerParams": {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "items": {
+            "$ref": "#/$defs/TextInput"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId",
+        "input"
+      ],
+      "type": "object"
+    },
+    "TurnSteerResult": {
+      "additionalProperties": false,
+      "properties": {
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "turnId"
+      ],
+      "type": "object"
+    },
     "UserInput": {
       "oneOf": [
         {
@@ -1616,6 +1719,22 @@
         "$ref": "#/$defs/EventsSubscribeResult"
       }
     },
+    "goal/pause": {
+      "params": {
+        "$ref": "#/$defs/GoalPauseParams"
+      },
+      "result": {
+        "$ref": "#/$defs/Empty"
+      }
+    },
+    "goal/resume": {
+      "params": {
+        "$ref": "#/$defs/GoalResumeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TurnResult"
+      }
+    },
     "initialize": {
       "params": {
         "$ref": "#/$defs/InitializeParams"
@@ -1670,6 +1789,14 @@
       },
       "result": {
         "$ref": "#/$defs/TurnResult"
+      }
+    },
+    "turn/steer": {
+      "params": {
+        "$ref": "#/$defs/TurnSteerParams"
+      },
+      "result": {
+        "$ref": "#/$defs/TurnSteerResult"
       }
     }
   },

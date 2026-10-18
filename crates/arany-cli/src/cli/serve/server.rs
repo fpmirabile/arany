@@ -1,10 +1,12 @@
+mod controls;
+
 use super::{
     items::{self, TurnState, notification},
     threads::{self, Threads},
 };
 use arany::{
-    Engine, EngineError, Event, GoalRequest, RunCancellation, RunControls, RunRequest, RunSteering,
-    SessionId, Tapped, ToolApprovals,
+    Engine, EngineError, Event, RunCancellation, RunControls, RunRequest, RunSteering, SessionId,
+    Tapped, ToolApprovals,
 };
 use arany_cli::protocol::{methods::*, rpc::*};
 use base64::Engine as _;
@@ -38,6 +40,13 @@ impl Fault {
             code: -32602,
             message: "invalid parameters".into(),
             reason: Some(Reason::InvalidParams),
+        }
+    }
+    fn refusal(reason: Reason) -> Self {
+        Self {
+            code: -32602,
+            message: "steering note refused".into(),
+            reason: Some(reason),
         }
     }
     pub fn selection(message: &str, reason: Reason) -> Self {
@@ -120,6 +129,7 @@ struct ActiveTurn {
     events: arany::Subscription,
     cancel: RunCancellation,
     approvals: super::approvals::Approvals,
+    steering: RunSteering,
     pending_start: Option<RequestId>,
     result_done: bool,
     state: TurnState,
@@ -291,8 +301,9 @@ async fn run_inner(
                                 send(&outbound, response).await.map_err(internal)?;
                                 Ok(None)
                             }
-                            "turn/start" => {
-                                let input: TurnStartParams = params(request.params)?;
+                            "turn/start" | "goal/resume" => {
+                                let mut input =
+                                    controls::Submission::parse(&request.method, request.params)?;
                                 if active.is_some() {
                                     return Err(Fault::state(Reason::Busy));
                                 }
@@ -300,24 +311,10 @@ async fn run_inner(
                                     .map
                                     .get(&input.thread_id)
                                     .ok_or_else(|| Fault::state(Reason::ThreadNotLoaded))?;
-                                let (objective, images) = input_parts(input.input)?;
-                                let mut goal = match input.goal {
-                                    Some(GoalInput {
-                                        resume_goal_id: Some(_),
-                                        ..
-                                    }) => return Err(Fault::params()),
-                                    Some(GoalInput {
-                                        autonomous: true, ..
-                                    }) => GoalRequest::autonomous(
-                                        loaded.goal_budget,
-                                        arany::GoalPhase::Implementation,
-                                    ),
-                                    _ => GoalRequest::default(),
-                                };
-                                goal.budget = Some(loaded.goal_budget);
-                                goal.resource_settings = loaded.resource_settings;
-                                let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
+                                let (objective, images) = input.parts()?;
                                 let view = threads::load_view(&state, input.thread_id).await?;
+                                let goal = input.goal(loaded, &view)?;
+                                let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
                                 let first_sequence = view
                                     .last_sequence
                                     .checked_add(1)
@@ -334,10 +331,11 @@ async fn run_inner(
                                     policy: loaded.policy,
                                     goal,
                                 };
+                                let steering = RunSteering::new();
                                 let controls = RunControls {
                                     tools: loaded.grant.clone(),
                                     approvals: Some(approvals),
-                                    steering: Some(RunSteering::new()),
+                                    steering: Some(steering.clone()),
                                     cancellation: RunCancellation::new(),
                                     progress: None,
                                 };
@@ -396,6 +394,7 @@ async fn run_inner(
                                     events,
                                     cancel,
                                     approvals,
+                                    steering,
                                     pending_start: Some(id.clone()),
                                     result_done: false,
                                     state: TurnState {
@@ -419,6 +418,12 @@ async fn run_inner(
                                 turn.approvals.close();
                                 turn.cancel.cancel();
                                 Ok(Some(json!({})))
+                            }
+                            "turn/steer" => {
+                                controls::steer(active.as_ref(), request.params).map(Some)
+                            }
+                            "goal/pause" => {
+                                controls::pause(active.as_ref(), request.params).map(Some)
                             }
                             _ => Err(Fault {
                                 code: -32601,
@@ -806,6 +811,7 @@ mod tests {
             events,
             cancel,
             approvals: super::super::approvals::Approvals::empty_for_test(),
+            steering: RunSteering::new(),
             pending_start: Some(RequestId::Integer(3)),
             result_done: true,
             state: TurnState {
