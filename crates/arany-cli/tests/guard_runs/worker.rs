@@ -163,17 +163,24 @@ async fn worker_case(case: &'static str) {
     }
     let violations = provider.violations.lock().unwrap().clone();
     assert!(violations.is_empty(), "{case}: {violations:?}");
-    let session = provider.requests.lock().unwrap()[0].session_id;
     let calls = provider.requests.lock().unwrap().clone();
+    let session = calls
+        .first()
+        .unwrap_or_else(|| panic!("{case}: no provider request; outcome {result:?}"))
+        .session_id;
     engine.close().await.unwrap();
     let bundle = closed_bundle(&state, session, &workspace).await;
-    assert_eq!(bundle.exit, Some(0));
-    assert!(bundle.stderr.is_empty());
+    assert_eq!(bundle.exit, Some(0), "{case}");
+    assert!(bundle.stderr.is_empty(), "{case}");
     assert_action_bounds(&bundle.events, false, false);
-    let run = &bundle.view.runs[0];
+    let run = bundle
+        .view
+        .runs
+        .first()
+        .unwrap_or_else(|| panic!("{case}: no run in session view"));
     if matches!(case, "background" | "mixed" | "wave") {
         assert_eq!(run.status, RunStatus::Failed);
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 2, "{case}");
         assert!(run.agents.iter().all(|a| a.assignment.is_none()));
         return;
     }
@@ -181,7 +188,7 @@ async fn worker_case(case: &'static str) {
         .agents
         .iter()
         .find_map(|a| a.assignment.as_ref())
-        .expect("worker acquired a lease");
+        .unwrap_or_else(|| panic!("{case}: worker acquired no lease; run {:?}", run.status));
     let child_calls = calls
         .iter()
         .filter(|r| r.phase == AgentPhase::ChildWork)
@@ -211,8 +218,8 @@ async fn worker_case(case: &'static str) {
     }
     if case == "publication_loss" {
         assert!(result.is_err(), "publication uncertainty is fatal");
-        assert!(injected);
-        assert_eq!(synthesis_calls, 0);
+        assert!(injected, "{case}");
+        assert_eq!(synthesis_calls, 0, "{case}");
         assert!(worker.released.is_none());
         assert_eq!(
             worker.integration.as_ref().unwrap().1.outcome,
@@ -220,8 +227,8 @@ async fn worker_case(case: &'static str) {
         );
     } else {
         let result = result.expect(case);
-        assert!(result.stopped.is_none());
-        assert!(worker.released.is_some());
+        assert!(result.stopped.is_none(), "{case}");
+        assert!(worker.released.is_some(), "{case}");
         if case == "success" {
             assert_eq!(run.status, RunStatus::Finished);
             assert_eq!(child_calls, 4);
@@ -242,8 +249,8 @@ async fn worker_case(case: &'static str) {
         } else {
             assert_eq!(run.status, RunStatus::Failed, "{case}");
             if case == "private_loss" {
-                assert!(injected);
-                assert_eq!(synthesis_calls, 1);
+                assert!(injected, "{case}");
+                assert_eq!(synthesis_calls, 1, "{case}");
                 assert_eq!(
                     worker.outcome.as_ref().unwrap().1.disposition,
                     WorkerDisposition::PrivateUncertain
