@@ -70,7 +70,7 @@ fn account_path_uses_the_private_binary_fixture() {
         process::assert_single_test_completed(&output.stdout, "inherited account root");
     }
     if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_none() {
-        assert!(root.starts_with(std::env::temp_dir()));
+        assert!(root.starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()));
     }
 }
 

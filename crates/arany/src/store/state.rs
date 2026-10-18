@@ -571,7 +571,7 @@ mod tests {
         if let Some(inherited) = std::env::var_os("ARANY_TEST_ACCOUNT_ROOT") {
             assert_eq!(path, PathBuf::from(inherited));
         } else {
-            assert!(path.starts_with(std::env::temp_dir()));
+            assert!(path.starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()));
             assert_ne!(path, StateRoot::configured_account_path().unwrap());
         }
         let metadata = std::fs::metadata(&path).expect("test account root");

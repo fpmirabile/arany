@@ -28,7 +28,10 @@ pub fn isolate_account_root() -> &'static std::path::Path {
             }
             #[cfg(unix)]
             {
-                let parent = std::env::temp_dir().join(account_roots::parent_name());
+                // macOS `/tmp` is a symlink, which private admission refuses.
+                let parent = std::fs::canonicalize(std::env::temp_dir())
+                    .expect("host temporary directory")
+                    .join(account_roots::parent_name());
                 let (path, lease) =
                     account_roots::create_in(&parent, 128).expect("private test account root");
                 ACCOUNT_LEASE.set(lease).expect("one account lease");

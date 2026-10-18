@@ -29,7 +29,7 @@ fn account_path_uses_the_private_binary_fixture() {
     let root = arany::test_support::isolate_account_root();
     assert_eq!(StateRoot::account_path().unwrap(), root);
     if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_none() {
-        assert!(root.starts_with(std::env::temp_dir()));
+        assert!(root.starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()));
     }
 }
 
