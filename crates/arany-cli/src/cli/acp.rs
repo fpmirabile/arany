@@ -54,7 +54,6 @@ pub(crate) fn admit(args: &AcpArgs) -> Result<(), &'static str> {
 
 struct Config {
     state: PathBuf,
-    workspace: PathBuf,
     provider: ProviderArg,
     model: String,
     effort: Option<Effort>,
@@ -87,17 +86,16 @@ impl Config {
             return authenticated;
         }
         if let Some(roster) = &self.roster {
-            roster.admit(&self.state, &self.workspace).await.is_ok()
+            roster.authenticate(&self.state).await
         } else {
-            super::provider::select::select_env_provider(
-                &self.provider,
+            super::provider::select::authenticate(
+                &self.state,
+                &self.provider.profile_label(),
                 &self.model,
                 self.effort,
-                self.workspace.clone(),
-                &self.state,
+                None,
             )
             .await
-            .is_ok()
         }
     }
 }
@@ -109,11 +107,10 @@ pub(crate) async fn run(
     let state_dir = super::state_dir(args.state_dir).map_err(str::to_owned)?;
     let state =
         StateRoot::admit(&state_dir).map_err(|_| "state directory unavailable or unsafe")?;
-    let workspace = std::env::current_dir().map_err(|_| "Workspace unavailable")?;
     let roster = args
         .profile
         .as_deref()
-        .map(|name| super::provider::roster::load(&state_dir, &workspace, name))
+        .map(|name| super::provider::roster::load_without_workspace(&state_dir, name))
         .transpose()?;
     let (provider, model, effort) = if let Some(roster) = &roster {
         roster.matches(args.provider.as_ref(), args.model.as_deref(), args.effort)?;
@@ -140,7 +137,6 @@ pub(crate) async fn run(
     }
     let config = Config {
         state: state_dir.clone(),
-        workspace,
         provider,
         model,
         effort,

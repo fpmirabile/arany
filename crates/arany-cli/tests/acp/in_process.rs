@@ -75,10 +75,9 @@ async fn send(writer: &mut Writer, id: Value, method: &str, params: Value) -> Va
     value
 }
 
-fn config(state: &std::path::Path, workspace: &std::path::Path) -> Config {
+fn config(state: &std::path::Path) -> Config {
     Config {
         state: state.into(),
-        workspace: workspace.into(),
         provider: ProviderArg::Openai,
         model: "gpt-5.4".into(),
         effort: None,
@@ -91,7 +90,6 @@ fn config(state: &std::path::Path, workspace: &std::path::Path) -> Config {
 
 fn start(
     state: &std::path::Path,
-    workspace: &std::path::Path,
     provider: Arc<dyn Provider>,
 ) -> (Writer, Reader, tokio::task::JoinHandle<Result<(), String>>) {
     let engine = Engine::open(
@@ -99,7 +97,7 @@ fn start(
         EngineConfig::default(),
     )
     .unwrap();
-    let config = config(state, workspace);
+    let config = config(state);
     let state_dir = state.to_path_buf();
     let (client, server) = tokio::io::duplex(64 * 1024);
     let (reader, writer) = tokio::io::split(client);
@@ -201,7 +199,7 @@ async fn committed_text_turn_matches_upstream_schema_and_golden() {
     std::fs::create_dir(&workspace).unwrap();
     let state = root.path().join("state");
     let provider = scripted();
-    let (mut writer, mut reader, task) = start(&state, &workspace, provider.clone());
+    let (mut writer, mut reader, task) = start(&state, provider.clone());
     let mut transcript = Vec::new();
     transcript.push(json!({"client":send(&mut writer, json!(1), "initialize", json!({"protocolVersion":1,"clientInfo":{"name":"test","version":"1"}})).await}));
     transcript.push(json!({"server":next(&mut reader).await}));
@@ -272,7 +270,7 @@ async fn busy_cancel_and_eof_commit_interruption() {
             requests: Arc::default(),
             identity: scripted().identity().clone(),
         });
-        let (mut writer, mut reader, task) = start(&state, &workspace, provider);
+        let (mut writer, mut reader, task) = start(&state, provider);
         initialize(&mut writer, &mut reader).await;
         let session = session(&mut writer, &mut reader, &workspace).await;
         send(
@@ -318,7 +316,7 @@ async fn malformed_oversized_and_hostile_params_recover_over_stdio() {
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let state = root.path().join("state");
-    let (mut writer, mut reader, task) = start(&state, &workspace, scripted());
+    let (mut writer, mut reader, task) = start(&state, scripted());
     writer.write_all(b"{broken\n").await.unwrap();
     assert_eq!(next(&mut reader).await["error"]["code"], -32700);
     writer.write_all(&vec![b'x'; MAX_LINE_BYTES]).await.unwrap();
@@ -396,10 +394,7 @@ async fn transport_auth_and_schema_fixture_without_private_state() {
         "4bcd1d2051ff7ed379bd9b234fb9b09c5ab9245478698e9fab805bd9b52a33a6"
     );
     validate(&wire::response(RequestId::Integer(1), wire::initialized()));
-    let mut config = config(
-        std::path::Path::new("/unopened-state"),
-        std::path::Path::new("/unopened-workspace"),
-    );
+    let mut config = config(std::path::Path::new("/unopened-state"));
     config.authenticated = Some(false);
     let (input, server) = tokio::io::duplex(64 * 1024);
     let (mut writer, mut reader) = (input, BufReader::new(server));
@@ -517,10 +512,7 @@ async fn transport_auth_and_schema_fixture_without_private_state() {
 async fn translator_latches_cancel_reconciles_and_remaps_failures_without_private_state() {
     let _deadline = crate::cli::serve::tests::deadline();
     let shared = Arc::new(Mutex::new(translate::State::default()));
-    let config = config(
-        std::path::Path::new("/state"),
-        std::path::Path::new("/workspace"),
-    );
+    let config = config(std::path::Path::new("/state"));
     let (serve_tx, mut serve_rx) = mpsc::channel(64);
     let (events, event_rx) = mpsc::channel(256);
     let (outbound, mut output) = mpsc::channel(256);
@@ -884,10 +876,7 @@ async fn frame_recovery_uses_real_codec_and_stdio_without_private_state() {
     let (serve_tx, mut serve_rx) = mpsc::channel(64);
     let (outbound, writer_rx) = mpsc::channel(256);
     let (shutdown, _) = watch::channel(false);
-    let mut config = config(
-        std::path::Path::new("/state"),
-        std::path::Path::new("/workspace"),
-    );
+    let mut config = config(std::path::Path::new("/state"));
     config.authenticated = Some(false);
     let reader_task = tokio::spawn(read_messages(
         input,

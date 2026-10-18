@@ -151,7 +151,9 @@ async fn select_provider_inner(
     validate_local_selection(selection).map_err(SelectionError::InvalidLocalSelection)?;
     match selection.profile {
         "openai" => {
-            let key = native_key(selection).await?.into_api_key();
+            let key = native_key(selection.profile, selection.account_id)
+                .await?
+                .into_api_key();
             let provider = match selection.account_id {
                 Some(id) => OpenAiProvider::from_saved_api_key_with_effort(
                     selection.model.to_owned(),
@@ -169,7 +171,7 @@ async fn select_provider_inner(
             Ok(Arc::new(provider))
         }
         "anthropic" => {
-            let credentials = native_key(selection).await?;
+            let credentials = native_key(selection.profile, selection.account_id).await?;
             let provider = AnthropicProvider::from_credentials_with_effort(
                 selection.model.to_owned(),
                 selection.effort,
@@ -214,13 +216,40 @@ async fn select_provider_inner(
     }
 }
 
-async fn native_key(selection: Selection<'_>) -> Result<NativeApiCredentials, SelectionError> {
-    match selection.account_id {
-        Some(id) => credentials::load_selected(id, selection.profile)
+async fn native_key(
+    profile: &str,
+    account_id: Option<Uuid>,
+) -> Result<NativeApiCredentials, SelectionError> {
+    match account_id {
+        Some(id) => credentials::load_selected(id, profile)
             .await
             .map_err(SelectionError::Credentials),
-        None => NativeApiCredentials::from_env(selection.profile)
+        None => NativeApiCredentials::from_env(profile)
             .map_err(|_| SelectionError::NativeCredentialsUnavailable),
+    }
+}
+
+pub(crate) async fn authenticate(
+    state_dir: &Path,
+    profile: &str,
+    model: &str,
+    effort: Option<Effort>,
+    account_id: Option<Uuid>,
+) -> bool {
+    match profile {
+        "openai" | "anthropic" => native_key(profile, account_id).await.is_ok(),
+        "chatgpt" => chatgpt::authenticate(account_id).await.is_ok(),
+        _ => {
+            let Some(name) = profile.strip_prefix("custom:") else {
+                return false;
+            };
+            let Ok(root) = StateRoot::open_existing(state_dir) else {
+                return false;
+            };
+            CustomProvider::admit(&root, name, model, effort)
+                .await
+                .is_ok()
+        }
     }
 }
 

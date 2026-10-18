@@ -39,10 +39,17 @@ consumed. No terminal UI is initialized. Stdout contains only UTF-8 JSON-RPC
 missing credentials leave stderr empty. A selected roster prints its existing
 bounded manifest on stderr before credential access.
 
+The editor launch directory is not a Workspace. Startup loads and validates a
+selected private roster without Workspace admission. Each `session/new.cwd`
+passes the full profile/Provider, State-overlap and Workspace-identity admission
+before Session creation. Authentication checks current credentials without a
+Workspace or inference; ChatGPT token refresh and workspace-dependent account
+admission wait for `session/new`. Authentication alone grants no Run authority.
+
 | Method | Input → result | Admission and ordering |
 |---|---|---|
 | `initialize` | `{protocolVersion,clientInfo?,clientCapabilities?}` → `{protocolVersion:1,agentInfo,agentCapabilities,authMethods}` | First request; a repeat is `alreadyInitialized`. The client version is a u16 integer; unsupported integer versions negotiate down/up to 1, and the client disconnects if it cannot speak 1. Malformed versions fail `invalidParams`. Client info fields pass through serve's 256-byte checks. |
-| `authenticate` | `{methodId:"arany-setup"}` → `{}` | Re-probes the pinned selection without inference. Exactly one agent auth method directs the user to `arany --setup` in a terminal. Missing credentials give `auth_required`; another method ID is invalid. No credential is accepted or returned. |
+| `authenticate` | `{methodId:"arany-setup"}` → `{}` | Re-probes credentials for the pinned selection without inference or Workspace admission. Exactly one agent auth method directs the user to `arany --setup` in a terminal. Missing credentials give `auth_required`; another method ID is invalid. No credential is accepted or returned. |
 | `session/new` | `{cwd,mcpServers,additionalDirectories?}` → `{sessionId}` | Maps to typed `thread/start` with the CLI tuple and `tools:false`. Absolute cwd, Workspace identity and State overlap use serve admission. Nonempty additional directories fail. Editor MCP servers are ignored with one fixed stderr notice per connection; no server is launched or contacted. Success commits Session creation before replying and counts toward serve's loaded-thread limit. |
 | `session/prompt` | `{sessionId,prompt:[{type:"text",text}\|{type:"resource_link",name,uri}]}` → `{stopReason}` | Requires available selection and a loaded Session. Concatenates blocks in order without separators; each resource link becomes the literal mention `[@name](uri)`. The URI is never fetched, opened or turned into authority. Maps to `turn/start`, starting one ordinary Goal. One prompt per process; a concurrent prompt fails `busy`, without queueing or execution. |
 | `session/cancel` | Notification `{sessionId}` | Cancels that Session's active prompt through `turn/interrupt`. Before the turn ID arrives, cancellation is latched and forwarded once. Repeated/unknown cancellations do nothing. |
@@ -147,3 +154,4 @@ State storage and all per-action resource limits remain unchanged.
 | Cancellation and capacity | Busy refusal runs no second prompt; session and request cancellation, pre-accept latch, EOF and stalled output produce bounded interruption without invented success | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Hostile input and recovery | Oversized/malformed lines recover; resource links remain literal mentions within block/UTF-8 bounds; relative cwd, additional directories, unsupported/oversized prompts and ambiguous envelopes refuse; offered fs/terminal and editor MCP never execute; EOF during recovery preserves the committed completion with incompleteUpdates | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Shipped command | TTY refusal exits 2 and unknown `--tools` exits 1 before State; cleared credentials initialize successfully, auth/new fail auth_required, no Session, EOF exits 0 with empty stderr and schema-valid stdout | [Session process corpus](../../crates/arany-cli/tests/session_run.rs) |
+| Editor launch directory | A launch directory containing State still permits initialize, profile authentication and Session creation for a different cwd; a session cwd containing State refuses without creating a Session | [Session process corpus](../../crates/arany-cli/tests/session_run.rs) |

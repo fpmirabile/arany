@@ -51,6 +51,14 @@ pub(crate) fn selected_registration() -> Result<(Uuid, bool), AuthorizationError
     account::selected_registration()
 }
 
+pub(crate) async fn authenticate(
+    expected_account_id: Option<Uuid>,
+) -> Result<(), AuthorizationError> {
+    tokio::task::spawn_blocking(move || account::authenticate(expected_account_id))
+        .await
+        .map_err(|_| AuthorizationError::Unavailable)?
+}
+
 pub(crate) async fn sign_out_selected(
     workspace: PathBuf,
 ) -> Result<account::SignOutOutcome, AuthorizationError> {

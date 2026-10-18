@@ -2951,6 +2951,80 @@ fn acp_stdio_negotiates_reports_auth_required_and_exits_cleanly() {
 }
 
 #[test]
+fn acp_profile_admits_session_cwd_instead_of_launch_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    StateRoot::admit(&state).unwrap();
+    private_file(
+        &state.join("provider-roster.json"),
+        &serde_json::to_vec(&serde_json::json!({
+            "version":1,
+            "profiles":[{"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":"low","account_id":null}]}],
+            "presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main"]}]
+        })).unwrap(),
+    );
+    let input = format!(
+        "{}\n{}\n{}\n{}\n",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"arany-setup"}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":root.path(),"mcpServers":[]}}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"session/new","params":{"cwd":workspace,"mcpServers":[]}}),
+    );
+    let output = process::file_output(
+        Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .env("OPENAI_API_KEY", "synthetic-acp-key")
+            .current_dir(root.path())
+            .args(["acp", "--profile", "coding", "--state-dir"])
+            .arg(&state),
+        Some(input.as_bytes()),
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stderr, b"Roster preset: coding\nRoles: primary=main, child=main, review=main, compaction=main\nEligible child profiles: main\n  main[0]: openai/gpt-5.4 effort=low (native API)\n");
+    let mut messages: Vec<serde_json::Value> = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    messages.sort_by_key(|message| message["id"].as_i64());
+    assert_eq!(messages.len(), 4, "{messages:?}");
+    assert_eq!(messages[0]["result"]["protocolVersion"], 1);
+    assert_eq!(messages[1]["result"], serde_json::json!({}));
+    assert_eq!(messages[2]["error"]["data"]["reason"], "invalidParams");
+    let id: SessionId = serde_json::from_value(messages[3]["result"]["sessionId"].clone()).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            let events = store.load_session(id).await.unwrap();
+            let view = SessionView::replay(id, &events).unwrap().unwrap();
+            use std::os::unix::fs::MetadataExt;
+            let metadata = std::fs::metadata(&workspace).unwrap();
+            assert_eq!(
+                view.workspace_identity,
+                Some(WorkspaceIdentity {
+                    device: metadata.dev(),
+                    inode: metadata.ino()
+                })
+            );
+            assert!(view.runs.is_empty());
+            store.close().await.unwrap();
+            assert_eq!(
+                arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        });
+}
+
+#[test]
 fn acp_refuses_tools_and_terminal_input_before_state_admission() {
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("state");
