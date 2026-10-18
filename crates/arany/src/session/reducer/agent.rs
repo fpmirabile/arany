@@ -68,6 +68,12 @@ fn child_tool_is_admissible(
         && intent.workspace_device == config.workspace_device
         && intent.workspace_inode == config.workspace_inode
         && intent.call.is_child_research()
+        && child.definition.as_ref().is_none_or(|name| {
+            super::definition_registry(run)
+                .ok()
+                .and_then(|registry| registry.get(name).cloned())
+                .is_some_and(|definition| definition.allows(&intent.call))
+        })
         && run
             .tools
             .iter()
@@ -284,6 +290,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             ordinal,
             objective,
             grant,
+            definition,
         } => {
             if *role == AgentRole::Child {
                 let goal =
@@ -326,7 +333,18 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             {
                 return Err(ReplayError::InvalidTransition);
             }
+            if let Some(name) = definition {
+                let definitions = super::definition_registry(run)?;
+                if *role != AgentRole::Child
+                    || definitions
+                        .get(name)
+                        .is_none_or(|definition| definition.editor())
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
             run.agents.push(AgentView {
+                definition: definition.clone(),
                 id: *agent_run_id,
                 role: *role,
                 ordinal: *ordinal,
@@ -433,6 +451,22 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                                 record.phase == AgentPhase::ChildWork
                                     && agent.grant == Some(ChildGrant::ReadOnly)
                                     && record.requested_tools == 1
+                                    && agent.definition.as_ref().is_none_or(|name| {
+                                        super::definition_registry(run)
+                                            .ok()
+                                            .and_then(|registry| registry.get(name).cloned())
+                                            .is_some_and(|definition| {
+                                                agent
+                                                    .provider_calls
+                                                    .iter()
+                                                    .filter(|prior| {
+                                                        prior.phase == AgentPhase::ChildWork
+                                                    })
+                                                    .count()
+                                                    + 1
+                                                    < usize::from(definition.max_turns)
+                                            })
+                                    })
                                     && child_tool_requests(agent)
                                         < crate::session::MAX_CHILD_TOOL_CALLS
                             }

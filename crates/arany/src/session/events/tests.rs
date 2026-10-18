@@ -644,6 +644,7 @@ mod account_default_tests {
     #[test]
     fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         let mut config = RunConfig {
+            agent_definitions: None,
             roster: None,
             providers: None,
             provider: "openai".into(),
@@ -677,7 +678,7 @@ mod account_default_tests {
         };
         assert_eq!(
             event.payload().unwrap(),
-            r#"{"config":{"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
+            r#"{"config":{"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
         );
         let Event::RunStarted {
             config: ordinary, ..
@@ -753,7 +754,7 @@ mod account_default_tests {
         let mut missing_roster = serde_json::to_value(ordinary).unwrap();
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(11));
+        assert_eq!(payload_version("RunStarted"), Some(12));
         assert_eq!(payload_version("ProviderCallRecorded"), Some(6));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
@@ -1265,6 +1266,7 @@ mod child_grant_tests {
     fn child_grant_round_trips_and_rejects_missing_or_misplaced_pins() {
         let (run_id, agent_run_id) = (RunId::new(), AgentRunId::new());
         let spawned = |role, ordinal, objective: Option<&str>, grant| Event::AgentSpawned {
+            definition: None,
             run_id,
             agent_run_id,
             role,
@@ -1404,12 +1406,12 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(9));
+        assert_eq!(payload_version("ToolFinished"), Some(10));
         assert_eq!(
-            Event::decode("ToolFinished", 9, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 10, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
-        for previous in [8, 7] {
+        for previous in [9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1461,7 +1463,7 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(8));
+        assert_eq!(payload_version("ToolStarted"), Some(9));
         assert_eq!(payload_version("ToolPermissionDecided"), Some(3));
     }
 
@@ -1517,6 +1519,7 @@ mod payload_version_tests {
         let agent = AgentRunId::new();
         let goal_id = GoalId::new();
         let config = RunConfig {
+            agent_definitions: None,
             roster: None,
             providers: None,
             provider: "openai".into(),
@@ -1573,8 +1576,8 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 11,
-                Event::ToolStarted { .. } => 8,
+                Event::RunStarted { .. } => 12,
+                Event::ToolStarted { .. } => 9,
                 _ => 7,
             };
             assert_eq!(event.version(), version, "{}", event.kind());

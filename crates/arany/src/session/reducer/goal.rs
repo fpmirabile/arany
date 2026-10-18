@@ -223,6 +223,27 @@ impl SessionView {
             .agents
             .iter()
             .any(|agent| agent.id == *agent_run_id && agent.status == AgentStatus::Active);
+        let run = current_run(self, *run_id)?;
+        if let Some(agent) = run.agents.iter().find(|agent| agent.id == *agent_run_id)
+            && let Some(name) = &agent.definition
+        {
+            let registry = super::definition_registry(run)?;
+            let definition = registry.get(name).ok_or(ReplayError::InvalidTransition)?;
+            let own_tool_pending = agent
+                .tools
+                .last()
+                .is_some_and(|tool| tool.observation.is_none());
+            if !own_tool_pending
+                && agent
+                    .provider_calls
+                    .iter()
+                    .filter(|call| call.phase == AgentPhase::ChildWork)
+                    .count()
+                    >= usize::from(definition.max_turns)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
         let goal = current_goal_mut(self, *goal_id)?;
         let budget = goal.effective_budget();
         if goal.status != GoalStatus::Running
@@ -302,9 +323,15 @@ impl SessionView {
         let run_status = run.status;
         let active_run_ready =
             run_status == RunStatus::Active
-                && !run.tools.is_empty()
-                && run.tools.iter().all(|tool| tool.observation.is_some())
-                && run.tools.last().is_some_and(ToolView::settled_without_stop)
+                && !run.model_tools().is_empty()
+                && run
+                    .model_tools()
+                    .iter()
+                    .all(|tool| tool.observation.is_some())
+                && run
+                    .model_tools()
+                    .last()
+                    .is_some_and(ToolView::settled_without_stop)
                 && run.primary().is_some_and(|primary| {
                     let Some(request_index) = primary.provider_calls.iter().rposition(|call| {
                         call.disposition == ProviderCallDisposition::ToolRequested
@@ -579,6 +606,13 @@ pub(super) fn apply(
             agent_run_id,
             active_ceiling_ms,
         } => {
+            if let Some(run) = current.runs.last().filter(|run| run.id == *run_id)
+                && run.primary().is_some_and(|primary| {
+                    primary.provider_calls.is_empty() && primary.id == *agent_run_id
+                })
+            {
+                super::definition_registry(run)?;
+            }
             current.reserve_goal_provider_call(goal_id, run_id, agent_run_id)?;
             record_active_ceiling(current_goal_mut(current, *goal_id)?, *active_ceiling_ms);
         }
@@ -619,6 +653,7 @@ pub(super) fn apply(
                 || record.covered_run_id != *run_id
                 || run.status != RunStatus::Active
                 || run.tools.iter().any(|tool| tool.observation.is_none())
+                || covered_count <= run.parse_count()
                 || covered_count > run.tools.len()
                 || !ends_whole_step(run, covered_count)
                 || *covered_tool_count <= run.tool_compaction_covered_count
@@ -674,7 +709,7 @@ fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
     let Some(primary) = run.primary() else {
         return false;
     };
-    let covered = run.tools[..covered_count]
+    let covered = run.tools[run.parse_count()..covered_count]
         .iter()
         .filter(|tool| !is_integration_tool(tool))
         .count();

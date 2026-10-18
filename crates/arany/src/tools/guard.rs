@@ -14,6 +14,8 @@ use tokio::process::{Child, Command};
 
 const CAPTURE_BYTES: usize = 48 * 1024;
 pub(super) const TASK_BYTES_CAP: usize = 96 * 1024;
+// Only a task carrying one base64 agent definition file may exceed the common cap.
+const DEFINITION_TASK_BYTES: usize = (64 * 1024_usize).div_ceil(3) * 4;
 pub(super) const RUNTIME_ROOT: &str = "/usr";
 // Loaded CI hosts stall teardown for seconds; one shared bound only widens the wait for termination evidence.
 pub(super) const TEARDOWN_WAIT: Duration = Duration::from_secs(10);
@@ -78,6 +80,8 @@ struct Task {
     cache: Option<BuildCacheTransfer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hook_stdin: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    definition: Option<String>,
     #[cfg(target_os = "linux")]
     parent_namespaces: profile::Namespaces,
     #[cfg(target_os = "macos")]
@@ -551,6 +555,7 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
                 intent: intent.clone(),
                 cache: None,
                 hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
+                definition: None,
                 parent_namespaces,
             })
             .is_ok()
@@ -558,7 +563,9 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        encode_task(&Task::new(runtime, intent, None)).is_ok()
+        Task::new(runtime, intent, None)
+            .and_then(|task| encode_task(&task))
+            .is_ok()
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -576,7 +583,13 @@ pub(super) async fn execute(
     #[cfg(target_os = "macos")]
     let result = macos::execute_inner(runtime, intent, cancellation, &mut dispatched).await;
     #[cfg(target_os = "linux")]
-    let result = linux::execute_inner(runtime, intent, cancellation, &mut dispatched).await;
+    let result = Box::pin(linux::execute_inner(
+        runtime,
+        intent,
+        cancellation,
+        &mut dispatched,
+    ))
+    .await;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let result = Err(ToolError::ProtectionUnavailable);
     match result {
@@ -901,9 +914,13 @@ pub(super) async fn capture(
     Err(error)
 }
 
+fn task_cap(definition: bool) -> usize {
+    TASK_BYTES_CAP + if definition { DEFINITION_TASK_BYTES } else { 0 }
+}
+
 fn encode_task(task: &Task) -> Result<Vec<u8>, ToolError> {
     let mut bytes = serde_json::to_vec(task).map_err(|_| ToolError::Configuration)?;
-    if bytes.len() > TASK_BYTES_CAP {
+    if bytes.len() > task_cap(task.definition.is_some()) {
         return Err(ToolError::Limit);
     }
     bytes.push(b'\n');
@@ -913,13 +930,13 @@ fn encode_task(task: &Task) -> Result<Vec<u8>, ToolError> {
 fn read_task(reader: &mut std::io::BufReader<impl Read>) -> Result<Task, ToolError> {
     let mut task = Vec::new();
     std::io::BufRead::read_until(
-        &mut Read::take(&mut *reader, (TASK_BYTES_CAP + 1) as u64),
+        &mut Read::take(&mut *reader, (task_cap(true) + 1) as u64),
         b'\n',
         &mut task,
     )
     .map_err(|_| ToolError::Operation)?;
     if task.last() != Some(&b'\n') {
-        return Err(if task.len() > TASK_BYTES_CAP {
+        return Err(if task.len() > task_cap(true) {
             ToolError::Limit
         } else {
             ToolError::Operation
@@ -928,7 +945,12 @@ fn read_task(reader: &mut std::io::BufReader<impl Read>) -> Result<Task, ToolErr
     if !reader.buffer().is_empty() {
         return Err(ToolError::Configuration);
     }
-    serde_json::from_slice(&task).map_err(|_| ToolError::Configuration)
+    let task_len = task.len();
+    let task: Task = serde_json::from_slice(&task).map_err(|_| ToolError::Configuration)?;
+    if task_len > task_cap(task.definition.is_some()) + 1 {
+        return Err(ToolError::Limit);
+    }
+    Ok(task)
 }
 
 #[cfg(target_os = "macos")]
@@ -964,6 +986,7 @@ pub(super) struct GuardContext<'a> {
     pub(super) workspace: &'a Path,
     pub(super) skill: Option<Vec<u8>>,
     pub(super) hook_stdin: Option<&'a str>,
+    pub(super) definition: Option<Vec<u8>>,
     runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
@@ -1151,6 +1174,7 @@ pub(super) fn helper_main() -> ExitCode {
         {
             return Err(ToolError::ChangedInput);
         }
+        let definition = definition_bytes(&task)?;
         let skill = if task.intent.call.facts().family == Family::Skill {
             Some(load_skill_bytes(&task)?)
         } else {
@@ -1214,6 +1238,7 @@ pub(super) fn helper_main() -> ExitCode {
             workspace,
             skill,
             hook_stdin: task.hook_stdin.as_deref(),
+            definition,
             runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
@@ -1273,6 +1298,43 @@ pub(super) fn helper_main() -> ExitCode {
 #[cfg(target_os = "macos")]
 pub(super) fn unit_main() -> ExitCode {
     macos::unit_main()
+}
+
+#[cfg(target_os = "linux")]
+fn parser_config(config: &Config) -> Config {
+    Config {
+        commands: Vec::new(),
+        skills: Vec::new(),
+        mcp: Vec::new(),
+        git: None,
+        runtime_grants: Vec::new(),
+        ..config.clone()
+    }
+}
+
+fn definition_bytes(task: &Task) -> Result<Option<Vec<u8>>, ToolError> {
+    use base64::Engine as _;
+    match (&task.intent.call, &task.definition) {
+        (ToolCall::ParseAgentDefinition { raw_digest, .. }, Some(encoded)) => {
+            if encoded.len() > DEFINITION_TASK_BYTES {
+                return Err(ToolError::Limit);
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| ToolError::Configuration)?;
+            if bytes.len() > 64 * 1024 {
+                return Err(ToolError::Limit);
+            }
+            if digest(&bytes) != *raw_digest
+                || base64::engine::general_purpose::STANDARD.encode(&bytes) != *encoded
+            {
+                return Err(ToolError::ChangedInput);
+            }
+            Ok(Some(bytes))
+        }
+        (ToolCall::ParseAgentDefinition { .. }, _) | (_, Some(_)) => Err(ToolError::Configuration),
+        (_, None) => Ok(None),
+    }
 }
 
 fn load_skill_bytes(task: &Task) -> Result<Vec<u8>, ToolError> {
@@ -1395,6 +1457,111 @@ pub(super) fn payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_definition_guard_task_binds_snapshot_digest_and_closed_payload() {
+        use base64::Engine as _;
+        let raw = vec![b' '; 64 * 1024];
+        let call = ToolCall::ParseAgentDefinition {
+            index: 0,
+            raw_digest: digest(&raw),
+        };
+        let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let mut task = Task {
+            config,
+            intent: intent(call),
+            cache: None,
+            hook_stdin: None,
+            definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+            #[cfg(target_os = "linux")]
+            parent_namespaces: profile::Namespaces::read().unwrap(),
+            #[cfg(target_os = "macos")]
+            workspace: "/private/fixture/workspace".into(),
+            #[cfg(target_os = "macos")]
+            guard_executable: "/private/fixture/arany".into(),
+            #[cfg(target_os = "macos")]
+            system_programs: None,
+        };
+        let encoded = encode_task(&task).unwrap();
+        assert!(encoded.len() <= TASK_BYTES_CAP + 1);
+        let decoded = read_task(&mut std::io::BufReader::new(encoded.as_slice())).unwrap();
+        assert_eq!(
+            definition_bytes(&decoded).unwrap().unwrap().len(),
+            raw.len()
+        );
+        let mut value = serde_json::to_value(&task).unwrap();
+        value.as_object_mut().unwrap().remove("definition");
+        let mut missing = serde_json::to_vec(&value).unwrap();
+        missing.push(b'\n');
+        assert!(read_task(&mut std::io::BufReader::new(missing.as_slice())).is_err());
+        task.definition =
+            Some(base64::engine::general_purpose::STANDARD.encode(vec![b' '; 64 * 1024 + 1]));
+        assert!(matches!(definition_bytes(&task), Err(ToolError::Limit)));
+        task.definition = Some(base64::engine::general_purpose::STANDARD.encode(b"changed"));
+        assert!(matches!(
+            definition_bytes(&task),
+            Err(ToolError::ChangedInput)
+        ));
+        task.definition = None;
+        assert!(definition_bytes(&task).is_err());
+        task.definition = Some("invalid*".into());
+        assert!(definition_bytes(&task).is_err());
+        task.intent.call = ToolCall::List { path: ".".into() };
+        assert!(definition_bytes(&task).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agent_definition_task_fits_the_cap_with_a_large_pinned_config() {
+        use base64::Engine as _;
+        let raw = vec![b' '; 64 * 1024];
+        let call = ToolCall::ParseAgentDefinition {
+            index: 0,
+            raw_digest: digest(&raw),
+        };
+        let commands: Vec<_> = (0..200)
+            .map(|index| {
+                serde_json::json!({"name": format!("program{index}"), "executable": format!("/usr/bin/{}", "x".repeat(200)), "sha256": "0".repeat(64), "interpreter": false, "inputs": []})
+            })
+            .collect();
+        let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
+        let task = |config: Config| Task {
+            config,
+            intent: intent(call.clone()),
+            cache: None,
+            hook_stdin: None,
+            definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+            parent_namespaces: profile::Namespaces::read().unwrap(),
+        };
+        let encoded = encode_task(&task(config.clone())).unwrap();
+        assert!(encoded.len() > TASK_BYTES_CAP);
+        let decoded = read_task(&mut std::io::BufReader::new(encoded.as_slice())).unwrap();
+        assert!(decoded.definition.is_some());
+        let mut plain = task(config);
+        plain.definition = None;
+        plain.intent.call = ToolCall::List { path: ".".into() };
+        plain.config.workspace_paths = vec!["p".repeat(TASK_BYTES_CAP)];
+        assert!(matches!(encode_task(&plain), Err(ToolError::Limit)));
+        let mut oversized = serde_json::to_vec(&plain).unwrap();
+        oversized.push(b'\n');
+        assert!(matches!(
+            read_task(&mut std::io::BufReader::new(oversized.as_slice())),
+            Err(ToolError::Limit)
+        ));
+    }
+
+    #[test]
+    fn task_reads_classify_eof_short_malformed_and_oversized_inputs() {
+        let read = |bytes: &[u8]| read_task(&mut std::io::BufReader::new(bytes));
+        assert!(matches!(read(b""), Err(ToolError::Operation)));
+        assert!(matches!(read(b"{\"config\""), Err(ToolError::Operation)));
+        assert!(matches!(read(b"{\n"), Err(ToolError::Configuration)));
+        assert!(matches!(read(b"{}\n{}\n"), Err(ToolError::Configuration)));
+        let mut oversized = vec![b' '; task_cap(true) + 1];
+        assert!(matches!(read(&oversized), Err(ToolError::Limit)));
+        oversized.push(b'\n');
+        assert!(matches!(read(&oversized), Err(ToolError::Limit)));
+    }
 
     #[test]
     fn worker_failure_lines_keep_their_closed_stage() {
@@ -2114,6 +2281,7 @@ mod tests {
         .unwrap();
         let task = |call: ToolCall| {
             let probe = Task {
+                definition: None,
                 config: config.clone(),
                 intent: EffectIntent {
                     id: uuid::Uuid::now_v7(),

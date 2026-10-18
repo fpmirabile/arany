@@ -152,7 +152,7 @@ impl RunLoop<'_> {
         let Some(config) = runtime.permissions() else {
             return (0, 0);
         };
-        if matches!(grant, Grant::Researcher { .. }) {
+        if matches!(grant, Grant::Researcher { .. }) || call.is_internal() {
             return (0, 0);
         }
         let Ok(plans) = self.hook_plans(runtime, config, call) else {

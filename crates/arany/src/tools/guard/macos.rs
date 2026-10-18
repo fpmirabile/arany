@@ -211,6 +211,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
         return Err(ToolError::ProtectionUnavailable);
     }
     let mut bytes = b"arany-macos-guard-v15:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go".to_vec();
+    bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-workspace-grant");
     bytes.extend_from_slice(profile(PROFILE, FILE_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
     bytes.extend_from_slice(profile(GIT_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
@@ -307,11 +308,13 @@ pub(super) fn install(
     }
     configure_file_cpu()?;
     let mut profile = profile(PROFILE, FILE_DENIED_SYSCALLS);
-    ancestors(&mut profile, &task.workspace)?;
-    profile.push_str(&format!(
-        "(allow file-read* (subpath {}))\n",
-        quoted(&task.workspace)?
-    ));
+    if !matches!(task.intent.call, ToolCall::ParseAgentDefinition { .. }) {
+        ancestors(&mut profile, &task.workspace)?;
+        profile.push_str(&format!(
+            "(allow file-read* (subpath {}))\n",
+            quoted(&task.workspace)?
+        ));
+    }
     if task.intent.call.mutates() {
         profile.push_str(&format!(
             "(allow file-write* (subpath {}))\n",
@@ -876,12 +879,13 @@ impl Task {
         runtime: &ToolRuntime,
         intent: &EffectIntent,
         cache: Option<super::BuildCacheTransfer>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ToolError> {
+        Ok(Self {
             config: runtime.config.clone(),
             intent: intent.clone(),
             cache,
             hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
+            definition: runtime.definitions.payload(&intent.call)?,
             workspace: runtime.workspace.clone(),
             guard_executable: runtime.guard_executable.clone(),
             system_programs: if intent.call.is_process() {
@@ -889,12 +893,17 @@ impl Task {
             } else {
                 None
             },
-        }
+        })
     }
 
     fn into_runtime(self) -> (ToolRuntime, EffectIntent, Option<super::BuildCacheTransfer>) {
         let cache = self.cache;
         let runtime = ToolRuntime {
+            definitions: super::super::definitions::DefinitionSnapshots::from_payload(
+                &self.intent.call,
+                self.definition,
+            )
+            .into(),
             permissions: None,
             unguarded_rules: None,
             context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
@@ -928,7 +937,7 @@ async fn execute_worker(
     root: &Path,
 ) -> Result<ToolObservation, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
-    let task = super::encode_task(&Task::new(runtime, intent, None))?;
+    let task = super::encode_task(&Task::new(runtime, intent, None)?)?;
     let mut child = Command::new(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
@@ -1203,6 +1212,7 @@ mod tests {
             "workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}))
         .unwrap();
         let task = Task {
+            definition: None,
             intent: EffectIntent {
                 id: uuid::Uuid::now_v7(),
                 run_id: crate::session::RunId::default(),
@@ -1407,6 +1417,7 @@ mod tests {
         .unwrap();
         let call = ToolCall::GitStatus { path: ".".into() };
         let task = Task {
+            definition: None,
             intent: EffectIntent {
                 id: uuid::Uuid::now_v7(),
                 run_id: crate::session::RunId::default(),

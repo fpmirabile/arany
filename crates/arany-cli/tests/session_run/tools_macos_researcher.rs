@@ -228,6 +228,7 @@ done
                 &serde_json::to_vec(&config).unwrap(),
             );
             let mut outcomes = vec![ProviderOutcome::Delegate(arany::Delegate {
+                agent: None,
                 children: vec!["Inspect native facts".into()],
             })];
             outcomes.extend(

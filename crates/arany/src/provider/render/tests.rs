@@ -345,6 +345,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
         ],
         tool_compaction_summary: None,
         tool_compaction_covered_count: 0,
+        definitions: Default::default(),
         display: Vec::new(),
         steering_notes: Vec::new(),
         provider_fallbacks: Vec::new(),
@@ -367,4 +368,62 @@ fn history_tool_block_projects_calls_without_intent_internals() {
     ] {
         assert!(!block.contains(internal), "{internal} leaked into history");
     }
+}
+
+#[test]
+fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
+    use crate::session::{RunStatus, RunView, ToolView};
+    let view = |call: ToolCall, text: &str| {
+        let observed = observation(call, text);
+        ToolView {
+            intent: observed.intent.clone(),
+            observation: Some(observed),
+            review_call_index: None,
+            permission_verdict: None,
+            hooks: Vec::new(),
+            finished_sequence: Some(3),
+        }
+    };
+    let parse = || {
+        view(
+            ToolCall::ParseAgentDefinition {
+                index: 0,
+                raw_digest: [1; 32],
+            },
+            "{}",
+        )
+    };
+    let mut run = RunView {
+        id: RunId::new(),
+        objective: "o".into(),
+        images: Vec::new(),
+        config: None,
+        agents: Vec::new(),
+        assistant_message: None,
+        status: RunStatus::Finished,
+        accepted_sequence: 1,
+        finished_sequence: None,
+        tools: vec![parse()],
+        tool_compaction_summary: None,
+        tool_compaction_covered_count: 0,
+        definitions: Default::default(),
+        display: Vec::new(),
+        steering_notes: Vec::new(),
+        provider_fallbacks: Vec::new(),
+    };
+    assert!(run.model_tools().is_empty());
+    assert_eq!(history_tool_block(&run), "");
+    run.tools.push(view(read("a"), "{\"text\":\"a\"}"));
+    run.tools.push(view(read("b"), "{\"text\":\"b\"}"));
+    let records = |run: &RunView| {
+        let parsed: Value = serde_json::from_str(&history_tool_block(run)).unwrap();
+        parsed["tool_records"].as_array().unwrap().len()
+    };
+    assert_eq!(records(&run), 2);
+    run.tool_compaction_covered_count = 2;
+    assert_eq!(
+        records(&run),
+        1,
+        "covered counts index the Run's Tool Events"
+    );
 }

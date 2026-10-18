@@ -564,6 +564,7 @@ mod tests {
                 })
             } else {
                 ProviderOutcome::Delegate(Delegate {
+                    agent: None,
                     children: vec!["What is two?".into()],
                 })
             };

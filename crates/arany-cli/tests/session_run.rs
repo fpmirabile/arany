@@ -282,6 +282,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         tools: Vec::new(),
                         tool_compaction_summary: None,
                         tool_compaction_covered_count: 0,
+                        definitions: Default::default(),
                         display: Vec::new(),
                         steering_notes: Vec::new(),
                         provider_fallbacks: Vec::new(),
@@ -1619,6 +1620,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .await
             .expect("pending objective");
         let mut config = RunConfig {
+            agent_definitions: None,
             roster: None,
             providers: None,
             provider: "scripted".into(),
@@ -2218,6 +2220,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
             let interrupted_run = RunId::new();
             let primary = AgentRunId::new();
             let config = RunConfig {
+                agent_definitions: None,
                 roster: None,
                 providers: None,
                 provider: "scripted".into(),
@@ -2274,6 +2277,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                 },
                 Event::AgentSpawned {
+                    definition: None,
                     run_id: interrupted_run,
                     agent_run_id: primary,
                     role: AgentRole::Primary,
@@ -2485,6 +2489,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 .append(
                     session_id,
                     Event::AgentSpawned {
+                        definition: None,
                         run_id: next_run,
                         agent_run_id: AgentRunId::new(),
                         role: AgentRole::Primary,
@@ -2821,7 +2826,10 @@ fn serve_stdio_initializes_refuses_missing_credentials_and_exits_cleanly() {
             "turns_v1",
             "items_v1",
             "interrupt_receipt_v1",
-            "approvals_v1"
+            "approvals_v1",
+            "events_subscribe_v1",
+            "receipt_get_v1",
+            "thread_fork_v1"
         ])
     );
     assert_eq!(messages[1]["error"]["code"], -32001);

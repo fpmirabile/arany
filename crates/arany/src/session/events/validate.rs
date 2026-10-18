@@ -103,13 +103,25 @@ impl Event {
                 ordinal,
                 objective,
                 grant,
+                definition,
                 ..
             } => match (role, grant) {
-                (AgentRole::Primary, None) if *ordinal == 0 && objective.is_none() => Ok(()),
-                (AgentRole::Child, Some(_)) if (1..=8).contains(ordinal) => bounded(
-                    objective.as_deref().ok_or(ReplayError::InvalidPayload)?,
-                    2 * 1024,
-                ),
+                (AgentRole::Primary, None)
+                    if *ordinal == 0 && objective.is_none() && definition.is_none() =>
+                {
+                    Ok(())
+                }
+                (AgentRole::Child, Some(_))
+                    if (1..=8).contains(ordinal)
+                        && definition.as_ref().is_none_or(|name| {
+                            name.len() <= 64 && crate::tools::types::valid_name(name)
+                        }) =>
+                {
+                    bounded(
+                        objective.as_deref().ok_or(ReplayError::InvalidPayload)?,
+                        2 * 1024,
+                    )
+                }
                 _ => Err(ReplayError::InvalidPayload),
             },
             Self::ProviderFallbackUsed { fallback, .. } => {

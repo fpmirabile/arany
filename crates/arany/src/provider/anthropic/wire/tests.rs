@@ -515,7 +515,7 @@ fn inbound_end_turn_requires_exactly_one_text_block_as_finish_or_delegate() {
     );
     assert!(matches!(
         decode(&request, &delegate).unwrap().outcome,
-        ProviderOutcome::Delegate(Delegate { children }) if children == ["a", "b"]
+        ProviderOutcome::Delegate(Delegate { children, agent: None }) if children == ["a", "b"]
     ));
 
     let compact = response("end_turn", json!([text_block(r#"{"summary":"short"}"#)]));

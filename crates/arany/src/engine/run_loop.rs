@@ -110,6 +110,9 @@ pub(super) struct RunLoop<'a> {
     controls: LoopControls<'a>,
     ledger: &'a GoalLedger,
     progress: Option<&'a ProgressPublisher>,
+    definitions: std::sync::OnceLock<
+        std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
+    >,
 }
 
 pub(super) struct LoopControls<'a> {
@@ -145,6 +148,7 @@ impl<'a> RunLoop<'a> {
                 ledger,
                 publisher: progress,
             },
+            definitions: std::sync::OnceLock::new(),
             journal,
             session_id: identity.session_id,
             run_id: identity.run_id,
@@ -399,6 +403,12 @@ impl<'a> RunLoop<'a> {
         &self,
         mut root_request: ProviderRequest,
     ) -> Result<(), EngineError> {
+        match self.initialize_definitions(&mut root_request).await {
+            Ok(true) => {}
+            Ok(false) => return self.settle_definition_stop().await,
+            Err(EngineError::GoalBudgetExhausted) => return self.settle_stopped_primary().await,
+            Err(error) => return Err(error),
+        }
         self.drive_primary(&mut root_request).await
     }
 
@@ -433,7 +443,11 @@ impl<'a> RunLoop<'a> {
                     outcome: ProviderOutcome::Delegate(delegation),
                     ..
                 }) => (
-                    planning && self.well_formed_delegation(&delegation.children),
+                    planning
+                        && self.well_formed_delegation(
+                            &delegation.children,
+                            delegation.agent.as_deref(),
+                        ),
                     self.ledger().can_start_provider_call(),
                 ),
                 CallResult::Response(ProviderResponse {
@@ -478,7 +492,7 @@ impl<'a> RunLoop<'a> {
                         return self.settle_stopped_primary().await;
                     }
                     return self
-                        .run_children(root_request, delegation.children, turn)
+                        .run_children(root_request, delegation.children, delegation.agent, turn)
                         .await;
                 }
                 CallResult::Response(ProviderResponse {
@@ -496,7 +510,7 @@ impl<'a> RunLoop<'a> {
                         request: &mut *root_request,
                         review_allowed: planning && self.ledger().admits(Action::Review),
                     };
-                    match self.execute_step(grant, request, turn).await {
+                    match Box::pin(self.execute_step(grant, request, turn)).await {
                         Ok(true) => {}
                         Ok(false) if self.controls.cancellation.is_cancelled() => {
                             return self.settle_stopped_primary().await;
@@ -759,7 +773,11 @@ impl<'a> RunLoop<'a> {
             && plan_and_call_fit
             && plan_valid
             && contract_budget_available
-            && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. })
+            && !matches!(
+                call,
+                crate::tools::ToolCall::ApplyChangeset { .. }
+                    | crate::tools::ToolCall::ParseAgentDefinition { .. }
+            )
     }
 
     pub(super) async fn begin_tool_step(
@@ -810,6 +828,31 @@ impl<'a> RunLoop<'a> {
         })
         .await?;
         Ok(())
+    }
+
+    async fn settle_definition_stop(&self) -> Result<(), EngineError> {
+        let stopped = self.pause_at_boundary()
+            || self.controls.cancellation.is_cancelled()
+            || self.ledger().active_time_exhausted()
+            || self.ledger().view(|view| {
+                view.runs.iter().any(|run| {
+                    run.id == self.run_id
+                        && run.tools.iter().any(|tool| {
+                            tool.observation.as_ref().is_some_and(|observation| {
+                                matches!(
+                                    observation.disposition,
+                                    crate::tools::ToolDisposition::Uncertain
+                                        | crate::tools::ToolDisposition::Cancelled
+                                )
+                            })
+                        })
+                })
+            })?;
+        match definition_stop(stopped, !self.ledger().can_start_provider_call()) {
+            DefinitionStop::Settle => self.settle_stopped_primary().await,
+            DefinitionStop::Budget => self.fail_for_budget().await,
+            DefinitionStop::Fail => self.fail_primary().await,
+        }
     }
 
     async fn fail_primary(&self) -> Result<(), EngineError> {
@@ -994,4 +1037,35 @@ fn valid_finish(finish: &Finish, result_limit: usize) -> bool {
         && finish.result.len() <= result_limit
         && Event::finished_payload_size(&finish.summary, &finish.result)
             .is_ok_and(|bytes| bytes <= crate::store::MAX_EVENT_BYTES)
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum DefinitionStop {
+    Settle,
+    Budget,
+    Fail,
+}
+
+// Interruptions (cancel, pause, active time, Uncertain or Cancelled parse) settle honestly; only a plain refusal fails.
+fn definition_stop(interrupted: bool, provider_budget_closed: bool) -> DefinitionStop {
+    if interrupted {
+        DefinitionStop::Settle
+    } else if provider_budget_closed {
+        DefinitionStop::Budget
+    } else {
+        DefinitionStop::Fail
+    }
+}
+
+#[cfg(test)]
+mod definition_stop_tests {
+    use super::*;
+
+    #[test]
+    fn parser_stops_settle_interruptions_and_fail_budget_or_refusal_distinctly() {
+        assert_eq!(definition_stop(true, true), DefinitionStop::Settle);
+        assert_eq!(definition_stop(true, false), DefinitionStop::Settle);
+        assert_eq!(definition_stop(false, true), DefinitionStop::Budget);
+        assert_eq!(definition_stop(false, false), DefinitionStop::Fail);
+    }
 }

@@ -71,13 +71,14 @@ pub use store::{HistoryReset, Record, RecordKind, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{
     ApprovalInbox, ApprovalMode, ApprovalReply, Attestation, CacheUpdate, CommandChangeset,
-    EffectIntent, EnforcementCause, FileChange, FileVersion, GuardReceipt, MAX_SKILLS,
-    NetworkGrant, ProjectSkills, RuntimeProfileOption, ToolApproval, ToolApprovals, ToolCall,
-    ToolContext, ToolDisposition, ToolError, ToolLimits, ToolObservation, ToolPolicyReceipt,
-    ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep,
-    TrustRecordError, TrustReset, UnguardedPrompt, UnguardedReceipt, WorkspacePermissions,
-    configured_skill_names, list_workspace_entries, mention_paths, native_protection_supported,
-    project_skills, runtime_skill_names, tool_guard_main,
+    DefinitionFilePin, DefinitionRegistryPin, EffectIntent, EnforcementCause, FileChange,
+    FileVersion, GuardReceipt, MAX_SKILLS, NetworkGrant, ProjectSkills, RuntimeProfileOption,
+    ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition, ToolError, ToolLimits,
+    ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile,
+    ToolResourceSettings, ToolStep, TrustRecordError, TrustReset, UnguardedPrompt,
+    UnguardedReceipt, WorkspacePermissions, configured_skill_names, list_workspace_entries,
+    mention_paths, native_protection_supported, project_skills, runtime_skill_names,
+    tool_guard_main,
 };
 
 pub use session::DISPLAY_LIMIT_TEXT;

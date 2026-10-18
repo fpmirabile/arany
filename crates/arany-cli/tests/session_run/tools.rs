@@ -1477,6 +1477,7 @@ impl Provider for BoundedLoop {
         let outcome = if self.team {
             match requests.len() {
                 0 => ProviderOutcome::Delegate(arany::Delegate {
+                    agent: None,
                     children: vec!["Review the stated task without effects".into()],
                 }),
                 1 => ProviderOutcome::Finish(Finish {

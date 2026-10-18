@@ -164,6 +164,9 @@ impl PermissionConfig {
         call: &ToolCall,
     ) -> Result<Vec<(u8, u8, &CommandHook)>, ConfigError> {
         let mut matched = Vec::new();
+        if call.is_internal() {
+            return Ok(matched);
+        }
         for (group_index, group) in self.hooks.groups(HookEvent::PreToolUse).iter().enumerate() {
             if !group.matches_tool(call)? {
                 continue;
@@ -188,6 +191,18 @@ impl PermissionConfig {
 
     pub fn decision(&self, call: &ToolCall) -> Decision {
         self.decision_with_source(call).0
+    }
+
+    pub(crate) fn evaluate_mode(
+        mode: PermissionMode,
+        call: &ToolCall,
+    ) -> (Decision, PermissionSource, Option<ApprovalMode>) {
+        Self {
+            mode,
+            rules: Vec::new(),
+            hooks: HookConfig::validate(Default::default()).expect("empty hooks"),
+        }
+        .evaluate(call)
     }
 
     pub(crate) fn evaluate(

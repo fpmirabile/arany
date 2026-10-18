@@ -230,13 +230,13 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
 }
 
 pub(crate) fn history_tool_block(run: &RunView) -> String {
-    if run.tools.is_empty() && run.tool_compaction_summary.is_none() {
+    if run.model_tools().is_empty() && run.tool_compaction_summary.is_none() {
         return String::new();
     }
     let records: Vec<_> = run
-        .tools
+        .model_tools()
         .iter()
-        .skip(run.tool_compaction_covered_count as usize)
+        .skip((run.tool_compaction_covered_count as usize).saturating_sub(run.parse_count()))
         .map(|tool| match &tool.observation {
             Some(observation) => model_observation(observation),
             None => json!({"call": model_call(&tool.intent.call), "execution": "uncertain; never replay"}),

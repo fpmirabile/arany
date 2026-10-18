@@ -12,6 +12,9 @@ pub fn protocol_schema() -> Value {
         "initialize": method::<InitializeParams, InitializeResult>(&mut generator),
         "thread/start": method::<ThreadStartParams, ThreadResult>(&mut generator),
         "thread/resume": method::<ThreadResumeParams, ThreadResumeResult>(&mut generator),
+        "thread/fork": method::<ThreadForkParams, ThreadResult>(&mut generator),
+        "events/subscribe": method::<EventsSubscribeParams, EventsSubscribeResult>(&mut generator),
+        "receipt/get": method::<ReceiptGetParams, ReceiptGetResult>(&mut generator),
         "turn/start": method::<TurnStartParams, TurnResult>(&mut generator),
         "turn/interrupt": method::<TurnInterruptParams, Empty>(&mut generator),
     });
@@ -23,6 +26,7 @@ pub fn protocol_schema() -> Value {
         "item/started": {"params": generator.subschema_for::<ItemStartedNotification>()},
         "item/completed": {"params": generator.subschema_for::<ItemCompletedNotification>()},
         "events/resync": {"params": generator.subschema_for::<EventsResyncNotification>()},
+        "events/committed": {"params": generator.subschema_for::<EventsCommittedNotification>()},
     });
     let approval = method::<ApprovalParams, ApprovalResult>(&mut generator);
     json!({

@@ -23,6 +23,7 @@ pub enum Output {
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     use arany::{ToolCall, ToolDisposition};
     let operation = match &tool.intent.call {
+        ToolCall::ParseAgentDefinition { .. } => "Parse agent definition".into(),
         ToolCall::List { path } => format!("List {path}"),
         ToolCall::Read { path, .. } => format!("Read {path}"),
         ToolCall::Search { path, .. } => format!("Search {path}"),
@@ -916,6 +917,7 @@ mod exec_jsonl_tests {
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
+            definitions: Default::default(),
             display: Vec::new(),
             steering_notes: Vec::new(),
             provider_fallbacks: Vec::new(),
@@ -1026,17 +1028,7 @@ pub(crate) fn image_description(image: &arany::ImageAttachment, index: usize) ->
 }
 
 fn append_jsonl(rendered: &mut String, envelope: &EventEnvelope) {
-    let line = EventLine {
-        sequence: envelope.sequence,
-        session_id: envelope.session_id.to_string(),
-        run_id: envelope.run_id.map(|id| id.to_string()),
-        agent_run_id: envelope.agent_run_id.map(|id| id.to_string()),
-        kind: envelope.event.kind(),
-        event_version: envelope.event.version() as u32,
-        payload: serde_json::from_str(&envelope.event.payload().expect("validated Event"))
-            .expect("valid Event JSON"),
-        created_at_ms: envelope.created_at_ms,
-    };
+    let line = EventLine::from(envelope);
     let json = serde_json::to_string(&line).expect("serializable Event");
     rendered.push_str(&escape_json_controls(&json));
     rendered.push('\n');
@@ -1155,6 +1147,7 @@ mod tests {
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
+            definitions: Default::default(),
             display: Vec::new(),
             steering_notes: Vec::new(),
             provider_fallbacks: fallbacks,
@@ -1636,6 +1629,7 @@ mod unguarded_tests {
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
+            definitions: Default::default(),
             display: Vec::new(),
             steering_notes: Vec::new(),
         };

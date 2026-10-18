@@ -97,7 +97,7 @@ impl CompiledContext {
             if selected.len() == MAX_HISTORY_RUNS {
                 break;
             }
-            if run.status != RunStatus::Finished && run.tools.is_empty() {
+            if run.status != RunStatus::Finished && run.model_tools().is_empty() {
                 continue;
             }
             if run
@@ -106,7 +106,7 @@ impl CompiledContext {
             {
                 continue;
             }
-            let assistant = if run.tools.is_empty() {
+            let assistant = if run.model_tools().is_empty() {
                 run.assistant_message.clone().ok_or(ContextTooLarge)?
             } else {
                 let mut context = crate::provider::history_tool_block(run);
@@ -159,7 +159,7 @@ impl CompiledContext {
         }));
         let tool_history_bytes = selected
             .iter()
-            .filter(|(run, _)| !run.tools.is_empty())
+            .filter(|(run, _)| !run.model_tools().is_empty())
             .map(|(_, turn)| turn.assistant.len())
             .sum::<usize>() as u32;
         let (history_run_ids, history) = selected

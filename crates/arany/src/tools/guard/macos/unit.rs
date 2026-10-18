@@ -837,7 +837,7 @@ pub(super) async fn execute(
         );
         capture.complete();
         let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
-        let task = super::super::encode_task(&Task::new(runtime, intent, cache_transfer))?;
+        let task = super::super::encode_task(&Task::new(runtime, intent, cache_transfer)?)?;
         let mut bytes = tokio::time::timeout_at(preparation_deadline, async {
             stream
                 .get_mut()
@@ -1733,6 +1733,7 @@ done
         )
         .unwrap();
         ToolRuntime {
+            definitions: Default::default(),
             permissions: None,
             unguarded_rules: None,
             context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
@@ -2974,6 +2975,7 @@ done
                     .unwrap();
                 std::env::set_current_dir(root).unwrap();
                 let task = Task {
+                    definition: None,
                     config: runtime.config.clone(),
                     cache: None,
                     hook_stdin: None,

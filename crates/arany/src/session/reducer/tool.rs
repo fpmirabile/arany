@@ -24,13 +24,32 @@ pub(super) fn apply(
             .as_ref()
             .and_then(|config| config.tool_policy.as_ref())
             .is_some_and(|policy| policy.permissions_digest.is_some());
+        let definition_mode = super::definition_mode(run, *agent_run_id)?;
         let unguarded = observation.intent.call.is_unguarded();
-        if configured || unguarded {
+        if configured || definition_mode.is_some() || unguarded {
             let tool = pending_tool(run, *agent_run_id)?;
             let verdict = tool
                 .permission_verdict
                 .as_ref()
                 .ok_or(ReplayError::InvalidTransition)?;
+            if let Some(mode) = definition_mode {
+                let restriction = crate::tools::permissions::PermissionConfig::evaluate_mode(
+                    mode,
+                    &observation.intent.call,
+                )
+                .0;
+                if verdict.approved
+                    && (restriction == crate::tools::permissions::Decision::Deny
+                        || restriction == crate::tools::permissions::Decision::Ask
+                            && !matches!(
+                                verdict.source,
+                                crate::tools::permissions::PermissionSource::Human
+                                    | crate::tools::permissions::PermissionSource::AiReview
+                            ))
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
             if unguarded
                 && !matches!(
                     observation.attestation,
@@ -59,6 +78,7 @@ pub(super) fn apply(
             verdict,
         } => {
             let run = active_run(current, *run_id)?;
+            let definition_mode = super::definition_mode(run, *agent_run_id)?;
             let policy = run
                 .config
                 .as_ref()
@@ -68,7 +88,11 @@ pub(super) fn apply(
             let rules_pinned = policy.is_some_and(|policy| policy.unguarded_rules_digest.is_some());
             let pending_call = pending_tool(run, *agent_run_id)?.intent.call.clone();
             let unguarded = pending_call.is_unguarded();
-            if verdict.mode.is_some() != permissions_pinned || !(permissions_pinned || unguarded) {
+            if verdict.mode.is_some() != (permissions_pinned || definition_mode.is_some())
+                || !(permissions_pinned || definition_mode.is_some() || unguarded)
+                || definition_mode == Some(crate::tools::permissions::PermissionMode::DontAsk)
+                    && verdict.decision == crate::tools::permissions::Decision::Ask
+            {
                 return Err(ReplayError::InvalidTransition);
             }
             if unguarded
@@ -163,6 +187,7 @@ pub(super) fn apply(
             });
             if tool.permission_verdict.is_some()
                 || tool.observation.is_some()
+                || tool.intent.call.is_internal()
                 || hook.subject_digest != tool.intent.digest()
                 || hook.intent.policy_digest != tool.intent.policy_digest
                 || hook.intent.workspace_device != tool.intent.workspace_device
@@ -224,7 +249,12 @@ pub(super) fn apply(
             let goal = active_run_goal(current, *run_id).ok_or(ReplayError::InvalidTransition)?;
             let phase_allows_call =
                 goal.phase == GoalPhase::Implementation || intent.call.is_goal_plan_prelude();
-            let plan_allows_call = if let Some(contract) = &goal.plan_contract {
+            let plan_allows_call = if matches!(
+                intent.call,
+                crate::tools::ToolCall::ParseAgentDefinition { .. }
+            ) {
+                true
+            } else if let Some(contract) = &goal.plan_contract {
                 !goal.awaiting_plan_contract
                     && (contract.allows_call(&intent.call)
                         || matches!(&intent.call, crate::tools::ToolCall::ApplyChangeset { .. }))
@@ -245,7 +275,24 @@ pub(super) fn apply(
             let primary = run.primary().ok_or(ReplayError::InvalidTransition)?;
             let integration = matches!(&intent.call, crate::tools::ToolCall::ApplyChangeset { .. });
             let valid_origin =
-                if integration {
+                if let crate::tools::ToolCall::ParseAgentDefinition { index, raw_digest } =
+                    &intent.call
+                {
+                    let parsed = run.tools.len();
+                    primary.provider_calls.is_empty()
+                        && run.agents.len() == 1
+                        && usize::from(*index) == parsed
+                        && config
+                            .agent_definitions
+                            .as_ref()
+                            .and_then(|pin| pin.files.get(parsed))
+                            .is_some_and(|file| file.digest == *raw_digest)
+                        && run.tools.iter().all(|tool| {
+                            tool.observation.as_ref().is_some_and(|observation| {
+                                observation.disposition == crate::tools::ToolDisposition::Succeeded
+                            })
+                        })
+                } else if integration {
                     valid_integration_source(run, intent)
                 } else {
                     primary.provider_calls.last().is_some_and(|call| {
@@ -360,6 +407,14 @@ pub(super) fn apply(
                 }
                 tool.observation = Some(observation.clone());
                 tool.finished_sequence = Some(prior);
+                if matches!(
+                    observation.intent.call,
+                    crate::tools::ToolCall::ParseAgentDefinition { .. }
+                ) {
+                    run.definitions = super::DefinitionCache::default();
+                    let computed = super::compute_definition_registry(run).ok();
+                    run.definitions = super::DefinitionCache(computed);
+                }
             }
             let goal_id = current
                 .goals
