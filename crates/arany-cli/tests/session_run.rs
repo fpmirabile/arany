@@ -2816,13 +2816,7 @@ fn serve_stdio_initializes_refuses_missing_credentials_and_exits_cleanly() {
     assert_eq!(messages[0]["id"], 1);
     assert_eq!(
         messages[0]["result"]["capabilities"],
-        serde_json::json!([
-            "threads_v1",
-            "turns_v1",
-            "items_v1",
-            "interrupt_receipt_v1",
-            "approvals_v1"
-        ])
+        serde_json::json!(arany_cli::protocol::methods::CAPABILITIES)
     );
     assert_eq!(messages[1]["error"]["code"], -32001);
     assert_eq!(
