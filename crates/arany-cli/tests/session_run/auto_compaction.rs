@@ -211,7 +211,9 @@ fn synthetic_server(
         }
         let text = match index {
             0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
-            1 => serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}}),
+            1 => {
+                serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
+            }
             2 => serde_json::json!({"summary":"synthetic summary"}),
             3 => {
                 serde_json::json!({"outcome":{"type":"finish","summary":"first summary","result":"A".repeat(24 * 1024)}})

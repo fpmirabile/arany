@@ -1,4 +1,4 @@
-use super::{Delegate, Finish, ProviderError, ProviderOutcome, ToolUseId};
+use super::{ChildAssignment, Delegate, Finish, ProviderError, ProviderOutcome, ToolUseId};
 use crate::tools::types::MAX_TOOL_ARGUMENT_BYTES;
 use crate::tools::{ToolCall, ToolRequest};
 use serde::Deserialize;
@@ -18,7 +18,7 @@ enum StructuredOutcome {
         result: String,
     },
     Delegate {
-        children: Vec<String>,
+        children: Vec<ChildAssignment>,
         agent: Option<String>,
     },
 }
@@ -38,8 +38,16 @@ impl From<StructuredOutcome> for ProviderOutcome {
 
 pub(crate) fn structured_outcome(text: &str) -> Result<ProviderOutcome, ProviderError> {
     serde_json::from_str::<OutcomeEnvelope>(text)
-        .map(|envelope| envelope.outcome.into())
         .map_err(|_| ProviderError::InvalidOutcome)
+        .and_then(|envelope| {
+            let outcome: ProviderOutcome = envelope.outcome.into();
+            if let ProviderOutcome::Delegate(value) = &outcome
+                && !super::valid_assignments(&value.children, value.agent.as_deref())
+            {
+                return Err(ProviderError::InvalidOutcome);
+            }
+            Ok(outcome)
+        })
 }
 
 pub(crate) fn function_outcome(
@@ -104,4 +112,80 @@ pub(crate) fn tools_outcome(requests: Vec<ToolRequest>) -> Result<ProviderOutcom
         return Err(ProviderError::InvalidOutcome);
     }
     Ok(ProviderOutcome::Tools(requests))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assignments_require_one_current_closed_object_form_and_bounded_payload() {
+        for profile in [Value::Null, json!("inspect")] {
+            let value = json!({"outcome": {"type": "delegate", "children": [{"objective": "Inspect", "profile": profile}]}});
+            assert!(structured_outcome(&value.to_string()).is_ok());
+        }
+        for text in [
+            r#"{"outcome":{"type":"delegate","children":["Inspect"]}}"#,
+            r#"{"outcome":{"type":"delegate","children":[{"objective":"Inspect"}]}}"#,
+            r#"{"outcome":{"type":"delegate","children":[{"profile":null}]}}"#,
+            r#"{"outcome":{"type":"delegate","children":[{"objective":"a","objective":"b","profile":null}]}}"#,
+            r#"{"outcome":{"type":"delegate","children":[{"objective":"a","profile":null,"profile":"inspect"}]}}"#,
+        ] {
+            assert!(structured_outcome(text).is_err());
+        }
+        for profile in [
+            json!(1),
+            json!({}),
+            json!([]),
+            json!(""),
+            json!("../inspect"),
+            json!("Inspect"),
+            json!("é"),
+            json!("x".repeat(65)),
+        ] {
+            assert!(structured_outcome(&json!({"outcome": {"type": "delegate", "children": [{"objective": "Inspect", "profile": profile}]}}).to_string()).is_err());
+        }
+        let mut children = vec![
+            super::super::ChildAssignment {
+                objective: "x".repeat(2048),
+                profile: None
+            };
+            8
+        ];
+        let size = |children: &[super::super::ChildAssignment]| {
+            serde_json::to_vec(
+                &json!({"outcome": {"type": "delegate", "children": children, "agent": null}}),
+            )
+            .unwrap()
+            .len()
+        };
+        let extra = 24 * 1024 - size(&children);
+        let controls = extra / 5;
+        let escaped = extra % 5;
+        children[0].objective =
+            "\0".repeat(controls) + &"\n".repeat(escaped) + &"x".repeat(2048 - controls - escaped);
+        assert_eq!(size(&children), 24 * 1024);
+        assert!(super::super::valid_assignments(&children, None));
+        children[1].objective.replace_range(..1, "\n");
+        assert_eq!(size(&children), 24 * 1024 + 1);
+        assert!(!super::super::valid_assignments(&children, None));
+        for (count, objective, valid) in [
+            (0, "Inspect".into(), false),
+            (8, "Inspect".into(), true),
+            (9, "Inspect".into(), false),
+            (1, " ".into(), false),
+            (1, "x".repeat(2048), true),
+            (1, "x".repeat(2049), false),
+            (8, "\0".repeat(2048), false),
+        ] {
+            let children = vec![json!({"objective": objective, "profile": null}); count];
+            assert_eq!(
+                structured_outcome(
+                    &json!({"outcome": {"type": "delegate", "children": children}}).to_string()
+                )
+                .is_ok(),
+                valid
+            );
+        }
+    }
 }

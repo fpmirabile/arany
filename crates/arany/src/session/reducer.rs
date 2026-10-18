@@ -180,6 +180,7 @@ mod tests;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentView {
+    pub profile: Option<String>,
     pub definition: Option<String>,
     pub id: AgentRunId,
     pub role: AgentRole,
@@ -398,6 +399,24 @@ impl RunView {
             }
         }
         text
+    }
+
+    pub(crate) fn provider_chain(
+        &self,
+        actor: AgentRunId,
+        role: crate::provider::ProviderRole,
+    ) -> Option<&[crate::provider::ProviderIdentity]> {
+        let config = self.config.as_ref()?;
+        if role == crate::provider::ProviderRole::Child
+            && let Some(roster) = &config.roster
+        {
+            let agent = self.agents.iter().find(|agent| agent.id == actor)?;
+            return roster.chain(agent.profile.as_deref()?);
+        }
+        config
+            .providers
+            .as_ref()
+            .map(|routes| routes.get(role).as_slice())
     }
 
     pub(crate) fn primary(&self) -> Option<&AgentView> {

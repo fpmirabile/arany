@@ -244,6 +244,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                 },
                 Event::AgentSpawned {
+                    profile: None,
                     definition: None,
                     run_id,
                     agent_run_id,
@@ -418,7 +419,9 @@ async fn run_history_fixture() {
                     0 => {
                         serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
                     }
-                    1 => serde_json::json!({"outcome":{"type":"delegate","children":["child"]}}),
+                    1 => {
+                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child","profile":null}]}})
+                    }
                     _ => serde_json::json!({"summary":"summary"}),
                 };
                 send_response(&mut stream, index, text);
@@ -431,7 +434,7 @@ async fn run_history_fixture() {
                 send_response_for(
                     &mut stream,
                     index,
-                    serde_json::json!({"outcome":{"type":"delegate","children":["child"]}}),
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child","profile":null}]}}),
                     true,
                 );
             } else {

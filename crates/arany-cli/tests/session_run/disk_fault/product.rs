@@ -46,7 +46,7 @@ fn limited_exec_reports_store_failure_without_an_answer() {
             let response = match index {
                 0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
                 1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":["one read-only question"]}})
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
                 _ => serde_json::json!({"summary":"synthetic summary"}),
             };

@@ -302,7 +302,7 @@ impl<'a> RunLoop<'a> {
             self.journal
                 .admit(
                     self.session_id,
-                    action.max_events_for(&self.routing.providers),
+                    action.max_events_for_admitted(&self.routing.providers),
                     action.tool_observations(),
                 )
                 .await?;

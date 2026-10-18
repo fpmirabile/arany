@@ -1148,9 +1148,18 @@ impl Provider for FiniteTokenTeam {
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
                     children: vec![
-                        "Review one".into(),
-                        "Review two".into(),
-                        "Review three".into(),
+                        arany::ChildAssignment {
+                            objective: "Review one".into(),
+                            profile: None,
+                        },
+                        arany::ChildAssignment {
+                            objective: "Review two".into(),
+                            profile: None,
+                        },
+                        arany::ChildAssignment {
+                            objective: "Review three".into(),
+                            profile: None,
+                        },
                     ],
                 }),
                 0,
@@ -1544,6 +1553,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
             active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
         },
         Event::AgentSpawned {
+            profile: None,
             definition: None,
             run_id,
             agent_run_id,
@@ -1649,7 +1659,16 @@ impl Provider for PendingChildren {
                 turn: arany::ProviderTurn::scripted(),
                 outcome: ProviderOutcome::Delegate(Delegate {
                     agent: None,
-                    children: vec!["First child".into(), "Second child".into()],
+                    children: vec![
+                        arany::ChildAssignment {
+                            objective: "First child".into(),
+                            profile: None,
+                        },
+                        arany::ChildAssignment {
+                            objective: "Second child".into(),
+                            profile: None,
+                        },
+                    ],
                 }),
                 response_id: None,
                 usage: arany::Usage {
@@ -3309,7 +3328,10 @@ async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         }),
         finish_with("child result"),
         finish_with("synthesized"),
@@ -3600,7 +3622,10 @@ async fn pause_at_the_delegate_boundary_spawns_no_child() {
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         }),
         finish_with("never reached"),
     ])
@@ -3656,7 +3681,10 @@ async fn pause_before_synthesis_starts_no_synthesis_call() {
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         }),
         finish_with("child result"),
         finish_with("never synthesized"),
@@ -3788,7 +3816,10 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         }),
         crate::tool_outcome(facts_read(), None),
         finish_with("facts say v1"),
@@ -3896,7 +3927,10 @@ async fn child_mcp_call_or_write_is_rejected_before_dispatch() {
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Inspect facts".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect facts".into(),
+                    profile: None,
+                }],
             }),
             crate::tool_outcome(call, None),
             finish_with("never reached"),
@@ -3961,7 +3995,10 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
         ),
         ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect notes".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect notes".into(),
+                profile: None,
+            }],
         }),
         crate::tool_outcome(facts_read(), None),
         crate::tool_outcome(
@@ -4038,7 +4075,10 @@ async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
         let state_path = temp.path().join("state");
         let mut outcomes = vec![ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         })];
         outcomes.extend((0..16).map(|_| crate::tool_outcome(facts_read(), None)));
         if further_tool {
@@ -4107,7 +4147,10 @@ async fn pause_during_research_finishes_the_child_call_and_dispatches_no_child_t
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         }),
         crate::tool_outcome(facts_read(), None),
         finish_with("never reached"),
@@ -4148,7 +4191,10 @@ async fn cancellation_after_a_child_tool_request_dispatches_no_child_tool() {
     let mut provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         }),
         crate::tool_outcome(facts_read(), None),
         finish_with("never reached"),
@@ -4188,7 +4234,10 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         }),
         crate::tool_outcome(facts_read(), None),
         finish_with("never reached"),
@@ -4272,7 +4321,10 @@ async fn near_deadline_child_tool_stops_before_tool_started() {
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         }),
         crate::tool_outcome(facts_read(), None),
         finish_with("never reached"),
@@ -4330,7 +4382,16 @@ async fn pause_before_queued_children_start_cancels_them_without_failing_the_run
     let mut provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect facts".into(), "Inspect facts again".into()],
+            children: vec![
+                arany::ChildAssignment {
+                    objective: "Inspect facts".into(),
+                    profile: None,
+                },
+                arany::ChildAssignment {
+                    objective: "Inspect facts again".into(),
+                    profile: None,
+                },
+            ],
         }),
         crate::tool_outcome(facts_read(), None),
         finish_with("never reached"),
@@ -4445,7 +4506,10 @@ async fn delegation_turn_is_replayed_before_synthesis() {
     let provider = ScriptedProvider::new(vec![
         ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         }),
         finish_with("facts say v1"),
         finish_with("synthesized"),
@@ -4840,6 +4904,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
             active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
         },
         Event::AgentSpawned {
+            profile: None,
             definition: None,
             run_id,
             agent_run_id,

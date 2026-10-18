@@ -49,7 +49,7 @@ impl CallRouter<'_> {
         role: ProviderRole,
         actor: AgentRunId,
     ) -> Result<Arc<dyn Provider>, EngineError> {
-        let chain = self.providers.get(role);
+        let chain = self.chain(role, actor)?;
         let index = self.ledger.view(|view| {
             match view
                 .runs
@@ -64,6 +64,36 @@ impl CallRouter<'_> {
             }
         })??;
         Ok(Arc::clone(&chain[index]))
+    }
+
+    fn chain(
+        &self,
+        role: ProviderRole,
+        actor: AgentRunId,
+    ) -> Result<Vec<Arc<dyn Provider>>, EngineError> {
+        if role == ProviderRole::Child
+            && let Some(roster) = &self.providers.roster
+        {
+            let profile = self
+                .ledger
+                .view(|view| {
+                    view.runs
+                        .last()?
+                        .agents
+                        .iter()
+                        .find(|agent| agent.id == actor)?
+                        .profile
+                        .clone()
+                })?
+                .ok_or(EngineError::InvalidHistory)?;
+            return roster
+                .profiles
+                .iter()
+                .find(|(name, _)| name == &profile)
+                .map(|(_, chain)| chain.clone())
+                .ok_or(EngineError::InvalidHistory);
+        }
+        Ok(self.providers.get(role).clone())
     }
 
     pub(super) fn bind(
@@ -88,7 +118,7 @@ impl CallRouter<'_> {
         preview: Option<ResponsePreview>,
     ) -> Result<CallResult, EngineError> {
         let role = ProviderRole::for_phase(request.phase);
-        if self.providers.get(role).len() == 1 {
+        if self.chain(role, request.agent_run_id)?.len() == 1 {
             let provider = self.bind(
                 role,
                 request.agent_run_id,
@@ -195,27 +225,18 @@ impl CallRouter<'_> {
         }
     }
 
-    fn can_switch(
+    fn next(
         &self,
         role: ProviderRole,
+        actor: AgentRunId,
         from: &ProviderIdentity,
-        request: &ProviderRequest,
-    ) -> bool {
-        let history = request
-            .input
-            .tools
-            .as_ref()
-            .is_some_and(|tools| !tools.steps.is_empty());
-        self.next(role, from)
-            .is_some_and(|to| !history || from.shares_account(to.identity()))
-    }
-
-    fn next(&self, role: ProviderRole, from: &ProviderIdentity) -> Option<&Arc<dyn Provider>> {
-        let chain = self.providers.get(role);
-        chain
+    ) -> Result<Option<Arc<dyn Provider>>, EngineError> {
+        let chain = self.chain(role, actor)?;
+        Ok(chain
             .iter()
             .position(|provider| provider.identity() == from)
             .and_then(|index| chain.get(index + 1))
+            .cloned())
     }
 
     pub(super) async fn switch(
@@ -225,17 +246,24 @@ impl CallRouter<'_> {
         from: &ProviderIdentity,
         request: Option<&ProviderRequest>,
     ) -> Result<bool, EngineError> {
-        if request.is_some_and(|request| !self.can_switch(role, from, request)) {
-            return Ok(false);
-        }
         let CallScope {
             session_id,
             run_id,
             agent_run_id,
         } = scope;
-        let Some(to) = self.next(role, from) else {
+        let Some(to) = self.next(role, agent_run_id, from)? else {
             return Ok(false);
         };
+        if request.is_some_and(|request| {
+            request
+                .input
+                .tools
+                .as_ref()
+                .is_some_and(|tools| !tools.steps.is_empty())
+                && !from.shares_account(to.identity())
+        }) {
+            return Ok(false);
+        }
         let candidate = self.ledger.view(|view| {
             let run = view.runs.last()?;
             let goal = view
@@ -309,7 +337,7 @@ impl CallRouter<'_> {
             .journal
             .admit(
                 session_id,
-                action.max_events_for(&self.providers) + 1,
+                action.max_events_for_admitted(&self.providers) + 1,
                 action.tool_observations(),
             )
             .await

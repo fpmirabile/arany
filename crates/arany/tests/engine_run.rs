@@ -909,7 +909,10 @@ fn compaction_preserves_unanswered_accepted_objectives_as_untrusted_data() {
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["not allowed".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "not allowed".into(),
+                profile: None,
+            }],
         })])
         .with_compactions(vec![Ok(CompactionResponse {
             summary: "Question remains unresolved".into(),
@@ -1134,7 +1137,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             transaction.commit().unwrap();
             drop(connection);
             let responses = if matches!(policy, CollaborationPolicy::Team { .. }) {
-                vec![ProviderOutcome::Delegate(Delegate { agent: None, children: vec!["Child".into()] }), finish(), finish()]
+                vec![ProviderOutcome::Delegate(Delegate { agent: None, children: vec![arany::ChildAssignment { objective: "Child".into(), profile: None }] }), finish(), finish()]
             } else { vec![finish()] };
             let provider = ScriptedProvider::new(responses);
             let requests = provider.requests.clone();
@@ -1239,7 +1242,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             transaction.commit().unwrap();
             drop(connection);
             let provider = ScriptedProvider::new(vec![
-                ProviderOutcome::Delegate(Delegate { agent: None, children: vec!["Child one".into(), "Child two".into()] }),
+                ProviderOutcome::Delegate(Delegate { agent: None, children: vec![arany::ChildAssignment { objective: "Child one".into(), profile: None }, arany::ChildAssignment { objective: "Child two".into(), profile: None }] }),
                 finish(),
                 finish(),
                 finish(),
@@ -1593,7 +1596,10 @@ fn bounded_finish_output_must_fit_canonical_json() {
             if child {
                 responses.push(ProviderOutcome::Delegate(Delegate {
                     agent: None,
-                    children: vec!["Child".into()],
+                    children: vec![arany::ChildAssignment {
+                        objective: "Child".into(),
+                        profile: None,
+                    }],
                 }));
             }
             responses.push(ProviderOutcome::Finish(Finish {
@@ -1712,7 +1718,10 @@ fn invalid_delegation_fails_the_run_without_committing_an_answer() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: vec!["unauthorized child".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "unauthorized child".into(),
+                profile: None,
+            }],
         })]);
         let requests = provider.requests.clone();
         let state_path = temp.path().join("state");
@@ -1855,7 +1864,10 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Check fact".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Check fact".into(),
+                    profile: None,
+                }],
             }),
             ProviderOutcome::Finish(Finish {
                 summary: "checked".into(),
@@ -2592,7 +2604,10 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Inspect".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect".into(),
+                    profile: None,
+                }],
             }),
             ProviderOutcome::Finish(Finish {
                 summary: "child".into(),
@@ -2978,7 +2993,13 @@ fn eight_children_use_the_same_ordered_loop() {
         let objectives: Vec<_> = (1..=8).map(|index| format!("Child {index}")).collect();
         let mut responses = vec![ProviderOutcome::Delegate(Delegate {
             agent: None,
-            children: objectives.clone(),
+            children: objectives
+                .iter()
+                .map(|objective| arany::ChildAssignment {
+                    objective: objective.clone(),
+                    profile: None,
+                })
+                .collect(),
         })];
         responses.extend((0..8).map(|_| {
             ProviderOutcome::Finish(Finish {
@@ -3064,7 +3085,12 @@ fn collaboration_capacity_corpus_rejects_invalid_delegation() {
             ),
         ];
         for (index, (policy, count)) in cases.into_iter().enumerate() {
-            let children = (0..count).map(|child| format!("Child {child}")).collect();
+            let children = (0..count)
+                .map(|child| arany::ChildAssignment {
+                    objective: format!("Child {child}"),
+                    profile: None,
+                })
+                .collect();
             let provider = ScriptedProvider::new(vec![ProviderOutcome::Delegate(Delegate {
                 children,
                 agent: None,
@@ -3159,7 +3185,10 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Check fact".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Check fact".into(),
+                    profile: None,
+                }],
             }),
             ProviderOutcome::Finish(Finish {
                 summary: "checked".into(),
@@ -3167,7 +3196,10 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
             }),
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Second round".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Second round".into(),
+                    profile: None,
+                }],
             }),
         ]);
         let requests = provider.requests.clone();
@@ -4516,7 +4548,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         };
                         responses.push_back(Ok(ProviderOutcome::Delegate(Delegate {
                             agent: None,
-                            children: vec!["A".into()],
+                            children: vec![arany::ChildAssignment { objective: "A".into(), profile: None }],
                         })));
                         responses.push_back(Ok(ProviderOutcome::Finish(Finish {
                             summary: "child done".into(),

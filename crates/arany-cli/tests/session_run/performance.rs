@@ -199,7 +199,7 @@ fn team_two_process_latency_on_named_host() {
                         serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
                     }
                     1 => {
-                        serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}})
+                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                     }
                     _ => serde_json::json!({"summary":"synthetic summary"}),
                 }
@@ -214,7 +214,7 @@ fn team_two_process_latency_on_named_host() {
                 match phase {
                     0 => {
                         assert_eq!(input["objective"], "Synthetic team question");
-                        serde_json::json!({"outcome":{"type":"delegate","children":["A","B"]}})
+                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"A","profile":null},{"objective":"B","profile":null}]}})
                     }
                     1 | 2 => {
                         assert_eq!(input["objective"], if phase == 1 { "A" } else { "B" });
