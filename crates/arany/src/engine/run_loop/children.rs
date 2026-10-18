@@ -210,26 +210,17 @@ impl RunLoop<'_> {
                         / count)
                         .min(MAX_CHILD_TOOL_CALLS)
                 });
-        while eager && !queue.unspawned.is_empty() && !self.controls.cancellation.is_cancelled() {
-            let child = match self
-                .spawn_next_child(&mut queue, root_request, &mut active_segment, deadline)
-                .await
-            {
-                Ok(Some(child)) => child,
-                Ok(None) => break,
-                Err(error) => return Err(queue.abort_with(error).await),
-            };
-            queue.pending.push_back(children.len());
-            children.push(child);
-        }
-        if eager && self.controls.cancellation.is_cancelled() {
-            if let Some(segment) = active_segment.take() {
-                self.settle_active_segment(segment)?;
-            }
-            for child in &children {
-                self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
-                    .await?;
-            }
+        if eager
+            && self
+                .spawn_researchers(
+                    &mut queue,
+                    &mut children,
+                    root_request,
+                    &mut active_segment,
+                    deadline,
+                )
+                .await?
+        {
             return self.settle_stopped_primary().await.map(|()| false);
         }
         if let Some(tools) = root_request.input.tools.as_mut() {
@@ -337,6 +328,39 @@ impl RunLoop<'_> {
             self.verify_workers().await?;
         }
         self.begin_synthesis(root_request).await
+    }
+
+    async fn spawn_researchers(
+        &self,
+        queue: &mut ChildQueue,
+        children: &mut Vec<ChildWork>,
+        root_request: &mut ProviderRequest,
+        segment: &mut Option<ActiveSegment>,
+        deadline: Instant,
+    ) -> Result<bool, EngineError> {
+        while !queue.unspawned.is_empty() && !self.controls.cancellation.is_cancelled() {
+            let child = match self
+                .spawn_next_child(queue, root_request, segment, deadline)
+                .await
+            {
+                Ok(Some(child)) => child,
+                Ok(None) => break,
+                Err(error) => return Err(queue.abort_with(error).await),
+            };
+            queue.pending.push_back(children.len());
+            children.push(child);
+        }
+        if !self.controls.cancellation.is_cancelled() {
+            return Ok(false);
+        }
+        if let Some(segment) = segment.take() {
+            self.settle_active_segment(segment)?;
+        }
+        for child in children.iter() {
+            self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
+                .await?;
+        }
+        Ok(true)
     }
 
     async fn spawn_children(
