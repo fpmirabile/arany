@@ -212,9 +212,9 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     let mut bytes = b"arany-macos-guard-v15:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go".to_vec();
     bytes.extend_from_slice(b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-workspace-grant");
-    bytes.extend_from_slice(profile(PROFILE, FILE_DENIED_SYSCALLS).as_bytes());
-    bytes.extend_from_slice(profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
-    bytes.extend_from_slice(profile(GIT_PROFILE, COMMAND_DENIED_SYSCALLS).as_bytes());
+    for kind in [ProfileKind::File, ProfileKind::Command, ProfileKind::Git] {
+        bytes.extend_from_slice(SeatbeltProfile::new(kind).text.as_bytes());
+    }
     bytes.extend_from_slice(b";typed-git-read-pinned-clt-git-after-go-read-only-workspace-unit-root-view-no-repository-config-closed-env-coalition-supervised");
     bytes.extend_from_slice(b"native-commands-mcp:checked-private-cwd;fixed-capacity-nosuid-project-scratch;fresh-selected-snapshot;read-only-pinned-runtime;bounded-positive-root-owned-non-setid-unentitled-system-exec;stamp-bound-process-signature-verdicts;admission-catalogue-bound-to-enforcement;per-worker-pinned-system-directories-no-follow-metadata-revalidation;exact-literal-union-profile;dynamic-coalition-persona-entitlement-fork-denial;null-bootstrap-registered-ports;child-only-signals;supervised-cpu;physical-footprint-memory");
     bytes.extend_from_slice(&CPU_LIMIT.as_nanos().to_le_bytes());
@@ -286,14 +286,84 @@ fn quoted(path: &Path) -> Result<String, ToolError> {
     serde_json::to_string(path).map_err(|_| ToolError::Path)
 }
 
-fn ancestors(profile: &mut String, path: &Path) -> Result<(), ToolError> {
-    for directory in path.ancestors().skip(1) {
-        profile.push_str(&format!(
-            "(allow file-read-metadata (literal {}))\n",
-            quoted(directory)?
-        ));
+#[derive(Clone, Copy)]
+enum ProfileKind {
+    File,
+    Command,
+    Git,
+}
+
+impl ProfileKind {
+    fn denied_syscalls(self) -> &'static [i32] {
+        match self {
+            Self::File => FILE_DENIED_SYSCALLS,
+            Self::Command | Self::Git => COMMAND_DENIED_SYSCALLS,
+        }
     }
-    Ok(())
+}
+
+struct SeatbeltProfile {
+    text: String,
+    kind: ProfileKind,
+}
+
+impl SeatbeltProfile {
+    fn new(kind: ProfileKind) -> Self {
+        let rules = match kind {
+            ProfileKind::File => PROFILE,
+            ProfileKind::Command => COMMAND_PROFILE,
+            ProfileKind::Git => GIT_PROFILE,
+        };
+        Self {
+            text: profile(rules, kind.denied_syscalls()),
+            kind,
+        }
+    }
+
+    fn rule(&mut self, operations: &str, filter: &str, path: &Path) -> Result<(), ToolError> {
+        self.text
+            .push_str(&format!("({operations} ({filter} {}))\n", quoted(path)?));
+        Ok(())
+    }
+
+    fn grant(&mut self, operations: &str, filter: &str, path: &Path) -> Result<(), ToolError> {
+        for directory in path.ancestors().skip(1) {
+            self.rule("allow file-read-metadata", "literal", directory)?;
+        }
+        self.rule(operations, filter, path)
+    }
+
+    fn protect_guard(&mut self, executable: &Path) -> Result<(), ToolError> {
+        self.rule("deny file-write*", "literal", executable)
+    }
+
+    fn install(self) -> Result<(), ToolError> {
+        let operations: &[(&CStr, i32)] = match self.kind {
+            ProfileKind::File => &[(c"process-fork", 1), (c"network-outbound", 1)],
+            ProfileKind::Command | ProfileKind::Git => &[
+                (c"process-fork", 0),
+                (c"network-outbound", 1),
+                (c"mach-lookup", 1),
+                (c"iokit-open-user-client", 1),
+                (c"process-exec-update-label", 1),
+            ],
+        };
+        if !matches!(self.kind, ProfileKind::File) && !ffi::detach_bootstrap_ports() {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        if self.text.len() > PROFILE_BYTES_CAP {
+            return Err(ToolError::Limit);
+        }
+        let profile = CString::new(self.text).map_err(|_| ToolError::Path)?;
+        if !ffi::install_sandbox(&profile) {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        attest_policy(operations, self.kind.denied_syscalls())?;
+        if matches!(self.kind, ProfileKind::File) {
+            verify_cpu_controls()?;
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn install(
@@ -307,7 +377,7 @@ pub(super) fn install(
         return install_git(task, stage);
     }
     configure_file_cpu()?;
-    let mut profile = profile(PROFILE, FILE_DENIED_SYSCALLS);
+    let mut profile = SeatbeltProfile::new(ProfileKind::File);
     let worker_root = if task.worker.is_some() {
         Some(std::env::current_dir().map_err(|_| ToolError::Path)?)
     } else {
@@ -318,24 +388,13 @@ pub(super) fn install(
         storage::verify_storage(root, &task.intent.limits)?;
         for name in ["workspace", "scratch"] {
             let path = root.join(name);
-            ancestors(&mut profile, &path)?;
-            profile.push_str(&format!(
-                "(allow file-read* file-write* (subpath {}))\n",
-                quoted(&path)?
-            ));
+            profile.grant("allow file-read* file-write*", "subpath", &path)?;
         }
     } else if !matches!(task.intent.call, ToolCall::ParseAgentDefinition { .. }) {
-        ancestors(&mut profile, &task.workspace)?;
-        profile.push_str(&format!(
-            "(allow file-read* (subpath {}))\n",
-            quoted(&task.workspace)?
-        ));
+        profile.grant("allow file-read*", "subpath", &task.workspace)?;
     }
     if task.worker.is_none() && task.intent.call.mutates() {
-        profile.push_str(&format!(
-            "(allow file-write* (subpath {}))\n",
-            quoted(&task.workspace)?
-        ));
+        profile.rule("allow file-write*", "subpath", &task.workspace)?;
     }
     if let ToolCall::Skill { name, resource } = &task.intent.call {
         let skill = task
@@ -345,34 +404,11 @@ pub(super) fn install(
             .find(|skill| &skill.name == name)
             .ok_or(ToolError::Configuration)?;
         let path = Path::new(&skill.directory).join(resource.as_deref().unwrap_or("SKILL.md"));
-        ancestors(&mut profile, &path)?;
-        profile.push_str(&format!(
-            "(allow file-read* (literal {}))\n",
-            quoted(&path)?
-        ));
+        profile.grant("allow file-read*", "literal", &path)?;
     }
-    profile.push_str(&format!(
-        "(deny file-write* (literal {}))\n",
-        quoted(&task.guard_executable)?
-    ));
-    install_profile(profile)?;
-    attest_policy(
-        &[(c"process-fork", 1), (c"network-outbound", 1)],
-        FILE_DENIED_SYSCALLS,
-    )?;
-    verify_cpu_controls()?;
+    profile.protect_guard(&task.guard_executable)?;
+    profile.install()?;
     Ok(worker_root.unwrap_or_else(|| PathBuf::from("/")))
-}
-
-fn install_profile(profile: String) -> Result<(), ToolError> {
-    if profile.len() > PROFILE_BYTES_CAP {
-        return Err(ToolError::Limit);
-    }
-    let profile = CString::new(profile).map_err(|_| ToolError::Path)?;
-    if !ffi::install_sandbox(&profile) {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    Ok(())
 }
 
 fn unit_root(task: &Task) -> Result<PathBuf, ToolError> {
@@ -478,7 +514,7 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
             required_system_programs.push(PathBuf::from(&program.executable));
         }
     }
-    let mut profile = profile(COMMAND_PROFILE, COMMAND_DENIED_SYSCALLS);
+    let mut profile = SeatbeltProfile::new(ProfileKind::Command);
     let grants = if task.intent.limits.cache_bytes > 0 {
         &["workspace", "scratch", "cache"][..]
     } else {
@@ -486,26 +522,20 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
     };
     for name in grants {
         let path = root.join(name);
-        ancestors(&mut profile, &path)?;
-        profile.push_str(&format!(
-            "(allow file-read* file-write* file-map-executable process-exec (subpath {}))\n",
-            quoted(&path)?
-        ));
+        profile.grant(
+            "allow file-read* file-write* file-map-executable process-exec",
+            "subpath",
+            &path,
+        )?;
     }
     for grant in &task.config.runtime_grants {
         grant.verify_host()?;
-        ancestors(&mut profile, &grant.path)?;
-        if grant.kind.is_toolchain() {
-            profile.push_str(&format!(
-                "(allow file-read* file-map-executable process-exec (subpath {}))\n",
-                quoted(&grant.path)?
-            ));
+        let operations = if grant.kind.is_toolchain() {
+            "allow file-read* file-map-executable process-exec"
         } else {
-            profile.push_str(&format!(
-                "(allow file-read* (subpath {}))\n",
-                quoted(&grant.path)?
-            ));
-        }
+            "allow file-read*"
+        };
+        profile.grant(operations, "subpath", &grant.path)?;
     }
     let resources = root.join("runtime");
     let metadata = std::fs::symlink_metadata(&resources).map_err(|_| ToolError::Path)?;
@@ -515,39 +545,24 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
     {
         return Err(ToolError::ProtectionUnavailable);
     }
-    profile.push_str(&format!(
-        "(allow file-read* file-map-executable (subpath {}))\n(allow process-exec (subpath {}))\n",
-        quoted(&resources)?,
-        quoted(&resources.join("programs"))?
-    ));
+    profile.rule(
+        "allow file-read* file-map-executable",
+        "subpath",
+        &resources,
+    )?;
+    profile.rule("allow process-exec", "subpath", &resources.join("programs"))?;
     task.system_programs
         .as_ref()
         .ok_or(ToolError::ProtectionUnavailable)?
-        .allow(&mut profile, &mut required_system_programs)?;
+        .allow(&mut profile.text, &mut required_system_programs)?;
     if !required_system_programs.is_empty() {
         return Err(ToolError::ProtectionUnavailable);
     }
     *stage = super::BootstrapStage::RuntimeMounts;
     verify_runtime_mounts(&task.config.runtime_grants)?;
     *stage = super::BootstrapStage::Capabilities;
-    profile.push_str(&format!(
-        "(deny file-write* (literal {}))\n",
-        quoted(&task.guard_executable)?
-    ));
-    if !ffi::detach_bootstrap_ports() {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    install_profile(profile)?;
-    attest_policy(
-        &[
-            (c"process-fork", 0),
-            (c"network-outbound", 1),
-            (c"mach-lookup", 1),
-            (c"iokit-open-user-client", 1),
-            (c"process-exec-update-label", 1),
-        ],
-        COMMAND_DENIED_SYSCALLS,
-    )?;
+    profile.protect_guard(&task.guard_executable)?;
+    profile.install()?;
     Ok(root)
 }
 
@@ -557,46 +572,23 @@ fn install_git(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf
     let git = task.config.git.as_ref().ok_or(ToolError::Configuration)?;
     crate::tools::git::verify_host_executable(git)?;
     let git_path = Path::new(&git.executable);
-    let mut profile = profile(GIT_PROFILE, COMMAND_DENIED_SYSCALLS);
-    ancestors(&mut profile, git_path)?;
-    profile.push_str(&format!(
-        "(allow file-read* file-map-executable process-exec (literal {}))\n",
-        quoted(git_path)?
-    ));
-    ancestors(&mut profile, &task.workspace)?;
-    profile.push_str(&format!(
-        "(allow file-read* (subpath {}))\n",
-        quoted(&task.workspace)?
-    ));
-    let view = root.join(crate::tools::git::VIEW);
-    ancestors(&mut profile, &view)?;
-    profile.push_str(&format!(
-        "(allow file-read* file-write* (subpath {}))\n",
-        quoted(&view)?
-    ));
-    profile.push_str(&format!(
-        "(allow file-read* (subpath {}))\n",
-        quoted(&root.join(crate::tools::git::HOME))?
-    ));
-    profile.push_str(&format!(
-        "(deny file-write* (literal {}))\n",
-        quoted(&task.guard_executable)?
-    ));
-    *stage = super::BootstrapStage::Capabilities;
-    if !ffi::detach_bootstrap_ports() {
-        return Err(ToolError::ProtectionUnavailable);
-    }
-    install_profile(profile)?;
-    attest_policy(
-        &[
-            (c"process-fork", 0),
-            (c"network-outbound", 1),
-            (c"mach-lookup", 1),
-            (c"iokit-open-user-client", 1),
-            (c"process-exec-update-label", 1),
-        ],
-        COMMAND_DENIED_SYSCALLS,
+    let mut profile = SeatbeltProfile::new(ProfileKind::Git);
+    profile.grant(
+        "allow file-read* file-map-executable process-exec",
+        "literal",
+        git_path,
     )?;
+    profile.grant("allow file-read*", "subpath", &task.workspace)?;
+    let view = root.join(crate::tools::git::VIEW);
+    profile.grant("allow file-read* file-write*", "subpath", &view)?;
+    profile.rule(
+        "allow file-read*",
+        "subpath",
+        &root.join(crate::tools::git::HOME),
+    )?;
+    profile.protect_guard(&task.guard_executable)?;
+    *stage = super::BootstrapStage::Capabilities;
+    profile.install()?;
     Ok(root)
 }
 
@@ -1158,6 +1150,154 @@ mod tests {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
+
+    fn assert_previous_composition(
+        kind: ProfileKind,
+        rules: &str,
+        denied_syscalls: &[i32],
+        grants: &[(bool, &str, &str, &str)],
+    ) {
+        let mut actual = SeatbeltProfile::new(kind);
+        let mut previous = profile(rules, denied_syscalls);
+        for &(include_ancestors, operations, filter, path) in grants {
+            let path = Path::new(path);
+            if include_ancestors {
+                actual.grant(operations, filter, path).unwrap();
+                for directory in path.ancestors().skip(1) {
+                    previous.push_str(&format!(
+                        "(allow file-read-metadata (literal {}))\n",
+                        quoted(directory).unwrap()
+                    ));
+                }
+            } else {
+                actual.rule(operations, filter, path).unwrap();
+            }
+            previous.push_str(&format!(
+                "({operations} ({filter} {}))\n",
+                quoted(path).unwrap()
+            ));
+        }
+        actual.protect_guard(Path::new("/guard/arany")).unwrap();
+        previous.push_str("(deny file-write* (literal \"/guard/arany\"))\n");
+        assert_eq!(actual.text, previous);
+    }
+
+    #[test]
+    fn file_profiles_match_previous_composition() {
+        for grants in [
+            &[(true, "allow file-read*", "subpath", "/project")][..],
+            &[
+                (true, "allow file-read*", "subpath", "/project"),
+                (false, "allow file-write*", "subpath", "/project"),
+            ][..],
+            &[
+                (true, "allow file-read*", "subpath", "/project"),
+                (
+                    true,
+                    "allow file-read*",
+                    "literal",
+                    "/skills/quoted\"\\/SKILL.md",
+                ),
+            ][..],
+            &[
+                (
+                    true,
+                    "allow file-read* file-write*",
+                    "subpath",
+                    "/unit/workspace",
+                ),
+                (
+                    true,
+                    "allow file-read* file-write*",
+                    "subpath",
+                    "/unit/scratch",
+                ),
+            ][..],
+            &[][..],
+        ] {
+            assert_previous_composition(ProfileKind::File, PROFILE, FILE_DENIED_SYSCALLS, grants);
+        }
+    }
+
+    #[test]
+    fn command_profiles_match_previous_composition() {
+        for cache in [false, true] {
+            let mut grants = vec![
+                (
+                    true,
+                    "allow file-read* file-write* file-map-executable process-exec",
+                    "subpath",
+                    "/unit/workspace",
+                ),
+                (
+                    true,
+                    "allow file-read* file-write* file-map-executable process-exec",
+                    "subpath",
+                    "/unit/scratch",
+                ),
+            ];
+            if cache {
+                grants.push((
+                    true,
+                    "allow file-read* file-write* file-map-executable process-exec",
+                    "subpath",
+                    "/unit/cache",
+                ));
+            }
+            grants.extend([
+                (
+                    true,
+                    "allow file-read* file-map-executable process-exec",
+                    "subpath",
+                    "/host/rust",
+                ),
+                (true, "allow file-read*", "subpath", "/host/cargo-cache"),
+                (
+                    false,
+                    "allow file-read* file-map-executable",
+                    "subpath",
+                    "/unit/runtime",
+                ),
+                (
+                    false,
+                    "allow process-exec",
+                    "subpath",
+                    "/unit/runtime/programs",
+                ),
+            ]);
+            assert_previous_composition(
+                ProfileKind::Command,
+                COMMAND_PROFILE,
+                COMMAND_DENIED_SYSCALLS,
+                &grants,
+            );
+        }
+    }
+
+    #[test]
+    fn git_profile_matches_previous_composition() {
+        assert_previous_composition(
+            ProfileKind::Git,
+            GIT_PROFILE,
+            COMMAND_DENIED_SYSCALLS,
+            &[
+                (
+                    true,
+                    "allow file-read* file-map-executable process-exec",
+                    "literal",
+                    "/Library/Developer/CommandLineTools/usr/bin/git",
+                ),
+                (true, "allow file-read*", "subpath", "/project"),
+                (
+                    true,
+                    "allow file-read* file-write*",
+                    "subpath",
+                    "/unit/git-view",
+                ),
+                (false, "allow file-read*", "subpath", "/unit/git-home"),
+            ],
+        );
+    }
 
     #[test]
     fn system_catalogue_revalidates_pins_and_binds_the_profile() {
