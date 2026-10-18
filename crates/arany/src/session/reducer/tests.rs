@@ -3217,6 +3217,7 @@ mod goal_replay_tests {
         host: EffectIntent,
         run: RunId,
         agent: AgentRunId,
+        started: bool,
     }
 
     // A primary that ran `sh -c <prior_script>` in the Guard with this outcome, then requests the host re-run of `exit 7`.
@@ -3301,12 +3302,32 @@ mod goal_replay_tests {
                 justification: "Run the failed command once".into(),
             },
         );
-        apply(&mut view, tool_started(run, agent, &host)).expect("the start is always admitted");
+        let start = tool_started(run, agent, &host);
+        if matches!(
+            prior,
+            Some((
+                _,
+                ToolDisposition::Uncertain | ToolDisposition::Cancelled,
+                _
+            ))
+        ) {
+            // The Run stops at these outcomes, so the reducer refuses the unguarded start itself.
+            assert!(rejected(&view, start), "{prior:?}");
+            return Unguarded {
+                view,
+                host,
+                run,
+                agent,
+                started: false,
+            };
+        }
+        apply(&mut view, start).expect("the start is always admitted");
         Unguarded {
             view,
             host,
             run,
             agent,
+            started: true,
         }
     }
 
@@ -3404,8 +3425,13 @@ mod goal_replay_tests {
                     Some(EnforcementCause::FilesystemDenied),
                 )),
                 Some(("exit 7", ToolDisposition::Succeeded, None)),
+                Some(("exit 7", ToolDisposition::Uncertain, None)),
+                Some(("exit 7", ToolDisposition::Cancelled, None)),
             ] {
                 let scenario = unguarded_scenario(prior, configured, true);
+                if !scenario.started {
+                    continue;
+                }
                 assert!(rejected(&scenario.view, human(&scenario)), "{prior:?}");
                 let mut denied = scenario.view.clone();
                 apply(

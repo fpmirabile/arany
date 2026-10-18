@@ -312,7 +312,7 @@ async fn unguarded_rerun_is_offered_only_after_an_attested_guard_failure_and_run
 
 #[tokio::test]
 async fn model_escalation_without_a_qualifying_failure_is_denied_and_journaled() {
-    let cases: [(&str, ToolCall, ToolCall, &str); 3] = [
+    let cases: [(&str, ToolCall, ToolCall, &str); 4] = [
         (
             "no prior attempt",
             guarded("echo prior; exit 0"),
@@ -329,6 +329,12 @@ async fn model_escalation_without_a_qualifying_failure_is_denied_and_journaled()
             "guard path alias",
             guarded("ls /workspace >/dev/null; exit 7"),
             unguarded("ls /workspace >/dev/null; exit 7"),
+            "Guard path aliases",
+        ),
+        (
+            "guard-only variable",
+            guarded("echo \"$ARANY_TOOL_INPUTS\"; exit 7"),
+            unguarded("echo \"$ARANY_TOOL_INPUTS\"; exit 7"),
             "Guard path aliases",
         ),
     ];
