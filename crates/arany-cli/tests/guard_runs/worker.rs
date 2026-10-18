@@ -249,7 +249,10 @@ pub(super) async fn worker_case(case: &'static str) {
         }
     };
     drop(running);
-    if deadline_case {
+    if provider
+        .clock_paused
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
         tokio::time::resume();
     }
     let violations = provider.violations.lock().unwrap().clone();

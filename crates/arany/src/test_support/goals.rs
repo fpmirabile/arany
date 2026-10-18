@@ -320,6 +320,7 @@ pub struct ForegroundWorkerProvider {
     pub budget: crate::GoalBudget,
     pub requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     pub violations: std::sync::Mutex<Vec<&'static str>>,
+    pub clock_paused: std::sync::atomic::AtomicBool,
     background_started: tokio::sync::Notify,
     identity: crate::ProviderIdentity,
     deadline_identity: crate::ProviderIdentity,
@@ -340,6 +341,7 @@ impl ForegroundWorkerProvider {
             budget,
             requests: Default::default(),
             violations: Default::default(),
+            clock_paused: Default::default(),
             background_started: Default::default(),
             identity,
             deadline_identity,
@@ -451,6 +453,8 @@ impl crate::Provider for ForegroundWorkerProvider {
             (AgentPhase::RootPlan, 1) => {
                 if self.case.contains("deadline") {
                     tokio::time::pause();
+                    self.clock_paused
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 self.delegation(&request)
             }
