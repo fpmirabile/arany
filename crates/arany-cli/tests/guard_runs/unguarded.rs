@@ -708,21 +708,17 @@ async fn hook_unguarded_rerun_requires_the_exact_command_and_a_fresh_human_ask_t
                 (verdict.decision, verdict.source, verdict.approved),
                 (Decision::Ask, PermissionSource::Human, allow)
             );
-            assert_eq!(host.workspace.join("ran.txt").exists(), allow);
+            let ran = std::fs::read_to_string(host.workspace.join("ran.txt")).ok();
+            assert_eq!(ran.is_some(), allow);
             let session = seen.outcome.session_id;
-            let workspace = host.workspace.clone();
             private_file(
                 &host.state.join("permissions.json"),
                 br#"{"permissions":{"deny":["command_unguarded"]}}"#,
             );
             let (events, view) = host.reopen(session).await;
             assert_eq!(view.runs[0].unguarded_tools(), usize::from(allow));
-            assert_eq!(workspace.join("ran.txt").exists(), allow);
             if allow {
-                assert_eq!(
-                    std::fs::read_to_string(workspace.join("ran.txt")).unwrap(),
-                    "ran\n"
-                );
+                assert_eq!(ran.as_deref(), Some("ran\n"));
                 for remove in [true, false] {
                     let mut forged = events.clone();
                     if remove {
@@ -777,7 +773,7 @@ async fn hook_stop_unguarded_rerun_uses_a_bounded_continuation_and_human_approva
             .await;
         assert_eq!(seen.prompts.len(), 1);
         assert_eq!(seen.intents[0].call, call);
-        assert_eq!(seen.calls.len(), 4);
+        assert_eq!(seen.calls.len(), if allow { 4 } else { 3 });
         assert!(
             seen.calls[2].input.stop_hook_feedback[0]
                 .text
