@@ -869,7 +869,11 @@ pub(super) async fn execute_inner(
             handle.await
         }
     }
-    .unwrap_or(Err(ToolError::Operation));
+    .unwrap_or_else(|_| {
+        Err(super::execution_failure(
+            super::GuardCheck::ControllerFailed,
+        ))
+    });
     *dispatched = started.load(Ordering::Acquire);
     result
 }

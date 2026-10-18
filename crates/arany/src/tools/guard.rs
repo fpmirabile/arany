@@ -320,16 +320,22 @@ struct Ready {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum CleanupCheck {
+pub(super) enum GuardCheck {
     Inspection,
     ListingUnavailable,
     DeviceUnlisted,
     DetachFailed,
     ImageStillListed,
     MountStillPresent,
+    WorkerClosed,
+    ReportMalformed,
+    ReportUnattested,
+    ReportTrailing,
+    Cancelled,
+    ControllerFailed,
 }
 
-impl CleanupCheck {
+impl GuardCheck {
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Inspection => "inspection",
@@ -338,6 +344,12 @@ impl CleanupCheck {
             Self::DetachFailed => "detach failed",
             Self::ImageStillListed => "image still listed",
             Self::MountStillPresent => "mount still present",
+            Self::WorkerClosed => "worker closed before its report",
+            Self::ReportMalformed => "malformed report",
+            Self::ReportUnattested => "unattested report",
+            Self::ReportTrailing => "report not followed by end of stream",
+            Self::Cancelled => "cancelled",
+            Self::ControllerFailed => "controller thread failed",
         }
     }
 }
@@ -381,7 +393,7 @@ impl BootstrapStage {
 pub struct BootstrapFailure {
     stage: BootstrapStage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    check: Option<CleanupCheck>,
+    check: Option<GuardCheck>,
 }
 
 impl std::fmt::Display for BootstrapFailure {
@@ -392,7 +404,7 @@ impl std::fmt::Display for BootstrapFailure {
 
 impl BootstrapFailure {
     pub(super) fn check(&self) -> Option<&'static str> {
-        self.check.map(CleanupCheck::label)
+        self.check.map(GuardCheck::label)
     }
 
     pub(super) fn failure_stage(&self) -> &'static str {
@@ -719,15 +731,52 @@ async fn read_observation<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     intent: &EffectIntent,
 ) -> Result<ToolObservation, ToolError> {
-    let bytes = read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES).await?;
-    let observation = parse_observation(&bytes)?;
-    if observation.cache_update != CacheUpdate::NotApplicable
-        || !observation.attested_for(intent)
-        || !read_capped(&mut *reader, 1).await?.is_empty()
-    {
-        return Err(ToolError::Operation);
+    read_report(reader, intent)
+        .await
+        .map_err(|rejected| rejected.0)
+}
+
+// A rejection keeps the error the reader has always returned and, where it is an Operation, a closed check.
+async fn read_report<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    intent: &EffectIntent,
+) -> Result<ToolObservation, (ToolError, Option<GuardCheck>)> {
+    let tagged = |check| {
+        move |error| match error {
+            ToolError::Operation => (error, Some(check)),
+            error => (error, None),
+        }
+    };
+    let bytes = read_line_capped(reader, MAX_TOOL_OBSERVATION_BYTES)
+        .await
+        .map_err(tagged(GuardCheck::WorkerClosed))?;
+    let observation = parse_observation(&bytes).map_err(tagged(GuardCheck::ReportMalformed))?;
+    if observation.cache_update != CacheUpdate::NotApplicable || !observation.attested_for(intent) {
+        return Err((ToolError::Operation, Some(GuardCheck::ReportUnattested)));
     }
-    Ok(observation)
+    match read_capped(&mut *reader, 1).await {
+        Ok(rest) if rest.is_empty() => Ok(observation),
+        Ok(_) => Err((ToolError::Operation, Some(GuardCheck::ReportTrailing))),
+        Err(error) => Err(tagged(GuardCheck::ReportTrailing)(error)),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn execution_failure(check: GuardCheck) -> ToolError {
+    ToolError::GuardBootstrap(BootstrapFailure {
+        stage: BootstrapStage::Payload,
+        check: Some(check),
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) async fn read_worker_report<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    intent: &EffectIntent,
+) -> Result<ToolObservation, ToolError> {
+    read_report(reader, intent)
+        .await
+        .map_err(|(error, check)| check.map_or(error, execution_failure))
 }
 
 fn parse_observation(bytes: &[u8]) -> Result<ToolObservation, ToolError> {
@@ -1660,6 +1709,102 @@ mod tests {
         )
         .await;
         assert!(matches!(lapsed, Err(ToolError::ProtectionUnavailable)));
+    }
+
+    #[tokio::test]
+    async fn worker_report_rejections_name_their_execution_check() {
+        let mut intent = intent(ToolCall::Command {
+            program: "sh".into(),
+            args: vec![],
+            cwd: String::new(),
+        });
+        intent.policy_digest = [1; 32];
+        intent.enforcement_digest = [2; 32];
+        let check = |bytes: Vec<u8>| {
+            let intent = intent.clone();
+            async move {
+                let mut reader = tokio::io::BufReader::new(bytes.as_slice());
+                match read_worker_report(&mut reader, &intent).await {
+                    Err(ToolError::GuardBootstrap(failure)) => {
+                        Some((failure.failure_stage(), failure.check()))
+                    }
+                    _ => None,
+                }
+            }
+        };
+        let observation = |attested: bool| ToolObservation {
+            enforcement_cause: None,
+            intent: intent.clone(),
+            disposition: ToolDisposition::Limit,
+            output: "Tool result or resource limit reached".into(),
+            attestation: attested.then(|| {
+                Attestation::Guard(GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                })
+            }),
+            cache_update: CacheUpdate::NotApplicable,
+        };
+        let line = |observation: &ToolObservation| {
+            let mut bytes = serde_json::to_vec(observation).unwrap();
+            bytes.push(b'\n');
+            bytes
+        };
+        assert_eq!(
+            check(Vec::new()).await,
+            Some(("execution", Some("worker closed before its report")))
+        );
+        assert_eq!(
+            check(b"partial".to_vec()).await,
+            Some(("execution", Some("worker closed before its report")))
+        );
+        assert_eq!(
+            check(b"not a report\n".to_vec()).await,
+            Some(("execution", Some("malformed report")))
+        );
+        assert_eq!(
+            check(
+                br#"{"stage":"storage_cleanup","check":"detach_failed"}
+"#
+                .to_vec()
+            )
+            .await,
+            Some(("storage cleanup", Some("detach failed"))),
+            "a worker's own closed failure passes through unchanged"
+        );
+        assert_eq!(
+            check(line(&observation(false))).await,
+            Some(("execution", Some("unattested report")))
+        );
+        let attested = observation(true);
+        assert!(attested.attested_for(&intent));
+        let mut trailing = line(&attested);
+        trailing.push(b'x');
+        assert_eq!(
+            check(trailing).await,
+            Some(("execution", Some("report not followed by end of stream")))
+        );
+        let mut overlong = line(&attested);
+        overlong.extend_from_slice(b"xy");
+        let mut reader = tokio::io::BufReader::new(overlong.as_slice());
+        assert!(
+            matches!(
+                read_worker_report(&mut reader, &intent).await,
+                Err(ToolError::Limit)
+            ),
+            "two trailing bytes keep the resource-limit outcome"
+        );
+        let report = line(&attested);
+        let mut reader = tokio::io::BufReader::new(report.as_slice());
+        assert_eq!(
+            read_worker_report(&mut reader, &intent)
+                .await
+                .unwrap()
+                .disposition,
+            ToolDisposition::Limit
+        );
     }
 
     #[tokio::test]
