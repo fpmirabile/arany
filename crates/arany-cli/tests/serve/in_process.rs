@@ -400,11 +400,24 @@ async fn reader_failure_during_a_turn_cancels_and_closes_the_engine() {
     waiting_turn(TurnStop::ReaderFailure).await;
 }
 
+#[tokio::test]
+async fn full_inbound_queue_does_not_block_signal_or_writer_failure_cancellation() {
+    let _deadline = deadline();
+    for stop in [
+        TurnStop::FullInboundSignal,
+        TurnStop::FullInboundWriterFailure,
+    ] {
+        waiting_turn(stop).await;
+    }
+}
+
 #[derive(Clone, Copy)]
 enum TurnStop {
     Interrupt,
     Eof,
     ReaderFailure,
+    FullInboundSignal,
+    FullInboundWriterFailure,
 }
 
 async fn waiting_turn(stop: TurnStop) {
@@ -427,6 +440,11 @@ async fn waiting_turn(stop: TurnStop) {
     let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
     let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
     let reader_output = outbound.clone();
+    let transport_output = outbound.clone();
+    let transport_input = input.clone();
+    let (full, full_queue) = tokio::sync::oneshot::channel();
+    let (signal, signalled) = tokio::sync::oneshot::channel();
+    let (fail_writer, writer_failed) = tokio::sync::oneshot::channel();
     let client = async {
         input.send(initialize()).await.unwrap();
         next(&mut output).await;
@@ -443,7 +461,29 @@ async fn waiting_turn(stop: TurnStop) {
             .unwrap();
         let run = next(&mut output).await["result"]["turn"]["id"].clone();
         start.recv().await.unwrap();
-        if matches!(stop, TurnStop::ReaderFailure) {
+        if matches!(
+            stop,
+            TurnStop::FullInboundSignal | TurnStop::FullInboundWriterFailure
+        ) {
+            for _ in 0..INBOUND_CAPACITY {
+                input
+                    .try_send(ClientMessage::Message(Message::Notification(
+                        Notification {
+                            jsonrpc: Default::default(),
+                            method: "initialized".into(),
+                            params: None,
+                        },
+                    )))
+                    .unwrap();
+            }
+            assert_eq!(input.capacity(), 0);
+            full.send(()).unwrap();
+            if matches!(stop, TurnStop::FullInboundSignal) {
+                signal.send(()).unwrap();
+            } else {
+                fail_writer.send(()).unwrap();
+            }
+        } else if matches!(stop, TurnStop::ReaderFailure) {
             assert_eq!(
                 read_messages(FailingReader, input.clone(), reader_output).await,
                 Err("protocol input failed".into())
@@ -488,11 +528,57 @@ async fn waiting_turn(stop: TurnStop) {
         }
         serde_json::from_value(thread).unwrap()
     };
-    let (result, id) = tokio::join!(
-        server::run_with_threads(engine(&state), state.clone(), inbound, outbound, threads),
-        client
-    );
-    result.unwrap();
+    let serving =
+        server::run_with_threads(engine(&state), state.clone(), inbound, outbound, threads);
+    let server = async {
+        if !matches!(
+            stop,
+            TurnStop::FullInboundSignal | TurnStop::FullInboundWriterFailure
+        ) {
+            return serving.await;
+        }
+        let (shutdown, mut stopping) = watch::channel(false);
+        let mut writer_shutdown = shutdown.subscribe();
+        tokio::pin!(serving);
+        let gated = async {
+            tokio::select! { biased;
+                _ = full_queue => {
+                    // Keep the full queue intact until the transport selects its stop branch.
+                    let _ = stopping.wait_for(|stopping| *stopping).await;
+                    serving.await
+                }
+                result = &mut serving => result,
+            }
+        };
+        let reader = tokio::spawn(std::future::pending());
+        let writer = tokio::spawn(async move {
+            if matches!(stop, TurnStop::FullInboundWriterFailure) {
+                writer_failed.await.unwrap();
+                Err("protocol output failed".into())
+            } else {
+                let _ = writer_shutdown.wait_for(|stopping| *stopping).await;
+                Ok(())
+            }
+        });
+        serve_transport(
+            gated,
+            async {
+                let _ = signalled.await;
+            },
+            transport_input,
+            transport_output,
+            reader,
+            writer,
+            shutdown,
+        )
+        .await
+    };
+    let (result, id) = tokio::join!(server, client);
+    if matches!(stop, TurnStop::FullInboundWriterFailure) {
+        assert_eq!(result, Err("protocol output failed".into()));
+    } else {
+        result.unwrap();
+    }
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     let (events, view) = closed_view(&state, id).await;
     assert_eq!(view.runs[0].status, arany::RunStatus::Cancelled);
@@ -773,6 +859,18 @@ fn private_json(path: &std::path::Path, value: Value) {
 #[tokio::test]
 async fn approval_required_by_private_settings_is_declined_without_a_server_request() {
     let _deadline = deadline();
+    approval_decline(false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn approval_is_declined_while_the_outbound_queue_is_full() {
+    let _deadline = deadline();
+    approval_decline(true).await;
+}
+
+#[cfg(unix)]
+async fn approval_decline(stall_output: bool) {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -795,6 +893,11 @@ async fn approval_required_by_private_settings_is_declined_without_a_server_requ
         },
     )
     .unwrap();
+    let mut events = engine.subscribe();
+    let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+    let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+    let stalled = outbound.clone();
+    let fill_output = outbound.clone();
     let provider = Arc::new(
         ScriptedProvider::new(vec![
             arany::test_support::scenario::tool_outcome(
@@ -810,15 +913,22 @@ async fn approval_required_by_private_settings_is_declined_without_a_server_requ
                 result: "Read declined".into(),
             }),
         ])
-        .with_profile("openai", "gpt-5.4"),
+        .with_profile("openai", "gpt-5.4")
+        .with_before_call(0, move || {
+            if stall_output {
+                for _ in 0..fill_output.capacity() {
+                    fill_output
+                        .try_send(server::response(RequestId::Integer(99), json!({})))
+                        .unwrap();
+                }
+            }
+        }),
     );
     let requests = provider.requests.clone();
     let threads = threads::Threads {
         provider: Some(provider),
         ..Default::default()
     };
-    let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
-    let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
     let client = async {
         input.send(initialize()).await.unwrap();
         next(&mut output).await;
@@ -833,6 +943,22 @@ async fn approval_required_by_private_settings_is_declined_without_a_server_requ
             ))
             .await
             .unwrap();
+        if stall_output {
+            let mut decided = false;
+            loop {
+                if let Some(arany::Tapped::Committed(event)) = events.next().await {
+                    if let Event::ToolPermissionDecided { verdict, .. } = &event.event {
+                        assert!(!verdict.approved);
+                        decided = true;
+                    }
+                    if matches!(event.event, Event::RunFinished { .. }) {
+                        assert!(decided);
+                        break;
+                    }
+                }
+            }
+            assert_eq!(stalled.capacity(), 0);
+        }
         let mut declined = false;
         loop {
             let message = next(&mut output).await;
@@ -1205,4 +1331,98 @@ async fn shutdown_grace_includes_output_drain_without_restarting_the_timer() {
             .contains("Run may be interrupted; check Session history")
     );
     assert_eq!(started.elapsed(), super::super::exec::SHUTDOWN_GRACE);
+}
+
+#[tokio::test]
+async fn oversized_resume_does_not_load_the_thread() {
+    let _deadline = deadline();
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let engine = engine(&state);
+    let thread = engine
+        .create_session(workspace.clone(), Some("Large history".into()))
+        .await
+        .unwrap();
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            arany::ProviderOutcome::Finish(arany::Finish {
+                summary: "Answer".into(),
+                result: "Hello".into()
+            });
+            3
+        ])
+        .with_profile("openai", "gpt-5.4"),
+    );
+    for _ in 0..3 {
+        let mut input =
+            arany::test_support::scenario::request(&workspace, &"\u{1}".repeat(64 * 1024));
+        input.session_id = Some(thread);
+        input.title = None;
+        input.include_paths.clear();
+        engine
+            .submit(
+                arany::AdmittedProviders::single(provider.clone()),
+                input,
+                arany::RunControls::default(),
+            )
+            .unwrap()
+            .result
+            .await
+            .unwrap();
+    }
+    let threads = threads::Threads {
+        provider: Some(scripted()),
+        ..Default::default()
+    };
+    let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+    let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+    let client = async {
+        input.send(initialize()).await.unwrap();
+        next(&mut output).await;
+        input
+            .send(request(
+                6,
+                "thread/resume",
+                json!({"threadId":thread,"cwd":workspace,"provider":"openai","model":"gpt-5.4"}),
+            ))
+            .await
+            .unwrap();
+        let refusal = next(&mut output).await;
+        assert_eq!(refusal["error"]["code"], -32000);
+        assert_eq!(refusal["error"]["data"]["reason"], "contextTooLarge");
+        input
+            .send(request(
+                3,
+                "turn/start",
+                json!({"threadId":thread,"input":[{"type":"text","text":"Again"}]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next(&mut output).await["error"]["data"]["reason"],
+            "threadNotLoaded"
+        );
+        for id in 0..threads::MAX_THREADS {
+            input.send(request(100 + id as i64, "thread/start", json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4","collaboration":"single"}))).await.unwrap();
+            assert!(next(&mut output).await.get("result").is_some());
+            next(&mut output).await;
+        }
+        input.send(ClientMessage::Eof).await.unwrap();
+    };
+    let (result, ()) = tokio::join!(
+        server::run_with_threads(engine, state.clone(), inbound, outbound, threads),
+        client
+    );
+    result.unwrap();
+    let (_, view) = closed_view(&state, thread).await;
+    assert_eq!(view.runs.len(), 3);
+    assert!(
+        view.runs
+            .iter()
+            .all(|run| run.status == arany::RunStatus::Finished)
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 3);
+    assert!(provider.responses.lock().unwrap().is_empty());
 }

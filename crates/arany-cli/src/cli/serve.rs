@@ -63,18 +63,53 @@ pub(crate) async fn run(
             .try_clone_to_owned()
             .map_err(|_| "protocol output unavailable".to_owned())?,
     );
-    let mut reader_task = tokio::spawn(read_messages(
+    let reader_task = tokio::spawn(read_messages(
         tokio::fs::File::from_std(input),
         inbound.clone(),
         outbound.clone(),
     ));
-    let mut writer_task = tokio::spawn(write_messages(tokio::fs::File::from_std(output), writer));
+    let writer_task = tokio::spawn(write_messages(tokio::fs::File::from_std(output), writer));
+    let (shutdown, _) = watch::channel(false);
+    let serving = server::run(
+        engine,
+        state_dir,
+        receiver,
+        outbound.clone(),
+        shutdown.clone(),
+    );
+    serve_transport(
+        serving,
+        async {
+            signals.next().await;
+        },
+        inbound,
+        outbound,
+        reader_task,
+        writer_task,
+        shutdown,
+    )
+    .await?;
+    Ok(super::CommandOutput {
+        stdout: String::new(),
+        stderr: String::new(),
+        success: true,
+    })
+}
+
+async fn serve_transport(
+    serving: impl std::future::Future<Output = Result<(), String>>,
+    stop: impl std::future::Future<Output = ()>,
+    inbound: mpsc::Sender<ClientMessage>,
+    outbound: mpsc::Sender<ServerMessage>,
+    mut reader_task: tokio::task::JoinHandle<Result<(), String>>,
+    mut writer_task: tokio::task::JoinHandle<Result<(), String>>,
+    shutdown: watch::Sender<bool>,
+) -> Result<(), String> {
     let mut reader_done = false;
     let mut writer_done = false;
-    let (shutdown, shutdown_rx) = watch::channel(false);
+    let shutdown_rx = shutdown.subscribe();
     let result = shutdown_grace(shutdown_rx, async {
         let mut result = {
-            let serving = server::run(engine, state_dir, receiver, outbound.clone(), shutdown.clone());
             tokio::pin!(serving);
             tokio::select! {
                 result = &mut serving => {
@@ -87,10 +122,10 @@ pub(crate) async fn run(
                         result
                     }
                 }
-                _ = signals.next() => {
+                _ = stop => {
                     shutdown.send_replace(true);
-                    let _ = inbound.send(ClientMessage::Eof).await;
-                    serving.await
+                    let (_, stopped) = tokio::join!(inbound.send(ClientMessage::Eof), &mut serving);
+                    stopped
                 }
                 result = &mut reader_task => {
                     reader_done = true;
@@ -104,8 +139,7 @@ pub(crate) async fn run(
                     writer_done = true;
                     shutdown.send_replace(true);
                     let written = result.map_err(|_| "protocol writer failed".to_owned()).and_then(|r| r);
-                    let _ = inbound.send(ClientMessage::Eof).await;
-                    let stopped = serving.await;
+                    let (_, stopped) = tokio::join!(inbound.send(ClientMessage::Eof), &mut serving);
                     written.and(stopped)
                 }
             }
@@ -138,12 +172,7 @@ pub(crate) async fn run(
         writer_task.abort();
         let _ = writer_task.await;
     }
-    result?;
-    Ok(super::CommandOutput {
-        stdout: String::new(),
-        stderr: String::new(),
-        success: true,
-    })
+    result
 }
 
 async fn shutdown_grace(

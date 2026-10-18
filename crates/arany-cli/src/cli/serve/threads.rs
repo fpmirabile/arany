@@ -255,9 +255,9 @@ pub(super) async fn start(
 
 pub(super) async fn resume(
     state: &Path,
-    threads: &mut Threads,
+    threads: &Threads,
     params: ThreadResumeParams,
-) -> Result<ThreadResumeResult, Fault> {
+) -> Result<(ThreadResumeResult, LoadedThread), Fault> {
     threads.check_capacity(Some(params.thread_id))?;
     let selection = ThreadStartParams {
         cwd: params.cwd,
@@ -295,6 +295,5 @@ pub(super) async fn resume(
         })
         .collect::<Result<_, Fault>>()?;
     let thread = thread(&view, created, &loaded.workspace);
-    threads.map.insert(params.thread_id, loaded);
-    Ok(ThreadResumeResult { thread, turns })
+    Ok((ThreadResumeResult { thread, turns }, loaded))
 }

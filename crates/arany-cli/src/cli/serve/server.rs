@@ -3,8 +3,8 @@ use super::{
     threads::{self, Threads},
 };
 use arany::{
-    ApprovalInbox, Engine, EngineError, Event, GoalRequest, RunCancellation, RunControls,
-    RunRequest, RunSteering, SessionId, Tapped, ToolApprovals,
+    Engine, EngineError, Event, GoalRequest, RunCancellation, RunControls, RunRequest, RunSteering,
+    SessionId, Tapped, ToolApprovals,
 };
 use arany_cli::protocol::{methods::*, rpc::*};
 use base64::Engine as _;
@@ -116,7 +116,7 @@ struct ActiveTurn {
     result: tokio::task::AbortHandle,
     events: arany::Subscription,
     cancel: RunCancellation,
-    inbox: ApprovalInbox,
+    decliner: tokio::task::AbortHandle,
     pending_start: Option<RequestId>,
     result_done: bool,
     state: TurnState,
@@ -126,6 +126,7 @@ impl Drop for ActiveTurn {
     fn drop(&mut self) {
         self.cancel.cancel();
         self.result.abort();
+        self.decliner.abort();
     }
 }
 
@@ -183,15 +184,12 @@ async fn run_inner(
                 Input(Option<ClientMessage>),
                 Event(Option<Tapped>),
                 Done(Result<Option<String>, EngineError>),
-                Approval(Option<Box<arany::ToolApproval>>),
             }
             let next = if let Some(turn) = active.as_mut() {
                 tokio::select! { biased;
                     input = inbound.recv(), if !shutdown => Next::Input(input),
                     event = turn.events.next() => Next::Event(event),
                     result = workers.join_next() => Next::Done(result.and_then(Result::ok).unwrap_or(Err(EngineError::CoordinatorFailed)).map(|result| result.stopped.map(|reason| reason.to_string()))),
-                    approval = turn.inbox.next() => Next::Approval(approval.map(Box::new)),
-
                 }
             } else {
                 if shutdown {
@@ -258,11 +256,14 @@ async fn run_inner(
                                 {
                                     return Err(Fault::state(Reason::Busy));
                                 }
-                                let result = threads::resume(&state, &mut threads, input).await?;
+                                let thread_id = input.thread_id;
+                                let (result, loaded) =
+                                    threads::resume(&state, &threads, input).await?;
                                 let response = response(id.clone(), &result);
                                 if encode_line(&response).is_err() {
                                     return Err(Fault::engine(EngineError::ContextTooLarge));
                                 }
+                                threads.map.insert(thread_id, loaded);
                                 send(&outbound, response).await.map_err(internal)?;
                                 Ok(None)
                             }
@@ -291,7 +292,8 @@ async fn run_inner(
                                 };
                                 goal.budget = Some(loaded.goal_budget);
                                 goal.resource_settings = loaded.resource_settings;
-                                let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
+                                let (approvals, mut inbox) =
+                                    ToolApprovals::new(loaded.approval_mode);
                                 let view = threads::load_view(&state, input.thread_id).await?;
                                 let first_sequence = view
                                     .last_sequence
@@ -341,12 +343,17 @@ async fn run_inner(
                                         return Err(Fault::engine(EngineError::CoordinatorFailed));
                                     }
                                 };
+                                let decliner = tokio::spawn(async move {
+                                    while let Some(approval) = inbox.next().await {
+                                        approval.decide(false);
+                                    }
+                                });
                                 active = Some(ActiveTurn {
                                     thread_id: input.thread_id,
                                     result,
                                     events,
                                     cancel,
-                                    inbox,
+                                    decliner: decliner.abort_handle(),
                                     pending_start: Some(id.clone()),
                                     result_done: false,
                                     state: TurnState {
@@ -399,8 +406,6 @@ async fn run_inner(
                     .await?
                 }
                 Next::Event(None) => return Err("Event stream closed during a Run".into()),
-                Next::Approval(Some(approval)) => (*approval).decide(false),
-                Next::Approval(None) => return Err("approval channel closed during a Run".into()),
                 Next::Done(result) => {
                     let turn = active.as_mut().expect("active turn");
                     turn.result_done = true;
@@ -739,14 +744,13 @@ mod tests {
             .submit(providers, input, RunControls::default())
             .unwrap();
         let result = result.await.unwrap();
-        let (_approvals, inbox) = ToolApprovals::new(arany::ApprovalMode::Request);
         let worker = tokio::spawn(async {});
         let mut turn = ActiveTurn {
             thread_id: session,
             result: worker.abort_handle(),
             events,
             cancel,
-            inbox,
+            decliner: worker.abort_handle(),
             pending_start: Some(RequestId::Integer(3)),
             result_done: true,
             state: TurnState {
