@@ -501,6 +501,7 @@ fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCal
                     && call.disposition == ProviderCallDisposition::InvalidResponse
                     && agent.provider_calls.len() > 1
                     && run.workers.stop.is_none()
+                    && run.agents.iter().any(|a| a.assignment.is_some())
         })
         && record.phase == AgentPhase::RootSynthesis
         && (all_children_finished(run)

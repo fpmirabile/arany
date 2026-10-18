@@ -2944,3 +2944,67 @@ fn worker_protocol_unverified_synthesis_is_recorded_but_cannot_finish() {
         "finish without fresh verification",
     );
 }
+
+#[test]
+fn worker_protocol_researcher_only_run_rejects_a_call_after_an_invalid_synthesis() {
+    let mut f = fixture();
+    let delegated = f
+        .events
+        .iter()
+        .position(|e| matches!(e, Event::ProviderCallRecorded { record, .. } if record.delegation.is_some()))
+        .unwrap();
+    f.events.truncate(delegated + 1);
+    let Event::ProviderCallRecorded { record, .. } = &mut f.events[delegated] else {
+        unreachable!()
+    };
+    record.delegation = Some(vec![ChildAssignment::Researcher {
+        objective: "Research".into(),
+        definition: None,
+        profile: None,
+    }]);
+    let researcher = AgentRunId::new();
+    f.push(Event::AgentSpawned {
+        run_id: f.run,
+        agent_run_id: researcher,
+        ordinal: 1,
+        role: AgentRole::Child,
+        objective: Some("Research".into()),
+        grant: Some(ChildGrant::ReadOnly),
+        definition: None,
+        profile: None,
+        assignment: None,
+    });
+    f.call(
+        researcher,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        None,
+    );
+    f.push(Event::AgentFinished {
+        run_id: f.run,
+        agent_run_id: researcher,
+        disposition: AgentDisposition::Finished,
+        summary: Some("done".into()),
+        result: Some("done".into()),
+        worker: None,
+    });
+    f.call(
+        f.primary,
+        AgentPhase::RootSynthesis,
+        ProviderCallDisposition::InvalidResponse,
+        None,
+    );
+    f.view();
+    let mut again = Fixture {
+        events: f.events.clone(),
+        ..f
+    };
+    again.call(
+        again.primary,
+        AgentPhase::RootSynthesis,
+        ProviderCallDisposition::Finished,
+        None,
+    );
+    let recorded = again.events.pop().unwrap();
+    refused(&again, recorded, "synthesis after an invalid synthesis");
+}
