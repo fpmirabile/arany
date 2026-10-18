@@ -29,6 +29,7 @@ mod goal_recovery_tests {
         let tool = ToolView {
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             intent: intent.clone(),
             observation: disposition.map(|disposition| ToolObservation {
                 enforcement_cause: None,
@@ -741,6 +742,7 @@ mod goal_replay_tests {
             review_call_index: None,
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             finished_sequence: None,
         });
         apply(&mut elsewhere, reserve_child_call(goal, run, child)).expect("review reservation");
@@ -1032,6 +1034,7 @@ mod goal_replay_tests {
         review.runs[0].tools.push(ToolView {
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             intent,
             observation: None,
             review_call_index: None,
@@ -1697,6 +1700,7 @@ mod goal_replay_tests {
                 review_call_index: None,
                 permission_verdict: None,
                 hooks: Vec::new(),
+                hook_sequence: None,
                 finished_sequence: Some(2),
             });
             assert!(
@@ -1725,6 +1729,7 @@ mod goal_replay_tests {
             review_call_index: None,
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             finished_sequence: Some(2),
         });
         newer.goals.push(newer_goal);
@@ -1749,6 +1754,7 @@ mod goal_replay_tests {
             review_call_index: None,
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             finished_sequence: Some(2),
         });
         assert_eq!(
@@ -3027,6 +3033,7 @@ mod goal_replay_tests {
                 tools: vec![ToolView {
                     permission_verdict: None,
                     hooks: Vec::new(),
+                    hook_sequence: None,
                     intent: read_intent,
                     observation: Some(read),
                     review_call_index: None,
@@ -3146,6 +3153,7 @@ mod goal_replay_tests {
                     tools: vec![ToolView {
                         permission_verdict: None,
                         hooks: Vec::new(),
+                        hook_sequence: None,
                         intent: write.intent.clone(),
                         observation: Some(write),
                         review_call_index: None,
@@ -3681,6 +3689,12 @@ mod goal_replay_tests {
         )
         .unwrap();
         apply(&mut view, tool_finished(run, agent, &intent, b"x")).unwrap();
+        let mut later = view.clone();
+        apply(&mut later, reserve_child_call(goal, run, agent)).unwrap();
+        assert!(
+            rejected(&later, started(HookEvent::PostToolUse, intent.digest())),
+            "a hook after a later Provider call is forged ordering"
+        );
         assert!(rejected(
             &view,
             started(HookEvent::PreToolUse, intent.digest())
@@ -3718,7 +3732,17 @@ mod goal_replay_tests {
                 .is_ok()
         );
         let mut accepted = view.clone();
-        apply(&mut accepted, finished(hook_observation, feedback)).unwrap();
+        apply(
+            &mut accepted,
+            finished(hook_observation.clone(), feedback.clone()),
+        )
+        .unwrap();
+        let mut gapped = view.clone();
+        apply(&mut gapped, reserve_child_call(goal, run, agent)).unwrap();
+        assert!(
+            rejected(&gapped, finished(hook_observation, feedback)),
+            "a finish after a later Provider call is forged ordering"
+        );
         let tool = &accepted.runs[0].tools[0];
         assert_eq!(
             tool.hook_feedback(),

@@ -162,34 +162,35 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
         call: &ToolCall,
-    ) -> (usize, u64) {
+    ) -> (usize, u64, u64) {
         let Some(config) = runtime.permissions() else {
-            return (0, 0);
+            return (0, 0, 0);
         };
         if matches!(grant, Grant::Researcher { .. }) || call.is_internal() {
-            return (0, 0);
+            return (0, 0, 0);
         }
-        let (Ok(mut plans), Ok(post)) = (
+        let (Ok(pre), Ok(post)) = (
             self.hook_plans(runtime, config, HookEvent::PreToolUse, call),
             self.hook_plans(runtime, config, HookEvent::PostToolUse, call),
         ) else {
-            return (0, 0);
+            return (0, 0, 0);
         };
-        plans.extend(post);
-        let active_ms = plans
-            .iter()
-            .map(|plan| {
-                duration_ms(
-                    runtime
-                        .reservation_overhead(&plan.call)
-                        .saturating_add(TOOL_CLEANUP_OVERHEAD)
-                        .saturating_add(STORE_ACTION_OVERHEAD),
-                )
-                .saturating_add(u64::from(plan.timeout_ms))
-            })
-            .sum::<u64>()
-            .min(self.ledger().active_remaining_ms().unwrap_or(u64::MAX));
-        (plans.len(), active_ms)
+        let active_ms = |plans: &[HookPlan]| {
+            plans
+                .iter()
+                .map(|plan| {
+                    duration_ms(
+                        runtime
+                            .reservation_overhead(&plan.call)
+                            .saturating_add(TOOL_CLEANUP_OVERHEAD)
+                            .saturating_add(STORE_ACTION_OVERHEAD),
+                    )
+                    .saturating_add(u64::from(plan.timeout_ms))
+                })
+                .sum::<u64>()
+                .min(self.ledger().active_remaining_ms().unwrap_or(u64::MAX))
+        };
+        (pre.len() + post.len(), active_ms(&pre), active_ms(&post))
     }
 
     // Room the next request keeps for the feedback lines PostToolUse hooks may add.
@@ -198,7 +199,11 @@ impl RunLoop<'_> {
             return 0;
         };
         match self.hook_plans(runtime, config, HookEvent::PostToolUse, call) {
-            Ok(plans) if !plans.is_empty() => MAX_HOOK_FEEDBACK_BYTES + 256,
+            Ok(plans) if !plans.is_empty() =>
+            // JSON escaping can double a line of quotes or backslashes.
+            {
+                2 * MAX_HOOK_FEEDBACK_BYTES + 256
+            }
             _ => 0,
         }
     }
@@ -236,6 +241,18 @@ impl RunLoop<'_> {
             !post_probe.hook_task_fits(&probe)
         }) {
             return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
+        }
+        if !post.is_empty()
+            && post_tool_use_input(
+                self.session_id,
+                config.mode(),
+                &intent.call,
+                intent.id,
+                serde_json::json!("x".repeat(MAX_HOOK_INPUT_BYTES + 1)),
+            )
+            .is_err()
+        {
+            return Ok(HookFold::deny("hook input exceeds its limit", 0));
         }
         if plans.is_empty() {
             return Ok(HookFold::none());
@@ -325,15 +342,15 @@ impl RunLoop<'_> {
         if plans.is_empty() {
             return Ok(fold);
         }
-        let Ok(input) = post_tool_use_input(
+        // Admission probed the worst case, so a build failure here is a broken invariant.
+        let input = post_tool_use_input(
             self.session_id,
             config.mode(),
             call,
             observation.intent.id,
             model_observation(observation),
-        ) else {
-            return Ok(fold);
-        };
+        )
+        .map_err(|_| EngineError::InvalidRequest)?;
         let input_digest = crate::tools::types::digest(input.as_bytes());
         let subject_digest = observation.intent.digest();
         let runtime = runtime.with_hook_stdin(&input);

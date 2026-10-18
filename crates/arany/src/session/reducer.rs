@@ -236,6 +236,7 @@ pub struct ToolView {
     pub review_call_index: Option<u32>,
     pub permission_verdict: Option<crate::tools::permissions::PermissionVerdict>,
     pub hooks: Vec<HookView>,
+    pub hook_sequence: Option<u64>,
     pub finished_sequence: Option<u64>,
 }
 

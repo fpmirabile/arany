@@ -2380,3 +2380,108 @@ async fn hook_post_tool_use_uncertain_outcome_stops_the_run_after_the_effect() {
     );
     assert!(tool.hook_feedback().is_empty());
 }
+
+#[tokio::test]
+async fn hook_post_tool_use_on_a_command_sees_the_integrated_tree() {
+    let settings = json!({
+        "permissions": {"allow": ["Bash", "Edit"]},
+        "hooks": {"PostToolUse": [{"matcher": "Bash", "hooks": [
+            shell_hook("cat notes/new.txt >&2; exit 2")
+        ]}]},
+    });
+    let fixture = Fixture::new(Some(&settings), true);
+    let call = arany::ToolCall::Command {
+        program: "sh".into(),
+        args: vec!["-c".into(), "printf done > notes/new.txt".into()],
+        cwd: "".into(),
+    };
+    let (result, requests, _) = fixture
+        .run(
+            vec![
+                tool_outcome(call.clone(), Some(Box::new(plan(&call)))),
+                finish("answer"),
+            ],
+            None,
+            false,
+        )
+        .await;
+    assert_eq!(result.run.status, RunStatus::Finished);
+    let step = &requests[1].input.tools.as_ref().unwrap().steps[0];
+    assert_eq!(step.observations.len(), 2, "command and integration");
+    assert_eq!(
+        step.hook_feedback.get(&0),
+        Some(&vec!["hook feedback: done".to_owned()])
+    );
+    let (events, view) = fixture.reopen(result.session_id).await;
+    let tools = &view.runs[0].tools;
+    assert_eq!(
+        tools[0].hook_feedback(),
+        vec!["hook feedback: done".to_owned()]
+    );
+    assert!(tools[1].hooks.is_empty());
+    let kinds: Vec<_> = events.iter().map(|event| event.event.kind()).collect();
+    let integration = kinds
+        .iter()
+        .rposition(|kind| *kind == "ToolFinished")
+        .unwrap();
+    let hook = kinds
+        .iter()
+        .position(|kind| *kind == "HookStarted")
+        .unwrap();
+    assert!(integration < hook, "the hook follows the integration");
+}
+
+fn read_post_settings(hooks: Vec<Value>) -> Value {
+    json!({"permissions": {}, "hooks": {"PostToolUse": [{"matcher": "Read", "hooks": hooks}]}})
+}
+
+#[tokio::test]
+async fn hook_post_tool_use_sets_that_cannot_run_deny_the_tool_before_dispatch() {
+    for (hooks, reason) in [
+        (
+            vec![json!({"type": "command", "command": "true", "args": []})],
+            "hook program is not pinned",
+        ),
+        ((0..9).map(|_| shell_hook("exit 0")).collect(), "hook limit"),
+    ] {
+        let case = hook_case(read_post_settings(hooks), None, false).await;
+        assert_eq!(
+            case.model_output,
+            format!("Hook denied this Tool: {reason}")
+        );
+        assert_eq!(case.started(), 0);
+        assert!(!case.dispatched());
+    }
+}
+
+#[tokio::test]
+async fn hook_post_tool_use_denies_a_researcher_tool_before_dispatch() {
+    let fixture = Fixture::new(Some(&read_post_settings(vec![shell_hook("exit 2")])), false);
+    let (result, _, _) = fixture
+        .run(
+            vec![
+                ProviderOutcome::Delegate(Delegate {
+                    agent: None,
+                    children: vec!["Inspect facts".into()],
+                }),
+                tool_outcome(call("read"), None),
+                finish("report"),
+                finish("answer"),
+            ],
+            None,
+            true,
+        )
+        .await;
+    let tool = result
+        .run
+        .agents
+        .iter()
+        .flat_map(|agent| &agent.tools)
+        .next()
+        .unwrap();
+    assert_eq!(
+        tool.observation.as_ref().unwrap().output,
+        "Hook denied this Tool: hooks are unavailable to delegated research"
+    );
+    assert!(tool.hooks.is_empty());
+}

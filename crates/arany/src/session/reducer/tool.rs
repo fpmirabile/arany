@@ -172,27 +172,31 @@ pub(super) fn apply(
             agent_run_id,
             hook,
         } => {
+            let previous = current.last_sequence;
             let run = active_run(current, *run_id)?;
             if !permissions_pinned(run)
                 || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
             {
                 return Err(ReplayError::InvalidTransition);
             }
-            let tool = pending_tool(run, *agent_run_id)?;
+            let post = hook.event == HookEvent::PostToolUse;
+            let (tool, state_allows) = if post {
+                let (tool, adjacent) = post_target(run, &hook.subject_digest, previous)?;
+                let succeeded = tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Succeeded
+                });
+                (tool, adjacent && succeeded)
+            } else {
+                let tool = pending_tool(run, *agent_run_id)?;
+                let fresh = tool.permission_verdict.is_none() && tool.observation.is_none();
+                (tool, fresh)
+            };
             let finished_restriction = tool.hooks.iter().any(|view| {
                 view.outcome.as_ref().is_none_or(|outcome| {
                     outcome.result.restriction() == Decision::Deny
                         || outcome.observation.stops_run()
                 })
             });
-            let post = hook.event == HookEvent::PostToolUse;
-            let state_allows = if post {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.disposition == crate::tools::ToolDisposition::Succeeded
-                })
-            } else {
-                tool.permission_verdict.is_none() && tool.observation.is_none()
-            };
             let same_event = tool
                 .hooks
                 .iter()
@@ -218,20 +222,32 @@ pub(super) fn apply(
                 invocation: hook.clone(),
                 outcome: None,
             });
+            if post {
+                tool.hook_sequence = Some(prior);
+            }
         }
         Event::HookFinished {
             run_id,
             agent_run_id,
             outcome,
         } => {
+            let previous = current.last_sequence;
             let run = active_run(current, *run_id)?;
             if !permissions_pinned(run)
                 || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
             {
                 return Err(ReplayError::InvalidTransition);
             }
-            let tool = pending_tool(run, *agent_run_id)?;
+            let count = run.tools.len();
+            let tool = run
+                .tools
+                .iter_mut()
+                .skip(count.saturating_sub(2))
+                .rev()
+                .find(|tool| tool.hooks.last().is_some_and(|view| view.outcome.is_none()))
+                .ok_or(ReplayError::InvalidTransition)?;
             let observed = tool.observation.is_some();
+            let sequence = tool.hook_sequence;
             let view = tool
                 .hooks
                 .last_mut()
@@ -239,11 +255,15 @@ pub(super) fn apply(
                     view.outcome.is_none()
                         && view.invocation.intent == outcome.observation.intent
                         && (view.invocation.event == HookEvent::PostToolUse) == observed
+                        && (!observed || sequence == Some(previous))
                         && outcome.result
                             == HookResult::for_event(view.invocation.event, &outcome.observation)
                 })
                 .ok_or(ReplayError::InvalidTransition)?;
             view.outcome = Some(outcome.clone());
+            if observed {
+                tool.hook_sequence = Some(prior);
+            }
         }
         Event::ToolStarted {
             run_id,
@@ -340,6 +360,7 @@ pub(super) fn apply(
                 review_call_index: None,
                 permission_verdict: None,
                 hooks: Vec::new(),
+                hook_sequence: None,
                 finished_sequence: None,
             });
             record_run_ceiling(current, *run_id, *active_ceiling_ms)?;
@@ -467,6 +488,41 @@ fn permissions_pinned(run: &RunView) -> bool {
         .as_ref()
         .and_then(|config| config.tool_policy.as_ref())
         .is_some_and(|policy| policy.permissions_digest.is_some())
+}
+
+// The Tool a PostToolUse hook follows: the last Tool, or the source of the changeset the last Tool
+// integrated. The hook must directly follow that Tool's latest journaled step.
+fn post_target<'a>(
+    run: &'a mut RunView,
+    subject: &[u8; 32],
+    previous: u64,
+) -> Result<(&'a mut ToolView, bool), ReplayError> {
+    let last = run
+        .tools
+        .len()
+        .checked_sub(1)
+        .ok_or(ReplayError::InvalidTransition)?;
+    let integration = &run.tools[last];
+    let integrated = matches!(
+        &integration.intent.call,
+        crate::tools::ToolCall::ApplyChangeset { source_intent_digest, .. }
+            if source_intent_digest == subject
+    ) && last > 0
+        && integration.observation.as_ref().is_some_and(|observation| {
+            observation.disposition == crate::tools::ToolDisposition::Succeeded
+        });
+    let index = if integrated { last - 1 } else { last };
+    let awaiting_integration = !integrated
+        && integration
+            .observation
+            .as_ref()
+            .and_then(super::observed_command_changeset)
+            .is_some_and(|changeset| !changeset.files.is_empty());
+    let tail = integration
+        .finished_sequence
+        .max(run.tools[index].hook_sequence);
+    let adjacent = !awaiting_integration && tail == Some(previous);
+    Ok((&mut run.tools[index], adjacent))
 }
 
 fn pending_tool(
