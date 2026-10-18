@@ -910,7 +910,7 @@ pub(super) struct GuardContext<'a> {
     pub(super) root: &'a Path,
     pub(super) workspace: &'a Path,
     pub(super) skill: Option<Vec<u8>>,
-    runtime_started: std::time::Instant,
+    runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
 }
@@ -925,12 +925,20 @@ impl GuardContext<'_> {
     }
 }
 
+// Only macOS has a supervisor deadline counted from GO; elsewhere the full runtime starts at spawn.
+fn runtime_start_at_go() -> Option<std::time::Instant> {
+    cfg!(target_os = "macos").then(std::time::Instant::now)
+}
+
 fn runtime_after(
-    started: std::time::Instant,
+    started: Option<std::time::Instant>,
     runtime_ms: u32,
     now: std::time::Instant,
 ) -> Duration {
-    (started + Duration::from_millis(u64::from(runtime_ms))).saturating_duration_since(now)
+    let runtime = Duration::from_millis(u64::from(runtime_ms));
+    started.map_or(runtime, |started| {
+        (started + runtime).saturating_duration_since(now)
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1120,8 +1128,7 @@ pub(super) fn helper_main() -> ExitCode {
         stdin
             .read_exact(&mut go)
             .map_err(|_| ToolError::Operation)?;
-        #[cfg(target_os = "macos")]
-        let go_received = std::time::Instant::now();
+        let runtime_started = runtime_start_at_go();
         if go != *b"GO\n" || task.intent.expires_at_ms <= now_ms() {
             return Err(ToolError::Configuration);
         }
@@ -1138,9 +1145,6 @@ pub(super) fn helper_main() -> ExitCode {
         if task.intent.call.is_process() {
             super::fs::copy_seed()?;
         }
-        // Linux has no post-GO supervisor deadline, so its seed copy stays outside the runtime.
-        #[cfg(not(target_os = "macos"))]
-        let go_received = std::time::Instant::now();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1151,7 +1155,7 @@ pub(super) fn helper_main() -> ExitCode {
             root: &root,
             workspace,
             skill,
-            runtime_started: go_received,
+            runtime_started,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
@@ -1351,11 +1355,17 @@ mod tests {
         let go = std::time::Instant::now();
         let runtime = Duration::from_millis(5_000);
         let setup = Duration::from_millis(1_500);
-        let launcher_end = go + setup + runtime_after(go, 5_000, go + setup);
+        let launcher_end = go + setup + runtime_after(Some(go), 5_000, go + setup);
         assert_eq!(launcher_end, go + runtime);
         assert_eq!(
-            runtime_after(go, 5_000, go + runtime + setup),
+            runtime_after(Some(go), 5_000, go + runtime + setup),
             Duration::ZERO
+        );
+        assert_eq!(runtime_after(None, 5_000, go + runtime + setup), runtime);
+        assert_eq!(
+            runtime_start_at_go().is_some(),
+            cfg!(target_os = "macos"),
+            "Linux keeps the full runtime from spawn"
         );
         let supervisor_go = tokio::time::Instant::now();
         assert!(
