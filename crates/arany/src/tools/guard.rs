@@ -17,6 +17,18 @@ const TASK_BYTES_CAP: usize = 96 * 1024;
 pub(super) const RUNTIME_ROOT: &str = "/usr";
 // Loaded CI hosts stall teardown for seconds; one shared bound only widens the wait for termination evidence.
 pub(super) const TEARDOWN_WAIT: Duration = Duration::from_secs(10);
+const PAYLOAD_KILL_WAIT: Duration = Duration::from_secs(1);
+// The launcher starts its runtime timer only after GO and may then spend the kill wait reaping.
+#[cfg(any(target_os = "macos", test))]
+const PAYLOAD_REPORT_GRACE: Duration = PAYLOAD_KILL_WAIT.saturating_add(Duration::from_secs(1));
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn payload_report_deadline(
+    go: tokio::time::Instant,
+    runtime_ms: u32,
+) -> tokio::time::Instant {
+    go + Duration::from_millis(u64::from(runtime_ms)) + PAYLOAD_REPORT_GRACE
+}
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -832,7 +844,7 @@ pub(super) async fn capture(
         Err(_) => ToolError::Limit,
     };
     let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(1), reap_owned_child(&mut child)).await;
+    let _ = tokio::time::timeout(PAYLOAD_KILL_WAIT, reap_owned_child(&mut child)).await;
     Err(error)
 }
 
@@ -1307,6 +1319,23 @@ mod tests {
             parse_observation(br#"{"stage":"made_up"}"#),
             Err(ToolError::Operation)
         ));
+    }
+
+    #[test]
+    fn payload_report_deadline_outlasts_the_launcher_timeout_and_kill_wait_within_a_finite_grace() {
+        let go = tokio::time::Instant::now();
+        let deadline = payload_report_deadline(go, 5_000);
+        let launcher_report = go + Duration::from_millis(5_000) + PAYLOAD_KILL_WAIT;
+        assert!(deadline > launcher_report);
+        assert_eq!(
+            deadline - go,
+            Duration::from_millis(5_000) + PAYLOAD_REPORT_GRACE
+        );
+        assert!(PAYLOAD_REPORT_GRACE < TEARDOWN_WAIT);
+        assert_eq!(
+            payload_report_deadline(go, u32::MAX) - go,
+            Duration::from_millis(u64::from(u32::MAX)) + PAYLOAD_REPORT_GRACE
+        );
     }
 
     #[tokio::test]

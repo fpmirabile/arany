@@ -562,6 +562,58 @@ async fn permission_dispatch_over_maximum_command_timeout_limits_before_deny() {
 }
 
 #[tokio::test]
+async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and_reaps_it() {
+    let marker = format!("{}", 41_337 + std::process::id() % 1000);
+    let survivors = || {
+        let listing = std::process::Command::new("ps")
+            .args(["-A", "-o", "command="])
+            .output()
+            .expect("process listing");
+        String::from_utf8_lossy(&listing.stdout)
+            .lines()
+            .filter(|line| line.trim_start().starts_with(&format!("sleep {marker}")))
+            .count()
+    };
+    let mut fixture = Fixture::new(None, true);
+    fixture.command_maximum = Some(1_000);
+    let call = arany::ToolCall::Command {
+        program: "sh".into(),
+        args: vec!["-c".into(), format!("sleep {marker} & sleep {marker}")],
+        cwd: "".into(),
+    };
+    let mut plan = plan(&call);
+    plan.command_timeout_ms = Some(1_000);
+    let (result, _, _) = fixture
+        .run(
+            vec![tool_outcome(call, Some(Box::new(plan))), finish("answer")],
+            Some(arany::ApprovalMode::Request),
+            false,
+        )
+        .await;
+    let tool = &result.run.tools[0];
+    let observation = tool.observation.as_ref().unwrap();
+    assert_eq!(
+        (observation.disposition, observation.output.as_str()),
+        (
+            arany::ToolDisposition::Limit,
+            "Tool result or resource limit reached"
+        )
+    );
+    assert!(matches!(
+        observation.attestation,
+        Some(arany::Attestation::Guard(_))
+    ));
+    // An exited descendant may linger briefly before its new parent collects it.
+    let reaped = (0..20).any(|_| {
+        survivors() == 0 || {
+            std::thread::sleep(Duration::from_millis(100));
+            false
+        }
+    });
+    assert!(reaped, "the background child outlived the Guard teardown");
+}
+
+#[tokio::test]
 async fn permission_dispatch_missing_settings_preserves_existing_approval_flow() {
     for mode in [
         None,
