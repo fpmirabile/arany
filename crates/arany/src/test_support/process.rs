@@ -148,6 +148,40 @@ pub trait BoundedOutput {
     fn bounded_output_with_input(&mut self) -> io::Result<Output>;
 }
 
+// `diskimage` can hold a just-used fixture image briefly: retry gracefully with backoff, force only last.
+#[cfg(target_os = "macos")]
+pub fn detach_disk_image(target: &std::path::Path, deadline: Duration) -> Result<(), Output> {
+    let end = Instant::now() + deadline;
+    let mut pause = Duration::from_millis(250);
+    loop {
+        let force = Instant::now() + pause >= end;
+        let mut command = Command::new("/usr/bin/hdiutil");
+        command.arg("detach");
+        if force {
+            command.arg("-force");
+        }
+        let output = command
+            .arg("-quiet")
+            .arg(target)
+            .env_clear()
+            .bounded_output_for(Duration::from_secs(20), 4096)
+            .map_err(|error| Output {
+                status: std::os::unix::process::ExitStatusExt::from_raw(1 << 8),
+                stdout: Vec::new(),
+                stderr: error.to_string().into_bytes(),
+            })?;
+        // A device node that disappeared after a failed attempt was detached by that attempt.
+        if output.status.success() || (target.starts_with("/dev") && !target.exists()) {
+            return Ok(());
+        }
+        if force {
+            return Err(output);
+        }
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_secs(4));
+    }
+}
+
 impl BoundedOutput for Command {
     fn bounded_output(&mut self) -> io::Result<Output> {
         self.bounded_output_for(Duration::from_secs(30), 32 * 1024 * 1024)
