@@ -5829,7 +5829,12 @@ async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_out
                 if let Some(facts) = &mut input.goal_context_facts {
                     normalize_facts(facts);
                 }
-                for step in &mut input.tools.as_mut().unwrap().steps {
+                let tools = input.tools.as_mut().unwrap();
+                // The catalog embeds the wall clock at each Run's start.
+                let mut catalog: serde_json::Value = serde_json::from_str(&tools.catalog).unwrap();
+                catalog["host_clock"]["unix_ms"] = 0.into();
+                tools.catalog = catalog.to_string();
+                for step in &mut tools.steps {
                     if let Some(facts) = &mut step.facts {
                         normalize_facts(facts);
                     }
