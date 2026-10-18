@@ -1034,3 +1034,22 @@ fn unguarded_commands_match_bash_deny_and_ask_but_never_allow() {
     assert_eq!(unguarded.label(), "command_unguarded");
     assert_eq!(peer_name(&unguarded), "Bash");
 }
+
+#[test]
+fn auto_mode_never_routes_an_unguarded_command_to_ai_review() {
+    let unguarded = ToolCall::CommandUnguarded {
+        program: "sh".into(),
+        args: vec!["-c".into(), "cargo test".into()],
+        cwd: String::new(),
+        justification: "Run the failed command once".into(),
+    };
+    let guarded = command("sh", &["-c", "cargo test"]);
+    let parsed = config(json!({"defaultMode": "auto"}));
+    assert_eq!(
+        parsed.evaluate(&guarded).2,
+        Some(crate::tools::ApprovalMode::Auto)
+    );
+    let evaluated = parsed.evaluate(&unguarded);
+    assert_eq!(evaluated.0, Decision::Ask);
+    assert_eq!(evaluated.2, Some(crate::tools::ApprovalMode::Request));
+}

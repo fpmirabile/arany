@@ -364,6 +364,10 @@ async fn run_on_engine(
                     .collect(),
                 None => vec![run],
             };
+            let unguarded: usize = goal_runs.iter().map(|run| run.unguarded_tools()).sum();
+            if unguarded > 0 {
+                receipt.push_str(&format!("unguarded effects: {unguarded}\n"));
+            }
             if let Some(notice) = crate::presentation::render_goal_provider_fallbacks(goal_runs) {
                 receipt.push_str(&notice);
                 receipt.push('\n');

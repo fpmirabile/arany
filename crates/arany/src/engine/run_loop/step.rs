@@ -16,9 +16,9 @@ use crate::tools::types::{
     CommandChangeset, CommandResult, MAX_TOOL_ARGUMENT_BYTES, MAX_TOOL_RESULT_BYTES,
 };
 use crate::tools::{
-    ActiveActionRequest, ActiveToolWindow, ApprovalMode, CacheUpdate, EffectIntent, ToolCall,
-    ToolContext, ToolDisposition, ToolError, ToolObservation, ToolRequest, ToolResourceClass,
-    ToolRuntime, ToolStep,
+    ActiveActionRequest, ActiveToolWindow, ApprovalMode, ApprovalReply, CacheUpdate, EffectIntent,
+    ToolCall, ToolContext, ToolDisposition, ToolError, ToolObservation, ToolRequest,
+    ToolResourceClass, ToolRuntime, ToolStep, UnguardedPrompt,
 };
 use std::time::Duration;
 use tokio::time::Instant;
@@ -80,6 +80,7 @@ struct Permission {
 impl Permission {
     fn narrow_terminal(mut self, mode: Option<ApprovalMode>, call: &ToolCall) -> Self {
         if self.decision != Decision::Deny
+            && self.basis != PermissionSource::ExactCommandRule
             && let Some(mode) = mode.filter(|mode| mode.asks(call))
         {
             if self.decision == Decision::Allow {
@@ -265,6 +266,8 @@ impl RunLoop<'_> {
         );
         let requested_runtime_ms = if command {
             requested_runtime_ms
+        } else if intent.call.is_unguarded() {
+            requested_runtime_ms.min(resource_settings.max_command_timeout_ms)
         } else {
             intent.limits.runtime_ms
         };
@@ -456,13 +459,24 @@ impl RunLoop<'_> {
             .map_or((Decision::Allow, PermissionSource::Mode, None), |config| {
                 config.evaluate(call)
             });
-        if runtime.permissions().is_some()
-            && (!runtime.allows(call)
-                || matches!(grant, Grant::Researcher { .. }) && !call.is_child_research())
+        let unguarded = call.is_unguarded();
+        let researcher = matches!(grant, Grant::Researcher { .. });
+        if (runtime.permissions().is_some() || unguarded)
+            && (!runtime.allows(call) || researcher && !call.is_child_research())
         {
             decision = decision.narrow(Decision::Deny);
             basis = PermissionSource::PinnedGrant;
             approval = None;
+        }
+        if unguarded && decision != Decision::Deny {
+            // Only a human or an exact project rule approves a host run; no mode or review does.
+            decision = Decision::Ask;
+            approval = Some(ApprovalMode::Request);
+            if basis != PermissionSource::Rule && runtime.matches_exact_command_rule(call) {
+                decision = Decision::Allow;
+                basis = PermissionSource::ExactCommandRule;
+                approval = None;
+            }
         }
         Permission {
             decision,
@@ -479,6 +493,7 @@ impl RunLoop<'_> {
         permission: Permission,
     ) -> Result<Verdict, EngineError> {
         let config = runtime.permissions();
+        let unguarded = intent.call.is_unguarded();
         let permission = permission.narrow_terminal(self.terminal_mode(), &intent.call);
         let Permission {
             decision, basis, ..
@@ -557,7 +572,7 @@ impl RunLoop<'_> {
                 }
             }
         };
-        if let Some(config) = config {
+        if config.is_some() || unguarded {
             let approved = matches!(&verdict, Verdict::Dispatch { .. });
             // An approving review that did not lead to dispatch is not an AI approval.
             let source = if !approved && source == PermissionSource::AiReview {
@@ -574,7 +589,7 @@ impl RunLoop<'_> {
                 verdict: PermissionVerdict {
                     intent_digest: digest,
                     decision,
-                    mode: Some(config.mode()),
+                    mode: config.map(|config| config.mode()),
                     basis,
                     source,
                     approved,
@@ -598,6 +613,14 @@ impl RunLoop<'_> {
         } else {
             permission.basis
         };
+        let mut unguarded_prompt = None;
+        if intent.call.is_unguarded() {
+            match unguarded_gate(runtime, request, &intent) {
+                Ok(prompt) => unguarded_prompt = Some(prompt),
+                Err(message) => return Ok(self.not_offered(intent, message, source)),
+            }
+        }
+        let mut unsaved_rule = false;
         let goal_allows = self.ledger().allows_tool(&intent.call);
         let mut approved = true;
         let mut active_time_exhausted = false;
@@ -638,16 +661,12 @@ impl RunLoop<'_> {
             {
                 match self.reserve_active_pause() {
                     Ok(pause) => {
-                        let mut cancellation = self.controls.cancellation.clone();
-                        let expires = intent.expires_at_ms.saturating_sub(crate::tools::now_ms());
-                        approved = tokio::select! {
-                            biased;
-                            () = cancellation.cancelled() => false,
-                            result = tokio::time::timeout(Duration::from_millis(expires), approvals.ask(&intent)) => {
-                                source = PermissionSource::Human;
-                                result.unwrap_or(false)
-                            }
-                        };
+                        let (reply, unsaved) = self
+                            .human_reply(runtime, approvals, &intent, unguarded_prompt.clone())
+                            .await;
+                        source = PermissionSource::Human;
+                        approved = reply != ApprovalReply::Deny && !unsaved;
+                        unsaved_rule = unsaved;
                         let resume_at = approved.then(Instant::now);
                         self.settle_active_pause(pause, resume_at)?;
                     }
@@ -709,7 +728,13 @@ impl RunLoop<'_> {
             not_dispatched(
                 intent,
                 ToolDisposition::Denied,
-                "Approval was not granted; no operation was dispatched",
+                if unsaved_rule {
+                    "The always-allow rule could not be saved; no operation was dispatched"
+                } else if unguarded_prompt.is_some() && self.controls.approvals.is_none() {
+                    "Unguarded re-run needs interactive approval or an exact-command rule for this project; no operation was dispatched"
+                } else {
+                    "Approval was not granted; no operation was dispatched"
+                },
             )
         };
         self.clear_tool_queue();
@@ -724,6 +749,52 @@ impl RunLoop<'_> {
             }),
             source,
         ))
+    }
+
+    fn not_offered(
+        &self,
+        intent: EffectIntent,
+        message: &'static str,
+        source: PermissionSource,
+    ) -> (Verdict, PermissionSource) {
+        self.clear_tool_queue();
+        (
+            Verdict::Deny(Answer {
+                observation: not_dispatched(intent, ToolDisposition::Denied, message),
+                refused: false,
+                active_time: Some(ActiveTime {
+                    segment: None,
+                    exhausted: false,
+                }),
+            }),
+            source,
+        )
+    }
+
+    async fn human_reply(
+        &self,
+        runtime: &ToolRuntime,
+        approvals: &crate::tools::ToolApprovals,
+        intent: &EffectIntent,
+        prompt: Option<UnguardedPrompt>,
+    ) -> (ApprovalReply, bool) {
+        let mut cancellation = self.controls.cancellation.clone();
+        let expires = intent.expires_at_ms.saturating_sub(crate::tools::now_ms());
+        let reply = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => ApprovalReply::Deny,
+            result = tokio::time::timeout(Duration::from_millis(expires), async {
+                match prompt.clone() {
+                    Some(prompt) => approvals.ask_unguarded(intent, prompt).await,
+                    None => ApprovalReply::from(approvals.ask(intent).await),
+                }
+            }) => result.unwrap_or(ApprovalReply::Deny),
+        };
+        // The rule is durable before the verdict, so a crash cannot leave a recorded approval without it.
+        let unsaved = reply == ApprovalReply::AllowAlwaysInProject
+            && prompt.is_some()
+            && runtime.record_exact_command_rule(&intent.call).is_err();
+        (reply, unsaved)
     }
 
     async fn dispatch_primary(
@@ -1107,6 +1178,54 @@ fn not_dispatched(
         cache_update: CacheUpdate::NotApplicable,
     }
 }
+
+fn unguarded_gate(
+    runtime: &ToolRuntime,
+    request: &ProviderRequest,
+    intent: &EffectIntent,
+) -> Result<UnguardedPrompt, &'static str> {
+    let ToolCall::CommandUnguarded {
+        program, args, cwd, ..
+    } = &intent.call
+    else {
+        return Err(NO_PRIOR_FAILURE);
+    };
+    let observed = request
+        .input
+        .tools
+        .as_ref()
+        .map(ToolContext::observations)
+        .unwrap_or_default();
+    if crate::tools::types::uses_guard_alias(args) {
+        return Err(
+            "Guard path aliases such as /workspace do not exist on the host; an unguarded re-run is not offered; no operation was dispatched",
+        );
+    }
+    let Some(prior) =
+        crate::tools::types::qualifying_guard_failure(&intent.call, observed.iter().copied())
+    else {
+        let denied_path = observed.iter().rev().any(|observation| {
+            observation.enforcement_cause == Some(crate::tools::EnforcementCause::FilesystemDenied)
+                && matches!(&observation.intent.call,
+                    ToolCall::Command { program: p, args: a, cwd: c } if p == program && a == args && c == cwd)
+        });
+        return Err(if denied_path {
+            "The Guard denied a protected path or set-ID entry; an unguarded re-run is not offered; no operation was dispatched"
+        } else {
+            NO_PRIOR_FAILURE
+        });
+    };
+    Ok(UnguardedPrompt {
+        executable: runtime
+            .command_executable(program)
+            .ok_or(NO_PRIOR_FAILURE)?
+            .to_owned(),
+        attribution: prior.enforcement_cause,
+    })
+}
+
+const NO_PRIOR_FAILURE: &str =
+    "No identical command failed under the Guard in this Run; no operation was dispatched";
 
 fn outside_plan(intent: EffectIntent) -> ToolObservation {
     not_dispatched(

@@ -116,6 +116,7 @@ mod tests {
                 "arany_edit",
                 "arany_command",
                 "arany_mcp_call",
+                "arany_command_unguarded"
             ]
         );
         assert!(primary.iter().all(|spec| !spec.description.is_empty()
@@ -145,7 +146,15 @@ mod tests {
             .collect();
         assert_eq!(
             eligible,
-            ["skill", "mkdir", "write", "edit", "command", "mcp_call"]
+            [
+                "skill",
+                "mkdir",
+                "write",
+                "edit",
+                "command",
+                "mcp_call",
+                "command_unguarded"
+            ]
         );
     }
 
