@@ -466,7 +466,7 @@ async fn run_on_engine(
     })
 }
 
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+pub(super) const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StopSignal {

@@ -59,6 +59,8 @@ Malformed, non-object or duplicate-key MCP arguments, and selected-credential re
 
 ## Admission, persistence and recovery
 
+A `serve --stdio` process opens one Engine shared by all its loaded threads; the [serve contract](./serve.md) owns its client loop.
+
 Persist only SQLite schema 4, compaction compiler version 3 and one current payload version per Event kind. Decision O5 (persistence): roster metadata is a required nullable `RunStarted` v11 field; keep role provenance and cross-validate it with the bounded snapshot. No SQL change, migration, dual reader or replay-time configuration lookup. `AgentSpawned` stays v6 until assignment selection is implemented.
 
 | Event kind | Current payload version |

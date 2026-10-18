@@ -223,6 +223,7 @@ fn protocol_params_reject_unknown_fields_unsupported_modes_and_input_overflow() 
     }
     let mut params = json!({"threadId": "019a0011-2233-7444-8555-667788990000", "input": []});
     for input in [
+        json!([]),
         json!([{"type": "text", "text": "x".repeat(65537)}]),
         json!([{"type": "text", "text": "é".repeat(32769)}]),
         json!([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]),

@@ -1,0 +1,15 @@
+{"client":{"id":1,"jsonrpc":"2.0","method":"initialize","params":{"clientInfo":{"name":"test","version":"1"}}}}
+{"server":{"id":1,"jsonrpc":"2.0","result":{"capabilities":["threads_v1","turns_v1","items_v1","interrupt_receipt_v1"],"platformOs":"$os","userAgent":"arany/$version"}}}
+{"client":{"jsonrpc":"2.0","method":"initialized","params":{}}}
+{"client":{"id":2,"jsonrpc":"2.0","method":"thread/start","params":{"collaboration":"single","cwd":"$workspace","model":"gpt-5.4","provider":"openai","title":"Conformance"}}}
+{"server":{"id":2,"jsonrpc":"2.0","result":{"thread":{"createdAtMs":0,"id":"$thread","title":"Conformance","workspace":"$workspace"}}}}
+{"server":{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"createdAtMs":0,"id":"$thread","title":"Conformance","workspace":"$workspace"}}}}
+{"client":{"id":3,"jsonrpc":"2.0","method":"turn/start","params":{"input":[{"text":"Hi","type":"text"}],"threadId":"$thread"}}}
+{"server":{"id":3,"jsonrpc":"2.0","result":{"turn":{"goalId":"$goal","id":"$run","items":[],"status":"inProgress"}}}}
+{"server":{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"$thread","turn":{"goalId":"$goal","id":"$run","items":[],"status":"inProgress"}}}}
+{"server":{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"$run:user","images":[],"text":"Hi","type":"userMessage"},"startedAtMs":0,"threadId":"$thread","turnId":"$run"}}}
+{"server":{"jsonrpc":"2.0","method":"item/completed","params":{"completedAtMs":0,"item":{"id":"$run:user","images":[],"text":"Hi","type":"userMessage"},"threadId":"$thread","turnId":"$run"}}}
+{"server":{"jsonrpc":"2.0","method":"item/completed","params":{"completedAtMs":0,"item":{"id":"$run:answer","phase":"final_answer","text":"Hello","type":"agentMessage"},"threadId":"$thread","turnId":"$run"}}}
+{"server":{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"$thread","turn":{"goal":{"status":"completed"},"goalId":"$goal","id":"$run","items":[],"status":"completed"}}}}
+{"client":{"id":6,"jsonrpc":"2.0","method":"thread/resume","params":{"cwd":"$workspace","model":"gpt-5.4","provider":"openai","threadId":"$thread"}}}
+{"server":{"id":6,"jsonrpc":"2.0","result":{"thread":{"createdAtMs":0,"goal":{"status":"completed"},"id":"$thread","title":"Conformance","workspace":"$workspace"},"turns":[{"goal":{"status":"completed"},"goalId":"$goal","id":"$run","items":[{"id":"$run:user","images":[],"text":"Hi","type":"userMessage"},{"id":"$run:answer","phase":"final_answer","text":"Hello","type":"agentMessage"}],"status":"completed"}]}}}
