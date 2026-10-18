@@ -243,6 +243,7 @@ pub(super) fn apply(
             tool.hooks.push(HookView {
                 invocation: hook.clone(),
                 outcome: None,
+                idle: false,
             });
             if post {
                 tool.hook_sequence = Some(prior);
@@ -279,10 +280,13 @@ pub(super) fn apply(
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
-                let ceiling = if run.status == crate::session::RunStatus::Active {
-                    None
-                } else {
+                if !hook.idle && run.status != crate::session::RunStatus::Active {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                let ceiling = if hook.idle {
                     hook.invocation.active_ceiling_ms
+                } else {
+                    None
                 };
                 if outcome.boundary_active_ms.is_some() != ceiling.is_some()
                     || outcome
@@ -853,6 +857,7 @@ fn start_lifecycle(
     run.lifecycle_hooks.push(HookView {
         invocation: hook.clone(),
         outcome: None,
+        idle: boundary,
     });
     run.lifecycle_hook_sequence = Some(sequence);
     Ok(())

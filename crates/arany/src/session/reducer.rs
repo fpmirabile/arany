@@ -323,6 +323,7 @@ pub struct ToolView {
 pub struct HookView {
     pub invocation: crate::tools::permissions::HookInvocation,
     pub outcome: Option<crate::tools::permissions::HookOutcome>,
+    pub(crate) idle: bool,
 }
 
 impl ToolView {

@@ -5425,4 +5425,153 @@ mod goal_replay_tests {
         assert_eq!(view.goals[0].active_ms, 7);
         assert_eq!(view.goals[0].active_ceiling_ms, 0);
     }
+
+    #[test]
+    fn lifecycle_hook_finishing_after_its_run_was_interrupted_is_rejected() {
+        use crate::tools::permissions::{
+            HookEvent, HookInvocation, HookOutcome, HookResult, stop_subject,
+        };
+        let (mut view, goal, run, actor) = primary_tool_session(true);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, actor)).unwrap();
+        apply(
+            &mut view,
+            Event::ProviderCallRecorded {
+                run_id: run,
+                agent_run_id: actor,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Finished,
+                    Some(0),
+                ),
+            },
+        )
+        .unwrap();
+        let intent = child_intent(
+            run,
+            actor,
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 2".into()],
+                cwd: String::new(),
+            },
+        );
+        let last_call = view.runs[0].agents[0].provider_calls.len() - 1;
+        apply(
+            &mut view,
+            Event::HookStarted {
+                run_id: run,
+                agent_run_id: actor,
+                hook: HookInvocation {
+                    event: HookEvent::Stop,
+                    group: 0,
+                    handler: 0,
+                    subject_digest: stop_subject(actor, last_call),
+                    input_digest: [9; 32],
+                    intent: intent.clone(),
+                    active_ceiling_ms: Some(1000),
+                },
+            },
+        )
+        .unwrap();
+        apply(
+            &mut view,
+            Event::SessionRenamed {
+                title: "Renamed".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        let mut observation = observation_for(intent, b"");
+        observation.disposition = ToolDisposition::Denied;
+        observation.attestation = None;
+        observation.output = "hook limit".into();
+        for boundary_active_ms in [None, Some(0)] {
+            assert!(rejected(
+                &view,
+                Event::HookFinished {
+                    run_id: run,
+                    agent_run_id: actor,
+                    outcome: HookOutcome {
+                        observation: observation.clone(),
+                        result: HookResult::Blocked {
+                            reason: Some("hook limit".into()),
+                        },
+                        boundary_active_ms,
+                    },
+                }
+            ));
+        }
+        assert_eq!(view.goals[0].resume_usage(&view).active_ms, 1000);
+    }
+
+    #[test]
+    fn crash_with_an_open_idle_precompact_leaves_the_session_usable() {
+        use crate::tools::permissions::{HookEvent, HookInvocation, compact_subject};
+        let (mut view, _, run, actor) = primary_tool_session(true);
+        let current = &mut view.runs[0];
+        current.status = RunStatus::Finished;
+        current.agents[0].status = AgentStatus::Finished;
+        current.agents[0].provider_calls.push(record(
+            AgentPhase::RootPlan,
+            ProviderCallDisposition::Finished,
+            Some(0),
+        ));
+        current
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        view.goals[0].active_run = None;
+        view.goals[0].active_deadline = None;
+        let intent = child_intent(
+            run,
+            actor,
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 2".into()],
+                cwd: String::new(),
+            },
+        );
+        apply(
+            &mut view,
+            Event::HookStarted {
+                run_id: run,
+                agent_run_id: actor,
+                hook: HookInvocation {
+                    event: HookEvent::PreCompact,
+                    group: 0,
+                    handler: 0,
+                    subject_digest: compact_subject("manual", 1),
+                    input_digest: [9; 32],
+                    intent,
+                    active_ceiling_ms: Some(1000),
+                },
+            },
+        )
+        .unwrap();
+        let next_goal = GoalId::new();
+        apply(&mut view, goal_started(next_goal, GoalBudget::default())).unwrap();
+        for event in start_run(
+            next_goal,
+            RunId::new(),
+            AgentRunId::new(),
+            config(CollaborationPolicy::Single, true),
+        ) {
+            apply(&mut view, event).unwrap();
+        }
+        assert_eq!(view.runs.len(), 2);
+        assert!(!view.runs[0].hooks_settled());
+        assert_eq!(view.goals[0].resume_usage(&view).active_ms, 1000);
+    }
 }
