@@ -99,7 +99,7 @@ impl Host {
                 &serde_json::to_vec(settings).unwrap(),
             );
         }
-        let engine = Engine::open(
+        let engine = crate::engine_support::open(
             root,
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),

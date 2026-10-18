@@ -18,6 +18,7 @@ use uuid::Uuid;
 #[cfg(unix)]
 pub use arany::test_support::process;
 use arany::test_support::{engine as engine_support, scenario::*};
+
 use engine_support::{run_to_end, run_with};
 
 #[path = "guard_runs/permissions.rs"]
@@ -25,6 +26,15 @@ mod permissions;
 
 #[path = "guard_runs/unguarded.rs"]
 mod unguarded;
+
+#[test]
+fn account_path_uses_the_private_binary_fixture() {
+    let root = arany::test_support::isolate_account_root();
+    assert_eq!(StateRoot::account_path().unwrap(), root);
+    if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_none() {
+        assert!(root.starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()));
+    }
+}
 
 async fn wait_for_child_finish(store: &Store, session_id: SessionId, objective: &str) {
     loop {
@@ -75,6 +85,11 @@ fn observe_process(
 
     let mut stdout = tempfile::tempfile_in(observation_root).expect("private stdout");
     let mut stderr = tempfile::tempfile_in(observation_root).expect("private stderr");
+    #[cfg(debug_assertions)]
+    command.env(
+        "ARANY_TEST_ACCOUNT_ROOT",
+        arany::test_support::isolate_account_root(),
+    );
     let mut child = OwnedChild(Some(
         command
             .stdin(Stdio::null())
@@ -167,7 +182,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let first_image = image_fixture(64 * 1024);
         let second_image = image_fixture(69);
         let provider = Arc::new(provider);
-        let engine = Engine::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
+        let engine = engine_support::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
         .expect("engine");
         let mut first_request = request(&workspace, "First question");
         first_request.title = None;
@@ -353,7 +368,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let requests = Arc::clone(&provider.requests);
         let compactions = Arc::clone(&provider.compact_requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(StateRoot::open_existing(&state_path).unwrap(), EngineConfig::default()).unwrap();
+        let engine = engine_support::open(StateRoot::open_existing(&state_path).unwrap(), EngineConfig::default()).unwrap();
         let mut next = request(&workspace, "");
         next.title = None;
         next.session_id = Some(first.session_id);
@@ -625,7 +640,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
         })]);
         let compact_requests = Arc::clone(&provider.compact_requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
         )
@@ -831,7 +846,7 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
         let observed = Arc::clone(&provider.requests);
         let resumed_compacts = Arc::clone(&provider.compact_requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state readmission"),
             EngineConfig::default(),
         )
@@ -973,7 +988,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
             let requests = Arc::clone(&provider.requests);
             let compacts = Arc::clone(&provider.compact_requests);
             let provider = Arc::new(provider);
-            let engine = Engine::open(
+            let engine = engine_support::open(
                 StateRoot::admit(&root.join("state")).expect("private seed State"),
                 EngineConfig::default(),
             )
@@ -1089,7 +1104,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
             identity: gated_identity(3),
         };
         let provider = Arc::new(provider);
-        let engine = Engine::open(StateRoot::admit(&state_path).expect("state readmission"), EngineConfig::default())
+        let engine = engine_support::open(StateRoot::admit(&state_path).expect("state readmission"), EngineConfig::default())
         .expect("engine");
         let observer = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
             .expect("observer");
@@ -1271,7 +1286,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
         let continued_requests = Arc::clone(&provider.requests);
         let compact_requests = Arc::clone(&provider.compact_requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(StateRoot::open_existing(&state_path).expect("continued State"), EngineConfig::default())
+        let engine = engine_support::open(StateRoot::open_existing(&state_path).expect("continued State"), EngineConfig::default())
         .expect("continued Engine");
         let failed = engine.compact_session(&AdmittedProviders::single(provider.clone()), session_id, workspace.clone()).await.expect("recorded compaction failure");
         assert_eq!(failed.covered_run_id, outcome.run.id);
@@ -1317,7 +1332,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
         let (started, mut started_rx) = mpsc::unbounded_channel();
         let cancelled_requests = Arc::new(Mutex::new(Vec::new()));
         let provider = Arc::new(GatedProvider { started, requests: Arc::clone(&cancelled_requests), fail_child: None, identity: gated_identity(3), });
-        let engine = Engine::open(StateRoot::open_existing(&state_path).expect("cancellation State"), EngineConfig::default())
+        let engine = engine_support::open(StateRoot::open_existing(&state_path).expect("cancellation State"), EngineConfig::default())
         .expect("cancellation Engine");
         let cancellation = RunCancellation::new();
         let run_cancellation = cancellation.clone();
@@ -1473,7 +1488,7 @@ async fn tool_step_events(
     std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("fact");
     let state_path = temp.path().join("state");
     let provider = Arc::new(ScriptedProvider::new(outcomes));
-    let engine = Engine::open(
+    let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig {
             guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2014,7 +2029,7 @@ mod goals {
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         let state_path = temp.path().join("state");
         let provider = Arc::new(ExactCapToolReview);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state"),
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2109,7 +2124,7 @@ mod goals {
             })),
         )]);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state"),
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2202,7 +2217,7 @@ mod goals {
         ]);
         let requests = provider.requests.clone();
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state"),
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2308,7 +2323,7 @@ mod goals {
         .with_before_call(1, move || assert!(pause.pause(), "first pause"));
         let requests = provider.requests.clone();
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state"),
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2396,7 +2411,7 @@ mod goals {
             finish_with("x"),
         ]);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state"),
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2483,7 +2498,7 @@ mod routing {
             ScriptedProvider::new(vec![finish("approve")])
                 .with_profile("scripted", "review-fallback"),
         );
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state).unwrap(),
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2575,7 +2590,7 @@ mod routing {
                     wire_provenance: None,
                 })]),
         );
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state).unwrap(),
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
@@ -2651,7 +2666,7 @@ mod routing {
                     wire_provenance: None,
                 })]),
         );
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state).unwrap(),
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),

@@ -41,7 +41,7 @@ pub fn routes(primary: &Arc<ScriptedProvider>) -> AdmittedProviders {
 }
 
 pub fn open(state: &Path) -> Engine {
-    Engine::open(StateRoot::admit(state).unwrap(), EngineConfig::default()).unwrap()
+    super::engine::open(StateRoot::admit(state).unwrap(), EngineConfig::default()).unwrap()
 }
 
 /// Tool grants that read `notes/facts.txt` through the Guard.

@@ -822,7 +822,7 @@ mod tests {
         std::fs::create_dir(&workspace).expect("workspace");
         let state_dir = temp.path().join("state");
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             StateRoot::admit(&state_dir).expect("state"),
             EngineConfig::default(),
         )
@@ -904,7 +904,7 @@ mod tests {
         std::fs::create_dir(&workspace).expect("workspace");
         let state_dir = temp.path().join("state");
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             StateRoot::admit(&state_dir).expect("state"),
             EngineConfig::default(),
         )
