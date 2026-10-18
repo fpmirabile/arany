@@ -484,6 +484,8 @@ impl RunLoop<'_> {
                 ToolDisposition::Limit,
                 "Delegation deadline reached; no operation was dispatched",
             ),
+
+            checkpoint: None,
         })
         .await
     }
