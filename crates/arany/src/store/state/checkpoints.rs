@@ -6,7 +6,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, TransactionBehavior, config::DbConfig, params,
 };
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 const FILE: &str = "checkpoints.sqlite";
@@ -22,6 +22,9 @@ const MAX_VERSION: usize = 1024 * 1024;
 const MAX_CAPTURE: usize = 32 * 1024 * 1024;
 const MAX_FILES: usize = 2048;
 const HEADROOM: u64 = 4 * 1024 * 1024;
+
+pub(crate) type Pruned = BTreeMap<String, String>;
+pub(crate) type Checked = Option<i64>;
 
 const SCHEMA: &[(&str, &str)] = &[
     (
@@ -71,7 +74,6 @@ pub(crate) struct Capture {
     pub(crate) session: SessionId,
     pub(crate) goal: GoalId,
     pub(crate) run: RunId,
-    pub(crate) sequence: u64,
     pub(crate) intent_id: uuid::Uuid,
     pub(crate) files: Vec<(String, Vec<u8>)>,
 }
@@ -186,7 +188,7 @@ pub(crate) fn prepare_reset(root: &StateRoot) -> Result<CheckpointReset, StoreEr
     let lock = lock(root)?;
     let records = records(root)?;
     // Healthy storage has no reset path; callers must first observe an unavailable store.
-    match open_before(root, false, LIMITS, lock.deadline) {
+    match open_before(root, false, LIMITS, lock.deadline, &mut None) {
         Ok(_) => return Err(StoreError::CheckpointUnavailable),
         Err(StoreError::CheckpointUnavailable) => {}
         Err(StoreError::Sqlite(error)) => {
@@ -206,7 +208,7 @@ pub(crate) fn prepare_reset(root: &StateRoot) -> Result<CheckpointReset, StoreEr
 
 #[cfg(test)]
 fn open(root: &StateRoot, create: bool, limits: Limits) -> Result<Connection, StoreError> {
-    open_before(root, create, limits, Instant::now() + BUSY)
+    open_before(root, create, limits, Instant::now() + BUSY, &mut None)
 }
 
 fn open_before(
@@ -214,6 +216,7 @@ fn open_before(
     create: bool,
     limits: Limits,
     deadline: Instant,
+    checked: &mut Checked,
 ) -> Result<Connection, StoreError> {
     records(root)?;
     let held = private_file(root, FILE, create, LIMITS.bytes as usize)?
@@ -247,7 +250,8 @@ fn open_before(
     if version != 1 && !fresh {
         return Err(StoreError::CheckpointUnavailable);
     }
-    if !fresh {
+    let schema = scalar(&connection, "PRAGMA schema_version", [])?;
+    if !fresh && *checked != Some(schema) {
         validate(&connection, limits)?;
     }
     if create {
@@ -268,6 +272,7 @@ fn open_before(
             return Err(StoreError::CheckpointUnavailable);
         }
     }
+    *checked = Some(scalar(&connection, "PRAGMA schema_version", [])?);
     let current = root.dir.symlink_metadata(FILE)?;
     let held = held.metadata()?;
     if current.dev() != held.dev() || current.ino() != held.ino() {
@@ -340,67 +345,170 @@ fn collect_blobs(connection: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn delete_refs(
+struct Victim {
+    rowid: i64,
+    session: String,
+    run: Option<String>,
+    digest: [u8; 32],
+}
+
+// Rows arrive ordered by eviction priority as (rowid, session, run, digest, len, group); whole groups
+// are removed until `enough(freed_bytes, freed_groups)` holds, in one pass without rescanning refs.
+fn evict(
     connection: &Connection,
-    filter: &str,
+    sql: &str,
     params: impl rusqlite::Params,
     incoming: &BTreeSet<[u8; 32]>,
-) -> Result<Option<RunId>, StoreError> {
-    let mut statement = connection.prepare(&format!(
-        "DELETE FROM refs WHERE {filter} RETURNING run_id,digest"
-    ))?;
-    let mut rows = statement.query(params)?;
-    let mut first = None;
-    while let Some(row) = rows.next()? {
-        if first.is_some() {
-            continue;
-        }
-        let run: Option<String> = row.get(0)?;
-        let digest: Vec<u8> = row.get(1)?;
-        let digest: [u8; 32] = digest
-            .try_into()
-            .map_err(|_| StoreError::CheckpointUnavailable)?;
-        if incoming.contains(&digest)
-            || scalar(
-                connection,
-                "SELECT EXISTS(SELECT 1 FROM refs WHERE digest=?1)",
-                [digest.as_slice()],
-            )? != 0
-        {
-            continue;
-        }
-        if let Some(run) = run {
-            first = Some(run.parse().map_err(|_| StoreError::CheckpointUnavailable)?);
+    pruned: &mut Pruned,
+    must_satisfy: bool,
+    mut enough: impl FnMut(i64, i64) -> bool,
+) -> Result<(), StoreError> {
+    let mut victims = Vec::new();
+    let (mut bytes, mut groups) = (0i64, 0i64);
+    let mut group = None::<String>;
+    let mut satisfied = false;
+    {
+        let mut statement = connection.prepare(sql)?;
+        let mut rows = statement.query(params)?;
+        while let Some(row) = rows.next()? {
+            let current: String = row.get(5)?;
+            if group.as_deref() != Some(current.as_str()) {
+                if !victims.is_empty() && enough(bytes, groups) {
+                    satisfied = true;
+                    break;
+                }
+                group = Some(current);
+                groups += 1;
+            }
+            let digest: Vec<u8> = row.get(3)?;
+            bytes += row.get::<_, i64>(4)?;
+            victims.push(Victim {
+                rowid: row.get(0)?,
+                session: row.get(1)?,
+                run: row.get(2)?,
+                digest: digest
+                    .try_into()
+                    .map_err(|_| StoreError::CheckpointUnavailable)?,
+            });
         }
     }
-    Ok(first)
+    if !satisfied && !victims.is_empty() && enough(bytes, groups) {
+        satisfied = true;
+    }
+    if must_satisfy && !satisfied {
+        return Err(StoreError::StorageFull);
+    }
+    let mut delete = connection.prepare("DELETE FROM refs WHERE rowid=?1")?;
+    for victim in &victims {
+        delete.execute([victim.rowid])?;
+    }
+    let mut lost = std::collections::HashMap::<[u8; 32], bool>::new();
+    for victim in &victims {
+        let lost = *match lost.entry(victim.digest) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let gone = !incoming.contains(&victim.digest)
+                    && scalar(
+                        connection,
+                        "SELECT EXISTS(SELECT 1 FROM refs WHERE digest=?1)",
+                        [victim.digest.as_slice()],
+                    )? == 0;
+                if gone {
+                    connection.execute(
+                        "DELETE FROM blobs WHERE digest=?1",
+                        [victim.digest.as_slice()],
+                    )?;
+                }
+                entry.insert(gone)
+            }
+        };
+        if lost && let Some(run) = &victim.run {
+            let newest = pruned.get(&victim.session).is_none_or(|known| known < run);
+            if newest {
+                pruned.insert(victim.session.clone(), run.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+const ROWS: &str = "SELECT rowid,session_id,run_id,digest,len";
+const TOTAL_ORDER: &str = "SELECT rowid,session_id,run_id,digest,len,CAST(rowid AS TEXT) FROM (SELECT rowid,session_id,run_id,digest,len,captured_at_ms,tool_sequence,MAX(captured_at_ms) OVER (PARTITION BY session_id) m FROM refs) ORDER BY m,session_id,captured_at_ms,tool_sequence,rowid";
+
+fn evict_total(
+    connection: &Connection,
+    incoming: &BTreeSet<[u8; 32]>,
+    pruned: &mut Pruned,
+    enough: impl FnMut(i64, i64) -> bool,
+) -> Result<(), StoreError> {
+    evict(connection, TOTAL_ORDER, [], incoming, pruned, true, enough)
+}
+
+fn evict_checkpoints(
+    connection: &Connection,
+    filter: &str,
+    owner: &str,
+    run: &str,
+    incoming: &BTreeSet<[u8; 32]>,
+    pruned: &mut Pruned,
+    enough: impl FnMut(i64, i64) -> bool,
+) -> Result<(), StoreError> {
+    let sql = format!(
+        "SELECT rowid,session_id,run_id,digest,len,session_id||'/'||c FROM (SELECT rowid,session_id,run_id,digest,len,COALESCE(run_id,rewind_id) c,MIN(captured_at_ms) OVER w t,MIN(tool_sequence) OVER w q FROM refs WHERE {filter} AND COALESCE(run_id,rewind_id)!=?2 WINDOW w AS (PARTITION BY session_id,COALESCE(run_id,rewind_id))) ORDER BY t,q,session_id,c,rowid"
+    );
+    evict(
+        connection,
+        &sql,
+        params![owner, run],
+        incoming,
+        pruned,
+        true,
+        enough,
+    )
 }
 
 fn expire(
     connection: &Connection,
     now: i64,
     incoming: &BTreeSet<[u8; 32]>,
-) -> Result<Option<RunId>, StoreError> {
-    delete_refs(
+    pruned: &mut Pruned,
+) -> Result<(), StoreError> {
+    evict(
         connection,
-        "session_id IN (SELECT session_id FROM refs GROUP BY session_id HAVING MAX(captured_at_ms) < ?1 OR MAX(captured_at_ms)>?2)",
+        &format!(
+            "{ROWS},CAST(rowid AS TEXT) FROM refs WHERE session_id IN (SELECT session_id FROM refs GROUP BY session_id HAVING MAX(captured_at_ms)<?1 OR MAX(captured_at_ms)>?2)"
+        ),
         params![now.saturating_sub(RETENTION_MS), now],
         incoming,
+        pruned,
+        false,
+        |_, _| false,
     )
 }
 
-pub(crate) fn sweep(root: &StateRoot, now: i64) -> Result<Option<RunId>, StoreError> {
+pub(crate) fn sweep(
+    root: &StateRoot,
+    now: i64,
+    checked: &mut Checked,
+) -> Result<Pruned, StoreError> {
     let _lock = lock(root)?;
-    let mut connection = open_before(root, true, LIMITS, _lock.deadline)?;
+    let mut connection = open_before(root, true, LIMITS, _lock.deadline, checked)?;
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let pruned = expire(&tx, now, &BTreeSet::new())?;
+    let mut pruned = Pruned::new();
+    expire(&tx, now, &BTreeSet::new(), &mut pruned)?;
     collect_blobs(&tx)?;
     tx.commit()?;
     connection.execute_batch("PRAGMA incremental_vacuum;")?;
     Ok(pruned)
 }
 
-pub(crate) fn capture(root: &StateRoot, capture: Capture, now: i64) -> Checkpoint {
+pub(crate) fn capture(
+    root: &StateRoot,
+    capture: Capture,
+    sequence: u64,
+    now: i64,
+    checked: &mut Checked,
+) -> Checkpoint {
     if capture.files.len() > MAX_FILES
         || capture
             .files
@@ -411,11 +519,13 @@ pub(crate) fn capture(root: &StateRoot, capture: Capture, now: i64) -> Checkpoin
     {
         return Checkpoint::skipped(CheckpointReason::TooLarge);
     }
-    match capture_inner(root, &capture, now, LIMITS) {
+    match capture_inner(root, &capture, sequence, now, LIMITS, checked) {
         Ok(pruned) => Checkpoint {
             status: CheckpointStatus::Captured,
             reason: None,
-            pruned_before_run: pruned,
+            pruned_before_run: pruned
+                .get(&capture.session.to_string())
+                .and_then(|run| run.parse().ok()),
         },
         Err(StoreError::StorageFull) => Checkpoint::skipped(CheckpointReason::Quota),
         Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(error, _)))
@@ -427,106 +537,160 @@ pub(crate) fn capture(root: &StateRoot, capture: Capture, now: i64) -> Checkpoin
     }
 }
 
+fn in_time(deadline: Instant) -> Result<(), StoreError> {
+    if Instant::now() > deadline {
+        return Err(StoreError::CheckpointUnavailable);
+    }
+    Ok(())
+}
+
+const EVICTION_ROUNDS: usize = 8;
+
 fn capture_inner(
     root: &StateRoot,
     capture: &Capture,
+    sequence: u64,
     now: i64,
     limits: Limits,
-) -> Result<Option<RunId>, StoreError> {
+    checked: &mut Checked,
+) -> Result<Pruned, StoreError> {
     let _lock = lock(root)?;
-    let mut connection = open_before(root, true, limits, _lock.deadline)?;
+    let deadline = _lock.deadline;
+    let mut connection = open_before(root, true, limits, deadline, checked)?;
     let capacity = rustix::fs::fstatvfs(&root.dir).map_err(|e| StoreError::Io(e.into()))?;
-    let bytes: usize = capture.files.iter().map(|(_, b)| b.len()).sum();
-    let physical = scalar(&connection, "PRAGMA page_count", [])? * 4096;
-    if capacity.f_bavail.saturating_mul(capacity.f_frsize)
-        < HEADROOM + physical as u64 + (bytes as u64) * 2
-    {
-        return Err(StoreError::StorageFull);
-    }
+    let available =
+        i64::try_from(capacity.f_bavail.saturating_mul(capacity.f_frsize)).unwrap_or(i64::MAX);
+    let bytes: i64 = capture.files.iter().map(|(_, b)| b.len() as i64).sum();
+    let files = capture.files.len() as i64;
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let incoming: BTreeSet<[u8; 32]> = capture
         .files
         .iter()
         .map(|(_, bytes)| Sha256::digest(bytes).into())
         .collect();
-    let mut pruned = expire(&tx, now, &incoming)?;
+    let mut pruned = Pruned::new();
+    expire(&tx, now, &incoming, &mut pruned)?;
+    in_time(deadline)?;
     let session = capture.session.to_string();
     let goal = capture.goal.to_string();
     let run = capture.run.to_string();
-    let sequence =
-        i64::try_from(capture.sequence).map_err(|_| StoreError::CheckpointUnavailable)?;
+    let sequence = i64::try_from(sequence).map_err(|_| StoreError::CheckpointUnavailable)?;
     for (path, content) in &capture.files {
         if !crate::tools::types::valid_relative(path, false) || path.len() > 4096 {
             return Err(StoreError::CheckpointUnavailable);
         }
-        let mut count = scalar(
+        let count = scalar(
             &tx,
             "SELECT COUNT(*) FROM refs WHERE session_id=?1 AND path=?2",
             params![session, path],
         )?;
-        let mut len = scalar(
+        let len = scalar(
             &tx,
             "SELECT COALESCE(SUM(len),0) FROM refs WHERE session_id=?1 AND path=?2",
             params![session, path],
         )?;
-        while count + 1 > limits.path_versions || len + content.len() as i64 > limits.path_bytes {
-            let removed = tx.query_row("SELECT rowid,len FROM refs WHERE session_id=?1 AND path=?2 AND tool_sequence!=?3 ORDER BY captured_at_ms,tool_sequence,rowid LIMIT 1", params![session,path,sequence], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).optional()?.ok_or(StoreError::StorageFull)?;
-            let removed_run = delete_refs(&tx, "rowid=?1", [removed.0], &incoming)?;
-            pruned = pruned.or(removed_run);
-            count -= 1;
-            len -= removed.1;
+        let add = content.len() as i64;
+        if count + 1 > limits.path_versions || len + add > limits.path_bytes {
+            evict(
+                &tx,
+                &format!(
+                    "{ROWS},CAST(rowid AS TEXT) FROM refs WHERE session_id=?1 AND path=?2 AND tool_sequence!=?3 ORDER BY captured_at_ms,tool_sequence,rowid"
+                ),
+                params![session, path, sequence],
+                &incoming,
+                &mut pruned,
+                true,
+                |freed, rows| {
+                    count + 1 - rows <= limits.path_versions
+                        && len - freed + add <= limits.path_bytes
+                },
+            )?;
         }
     }
-    while scalar(
+    in_time(deadline)?;
+    let goal_bytes = scalar(
         &tx,
         "SELECT COALESCE(SUM(len),0) FROM refs WHERE goal_id=?1",
         [&goal],
-    )? + bytes as i64
-        > limits.goal_bytes
-    {
-        let removed = evict_checkpoint(&tx, "goal_id=?1 AND run_id!=?2", &goal, &run, &incoming)?;
-        pruned = pruned.or(removed);
+    )?;
+    if goal_bytes + bytes > limits.goal_bytes {
+        evict_checkpoints(
+            &tx,
+            "goal_id=?1",
+            &goal,
+            &run,
+            &incoming,
+            &mut pruned,
+            |freed, _| goal_bytes - freed + bytes <= limits.goal_bytes,
+        )?;
     }
-    while scalar(
+    let session_bytes = scalar(
         &tx,
         "SELECT COALESCE(SUM(len),0) FROM refs WHERE session_id=?1",
         [&session],
-    )? + bytes as i64
-        > limits.session_bytes
-        || scalar(
+    )?;
+    let session_checkpoints = scalar(
+        &tx,
+        "SELECT COUNT(DISTINCT COALESCE(run_id,rewind_id)) FROM refs WHERE session_id=?1",
+        [&session],
+    )? + i64::from(
+        scalar(
             &tx,
-            "SELECT COUNT(DISTINCT COALESCE(run_id,rewind_id)) FROM refs WHERE session_id=?1",
-            [&session],
-        )? + i64::from(
-            scalar(
-                &tx,
-                "SELECT COUNT(*) FROM refs WHERE session_id=?1 AND run_id=?2",
-                params![session, run],
-            )? == 0,
-        ) > limits.session_checkpoints
+            "SELECT COUNT(*) FROM refs WHERE session_id=?1 AND run_id=?2",
+            params![session, run],
+        )? == 0,
+    );
+    if session_bytes + bytes > limits.session_bytes
+        || session_checkpoints > limits.session_checkpoints
     {
-        let removed = evict_checkpoint(
+        evict_checkpoints(
             &tx,
-            "session_id=?1 AND run_id!=?2",
+            "session_id=?1",
             &session,
             &run,
             &incoming,
+            &mut pruned,
+            |freed, groups| {
+                session_bytes - freed + bytes <= limits.session_bytes
+                    && session_checkpoints - groups <= limits.session_checkpoints
+            },
         )?;
-        pruned = pruned.or(removed);
     }
-    while scalar(&tx, "SELECT COUNT(*) FROM refs", [])? + capture.files.len() as i64 > limits.refs {
-        let removed = evict_total(&tx, &session, sequence, &incoming)?;
-        pruned = pruned.or(removed);
+    in_time(deadline)?;
+    let rows = scalar(&tx, "SELECT COUNT(*) FROM refs", [])?;
+    if rows + files > limits.refs {
+        evict_total(&tx, &incoming, &mut pruned, |_, removed| {
+            rows - removed + files <= limits.refs
+        })?;
     }
-    collect_blobs(&tx)?;
-    let needed = bytes as i64 + capture.files.len() as i64 * 16 * 4096;
-    while (scalar(&tx, "PRAGMA page_count", [])? - scalar(&tx, "PRAGMA freelist_count", [])?) * 4096
-        + needed
-        > limits.bytes
-    {
-        let removed = evict_total(&tx, &session, sequence, &incoming)?;
-        pruned = pruned.or(removed);
-        collect_blobs(&tx)?;
+    in_time(deadline)?;
+    let needed = bytes + files * 16 * 4096;
+    for round in 0..=EVICTION_ROUNDS {
+        let used = (scalar(&tx, "PRAGMA page_count", [])?
+            - scalar(&tx, "PRAGMA freelist_count", [])?)
+            * 4096;
+        let over = used + needed - limits.bytes;
+        if over <= 0 {
+            break;
+        }
+        if round == EVICTION_ROUNDS {
+            return Err(StoreError::StorageFull);
+        }
+        evict_total(&tx, &incoming, &mut pruned, |freed, _| freed >= over)?;
+        in_time(deadline)?;
+    }
+    for round in 0..=EVICTION_ROUNDS {
+        let free_pages = scalar(&tx, "PRAGMA freelist_count", [])? * 4096;
+        let growth = (needed - free_pages).max(0);
+        let short = HEADROOM as i64 + 2 * growth - available;
+        if short <= 0 {
+            break;
+        }
+        if growth == 0 || round == EVICTION_ROUNDS {
+            return Err(StoreError::StorageFull);
+        }
+        evict_total(&tx, &incoming, &mut pruned, |freed, _| freed * 2 >= short)?;
+        in_time(deadline)?;
     }
     for (path, content) in &capture.files {
         let digest = Sha256::digest(content);
@@ -540,49 +704,10 @@ fn capture_inner(
         }
         tx.execute("INSERT INTO refs(session_id,goal_id,run_id,rewind_id,tool_sequence,path,digest,len,captured_at_ms) VALUES(?1,?2,?3,NULL,?4,?5,?6,?7,?8)", params![session,goal,run,sequence,path,digest.as_slice(),content.len() as i64,now])?;
     }
-    collect_blobs(&tx)?;
+    in_time(deadline)?;
     tx.commit()?;
     connection.execute_batch("PRAGMA incremental_vacuum;")?;
     Ok(pruned)
-}
-
-fn evict_checkpoint(
-    connection: &Connection,
-    filter: &str,
-    owner: &str,
-    run: &str,
-    incoming: &BTreeSet<[u8; 32]>,
-) -> Result<Option<RunId>, StoreError> {
-    let sql = format!(
-        "SELECT session_id,COALESCE(run_id,rewind_id) FROM refs WHERE {filter} GROUP BY session_id,COALESCE(run_id,rewind_id) ORDER BY MIN(captured_at_ms),MIN(tool_sequence),session_id LIMIT 1"
-    );
-    let (session, checkpoint): (String, String) = connection
-        .query_row(&sql, params![owner, run], |r| Ok((r.get(0)?, r.get(1)?)))
-        .optional()?
-        .ok_or(StoreError::StorageFull)?;
-    delete_refs(
-        connection,
-        "session_id=?1 AND COALESCE(run_id,rewind_id)=?2",
-        params![session, checkpoint],
-        incoming,
-    )
-}
-
-fn evict_total(
-    connection: &Connection,
-    session: &str,
-    sequence: i64,
-    incoming: &BTreeSet<[u8; 32]>,
-) -> Result<Option<RunId>, StoreError> {
-    let owner: String = connection.query_row(
-        "SELECT session_id FROM refs GROUP BY session_id HAVING MAX(CASE WHEN session_id=?1 AND tool_sequence=?2 THEN 0 ELSE 1 END)=1 ORDER BY MAX(captured_at_ms),session_id LIMIT 1",
-        params![session,sequence], |r| r.get(0),
-    ).optional()?.ok_or(StoreError::StorageFull)?;
-    let row: i64 = connection.query_row(
-        "SELECT rowid FROM refs WHERE session_id=?1 AND NOT(session_id=?2 AND tool_sequence=?3) ORDER BY captured_at_ms,tool_sequence,rowid LIMIT 1",
-        params![owner,session,sequence], |r| r.get(0),
-    )?;
-    delete_refs(connection, "rowid=?1", [row], incoming)
 }
 
 fn read(connection: &Connection, digest: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
@@ -590,9 +715,16 @@ fn read(connection: &Connection, digest: &[u8]) -> Result<Option<Vec<u8>>, Store
     Ok(bytes.filter(|bytes| Sha256::digest(bytes).as_slice() == digest))
 }
 
-pub(crate) fn load(root: &StateRoot, digest: [u8; 32]) -> Result<Option<Vec<u8>>, StoreError> {
+pub(crate) fn load(
+    root: &StateRoot,
+    digest: [u8; 32],
+    checked: &mut Checked,
+) -> Result<Option<Vec<u8>>, StoreError> {
     let _lock = lock(root)?;
-    read(&open_before(root, false, LIMITS, _lock.deadline)?, &digest)
+    read(
+        &open_before(root, false, LIMITS, _lock.deadline, checked)?,
+        &digest,
+    )
 }
 
 #[cfg(test)]

@@ -64,9 +64,6 @@ impl Checkpoint {
 
     pub(crate) fn valid(&self) -> bool {
         (self.status == CheckpointStatus::Skipped) == self.reason.is_some()
-            && self
-                .pruned_before_run
-                .is_none_or(|id| id.to_string().parse::<RunId>().is_ok())
     }
 }
 
@@ -194,27 +191,20 @@ pub(crate) fn validate_finished(
         .iter()
         .find(|r| r.id == observation.intent.run_id)
         .ok_or(ReplayError::InvalidTransition)?;
+    let published = matches!(
+        observation.disposition,
+        ToolDisposition::Succeeded | ToolDisposition::Uncertain
+    );
     let before = before_versions(run, &observation.intent.call);
-    if before.is_empty() {
-        return Err(ReplayError::InvalidTransition);
-    }
     let needed = before.iter().any(|(path, digest)| {
         digest
             .as_ref()
             .is_some_and(|digest| capture_needed(view, run.id, path, digest))
     });
     match checkpoint.status {
-        CheckpointStatus::Captured
-            if needed
-                && matches!(
-                    observation.disposition,
-                    ToolDisposition::Succeeded | ToolDisposition::Uncertain
-                ) =>
-        {
-            Ok(())
-        }
-        CheckpointStatus::NotNeeded if !needed => Ok(()),
-        CheckpointStatus::Skipped if needed => Ok(()),
+        CheckpointStatus::Captured if needed && published => Ok(()),
+        CheckpointStatus::NotNeeded if !needed || !published => Ok(()),
+        CheckpointStatus::Skipped if needed && published => Ok(()),
         _ => Err(ReplayError::InvalidTransition),
     }
 }

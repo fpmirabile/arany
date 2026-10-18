@@ -2471,6 +2471,86 @@ mod goals {
         assert_action_bounds(&events, false, false);
     }
     #[tokio::test]
+    async fn a_stalled_checkpoint_capture_is_skipped_and_the_edit_still_publishes() {
+        use arany::test_support::goals::*;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "original");
+        let state_path = temp.path().join("state");
+        let engine = engine_support::open(
+            StateRoot::admit(&state_path).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        let config = state_path.join("tools.json");
+        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut plan = write_plan();
+        plan.paths = vec!["notes/facts.txt".into()];
+        plan.budget = arany::GoalBudget::default();
+        plan.success_criterion = arany::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "notes/facts.txt".into(),
+            content: "one".into(),
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            crate::tool_outcome(
+                arany::ToolCall::Write {
+                    path: "notes/facts.txt".into(),
+                    expected_digest: Some(
+                        Sha256::digest(b"original")
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect(),
+                    ),
+                    content: "one".into(),
+                },
+                Some(Box::new(plan)),
+            ),
+            finish_with("one"),
+        ]));
+        arany::FaultPlan::stall_checkpoint(session);
+        let mut input = request(&workspace, "Change the facts");
+        input.session_id = Some(session);
+        input.title = None;
+        input.include_paths.clear();
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        let tool = &outcome.run.tools[0];
+        assert_eq!(
+            tool.observation.as_ref().unwrap().disposition,
+            arany::ToolDisposition::Succeeded
+        );
+        let checkpoint = tool.checkpoint.as_ref().unwrap();
+        assert_eq!(checkpoint.status, arany::CheckpointStatus::Skipped);
+        assert_eq!(
+            checkpoint.reason,
+            Some(arany::CheckpointReason::StoreUnavailable)
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("notes/facts.txt")).unwrap(),
+            b"one"
+        );
+        engine.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn checkpoints_commit_before_go_skip_repeats_capture_gaps_and_preserve_replay() {
         use arany::test_support::goals::*;
         use std::os::unix::fs::PermissionsExt;

@@ -278,13 +278,14 @@ impl Store {
                 if ready_sender.send(Ok(())).is_err() {
                     return;
                 }
-                let pruned_on_open = if !read_only {
+                let mut checkpoint_checked = None;
+                let mut swept: state::checkpoints::Pruned = if !read_only {
                     state::checkpoints::sweep(
                         &root,
                         i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
+                        &mut checkpoint_checked,
                     ).unwrap_or_default()
-                } else { None };
-                let mut pruning_notice_pending = pruned_on_open;
+                } else { Default::default() };
                 let mut pruning_notified_run = None;
                 let mut hot_session = None::<HotSession>;
                 while let Some(request) = receiver.blocking_recv() {
@@ -397,7 +398,7 @@ impl Store {
                         Request::Evidence { op, reply } => {
                             let _ = reply.send(evidence::apply(&mut connection, read_only, op));
                         }
-                        Request::CheckpointCapture { mut capture, reply } => {
+                        Request::CheckpointCapture { capture, reply } => {
                             let result = if read_only {
                                 Err(StoreError::ReadOnly)
                             } else {
@@ -410,12 +411,14 @@ impl Store {
                                     let _ = reply.send(Err(StoreError::InvalidHistory));
                                     continue;
                                 };
-                                capture.sequence = u64::try_from(started).unwrap_or_default();
-                                let run = capture.run;
+                                let (run, session) = (capture.run, capture.session.to_string());
                                 let mut checkpoint = state::checkpoints::capture(
-                                    &root, capture, i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
+                                    &root, capture, u64::try_from(started).unwrap_or_default(),
+                                    i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
+                                    &mut checkpoint_checked,
                                 );
-                                if let Some(pruned) = pruning_notice_pending.take().or(checkpoint.pruned_before_run) {
+                                let earlier = swept.remove(&session).and_then(|run| run.parse::<crate::session::RunId>().ok());
+                                if let Some(pruned) = [checkpoint.pruned_before_run, earlier].into_iter().flatten().max_by_key(|run| run.to_string()) {
                                     if pruning_notified_run == Some(run) { checkpoint.pruned_before_run = None; }
                                     else { checkpoint.pruned_before_run = Some(pruned); pruning_notified_run = Some(run); }
                                 }
@@ -424,7 +427,7 @@ impl Store {
                             let _ = reply.send(result);
                         }
                         Request::CheckpointLoad { digest, reply } => {
-                            let _ = reply.send(state::checkpoints::load(&root, digest));
+                            let _ = reply.send(state::checkpoints::load(&root, digest, &mut checkpoint_checked));
                         }
                         Request::CheckpointReset { reply } => {
                             let result = if read_only {

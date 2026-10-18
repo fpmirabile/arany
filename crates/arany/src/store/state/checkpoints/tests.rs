@@ -5,15 +5,71 @@ fn fixture() -> (tempfile::TempDir, StateRoot) {
     let root = StateRoot::admit(&temp.path().join("state")).unwrap();
     (temp, root)
 }
-fn batch(session: SessionId, goal: GoalId, run: RunId, sequence: u64, content: &[u8]) -> Capture {
-    Capture {
-        session,
-        goal,
-        run,
-        sequence,
-        intent_id: uuid::Uuid::now_v7(),
-        files: vec![("file".into(), content.to_vec())],
+struct Batch {
+    capture: Capture,
+    sequence: u64,
+}
+impl std::ops::Deref for Batch {
+    type Target = Capture;
+    fn deref(&self) -> &Capture {
+        &self.capture
     }
+}
+impl std::ops::DerefMut for Batch {
+    fn deref_mut(&mut self) -> &mut Capture {
+        &mut self.capture
+    }
+}
+fn batch(session: SessionId, goal: GoalId, run: RunId, sequence: u64, content: &[u8]) -> Batch {
+    Batch {
+        capture: Capture {
+            session,
+            goal,
+            run,
+            intent_id: uuid::Uuid::now_v7(),
+            files: vec![("file".into(), content.to_vec())],
+        },
+        sequence,
+    }
+}
+fn capture(root: &StateRoot, batch: impl std::borrow::Borrow<Batch>, now: i64) -> Checkpoint {
+    let batch = batch.borrow();
+    super::capture(
+        root,
+        clone_capture(&batch.capture),
+        batch.sequence,
+        now,
+        &mut None,
+    )
+}
+fn clone_capture(capture: &Capture) -> Capture {
+    Capture {
+        session: capture.session,
+        goal: capture.goal,
+        run: capture.run,
+        intent_id: capture.intent_id,
+        files: capture.files.clone(),
+    }
+}
+fn capture_inner(
+    root: &StateRoot,
+    batch: &Batch,
+    now: i64,
+    limits: Limits,
+) -> Result<Option<RunId>, StoreError> {
+    super::capture_inner(root, &batch.capture, batch.sequence, now, limits, &mut None).map(
+        |pruned| {
+            pruned
+                .get(&batch.session.to_string())
+                .and_then(|run| run.parse().ok())
+        },
+    )
+}
+fn load(root: &StateRoot, digest: [u8; 32]) -> Result<Option<Vec<u8>>, StoreError> {
+    super::load(root, digest, &mut None)
+}
+fn sweep(root: &StateRoot, now: i64) -> Result<Pruned, StoreError> {
+    super::sweep(root, now, &mut None)
 }
 fn count(root: &StateRoot, sql: &str) -> i64 {
     scalar(&open(root, false, LIMITS).unwrap(), sql, []).unwrap()
@@ -300,4 +356,87 @@ fn checkpoints_pin_the_owner_accepted_bounds() {
     assert_eq!((MAX_FILES, MAX_CAPTURE), (2048, 33_554_432));
     assert_eq!(RETENTION_MS, 2_592_000_000);
     assert_eq!(BUSY, Duration::from_millis(2000));
+}
+
+#[test]
+fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_session() {
+    let (_temp, root) = fixture();
+    let (foreign, session, goal) = (SessionId::new(), SessionId::new(), GoalId::new());
+    let foreign_run = RunId::new();
+    let runs: Vec<RunId> = (0..20_000).map(|_| RunId::new()).collect();
+    {
+        let connection = open(&root, true, LIMITS).unwrap();
+        connection.execute_batch("BEGIN").unwrap();
+        let mut insert = connection
+            .prepare("INSERT INTO refs(session_id,goal_id,run_id,rewind_id,tool_sequence,path,digest,len,captured_at_ms) VALUES(?1,?2,?3,NULL,?4,?5,?6,1,?7)")
+            .unwrap();
+        for index in 0..20_000i64 {
+            let digest = Sha256::digest(index.to_le_bytes());
+            connection
+                .execute(
+                    "INSERT INTO blobs(digest,bytes,len) VALUES(?1,?2,1)",
+                    params![digest.as_slice(), [0u8]],
+                )
+                .unwrap();
+            insert
+                .execute(params![
+                    session.to_string(),
+                    goal.to_string(),
+                    runs[index as usize].to_string(),
+                    index + 1,
+                    format!("p{index}"),
+                    digest.as_slice(),
+                    RETENTION_MS + index
+                ])
+                .unwrap();
+        }
+        let digest = Sha256::digest(b"foreign");
+        connection
+            .execute(
+                "INSERT INTO blobs(digest,bytes,len) VALUES(?1,?2,7)",
+                params![digest.as_slice(), b"foreign".as_slice()],
+            )
+            .unwrap();
+        insert
+            .execute(params![
+                foreign.to_string(),
+                GoalId::new().to_string(),
+                foreign_run.to_string(),
+                1,
+                "f",
+                digest.as_slice(),
+                0
+            ])
+            .unwrap();
+        drop(insert);
+        connection.execute_batch("COMMIT").unwrap();
+    }
+    let mut limits = LIMITS;
+    limits.refs = 30_000;
+    limits.session_checkpoints = 100;
+    let started = Instant::now();
+    let pruned = super::capture_inner(
+        &root,
+        &batch(session, goal, RunId::new(), 30_000, b"new").capture,
+        30_000,
+        RETENTION_MS * 2,
+        limits,
+        &mut None,
+    )
+    .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(count(&root, "SELECT COUNT(DISTINCT run_id) FROM refs"), 100);
+    assert_eq!(
+        pruned.get(&session.to_string()),
+        Some(&runs[19_900].to_string())
+    );
+    assert_eq!(
+        pruned.get(&foreign.to_string()),
+        Some(&foreign_run.to_string()),
+        "foreign expiry is kept per Session, never attributed to this one"
+    );
 }

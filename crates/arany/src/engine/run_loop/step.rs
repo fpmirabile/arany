@@ -76,6 +76,8 @@ enum Verdict {
 }
 
 const MAX_NARROWINGS_PER_STEP: usize = 1;
+const CHECKPOINT_WAIT: Duration = Duration::from_secs(3);
+const CHECKPOINT_GO_MARGIN: Duration = Duration::from_secs(1);
 
 enum Resolver<'a> {
     AiReview { objective: &'a str },
@@ -1296,9 +1298,17 @@ impl RunLoop<'_> {
                     }
                 }
                 request = checkpoint_receiver.recv() => {
-                    if let Some(crate::tools::CheckpointRequest { reply }) = request {
+                    if let Some(crate::tools::CheckpointRequest { reply, go_deadline }) = request {
                         if crate::session::checkpoint::publication(&checkpoint_intent) {
-                            let deadline = active_segment.as_ref().map(|s| s.deadline()).unwrap_or_else(Instant::now);
+                            let deadline = [
+                                active_segment.as_ref().map(|s| s.deadline()),
+                                go_deadline.checked_sub(CHECKPOINT_GO_MARGIN),
+                                Instant::now().checked_add(CHECKPOINT_WAIT),
+                            ]
+                            .into_iter()
+                            .map(|bound| bound.unwrap_or_else(Instant::now))
+                            .min()
+                            .unwrap_or_else(Instant::now);
                             checkpoint = Some(self.capture_checkpoint(&runtime, &checkpoint_intent, deadline).await?);
                         }
                         let _ = reply.send(());
@@ -1319,21 +1329,13 @@ impl RunLoop<'_> {
             checkpoint = None;
         }
         if let Some(capture) = &mut checkpoint
-            && capture.status == crate::session::CheckpointStatus::Captured
             && !matches!(
                 observation.disposition,
                 ToolDisposition::Succeeded | ToolDisposition::Uncertain
             )
         {
-            let pruned = capture.pruned_before_run;
-            *capture = crate::session::Checkpoint::skipped(
-                if observation.disposition == ToolDisposition::Conflict {
-                    crate::session::CheckpointReason::DigestMismatch
-                } else {
-                    crate::session::CheckpointReason::StoreUnavailable
-                },
-            );
-            capture.pruned_before_run = pruned;
+            capture.status = crate::session::CheckpointStatus::NotNeeded;
+            capture.reason = None;
         }
         Ok((
             observation,
@@ -1351,7 +1353,7 @@ impl RunLoop<'_> {
     ) -> BoxedStep<'a, crate::session::Checkpoint> {
         Box::pin(async move {
             use crate::session::{Checkpoint, CheckpointReason};
-            let (sequence, paths) = self.ledger().view(|view| {
+            let paths = self.ledger().view(|view| {
                 let run = view
                     .runs
                     .iter()
@@ -1372,7 +1374,7 @@ impl RunLoop<'_> {
                             .map(|digest| (path, digest))
                     })
                     .collect::<Vec<_>>();
-                Ok::<_, EngineError>((view.last_sequence, paths))
+                Ok::<_, EngineError>(paths)
             })??;
             if paths.is_empty() {
                 return Ok(Checkpoint::not_needed());
@@ -1395,16 +1397,23 @@ impl RunLoop<'_> {
                 session: self.session_id,
                 goal: self.goal()?,
                 run: self.run_id,
-                sequence,
                 intent_id,
                 files,
             };
-            let checkpoint = self
-                .journal
-                .store()
-                .capture_checkpoint(capture)
-                .await
-                .unwrap_or_else(|_| Checkpoint::skipped(CheckpointReason::StoreUnavailable));
+            #[cfg(any(test, feature = "test-support"))]
+            let stalled = crate::fault::FaultPlan::checkpoint_stalled(self.session_id);
+            let store = self.journal.store();
+            let stored = async {
+                #[cfg(any(test, feature = "test-support"))]
+                if stalled {
+                    std::future::pending::<()>().await;
+                }
+                store.capture_checkpoint(capture).await
+            };
+            let checkpoint = match tokio::time::timeout_at(deadline, stored).await {
+                Ok(Ok(checkpoint)) => checkpoint,
+                _ => Checkpoint::skipped(CheckpointReason::StoreUnavailable),
+            };
             #[cfg(any(test, feature = "test-support"))]
             if checkpoint.status == crate::CheckpointStatus::Captured
                 && let Some((entered, release)) =

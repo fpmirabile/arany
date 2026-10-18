@@ -9,6 +9,7 @@ type Admits = fn(&Event) -> bool;
 
 enum Fault {
     Checkpoint(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
+    CheckpointStall(SessionId),
     WorkerReceipt(uuid::Uuid),
     GoalAppend(SessionId, Admits),
     GoalAcknowledgment(
@@ -44,6 +45,14 @@ impl FaultPlan {
         let (release, released) = oneshot::channel();
         plan().push(Fault::Checkpoint(session, entered, released));
         (wait, release)
+    }
+
+    pub fn stall_checkpoint(session: SessionId) {
+        plan().push(Fault::CheckpointStall(session));
+    }
+
+    pub(crate) fn checkpoint_stalled(session: SessionId) -> bool {
+        take(|fault| matches!(fault, Fault::CheckpointStall(id) if *id == session)).is_some()
     }
 
     pub(crate) fn checkpoint_gate(

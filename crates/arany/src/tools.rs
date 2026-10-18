@@ -167,6 +167,7 @@ struct QueueWait {
 
 pub(crate) struct CheckpointRequest {
     pub(crate) reply: tokio::sync::oneshot::Sender<()>,
+    pub(crate) go_deadline: tokio::time::Instant,
 }
 
 pub(crate) struct ActiveActionRequest {
@@ -242,7 +243,7 @@ impl ToolRuntime {
             .ok_or(ToolError::ProtectionUnavailable)?
             .slots
             .try_acquire()
-            .map_err(|_| ToolError::Limit)?;
+            .map_err(|_| ToolError::Operation)?;
         let files = match &intent.call {
             ToolCall::Write { .. } | ToolCall::Edit { .. } => paths
                 .iter()
@@ -352,7 +353,10 @@ impl ToolRuntime {
             );
             tokio::time::timeout_at(deadline, async {
                 sender
-                    .send(CheckpointRequest { reply })
+                    .send(CheckpointRequest {
+                        reply,
+                        go_deadline: deadline,
+                    })
                     .await
                     .map_err(|_| ToolError::Operation)?;
                 receipt.await.map_err(|_| ToolError::Operation)
