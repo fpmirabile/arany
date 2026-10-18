@@ -982,15 +982,7 @@ impl RunLoop<'_> {
                 }
             }
         };
-        let mode = config
-            .map(crate::tools::permissions::PermissionConfig::mode)
-            .or_else(|| match grant {
-                Grant::Researcher { child, .. } => child
-                    .definition
-                    .as_ref()
-                    .and_then(|definition| definition.permission_mode),
-                Grant::Primary { .. } => None,
-            });
+        let mode = effective_permission_mode(config, grant);
         if mode.is_some() || unguarded {
             let approved = matches!(&verdict, Verdict::Dispatch { .. });
             // An approving review that did not lead to dispatch is not an AI approval.
@@ -1920,6 +1912,20 @@ impl RunLoop<'_> {
     }
 }
 
+fn effective_permission_mode(
+    config: Option<&crate::tools::permissions::PermissionConfig>,
+    grant: &Grant<'_>,
+) -> Option<crate::tools::permissions::PermissionMode> {
+    config
+        .map(crate::tools::permissions::PermissionConfig::mode)
+        .or_else(|| match grant {
+            Grant::Researcher { child, .. } => child
+                .definition
+                .as_ref()
+                .and_then(|definition| definition.permission_mode),
+            Grant::Primary { .. } => None,
+        })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
