@@ -16,6 +16,7 @@ mod tool;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunStatus {
+    StoppedByHook,
     Pending,
     Active,
     Finished,
@@ -28,13 +29,18 @@ impl RunStatus {
     fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Finished | Self::Failed | Self::Cancelled | Self::Interrupted
+            Self::Finished
+                | Self::Failed
+                | Self::Cancelled
+                | Self::Interrupted
+                | Self::StoppedByHook
         )
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentStatus {
+    StoppedByHook,
     Active,
     Finished,
     Failed,
@@ -249,6 +255,33 @@ impl RunView {
                     .is_some_and(|outcome| !outcome.observation.stops_run())
             })
         })
+    }
+
+    pub fn hook_stop_reason(&self) -> Option<Option<&str>> {
+        self.lifecycle_hooks
+            .iter()
+            .chain(self.tools.iter().flat_map(|tool| &tool.hooks))
+            .find_map(|hook| match &hook.outcome.as_ref()?.result {
+                crate::tools::permissions::HookResult::Stopped { reason } => {
+                    Some(reason.as_deref())
+                }
+                _ => None,
+            })
+    }
+
+    pub(crate) fn actor_stopped_by_hook(&self, agent: AgentRunId) -> bool {
+        self.lifecycle_hooks
+            .iter()
+            .chain(self.tools.iter().flat_map(|tool| &tool.hooks))
+            .any(|hook| {
+                hook.invocation.intent.agent_run_id == agent
+                    && hook.outcome.as_ref().is_some_and(|outcome| {
+                        matches!(
+                            outcome.result,
+                            crate::tools::permissions::HookResult::Stopped { .. }
+                        )
+                    })
+            })
     }
 
     pub(crate) fn stop_hooks(&self, agent: AgentRunId) -> impl Iterator<Item = &HookView> {
@@ -766,6 +799,22 @@ impl SessionView {
         }
         let prior = envelope.sequence;
         let current = self;
+        if current
+            .runs
+            .last()
+            .is_some_and(|run| run.status == RunStatus::Active && run.hook_stop_reason().is_some())
+            && matches!(
+                envelope.event,
+                Event::ToolStarted { .. }
+                    | Event::HookStarted { .. }
+                    | Event::GoalProviderCallReserved { .. }
+                    | Event::GoalCompactionCallReserved { .. }
+                    | Event::AgentSpawned { .. }
+                    | Event::ProviderFallbackUsed { .. }
+            )
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
         // A Goal waiting for its plan contract admits only plan events, its explicit resume, or a new Goal that seals it.
         if let Some(awaiting) = current
             .goals
@@ -952,10 +1001,14 @@ fn closes_run_without_plan(event: &Event) -> bool {
     matches!(
         event,
         Event::AgentFinished {
-            disposition: AgentDisposition::Failed | AgentDisposition::Cancelled,
+            disposition: AgentDisposition::Failed
+                | AgentDisposition::Cancelled
+                | AgentDisposition::StoppedByHook,
             ..
         } | Event::RunFinished {
-            disposition: RunDisposition::Failed | RunDisposition::Cancelled,
+            disposition: RunDisposition::Failed
+                | RunDisposition::Cancelled
+                | RunDisposition::StoppedByHook,
             ..
         }
     )

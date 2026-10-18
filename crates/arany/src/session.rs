@@ -126,6 +126,7 @@ impl RunStatus {
             RunStatus::Finished => "finished",
             RunStatus::Failed => "failed",
             RunStatus::Cancelled => "cancelled",
+            RunStatus::StoppedByHook => "stopped by hook",
             RunStatus::Interrupted => "interrupted",
         }
     }
@@ -138,6 +139,7 @@ impl AgentStatus {
             AgentStatus::Finished => "finished",
             AgentStatus::Failed => "failed",
             AgentStatus::Cancelled => "cancelled",
+            AgentStatus::StoppedByHook => "stopped by hook",
             AgentStatus::Interrupted => "interrupted",
         }
     }

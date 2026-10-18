@@ -473,9 +473,11 @@ impl SessionView {
             run_status
         };
         // A crash with open between-Run compaction can pause an autonomous Goal even after a Finished Run.
-        let paused = matches!(run_status, RunStatus::Cancelled | RunStatus::Interrupted)
-            || (run_status == RunStatus::Finished
-                && (!goal.autonomous || goal.compaction_call_reserved.is_some()));
+        let paused = matches!(
+            run_status,
+            RunStatus::Cancelled | RunStatus::Interrupted | RunStatus::StoppedByHook
+        ) || (run_status == RunStatus::Finished
+            && (!goal.autonomous || goal.compaction_call_reserved.is_some()));
         if !paused {
             return Err(ReplayError::InvalidTransition);
         }

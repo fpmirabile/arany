@@ -235,7 +235,10 @@ pub(super) async fn fork_with_store(
     if !source.runs.last().is_some_and(|run| {
         matches!(
             run.status,
-            RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
+            RunStatus::Finished
+                | RunStatus::Failed
+                | RunStatus::Cancelled
+                | RunStatus::StoppedByHook
         )
     }) {
         return Err(EngineError::ForkNotAtRunBoundary);

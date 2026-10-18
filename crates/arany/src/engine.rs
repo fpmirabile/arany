@@ -1727,6 +1727,7 @@ impl Engine {
             crate::session::RunStatus::Finished
                 | crate::session::RunStatus::Failed
                 | crate::session::RunStatus::Cancelled
+                | crate::session::RunStatus::StoppedByHook
         ) {
             return Err(EngineError::InvalidHistory);
         }

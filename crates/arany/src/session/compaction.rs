@@ -91,13 +91,17 @@ impl PreparedCompaction {
                         assistant: assistant.clone(),
                     })
                 }
-                RunStatus::Failed | RunStatus::Cancelled | RunStatus::Interrupted => {
+                RunStatus::Failed
+                | RunStatus::Cancelled
+                | RunStatus::Interrupted
+                | RunStatus::StoppedByHook => {
                     used = used
                         .checked_add(user.len() + 64)
                         .ok_or(CompactionInputError::TooLarge)?;
                     let status = match run.status {
                         RunStatus::Failed => UnansweredStatus::Failed,
                         RunStatus::Cancelled => UnansweredStatus::Cancelled,
+                        RunStatus::StoppedByHook => UnansweredStatus::StoppedByHook,
                         _ => UnansweredStatus::Interrupted,
                     };
                     CompactionItem::Unanswered { user, status }

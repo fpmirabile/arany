@@ -260,6 +260,8 @@ impl<'a> RunLoop<'a> {
         }
         if cancelled {
             self.cancel_primary().await
+        } else if self.hook_requested_stop()? {
+            self.finish_hook_stop().await
         } else {
             self.fail_for_budget().await
         }
@@ -884,6 +886,9 @@ impl<'a> RunLoop<'a> {
         if self.controls.cancellation.is_cancelled() {
             return self.cancel_primary().await;
         }
+        if self.hook_requested_stop()? {
+            return self.finish_hook_stop().await;
+        }
         if !self.ledger().success_criterion_satisfied() && !self.ledger().allows_next_run() {
             // Only an autonomous Goal runs out of Runs; a single-Run Goal with an unmet plan simply fails.
             return if self.ledger().autonomous() {
@@ -944,6 +949,9 @@ impl<'a> RunLoop<'a> {
         if self.controls.cancellation.is_cancelled() {
             return self.cancel_primary().await;
         }
+        if self.hook_requested_stop()? {
+            return self.finish_hook_stop().await;
+        }
         self.append(Event::AgentFinished {
             worker: None,
             run_id: self.run_id,
@@ -956,6 +964,33 @@ impl<'a> RunLoop<'a> {
         self.append(Event::RunFinished {
             run_id: self.run_id,
             disposition: RunDisposition::Failed,
+            active_ms: self.ledger().run_active_ms()?,
+        })
+        .await?;
+        Ok(())
+    }
+
+    fn hook_requested_stop(&self) -> Result<bool, EngineError> {
+        self.ledger().view(|view| {
+            view.runs.iter().any(|run| {
+                run.id == self.run_id && run.hooks_settled() && run.hook_stop_reason().is_some()
+            })
+        })
+    }
+
+    async fn finish_hook_stop(&self) -> Result<(), EngineError> {
+        self.append(Event::AgentFinished {
+            worker: None,
+            run_id: self.run_id,
+            agent_run_id: self.primary_id,
+            disposition: AgentDisposition::StoppedByHook,
+            summary: None,
+            result: None,
+        })
+        .await?;
+        self.append(Event::RunFinished {
+            run_id: self.run_id,
+            disposition: RunDisposition::StoppedByHook,
             active_ms: self.ledger().run_active_ms()?,
         })
         .await?;

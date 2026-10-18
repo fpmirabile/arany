@@ -108,6 +108,7 @@ pub(crate) enum TraceProvider {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum TraceOutcome {
+    StoppedByHook,
     Finished,
     Failed,
     Cancelled,
@@ -910,6 +911,7 @@ impl TraceOutcome {
             Self::Finished => "finished",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::StoppedByHook => "stopped_by_hook",
         }
     }
 }
@@ -920,6 +922,7 @@ impl From<AgentDisposition> for TraceOutcome {
             AgentDisposition::Finished => Self::Finished,
             AgentDisposition::Failed => Self::Failed,
             AgentDisposition::Cancelled => Self::Cancelled,
+            AgentDisposition::StoppedByHook => Self::StoppedByHook,
         }
     }
 }
@@ -930,6 +933,7 @@ impl From<RunDisposition> for TraceOutcome {
             RunDisposition::Finished => Self::Finished,
             RunDisposition::Failed => Self::Failed,
             RunDisposition::Cancelled => Self::Cancelled,
+            RunDisposition::StoppedByHook => Self::StoppedByHook,
         }
     }
 }

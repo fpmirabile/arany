@@ -2277,18 +2277,17 @@ struct PostCase {
 }
 
 async fn post_case(hook: Value) -> PostCase {
+    post_run(hook, false).await
+}
+
+async fn post_run(hook: Value, stopped: bool) -> PostCase {
     let fixture = Fixture::new(Some(&post_settings(hook)), true);
     let write = call("edit");
-    let (result, requests, _) = fixture
-        .run(
-            vec![
-                tool_outcome(write.clone(), Some(Box::new(plan(&write)))),
-                finish("answer"),
-            ],
-            None,
-            false,
-        )
-        .await;
+    let mut outcomes = vec![tool_outcome(write.clone(), Some(Box::new(plan(&write))))];
+    if !stopped {
+        outcomes.push(finish("answer"));
+    }
+    let (result, requests, _) = fixture.run(outcomes, None, false).await;
     let live_feedback = requests
         .get(1)
         .and_then(|request| request.input.tools.as_ref())
@@ -2406,6 +2405,42 @@ async fn hook_post_tool_use_feedback_is_journaled_and_never_undoes() {
             assert!(!result["changeset"]["files"].as_array().unwrap().is_empty());
         }
     }
+}
+
+#[tokio::test]
+async fn hook_post_tool_use_continue_false_stops_after_the_committed_effect() {
+    let case = post_run(shell_hook(r#"printf '%s' '{"continue":false,"stopReason":"review required","decision":"block","reason":"not model feedback"}'"#), true).await;
+    assert_eq!(case.status, RunStatus::StoppedByHook);
+    assert_eq!(case.provider_calls, 1);
+    assert_eq!(case.host_file, "done");
+    assert_eq!(
+        case.tool.observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Succeeded
+    );
+    assert!(case.tool.hook_feedback().is_empty());
+    assert_eq!(
+        case.tool.hooks[0].outcome.as_ref().unwrap().result,
+        arany::permissions::HookResult::Stopped {
+            reason: Some("review required".into())
+        }
+    );
+    let session = case.events[0].session_id;
+    let view = SessionView::replay(session, &case.events).unwrap().unwrap();
+    let run = &view.runs[0];
+    assert!(run.assistant_message.is_none());
+    assert_eq!(
+        arany_cli::presentation::run_feedback(run).as_deref(),
+        Some("Run stopped by hook: review required")
+    );
+    let last_hook = case
+        .events
+        .iter()
+        .position(|event| matches!(event.event, Event::HookFinished { .. }))
+        .unwrap();
+    assert!(case.events[last_hook + 1..].iter().all(|event| !matches!(
+        event.event,
+        Event::ProviderCallRecorded { .. } | Event::ToolStarted { .. } | Event::HookStarted { .. }
+    )));
 }
 
 #[tokio::test]
@@ -2848,6 +2883,55 @@ async fn hook_identity_update_proceeds_unchanged() {
 
 mod lifecycle_hooks {
     use super::*;
+
+    #[tokio::test]
+    async fn continue_false_stops_primary_and_child_without_feedback_or_later_hooks() {
+        for child in [false, true] {
+            let event = if child { "SubagentStop" } else { "Stop" };
+            let settings = json!({"hooks":{event:[{"hooks":[
+                shell_hook(r#"printf '%s' '{"continue":false,"stopReason":"halt","decision":"block","reason":"not feedback"}'"#),
+                shell_hook("exit 2")
+            ]}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            let outcomes = if child {
+                vec![
+                    ProviderOutcome::Delegate(arany::Delegate {
+                        children: vec![arany::ChildAssignment {
+                            objective: "Research the task".into(),
+                            profile: None,
+                        }],
+                        agent: None,
+                    }),
+                    finish("child answer"),
+                ]
+            } else {
+                vec![finish("candidate")]
+            };
+            let (result, requests, _) = fixture.run(outcomes, None, child).await;
+            assert_eq!(result.run.status, RunStatus::StoppedByHook);
+            assert_eq!(requests.len(), if child { 2 } else { 1 });
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.input.stop_hook_feedback.is_empty())
+            );
+            let (events, view) = fixture.reopen(result.session_id).await;
+            let run = &view.runs[0];
+            assert_eq!(run.lifecycle_hooks.len(), 1);
+            assert_eq!(run.hook_stop_reason(), Some(Some("halt")));
+            assert_eq!(
+                run.agents[usize::from(child)].status,
+                arany::AgentStatus::StoppedByHook
+            );
+            assert!(run.assistant_message.is_none());
+            assert_eq!(
+                SessionView::replay(result.session_id, &events)
+                    .unwrap()
+                    .unwrap(),
+                view
+            );
+        }
+    }
 
     #[tokio::test]
     async fn stop_hook_blocks_at_most_eight_times_and_is_journaled() {

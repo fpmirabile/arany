@@ -821,6 +821,7 @@ fn start_lifecycle(
                         | RunStatus::Finished
                         | RunStatus::Failed
                         | RunStatus::Cancelled
+                        | RunStatus::StoppedByHook
                 )
                 || !["manual", "auto"]
                     .iter()

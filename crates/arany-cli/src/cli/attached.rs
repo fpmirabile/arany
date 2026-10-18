@@ -2110,7 +2110,10 @@ fn confirm_outcome(view: &SessionView, outcome: &RunOutcome) -> Result<(), Strin
             && run == &outcome.run
             && matches!(
                 run.status,
-                RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
+                RunStatus::Finished
+                    | RunStatus::Failed
+                    | RunStatus::Cancelled
+                    | RunStatus::StoppedByHook
             )
     }) {
         return Err("Run history unavailable or invalid".into());
@@ -2134,6 +2137,7 @@ fn emit_outcome(
         RunStatus::Finished => "finished",
         RunStatus::Failed => "failed",
         RunStatus::Cancelled => "cancelled",
+        RunStatus::StoppedByHook => "stopped_by_hook",
         _ => return Err("Run did not reach a terminal state".into()),
     };
     if !user_recorded && visual_mode != Some(crate::terminal::TerminalMode::Fullscreen) {

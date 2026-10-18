@@ -5191,6 +5191,16 @@ mod goal_replay_tests {
     }
     #[test]
     fn lifecycle_hooks_replay_bind_call_subject_order_block_and_continuation() {
+        for (kind, old) in [
+            ("HookFinished", 2),
+            ("AgentFinished", 7),
+            ("RunFinished", 7),
+        ] {
+            assert!(matches!(
+                Event::decode(kind, old, "{}", None, None),
+                Err(ReplayError::UnknownEvent)
+            ));
+        }
         use crate::tools::permissions::{
             HookEvent, HookInvocation, HookOutcome, HookResult, compact_subject, stop_subject,
         };
@@ -5312,6 +5322,55 @@ mod goal_replay_tests {
                 &uncertain_view,
                 reserve_child_call(goal, run, actor)
             ));
+            if event != HookEvent::PreCompact {
+                let mut stopped_view = view.clone();
+                let mut stopped = finished.clone();
+                if let Event::HookFinished { outcome, .. } = &mut stopped {
+                    outcome.observation.disposition = ToolDisposition::Succeeded;
+                    outcome.observation.output = serde_json::json!({"exit_code":0,"stdout":r#"{"continue":false,"stopReason":"halt"}"#,"stderr":"","changeset":{"files":[]}}).to_string();
+                    outcome.result = HookResult::Stopped {
+                        reason: Some("halt".into()),
+                    };
+                }
+                let terminal = Event::AgentFinished {
+                    worker: None,
+                    run_id: run,
+                    agent_run_id: actor,
+                    disposition: AgentDisposition::StoppedByHook,
+                    summary: None,
+                    result: None,
+                };
+                assert!(rejected(&stopped_view, terminal.clone()));
+                apply(&mut stopped_view, stopped).unwrap();
+                assert_eq!(stopped_view.runs[0].hook_stop_reason(), Some(Some("halt")));
+                assert!(rejected(
+                    &stopped_view,
+                    reserve_child_call(goal, run, actor)
+                ));
+                assert!(rejected(&stopped_view, started.clone()));
+                apply(&mut stopped_view, terminal).unwrap();
+                assert_eq!(
+                    stopped_view.runs[0]
+                        .agents
+                        .iter()
+                        .find(|agent| agent.id == actor)
+                        .unwrap()
+                        .status,
+                    AgentStatus::StoppedByHook
+                );
+                if event == HookEvent::Stop {
+                    stopped_view.goals[0].active_deadline =
+                        Some((run, Some(crate::session::MAX_GOAL_ACTIVE_MS)));
+                    let terminal = Event::RunFinished {
+                        run_id: run,
+                        disposition: RunDisposition::StoppedByHook,
+                        active_ms: 0,
+                    };
+                    apply(&mut stopped_view, terminal).unwrap();
+                    assert_eq!(stopped_view.runs[0].status, RunStatus::StoppedByHook);
+                    assert!(stopped_view.runs[0].assistant_message.is_none());
+                }
+            }
             apply(&mut view, finished.clone()).unwrap();
             assert!(rejected(&view, finished));
             if event == HookEvent::PreCompact {

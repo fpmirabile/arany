@@ -367,7 +367,7 @@ async fn run_on_engine(
     let success = run.status == RunStatus::Finished && !paused;
     if !matches!(
         run.status,
-        RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
+        RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled | RunStatus::StoppedByHook
     ) {
         return Err("Run did not reach a terminal state".into());
     }
@@ -382,6 +382,7 @@ async fn run_on_engine(
                     RunStatus::Finished => "finished",
                     RunStatus::Failed => "failed",
                     RunStatus::Cancelled => "cancelled",
+                    RunStatus::StoppedByHook => "stopped_by_hook",
                     _ => return Err("Run did not reach a terminal state".into()),
                 },
                 match run.config.as_ref() {
@@ -429,11 +430,21 @@ async fn run_on_engine(
                 receipt.push_str(notice);
                 receipt.push('\n');
             }
+            if run.status == RunStatus::StoppedByHook
+                && let Some(notice) = crate::presentation::run_feedback(run)
+            {
+                receipt.push_str(&notice);
+                receipt.push('\n');
+            }
             receipt
         }
         OutputArg::Jsonl if success => String::new(),
         OutputArg::Jsonl => match run.status {
             RunStatus::Cancelled => "error: Run cancelled\n".into(),
+            RunStatus::StoppedByHook => format!(
+                "{}\n",
+                crate::presentation::run_feedback(run).unwrap_or_default()
+            ),
             RunStatus::Failed => "error: Run failed\n".into(),
             // A finished Run that is not a success keeps its Goal paused.
             _ => "error: Goal paused before completion\n".into(),

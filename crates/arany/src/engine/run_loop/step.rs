@@ -300,7 +300,7 @@ impl RunLoop<'_> {
                     step.hook_feedback.insert(narrowings, post.feedback);
                 }
                 HookStop::None => {}
-                HookStop::Uncertain => return Ok(false),
+                HookStop::Uncertain | HookStop::Requested => return Ok(false),
                 HookStop::ActiveTime => return Err(EngineError::GoalBudgetExhausted),
             }
         }

@@ -266,6 +266,10 @@ pub struct HookOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum HookResult {
     Passed,
+    Stopped {
+        #[serde(deserialize_with = "Option::deserialize")]
+        reason: Option<String>,
+    },
     Restricted {
         decision: Decision,
         #[serde(deserialize_with = "Option::deserialize")]
@@ -302,7 +306,7 @@ impl HookResult {
             Self::Restricted { decision, .. } => *decision,
             Self::Narrowed { call: updated } if updated != call => Decision::Deny,
             Self::Narrowed { .. } => Decision::Allow,
-            Self::Blocked { .. } => Decision::Deny,
+            Self::Blocked { .. } | Self::Stopped { .. } => Decision::Deny,
             Self::Passed | Self::Feedback { .. } | Self::Ignored { .. } => Decision::Allow,
         }
     }
@@ -319,9 +323,9 @@ impl HookResult {
         .into_iter()
         .any(|event| *self == Self::for_event(event, observation))
             && match self {
-                Self::Restricted { reason, .. } | Self::Blocked { reason } => {
-                    reason.as_deref().is_none_or(valid_reason)
-                }
+                Self::Restricted { reason, .. }
+                | Self::Blocked { reason }
+                | Self::Stopped { reason } => reason.as_deref().is_none_or(valid_reason),
                 Self::Feedback { lines } => lines.iter().all(|line| valid_reason(line)),
                 _ => true,
             }
@@ -499,6 +503,11 @@ pub(crate) fn parse_post_output(exit_code: Option<i32>, stdout: &str, stderr: &s
         return HookResult::Passed;
     };
     let text = |value: Option<&Value>| value.and_then(Value::as_str).and_then(bounded_reason);
+    if output.get("continue") == Some(&Value::Bool(false)) {
+        return HookResult::Stopped {
+            reason: text(output.get("stopReason")),
+        };
+    }
     let mut lines = Vec::new();
     if output.get("decision").and_then(Value::as_str) == Some("block") {
         lines.push(text(output.get("reason")).unwrap_or_else(|| BLOCKED.into()));
@@ -690,7 +699,6 @@ pub(super) fn parse_lifecycle_output(
     else {
         return HookResult::Passed;
     };
-    // The peer stops instead of continuing: a finishing actor may finish, while compaction is skipped (the narrowing reading). A Run-wide stop outcome is not built.
     if output.get("continue") == Some(&Value::Bool(false)) {
         if event == HookEvent::PreCompact {
             HookResult::Blocked {
@@ -700,7 +708,12 @@ pub(super) fn parse_lifecycle_output(
                     .and_then(bounded_reason),
             }
         } else {
-            HookResult::Passed
+            HookResult::Stopped {
+                reason: output
+                    .get("stopReason")
+                    .and_then(Value::as_str)
+                    .and_then(bounded_reason),
+            }
         }
     } else if output.get("decision").and_then(Value::as_str) == Some("block") {
         HookResult::Blocked {

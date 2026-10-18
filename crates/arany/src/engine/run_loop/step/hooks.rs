@@ -16,6 +16,7 @@ const MIN_HOOK_RUNTIME_MS: u32 = 1_000;
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(in crate::engine::run_loop) enum HookStop {
     None,
+    Requested,
     Uncertain,
     ActiveTime,
 }
@@ -87,11 +88,15 @@ impl HookFold {
                     exhausted: true,
                 }),
             },
-            HookStop::Uncertain => Answer {
+            HookStop::Uncertain | HookStop::Requested => Answer {
                 observation: not_dispatched(
                     intent,
                     ToolDisposition::Denied,
-                    "Hook outcome uncertain; no operation was dispatched",
+                    if self.stop == HookStop::Requested {
+                        "Hook stopped the Run; no operation was dispatched"
+                    } else {
+                        "Hook outcome uncertain; no operation was dispatched"
+                    },
                 ),
                 refused: true,
                 active_time: None,
@@ -443,6 +448,8 @@ impl RunLoop<'_> {
             };
             let stop = if run.stops {
                 HookStop::Uncertain
+            } else if matches!(run.result, HookResult::Stopped { .. }) {
+                HookStop::Requested
             } else if run.exhausted {
                 HookStop::ActiveTime
             } else {
@@ -617,6 +624,9 @@ impl RunLoop<'_> {
             }
             if run.stops {
                 return Err(crate::tools::ToolError::Uncertain.into());
+            }
+            if matches!(run.result, HookResult::Stopped { .. }) {
+                return Ok(None);
             }
             if run.exhausted && deadline.is_none() {
                 return Err(EngineError::GoalBudgetExhausted);
@@ -939,6 +949,12 @@ type Recorded = ((u8, u8), Option<HookResult>);
 fn occurrence_verdict(recorded: &[Recorded], matched: &[(u8, u8)]) -> Option<Option<String>> {
     if recorded.is_empty() {
         return None;
+    }
+    if recorded
+        .iter()
+        .any(|(_, result)| matches!(result, Some(HookResult::Stopped { .. })))
+    {
+        return Some(None);
     }
     let refused = || Some("hook occurrence already attempted".to_owned());
     let verdict = recorded.iter().find_map(|(_, result)| match result {
