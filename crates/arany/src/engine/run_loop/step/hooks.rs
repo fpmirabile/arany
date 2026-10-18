@@ -868,12 +868,13 @@ impl RunLoop<'_> {
         EngineError,
     > {
         Ok(match clock {
-            HookClock::Pause(pause) => self.dispatch_guard(runtime, hook_intent, pause).await?,
+            HookClock::Pause(pause) => {
+                Box::pin(self.dispatch_guard(runtime, hook_intent, pause)).await?
+            }
             HookClock::Deadline(deadline) => {
                 let cancellation = crate::engine::RunCancellation::new();
                 let mut parent = self.controls.cancellation.clone();
-                let execution = runtime.execute(hook_intent, cancellation.clone());
-                tokio::pin!(execution);
+                let mut execution = Box::pin(runtime.execute(hook_intent, cancellation.clone()));
                 let observation = tokio::select! {
                     observation = &mut execution => observation,
                     () = tokio::time::sleep_until(deadline) => { cancellation.cancel(); execution.await },
@@ -991,7 +992,7 @@ impl RunLoop<'_> {
         })
         .await?;
         let (observation, segment, exhausted) =
-            self.dispatch_hook(runtime, hook_intent, clock).await?;
+            Box::pin(self.dispatch_hook(runtime, hook_intent, clock)).await?;
         self.clear_tool_queue();
         if let Some(segment) = segment {
             self.settle_active_segment(segment)?;

@@ -956,7 +956,7 @@ impl RunLoop<'_> {
                     outcome: ProviderOutcome::Finish(f),
                     turn,
                     ..
-                }) => match self.worker_stop(child, &f, turn, deadline).await? {
+                }) => match Box::pin(self.worker_stop(child, &f, turn, deadline)).await? {
                     super::children::ChildStop::Proceed => return Ok(Some(f)),
                     super::children::ChildStop::Reprompt => continue,
                     super::children::ChildStop::End(_) => return Ok(None),
