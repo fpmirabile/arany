@@ -21,9 +21,9 @@ use unicode_width::UnicodeWidthStr;
 const MAX_VISIBLE_DRAFT_ROWS: usize = 4;
 
 pub(super) struct PermissionFrameState<'a> {
-    pub choices: (&'a str, &'a str),
+    pub choices: &'a [&'a str],
     pub page: usize,
-    pub allow: bool,
+    pub focus: usize,
     pub profile_start: Option<usize>,
     pub profile_count: usize,
     pub focused_profile: Option<usize>,
@@ -88,7 +88,7 @@ pub(super) fn draw_permission_frame(
     let PermissionFrameState {
         choices,
         page,
-        allow,
+        focus,
         profile_start,
         profile_count,
         focused_profile,
@@ -182,8 +182,8 @@ pub(super) fn draw_permission_frame(
             Rect::new(area.x, options_y, width, 1),
         );
     } else {
-        for (index, choice) in [choices.0, choices.1].iter().enumerate() {
-            let focused = allow == (index == 1);
+        for (index, choice) in choices.iter().enumerate() {
+            let focused = focus == index;
             let label = format!("{} {}", if focused { "›" } else { " " }, choice);
             frame.render_widget(
                 Paragraph::new(safe_truncate(&label, usize::from(width))).style(if focused {

@@ -577,11 +577,147 @@ fn read_evidence_names_the_site_that_attested_it() {
         limit: 4096,
     };
     assert_eq!(
-        goal_report_evidence(&call, "{}", true),
+        goal_report_evidence(
+            &call,
+            "{}",
+            Some(&Attestation::for_site(&read_intent(&call)))
+        ),
         "The Engine attested a read of src/lib.rs."
     );
     assert_eq!(
-        goal_report_evidence(&call, "{}", false),
+        goal_report_evidence(&call, "{}", None),
         "Guard attested a read of src/lib.rs."
+    );
+}
+
+fn read_intent(call: &ToolCall) -> EffectIntent {
+    EffectIntent {
+        id: Uuid::now_v7(),
+        run_id: RunId::new(),
+        agent_run_id: AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call: call.clone(),
+        limits: ToolLimits::default(),
+        expires_at_ms: 1,
+        use_count: 1,
+    }
+}
+
+#[test]
+fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission() {
+    let run_id = RunId::new();
+    let call = ToolCall::CommandUnguarded {
+        program: "cargo".into(),
+        args: vec!["check".into()],
+        cwd: String::new(),
+        justification: "Run the failed command once".into(),
+    };
+    let mut intent = read_intent(&call);
+    intent.run_id = run_id;
+    let observation = crate::tools::ToolObservation {
+        enforcement_cause: None,
+        attestation: Some(Attestation::for_site(&intent)),
+        intent: intent.clone(),
+        disposition: ToolDisposition::Succeeded,
+        output: serde_json::json!({"exit_code": 0, "stdout": "", "stderr": "", "changeset": {"files": []}}).to_string(),
+        cache_update: CacheUpdate::NotApplicable,
+    };
+    assert_eq!(
+        goal_report_evidence(&call, &observation.output, observation.attestation.as_ref()),
+        "An unguarded host run attested Unguarded command cargo."
+    );
+    let tool = ToolView {
+        intent,
+        observation: Some(observation),
+        review_call_index: None,
+        permission_verdict: None,
+        finished_sequence: None,
+    };
+    assert!(tool.ran_unguarded());
+    let goal_id = GoalId::new();
+    let run = RunView {
+        id: run_id,
+        objective: "Report".into(),
+        images: Vec::new(),
+        config: None,
+        agents: Vec::new(),
+        assistant_message: Some("Done".into()),
+        status: RunStatus::Finished,
+        accepted_sequence: 1,
+        finished_sequence: Some(2),
+        tools: vec![tool; 100],
+        tool_compaction_summary: None,
+        tool_compaction_covered_count: 0,
+        display: Vec::new(),
+        steering_notes: Vec::new(),
+        provider_fallbacks: Vec::new(),
+    };
+    let goal = GoalView {
+        continues: None,
+        budget_closed: false,
+        id: goal_id,
+        objective: "Report".into(),
+        workspace_identity: WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        },
+        budget: GoalBudget::default(),
+        phase: GoalPhase::Implementation,
+        autonomous: false,
+        resource_settings: crate::tools::ToolResourceSettings::default(),
+        status: GoalStatus::Running,
+        run_ids: vec![run_id],
+        active_run: None,
+        plan_contract: None,
+        success_state: crate::session::GoalSuccessState::NoContract,
+        success_criterion_satisfied: false,
+        awaiting_plan_contract: false,
+        active_ms: 0,
+        uncertain_active_ms: 0,
+        active_deadline: None,
+        compaction_call_reserved: None,
+        uncertain_compaction_calls: 0,
+        provider_calls: 1,
+        unobserved_provider_calls: Vec::new(),
+        known_tokens: 0,
+        token_usage_unknown: false,
+        report: None,
+        started_sequence: 0,
+        finished_sequence: None,
+        known_cached_tokens: 0,
+        active_ceiling_ms: 0,
+    };
+    let view = crate::session::SessionView {
+        id: SessionId::new(),
+        title: "Report".into(),
+        title_is_explicit: false,
+        inherited_title: None,
+        workspace_identity: Some(WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        }),
+        defaults: crate::session::SessionDefaults::default(),
+        created_sequence: 0,
+        last_sequence: 2,
+        lineage: None,
+        runs: vec![run.clone()],
+        compactions: Vec::new(),
+        goals: vec![goal.clone()],
+    };
+    let report = goal_report(&view, &run, &goal);
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .any(|item| item.contains("100 unguarded host run(s) executed outside the Guard"))
+    );
+    assert!(
+        report
+            .evidence
+            .iter()
+            .any(|item| item.starts_with("An unguarded host run attested"))
     );
 }

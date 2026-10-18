@@ -41,7 +41,7 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
         let requests = Arc::clone(&provider.requests);
         let state_path = temp.path().join("state");
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private State"),
             EngineConfig::default(),
         )
@@ -146,7 +146,7 @@ fn fifo_include_child() {
         let provider = ScriptedProvider::new(vec![]);
         let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state).expect("private State"),
             EngineConfig::default(),
         )
@@ -204,6 +204,11 @@ fn fifo_include_rejects_without_waiting_for_a_writer() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(debug_assertions)]
+    command.env(
+        "ARANY_TEST_ACCOUNT_ROOT",
+        arany::test_support::isolate_account_root(),
+    );
     let output = command
         .bounded_output_for(Duration::from_secs(5), 4096)
         .expect("bounded FIFO helper");

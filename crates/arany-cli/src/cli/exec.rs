@@ -364,6 +364,10 @@ async fn run_on_engine(
                     .collect(),
                 None => vec![run],
             };
+            let unguarded: usize = goal_runs.iter().map(|run| run.unguarded_tools()).sum();
+            if unguarded > 0 {
+                receipt.push_str(&format!("unguarded effects: {unguarded}\n"));
+            }
             if let Some(notice) = crate::presentation::render_goal_provider_fallbacks(goal_runs) {
                 receipt.push_str(&notice);
                 receipt.push('\n');
@@ -818,7 +822,7 @@ mod tests {
         std::fs::create_dir(&workspace).expect("workspace");
         let state_dir = temp.path().join("state");
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             StateRoot::admit(&state_dir).expect("state"),
             EngineConfig::default(),
         )
@@ -900,7 +904,7 @@ mod tests {
         std::fs::create_dir(&workspace).expect("workspace");
         let state_dir = temp.path().join("state");
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             StateRoot::admit(&state_dir).expect("state"),
             EngineConfig::default(),
         )

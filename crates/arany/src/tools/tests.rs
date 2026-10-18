@@ -1552,7 +1552,7 @@ fn goal_success_criterion_offers_only_admitted_calls() {
         .iter()
         .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
         .collect();
-    assert_eq!(operations, ["command"]);
+    assert_eq!(operations, ["command", "command_unguarded"]);
     assert!(
         success_calls
             .iter()
@@ -1902,6 +1902,42 @@ fn git_pin_is_optional_closed_and_rooted_per_platform() {
     assert!(absent.validate().is_ok());
     assert!(!absent.allows(&status));
     assert!(serde_json::to_value(&absent).unwrap().get("git").is_none());
+}
+
+#[test]
+fn unguarded_command_is_offered_only_beside_a_cataloged_command_and_never_to_researchers() {
+    let names = |catalog: Value| -> Vec<String> {
+        catalog_call_schemas(&catalog)
+            .iter()
+            .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
+            .map(str::to_owned)
+            .collect()
+    };
+    let without = json!({"write": false, "commands": [], "skills": [], "mcp_servers": []});
+    assert!(!names(without).contains(&"command_unguarded".to_owned()));
+    let with =
+        json!({"write": false, "commands": [{"name": "sh"}], "skills": [], "mcp_servers": []});
+    let calls = catalog_call_schemas(&with);
+    let unguarded = calls
+        .iter()
+        .find(|call| call["properties"]["operation"]["enum"][0] == "command_unguarded")
+        .expect("offered beside a cataloged command");
+    assert_eq!(unguarded["properties"]["program"]["enum"], json!(["sh"]));
+    assert!(
+        unguarded["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("justification"))
+    );
+    assert!(
+        !super::ToolCall::CommandUnguarded {
+            program: "sh".into(),
+            args: Vec::new(),
+            cwd: String::new(),
+            justification: "run".into(),
+        }
+        .is_child_research()
+    );
 }
 
 #[test]

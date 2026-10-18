@@ -2411,9 +2411,9 @@ fn permission_profile_rows_wrap_at_spaces_with_a_hanging_indent() {
                 frame,
                 &lines,
                 PermissionFrameState {
-                    choices: ("Read only", "Trust folder"),
+                    choices: &["Read only", "Trust folder"],
                     page: 0,
-                    allow: false,
+                    focus: 0,
                     profile_start: Some(3),
                     profile_count: 1,
                     focused_profile: None,
@@ -2462,9 +2462,9 @@ fn permission_long_path_hard_breaks_only_at_the_row_edge() {
                     frame,
                     &lines,
                     PermissionFrameState {
-                        choices: ("Read only", "Trust folder"),
+                        choices: &["Read only", "Trust folder"],
                         page,
-                        allow: false,
+                        focus: 0,
                         profile_start: Some(3),
                         profile_count: 1,
                         focused_profile: None,
@@ -2523,9 +2523,9 @@ fn permission_frame_fills_the_terminal_like_chat() {
                     frame,
                     &lines,
                     PermissionFrameState {
-                        choices: ("Read only", "Trust this folder"),
+                        choices: &["Read only", "Trust this folder"],
                         page: 0,
-                        allow: false,
+                        focus: 0,
                         profile_start: Some(profile_start),
                         profile_count: 6,
                         focused_profile: None,
@@ -2583,9 +2583,9 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
                         frame,
                         &lines,
                         PermissionFrameState {
-                            choices: ("Read only", "Trust folder"),
+                            choices: &["Read only", "Trust folder"],
                             page,
-                            allow: false,
+                            focus: 0,
                             profile_start: None,
                             profile_count: 0,
                             focused_profile: None,
@@ -2724,9 +2724,9 @@ fn tool_approval_panel_stays_centered_and_boxed() {
                 frame,
                 &lines,
                 PermissionFrameState {
-                    choices: ("Deny", "Allow once"),
+                    choices: &["Deny", "Allow once"],
                     page: 0,
-                    allow: false,
+                    focus: 0,
                     profile_start: None,
                     profile_count: 0,
                     focused_profile: None,
@@ -2742,4 +2742,103 @@ fn tool_approval_panel_stays_centered_and_boxed() {
     assert_eq!(buffer[(12, 11)].symbol(), "A");
     assert_eq!(buffer[(11, 11)].symbol(), " ");
     assert_eq!(buffer[(0, 0)].symbol(), " ");
+}
+
+#[test]
+fn unguarded_approval_pages_show_the_risk_copy_then_three_choices_with_deny_focused() {
+    let intent = arany::EffectIntent {
+        id: uuid::Uuid::now_v7(),
+        run_id: arany::RunId::new(),
+        agent_run_id: arany::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call: arany::ToolCall::CommandUnguarded {
+            program: "sh".into(),
+            args: vec!["-c".into(), "cargo test".into()],
+            cwd: String::new(),
+            justification: "The sandbox may have blocked the network".into(),
+        },
+        limits: arany::ToolLimits::default(),
+        expires_at_ms: 1,
+        use_count: 1,
+    };
+    let prompt = arany::UnguardedPrompt {
+        executable: "/usr/bin/bash".into(),
+        attribution: None,
+    };
+    let lines = crate::presentation::unguarded_approval_lines(&intent, &prompt);
+    assert_eq!(lines[0], "Run outside the Guard? (unguarded)");
+    for (width, choices) in [
+        (
+            80u16,
+            [
+                "Deny",
+                "Allow once (unguarded)",
+                "Always allow this exact command in this project (unguarded)",
+            ],
+        ),
+        (
+            40,
+            ["Deny", "Allow once", "Always allow exact command here"],
+        ),
+    ] {
+        for focus in 0..3 {
+            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+            let mut page = 0;
+            let mut seen = String::new();
+            loop {
+                let mut progress = None;
+                terminal
+                    .draw(|frame| {
+                        progress = Some(draw_permission_frame(
+                            frame,
+                            &lines,
+                            PermissionFrameState {
+                                choices: &choices,
+                                page,
+                                focus,
+                                profile_start: None,
+                                profile_count: 0,
+                                focused_profile: None,
+                                profile_selection_enabled: None,
+                                footer: Some("↑↓ choose · Enter confirm · Esc denies"),
+                                palette: Palette { color: false },
+                                boxed: true,
+                            },
+                        ));
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                for y in 0..30 {
+                    seen.push_str(&buffer_row(buffer, y));
+                    seen.push('\n');
+                }
+                let progress = progress.unwrap();
+                if !progress.more {
+                    for (index, choice) in choices.iter().enumerate() {
+                        let row = (0..30)
+                            .map(|y| buffer_row(buffer, y))
+                            .find(|row| row.contains(choice))
+                            .unwrap_or_else(|| panic!("{choice} at width {width}"));
+                        assert_eq!(row.contains('›'), index == focus, "{row}");
+                    }
+                    break;
+                }
+                page = progress.page + 1;
+            }
+            let squashed: String = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+            for needle in [
+                "Program: sh",
+                "Guard attribution: none",
+                "Risk: it runs as you",
+            ] {
+                assert!(
+                    seen.contains(needle) || squashed.contains(needle),
+                    "{needle} at width {width}"
+                );
+            }
+        }
+    }
 }

@@ -52,7 +52,7 @@ fn team_two_core_latency_on_named_host() {
         let provider = ScriptedProvider::new(responses);
         let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = Engine::open(
+        let engine = engine_support::open(
             StateRoot::admit(&state).expect("private state"),
             EngineConfig::default(),
         )
