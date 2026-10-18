@@ -20,6 +20,7 @@ use tokio::time::Instant;
 mod children;
 mod step;
 mod tool_compaction;
+mod worker;
 
 use step::Grant;
 
@@ -110,6 +111,9 @@ pub(super) struct RunLoop<'a> {
     controls: LoopControls<'a>,
     ledger: &'a GoalLedger,
     hints: Option<&'a HintPublisher>,
+    worker_data_bytes: std::sync::OnceLock<u32>,
+    worker: tokio::sync::Mutex<Option<crate::tools::worker::View>>,
+    handover: std::sync::OnceLock<std::sync::Arc<[u8]>>,
     definitions: std::sync::OnceLock<
         std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
     >,
@@ -148,6 +152,9 @@ impl<'a> RunLoop<'a> {
                 ledger,
                 publisher: hints,
             },
+            worker_data_bytes: std::sync::OnceLock::new(),
+            worker: tokio::sync::Mutex::new(None),
+            handover: std::sync::OnceLock::new(),
             definitions: std::sync::OnceLock::new(),
             journal,
             session_id: identity.session_id,
@@ -561,6 +568,7 @@ impl<'a> RunLoop<'a> {
                         }
                         Err(error) => return Err(error),
                     }
+                    Box::pin(self.verify_workers()).await?;
                 }
                 CallResult::Cancelled => return self.cancel_primary().await,
                 CallResult::Response(_) if budget_refused => return self.fail_for_budget().await,
@@ -884,6 +892,17 @@ impl<'a> RunLoop<'a> {
         if self.controls.cancellation.is_cancelled() {
             return self.cancel_primary().await;
         }
+        let workers_verified = self.ledger().view(|v| {
+            v.runs.last().is_some_and(|r| {
+                r.agents
+                    .iter()
+                    .filter_map(|a| a.assignment.as_ref())
+                    .all(|w| w.settled())
+            })
+        })?;
+        if !workers_verified {
+            return self.fail_primary().await;
+        }
         if !self.ledger().success_criterion_satisfied() && !self.ledger().allows_next_run() {
             // Only an autonomous Goal runs out of Runs; a single-Run Goal with an unmet plan simply fails.
             return if self.ledger().autonomous() {
@@ -1102,13 +1121,21 @@ fn call_record(
                 }) => Some(
                     d.children
                         .iter()
-                        .map(
-                            |child| crate::session::worker::ChildAssignment::Researcher {
-                                objective: child.objective.clone(),
-                                definition: d.agent.clone(),
-                                profile: child.profile.clone().or_else(|| default_profile.clone()),
-                            },
-                        )
+                        .map(|child| {
+                            child.editor.as_ref().map_or_else(
+                                || crate::session::worker::ChildAssignment::Researcher {
+                                    objective: child.objective.clone(),
+                                    definition: d.agent.clone(),
+                                    profile: child
+                                        .profile
+                                        .clone()
+                                        .or_else(|| default_profile.clone()),
+                                },
+                                |assignment| crate::session::worker::ChildAssignment::Editor {
+                                    assignment: assignment.clone(),
+                                },
+                            )
+                        })
                         .collect(),
                 ),
                 _ => None,

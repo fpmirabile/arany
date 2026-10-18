@@ -19,6 +19,10 @@ pub(crate) fn specs(catalog: &Value, role: PromptRole) -> Vec<ToolSpec> {
     let mut calls = catalog_call_schemas(catalog);
     if role == PromptRole::Researcher {
         calls.retain(|call| facts_of(call).is_some_and(|facts| facts.researcher));
+    } else if role == PromptRole::Editor {
+        calls.retain(|call| {
+            facts_of(call).is_some_and(|facts| facts.family == crate::tools::catalog::Family::File)
+        });
     }
     let contract = (role == PromptRole::Primary).then(|| plan_contract_property(&calls));
     calls
@@ -66,7 +70,7 @@ fn spec(mut parameters: Value, discriminator: &str) -> ToolSpec {
             "Complete the current task and report its observed result. A requested edit must first have an applied mutation result, or an actual blocking failure."
         }
         "delegate" => {
-            "Delegate independent read-only reasoning to children; the primary retains file operations and completes the task after their results."
+            "Delegate research, or one offered foreground editor assignment. The primary integrates private edits and verifies the criterion before completing."
         }
         _ => by_name(&operation).expect("compiled operation").description,
     };

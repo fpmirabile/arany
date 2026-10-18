@@ -17,6 +17,7 @@ pub enum Action {
     ProviderCall { previews: bool, steering: bool },
     Child { in_flight: u32, research: bool },
     Tool,
+    Worker { chunks: usize },
     Review,
     Compaction,
     BoundaryCompaction { goal: bool },
@@ -40,6 +41,7 @@ impl Action {
                     .saturating_mul(2),
             ),
             Self::Tool | Self::Review => 8,
+            Self::Worker { chunks } => chunks.saturating_add(22),
             Self::Compaction => 6,
             Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
             Self::Delegation { children, research } => {
@@ -92,6 +94,9 @@ impl Action {
                     0
                 }),
             Self::Tool | Self::Review => switches(ProviderRole::Review),
+            Self::Worker { .. } => switches(ProviderRole::Review)
+                .saturating_add(switches(ProviderRole::Child))
+                .saturating_add(switches(ProviderRole::Primary)),
             Self::Compaction | Self::BoundaryCompaction { .. } => {
                 switches(ProviderRole::Compaction)
             }
@@ -116,7 +121,7 @@ impl Action {
     pub(super) fn tool_observations(self) -> usize {
         match self {
             // A command can need a separate integration observation, so reserve two observations per Tool step.
-            Self::Tool | Self::Review => 2,
+            Self::Tool | Self::Review | Self::Worker { .. } => 2,
             Self::Child {
                 in_flight,
                 research: true,
@@ -315,7 +320,10 @@ impl GoalLedger {
 
     pub(super) fn admits(&self, action: Action) -> bool {
         match action {
-            Action::ProviderCall { .. } | Action::Child { .. } | Action::Tool => {
+            Action::ProviderCall { .. }
+            | Action::Child { .. }
+            | Action::Tool
+            | Action::Worker { .. } => {
                 self.can_start_provider_call() && self.remaining_calls() != Some(0)
             }
             Action::Review | Action::Compaction => {

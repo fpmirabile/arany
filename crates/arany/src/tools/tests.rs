@@ -53,6 +53,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
         queue_progress: None,
+        queue_wait: None,
         active_action_gate: None,
         hook_stdin: None,
         #[cfg(target_os = "macos")]
@@ -2065,6 +2066,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
         queue_progress: None,
+        queue_wait: None,
         active_action_gate: None,
         hook_stdin: None,
         #[cfg(target_os = "macos")]
@@ -2176,6 +2178,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         guard_executable: PathBuf::new(),
         enforcement_digest: [1; 32],
         queue_progress: None,
+        queue_wait: None,
         active_action_gate: None,
         hook_stdin: None,
         #[cfg(target_os = "macos")]
@@ -2236,6 +2239,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         guard_executable: std::path::PathBuf::new(),
         enforcement_digest: [1; 32],
         queue_progress: None,
+        queue_wait: None,
         active_action_gate: None,
         hook_stdin: None,
         #[cfg(target_os = "macos")]

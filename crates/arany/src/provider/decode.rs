@@ -149,6 +149,7 @@ mod tests {
         }
         let mut children = vec![
             ChildAssignment {
+                editor: None,
                 objective: "x".repeat(2048),
                 profile: None
             };
@@ -189,5 +190,70 @@ mod tests {
                 valid
             );
         }
+    }
+    #[test]
+    fn foreground_editor_wire_is_closed_scoped_and_checks_nested_credential_reflection() {
+        let assignment = crate::session::worker::EditorAssignment {
+            definition: "editor".into(),
+            definition_digest: [1; 32],
+            mission: "Edit notes".into(),
+            direction: "Bounded edit".into(),
+            lease: vec!["notes".into()],
+            criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "notes/a".into(),
+                content: "done".into(),
+            },
+            mode: crate::session::worker::WorkerMode::Foreground,
+            max_turns: 17,
+            wave: 1,
+            resumes: None,
+            supersedes: None,
+        };
+        let child = ChildAssignment {
+            objective: assignment.mission.clone(),
+            profile: None,
+            editor: Some(Box::new(assignment)),
+        };
+        let mut value = json!({"outcome":{"type":"delegate","agent":null,"children":[child]}});
+        assert!(structured_outcome(&value.to_string()).is_ok());
+        value["outcome"]["children"][0]["editor"]["host_path"] = json!("/outside");
+        assert!(structured_outcome(&value.to_string()).is_err());
+        value["outcome"]["children"][0]["editor"]
+            .as_object_mut()
+            .unwrap()
+            .remove("host_path");
+        value["outcome"]["children"][0]["editor"]["direction"] = json!("synthetic-secret");
+        let response = super::super::ProviderResponse {
+            outcome: structured_outcome(&value.to_string()).unwrap(),
+            turn: super::super::ProviderTurn::scripted(),
+            response_id: None,
+            usage: Default::default(),
+            wire_provenance: None,
+        };
+        assert!(response.reflects_secret("synthetic-secret"));
+        let mut request = super::super::test_support::primary_request("test-model");
+        request.collaboration = crate::session::CollaborationPolicy::Auto {
+            max_active_children: 3,
+        };
+        request.input.goal_plan_contract = Some(super::super::test_support::goal_plan_contract());
+        let mut catalog = super::super::test_support::catalog();
+        catalog["agents"] = json!([{"name":"editor","editor":true,"supported":true,"digest":vec![1;32],"max_turns":17}]);
+        request.input.tools = Some(super::super::test_support::tool_context(catalog));
+        let schema = super::super::run_outcome_schema(&request);
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&value));
+        value["outcome"]["children"][0]["editor"]["mode"] = json!("background");
+        assert!(!validator.is_valid(&value));
+        request.input.role = crate::provider::PromptRole::Editor;
+        request.phase = crate::provider::AgentPhase::ChildWork;
+        request.collaboration = crate::session::CollaborationPolicy::Single;
+        assert!(request.validate_scope().is_ok());
+        assert_eq!(
+            super::super::run_outcome_schema(&request)["properties"]["outcome"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

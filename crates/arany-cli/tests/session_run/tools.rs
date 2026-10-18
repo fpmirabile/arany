@@ -1479,6 +1479,7 @@ impl Provider for BoundedLoop {
                 0 => ProviderOutcome::Delegate(arany::Delegate {
                     agent: None,
                     children: vec![arany::ChildAssignment {
+                        editor: None,
                         objective: "Review the stated task without effects".into(),
                         profile: None,
                     }],

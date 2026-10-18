@@ -204,6 +204,10 @@ struct ActiveTime {
     exhausted: bool,
 }
 
+// Boxing a large future in a non-async wrapper keeps debug-build callers from holding it in their own frames.
+pub(super) type BoxedStep<'a, T> =
+    std::pin::Pin<Box<dyn Future<Output = Result<T, EngineError>> + Send + 'a>>;
+
 impl RunLoop<'_> {
     pub(super) async fn execute_step(
         &self,
@@ -237,9 +241,9 @@ impl RunLoop<'_> {
             let source_intent_digest = intent.digest();
             let narrowable = narrowings < MAX_NARROWINGS_PER_STEP;
             // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
-            let Some((observation, narrowed)) =
-                Box::pin(self.run_intent(&grant, runtime, intent, &source_call, narrowable))
-                    .await?
+            let Some((observation, narrowed)) = self
+                .run_intent(&grant, runtime, intent, &source_call, narrowable)
+                .await?
             else {
                 return Ok(false);
             };
@@ -325,7 +329,33 @@ impl RunLoop<'_> {
         let intent = match grant {
             Grant::Primary { .. } => self.primary_intent(runtime, call)?,
             Grant::Researcher { child, deadline } => {
-                self.researcher_intent(runtime, child.agent_run_id, call, *deadline)
+                let mut intent =
+                    self.researcher_intent(runtime, child.agent_run_id, call, *deadline);
+                if child.editor
+                    && let Some(intent) = &mut intent
+                {
+                    intent.target = self.worker_target()?;
+                    intent.limits.cache_requested_bytes = 0;
+                    intent.limits.cache_bytes = 0;
+                    intent.limits.cache_candidate_bytes = 0;
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    intent.limits.runtime_ms = intent.limits.runtime_ms.min(
+                        u32::try_from(
+                            duration_ms(remaining.saturating_sub(
+                                runtime.reservation_overhead(&intent.call)
+                                    + TOOL_CLEANUP_OVERHEAD
+                                    + STORE_ACTION_OVERHEAD,
+                            )) / 4,
+                        )
+                        .unwrap_or(u32::MAX),
+                    );
+                    if intent.limits.runtime_ms < 1_000 {
+                        return Ok(None);
+                    }
+                    intent.expires_at_ms =
+                        crate::tools::now_ms().saturating_add(u64::from(intent.limits.runtime_ms));
+                }
+                intent
             }
         };
         let Some(mut intent) = intent else {
@@ -407,7 +437,13 @@ impl RunLoop<'_> {
         } else {
             intent.limits.runtime_ms
         };
-        let transfer_multiplier = if command && intent.limits.cache_bytes > 0 {
+        let transfer_multiplier = if command && intent.limits.cache_bytes > 0
+            || matches!(
+                intent.call,
+                ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                }
+            ) {
             3
         } else {
             1
@@ -423,7 +459,7 @@ impl RunLoop<'_> {
                     requested_runtime_ms.min(u32::try_from(per_action).unwrap_or(u32::MAX))
                 })
         };
-        if runtime_ms == 0 {
+        if runtime_ms < 1_000 {
             return Ok(None);
         }
         intent.limits.runtime_ms = runtime_ms;
@@ -437,7 +473,7 @@ impl RunLoop<'_> {
         Ok(Some(intent))
     }
 
-    fn researcher_intent(
+    pub(super) fn researcher_intent(
         &self,
         runtime: &ToolRuntime,
         agent_run_id: crate::session::AgentRunId,
@@ -465,7 +501,18 @@ impl RunLoop<'_> {
         Some(intent)
     }
 
-    pub(super) async fn run_intent(
+    pub(super) fn run_intent<'a>(
+        &'a self,
+        grant: &'a Grant<'_>,
+        runtime: &'a ToolRuntime,
+        intent: EffectIntent,
+        post_call: &'a ToolCall,
+        narrowable: bool,
+    ) -> BoxedStep<'a, Option<(ToolObservation, Option<ToolCall>)>> {
+        Box::pin(self.run_intent_inner(grant, runtime, intent, post_call, narrowable))
+    }
+
+    async fn run_intent_inner(
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
@@ -497,7 +544,16 @@ impl RunLoop<'_> {
             active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
         })
         .await?;
+        if matches!(grant, Grant::Researcher { child, .. } if child.editor) {
+            self.worker
+                .lock()
+                .await
+                .as_mut()
+                .ok_or(EngineError::CoordinatorFailed)?
+                .note_intent(&intent);
+        }
         let mut narrowed = None;
+        let mut candidate = None;
         let answer = match self
             .before_dispatch(grant, runtime, intent, permission, narrowable)
             .await?
@@ -514,9 +570,14 @@ impl RunLoop<'_> {
                 Grant::Primary { .. } => {
                     self.dispatch_primary(runtime, intent, queue_pause).await?
                 }
-                Grant::Researcher { .. } => Answer {
-                    observation: execute_cancellable(runtime, intent, &self.controls.cancellation)
-                        .await,
+                Grant::Researcher { child, .. } => Answer {
+                    observation: if child.editor {
+                        let (observation, pending) = self.dispatch_worker(runtime, intent).await?;
+                        candidate = pending;
+                        observation
+                    } else {
+                        execute_cancellable(runtime, intent, &self.controls.cancellation).await
+                    },
                     refused: false,
                     active_time: None,
                 },
@@ -528,6 +589,14 @@ impl RunLoop<'_> {
             observation: answer.observation.clone(),
         })
         .await?;
+        if let Some((candidate, data)) = candidate {
+            self.worker
+                .lock()
+                .await
+                .as_mut()
+                .ok_or(EngineError::CoordinatorFailed)?
+                .acknowledge(candidate, data)?;
+        }
         if let Some(active_time) = answer.active_time {
             if let Some(segment) = active_time.segment {
                 self.settle_active_segment(segment)?;
@@ -548,6 +617,19 @@ impl RunLoop<'_> {
         hook_events: usize,
         narrowable: bool,
     ) -> Result<bool, EngineError> {
+        if matches!(
+            intent.target,
+            crate::session::worker::EffectTarget::WorkerView { .. }
+        ) || matches!(
+            intent.call,
+            ToolCall::PrepareWorker { .. }
+                | ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                }
+        ) {
+            self.admit_worker_action(self.worker_call_chunks(&intent.call)?)
+                .await?;
+        }
         let (tail, observations) = match grant {
             Grant::Primary { review_allowed, .. } => {
                 // The primary keeps one Provider call for its next turn and one for a review.
@@ -593,6 +675,15 @@ impl RunLoop<'_> {
         Ok(true)
     }
 
+    fn plan_allows(&self, call: &ToolCall) -> bool {
+        matches!(
+            call,
+            ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+            }
+        ) || self.ledger().allows_tool(call)
+    }
+
     fn review_will_run(
         &self,
         runtime: &ToolRuntime,
@@ -601,7 +692,7 @@ impl RunLoop<'_> {
         permission: Permission,
     ) -> Result<bool, EngineError> {
         Ok(self.ledger().command_timeout_limit(call)?.is_none()
-            && self.ledger().allows_tool(call)
+            && self.plan_allows(call)
             && runtime.allows(call)
             && permission
                 .narrow_terminal(self.terminal_mode(), call)
@@ -625,15 +716,45 @@ impl RunLoop<'_> {
                 approval: None,
             };
         }
-        let (mut decision, mut basis, mut approval) = runtime
-            .permissions()
-            .map_or((Decision::Allow, PermissionSource::Mode, None), |config| {
-                config.evaluate(call)
-            });
+        let (mut decision, mut basis, mut approval) = runtime.permissions().map_or(
+            (Decision::Allow, PermissionSource::Mode, None),
+            |config| {
+                if let ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::WorkerHandover { data, .. },
+                } = call
+                {
+                    self.ledger()
+                        .view(|view| {
+                            view.runs
+                                .last()
+                                .and_then(|run| {
+                                    run.workers
+                                        .data
+                                        .iter()
+                                        .find(|sealed| &sealed.reference == data)
+                                })
+                                .and_then(|sealed| match &sealed.facts {
+                                    crate::session::worker::WorkerDataFacts::Changes(paths) => {
+                                        Some(config.evaluate_worker_paths(call, Some(paths)))
+                                    }
+                                    _ => None,
+                                })
+                        })
+                        .ok()
+                        .flatten()
+                        .unwrap_or((Decision::Deny, PermissionSource::PinnedGrant, None))
+                } else {
+                    config.evaluate(call)
+                }
+            },
+        );
         let unguarded = call.is_unguarded();
         let researcher = matches!(grant, Grant::Researcher { .. });
         if (runtime.permissions().is_some() || unguarded)
-            && (!runtime.allows(call) || researcher && !call.is_child_research())
+            && (!runtime.allows(call)
+                || researcher
+                    && !call.is_child_research()
+                    && !matches!(grant, Grant::Researcher { child, .. } if child.editor && child.definition.as_ref().is_some_and(|definition| definition.allows_worker(call))))
         {
             decision = decision.narrow(Decision::Deny);
             basis = PermissionSource::PinnedGrant;
@@ -759,7 +880,7 @@ impl RunLoop<'_> {
                     .await?
                 }
                 Grant::Researcher { deadline, .. } => {
-                    if !self.ledger().allows_tool(&intent.call) {
+                    if !intent.call.is_internal() && !self.ledger().allows_tool(&intent.call) {
                         (
                             Verdict::Deny(Answer {
                                 observation: outside_plan(intent),
@@ -838,8 +959,7 @@ impl RunLoop<'_> {
             }
         }
         let mut unsaved_rule = false;
-        let goal_allows = matches!(intent.call, ToolCall::ParseAgentDefinition { .. })
-            || self.ledger().allows_tool(&intent.call);
+        let goal_allows = intent.call.is_internal() || self.plan_allows(&intent.call);
         let mut approved = true;
         let mut active_time_exhausted = false;
         if goal_allows
@@ -1002,6 +1122,44 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         queue_pause: Option<ActivePause>,
     ) -> Result<Answer, EngineError> {
+        if matches!(intent.call, ToolCall::PrepareWorker { .. }) {
+            if let Some(pause) = queue_pause {
+                self.settle_active_pause(pause, None)?;
+            }
+            let segment = match self.reserve_active_segment(tool_action_bound(runtime, &intent)) {
+                Ok(segment) => segment,
+                Err(EngineError::GoalBudgetExhausted) => {
+                    return Ok(Answer {
+                        observation: active_time_limit_observation(intent),
+                        refused: false,
+                        active_time: Some(ActiveTime {
+                            segment: None,
+                            exhausted: true,
+                        }),
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            let observation = self.capture_worker_base(runtime, intent).await?;
+            return Ok(Answer {
+                observation,
+                refused: false,
+                active_time: Some(ActiveTime {
+                    segment: Some(segment),
+                    exhausted: false,
+                }),
+            });
+        }
+        let runtime = match (&intent.call, self.handover.get()) {
+            (
+                ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
+                },
+                Some(bytes),
+            ) => runtime.with_handover(bytes.clone()),
+            _ => runtime.clone(),
+        };
+        let runtime = &runtime;
         let (observation, segment, exhausted) =
             if intent.call.facts().site == crate::tools::catalog::Site::Guard {
                 let Some(queue_pause) = queue_pause else {
@@ -1043,7 +1201,8 @@ impl RunLoop<'_> {
         let runtime = runtime.with_active_action_gate(active_sender);
         let worker_cancellation = RunCancellation::new();
         let mut run_cancellation = self.controls.cancellation.clone();
-        let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
+        let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
+            .saturating_add(crate::tools::worker::transfer_time(&intent));
         let action_bound = tool_action_bound(&runtime, &intent);
         let runtime_ms = intent.limits.runtime_ms;
         let mut execution = Box::pin(runtime.execute(intent, worker_cancellation.clone()));
@@ -1383,7 +1542,9 @@ fn tool_action_bound(runtime: &ToolRuntime, intent: &EffectIntent) -> Duration {
     runtime
         .reservation_overhead(&intent.call)
         .saturating_add(
-            Duration::from_millis(u64::from(intent.limits.cache_transfer_ms)).saturating_mul(2),
+            Duration::from_millis(u64::from(intent.limits.cache_transfer_ms))
+                .saturating_add(crate::tools::worker::transfer_time(intent))
+                .saturating_mul(2),
         )
         .saturating_add(Duration::from_millis(u64::from(intent.limits.runtime_ms)))
         .saturating_add(TOOL_CLEANUP_OVERHEAD)
@@ -1576,8 +1737,9 @@ impl RunLoop<'_> {
                 review_allowed: false,
             };
             let post_call = intent.call.clone();
-            let Some((observation, _)) =
-                Box::pin(self.run_intent(&grant, runtime, intent, &post_call, false)).await?
+            let Some((observation, _)) = self
+                .run_intent(&grant, runtime, intent, &post_call, false)
+                .await?
             else {
                 return Ok(false);
             };
@@ -1611,11 +1773,37 @@ impl RunLoop<'_> {
         catalog["agents"] = serde_json::json!(
             registry
                 .values()
-                .map(crate::tools::definitions::AgentDefinition::catalog_entry)
+                .map(|definition| {
+                    let mut entry = definition.catalog_entry();
+                    if definition.editor() {
+                        let supported = !definition.background
+                            && runtime.worker_policy().is_some()
+                            && self.controls.goal_phase
+                                == crate::session::GoalPhase::Implementation;
+                        entry["supported"] = serde_json::json!(supported);
+                        entry["unsupported_reason"] = serde_json::json!(if definition.background {
+                            Some("background_execution_unavailable")
+                        } else if !supported {
+                            Some("editor_parent_grant_unavailable")
+                        } else {
+                            None
+                        });
+                        entry["editor"] = serde_json::json!(true);
+                        entry["digest"] = serde_json::json!(crate::tools::types::digest(
+                            &serde_json::to_vec(definition).expect("normalized definition")
+                        ));
+                        entry["max_turns"] = serde_json::json!(definition.max_turns);
+                    }
+                    entry
+                })
                 .collect::<Vec<_>>()
         );
         tools.catalog = serde_json::to_string(&catalog).map_err(|_| EngineError::InvalidRequest)?;
-        if tools.catalog.len() > crate::tools::types::MAX_TOOL_CATALOG_BYTES
+        if serde_json::to_vec(&catalog["agents"])
+            .map_err(|_| EngineError::InvalidRequest)?
+            .len()
+            > 8 * 1024
+            || tools.catalog.len() > crate::tools::types::MAX_TOOL_CATALOG_BYTES
             || tools.rendered_len() > runtime.context_limit_bytes()
         {
             return Ok(false);

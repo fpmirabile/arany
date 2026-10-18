@@ -76,6 +76,7 @@ async fn rejected_child_feedback_uses_the_committed_account_failure() {
         Ok(ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "B".into(),
                 profile: None,
             }],
@@ -116,6 +117,7 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     responses.push_back(Ok(ProviderOutcome::Delegate(Delegate {
                         agent: None,
                         children: vec![arany::ChildAssignment {
+                            editor: None,
                             objective: "A".into(),
                             profile: None,
                         }],

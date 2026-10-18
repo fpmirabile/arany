@@ -21,6 +21,9 @@ use arany::test_support::{engine as engine_support, scenario::*};
 
 use engine_support::{run_to_end, run_with};
 
+#[path = "guard_runs/worker.rs"]
+mod worker;
+
 #[path = "guard_runs/permissions.rs"]
 mod permissions;
 
@@ -371,7 +374,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
 
 
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate { agent: None, children: vec![arany::ChildAssignment { objective: "Inspect current image".into(), profile: None }] }),
+            ProviderOutcome::Delegate(Delegate { agent: None, children: vec![arany::ChildAssignment { editor: None, objective: "Inspect current image".into(), profile: None }] }),
             ProviderOutcome::Finish(Finish { summary: "inspected".into(), result: "Child answer".into() }),
             ProviderOutcome::Finish(Finish { summary: "combined".into(), result: "Team answer".into() }),
             ProviderOutcome::Finish(Finish { summary: "large".into(), result: "Large image answer".into() }),
@@ -1719,6 +1722,7 @@ async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit(
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
                 children: vec![arany::ChildAssignment {
+                    editor: None,
                     objective: "Inspect the fact".into(),
                     profile: None,
                 }],
@@ -1771,6 +1775,7 @@ async fn researcher_tool_step_events_match_the_snapshot() {
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
                 children: vec![arany::ChildAssignment {
+                    editor: None,
                     objective: "Inspect the fact".into(),
                     profile: None,
                 }],
@@ -2588,6 +2593,7 @@ mod routing {
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
                     children: vec![arany::ChildAssignment {
+                        editor: None,
                         objective: "Read the facts".into(),
                         profile: Some("spare".into()),
                     }],

@@ -53,6 +53,46 @@ pub(super) fn goal_report(
             &mut omitted_facts,
         );
     }
+    for worker in view
+        .runs
+        .iter()
+        .filter(|run| goal.run_ids.contains(&run.id))
+        .flat_map(|run| &run.agents)
+        .filter_map(|a| a.assignment.as_ref())
+    {
+        if let Some((_, outcome)) = &worker.outcome {
+            let fact = match outcome.disposition {
+                crate::session::worker::WorkerDisposition::PrivateUncertain => Some(
+                    "A private worker effect remains unknown; its contained private work was discarded without Workspace publication.",
+                ),
+                crate::session::worker::WorkerDisposition::Failed
+                | crate::session::worker::WorkerDisposition::Lost
+                | crate::session::worker::WorkerDisposition::Cancelled => Some(
+                    "A worker failed or stopped; its private work was discarded without Workspace publication.",
+                ),
+                _ if worker.integration.as_ref().is_some_and(|(_, i)| {
+                    i.outcome == crate::session::worker::WorkerIntegrationOutcome::Conflict
+                }) =>
+                {
+                    Some(
+                        "Worker integration conflicted; the whole changeset was discarded before publication.",
+                    )
+                }
+                _ if worker.verification.as_ref().is_none_or(|(_, v)| !v.passed) => {
+                    Some("A worker criterion has no passing fresh primary verification.")
+                }
+                _ => None,
+            };
+            if let Some(fact) = fact {
+                push_goal_report_item(
+                    &mut report,
+                    GoalReportSection::Unresolved,
+                    fact,
+                    &mut omitted_facts,
+                );
+            }
+        }
+    }
     push_cache_facts(&mut report, view, goal, &mut omitted_facts);
     push_unguarded_facts(&mut report, view, goal, &mut omitted_facts);
     for (index, (_, fallback)) in view

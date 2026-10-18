@@ -31,7 +31,7 @@
             "additionalProperties": false,
             "properties": {
               "agent": {
-                "description": "Admitted agent definition name, or null for the default researcher. Editors are unsupported.",
+                "description": "Admitted agent definition name, or null. An editor assignment selects its own exact admitted definition.",
                 "type": [
                   "string",
                   "null"

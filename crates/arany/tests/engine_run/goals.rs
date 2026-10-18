@@ -1149,14 +1149,17 @@ impl Provider for FiniteTokenTeam {
                     agent: None,
                     children: vec![
                         arany::ChildAssignment {
+                            editor: None,
                             objective: "Review one".into(),
                             profile: None,
                         },
                         arany::ChildAssignment {
+                            editor: None,
                             objective: "Review two".into(),
                             profile: None,
                         },
                         arany::ChildAssignment {
+                            editor: None,
                             objective: "Review three".into(),
                             profile: None,
                         },
@@ -1663,10 +1666,12 @@ impl Provider for PendingChildren {
                     agent: None,
                     children: vec![
                         arany::ChildAssignment {
+                            editor: None,
                             objective: "First child".into(),
                             profile: None,
                         },
                         arany::ChildAssignment {
+                            editor: None,
                             objective: "Second child".into(),
                             profile: None,
                         },
@@ -3409,6 +3414,7 @@ async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
         ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect facts".into(),
                 profile: None,
             }],
@@ -3703,6 +3709,7 @@ async fn pause_at_the_delegate_boundary_spawns_no_child() {
         ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect facts".into(),
                 profile: None,
             }],
@@ -3762,6 +3769,7 @@ async fn pause_before_synthesis_starts_no_synthesis_call() {
         ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect facts".into(),
                 profile: None,
             }],
@@ -3897,6 +3905,7 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
         ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect facts".into(),
                 profile: None,
             }],
@@ -4008,6 +4017,7 @@ async fn child_mcp_call_or_write_is_rejected_before_dispatch() {
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
                 children: vec![arany::ChildAssignment {
+                    editor: None,
                     objective: "Inspect facts".into(),
                     profile: None,
                 }],
@@ -4076,6 +4086,7 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
         ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect notes".into(),
                 profile: None,
             }],
@@ -4156,6 +4167,7 @@ async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
         let mut outcomes = vec![ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect facts".into(),
                 profile: None,
             }],
@@ -4228,6 +4240,7 @@ async fn pause_during_research_finishes_the_child_call_and_dispatches_no_child_t
         ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect facts".into(),
                 profile: None,
             }],
@@ -4272,6 +4285,7 @@ async fn cancellation_after_a_child_tool_request_dispatches_no_child_tool() {
         ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect facts".into(),
                 profile: None,
             }],
@@ -4315,6 +4329,7 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
         ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect facts".into(),
                 profile: None,
             }],
@@ -4402,6 +4417,7 @@ async fn near_deadline_child_tool_stops_before_tool_started() {
         ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect facts".into(),
                 profile: None,
             }],
@@ -4464,10 +4480,12 @@ async fn pause_before_queued_children_start_cancels_them_without_failing_the_run
             agent: None,
             children: vec![
                 arany::ChildAssignment {
+                    editor: None,
                     objective: "Inspect facts".into(),
                     profile: None,
                 },
                 arany::ChildAssignment {
+                    editor: None,
                     objective: "Inspect facts again".into(),
                     profile: None,
                 },
@@ -4587,6 +4605,7 @@ async fn delegation_turn_is_replayed_before_synthesis() {
         ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect facts".into(),
                 profile: None,
             }],
@@ -5582,4 +5601,79 @@ async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
             .is_empty()
     );
     assert_eq!(failing.compact_requests.lock().expect("requests").len(), 1);
+}
+
+#[tokio::test]
+async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable_parent() {
+    use arany::worker::{EditorAssignment, WorkerMode};
+    for case in ["foreground", "background", "mixed", "wave"] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "Fact");
+        let state_path = temp.path().join("state");
+        let mut assignments = vec![arany::ChildAssignment {
+            objective: "Edit notes".into(),
+            profile: None,
+            editor: Some(Box::new(EditorAssignment {
+                definition: "editor".into(),
+                definition_digest: [1; 32],
+                mission: "Edit notes".into(),
+                direction: String::new(),
+                lease: vec!["notes".into()],
+                criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                    path: "notes/a".into(),
+                    content: "done".into(),
+                },
+                mode: if case == "background" {
+                    WorkerMode::Background
+                } else {
+                    WorkerMode::Foreground
+                },
+                max_turns: 17,
+                wave: if case == "wave" { 2 } else { 1 },
+                resumes: None,
+                supersedes: None,
+            })),
+        }];
+        if case == "mixed" {
+            assignments.push(arany::ChildAssignment {
+                editor: None,
+                objective: "Research".into(),
+                profile: None,
+            });
+        }
+        let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Delegate(
+            Delegate {
+                agent: None,
+                children: assignments,
+            },
+        )]));
+        let engine = engine_support::open(
+            StateRoot::admit(&state_path).unwrap(),
+            EngineConfig::default(),
+        )
+        .unwrap();
+        let mut input = request(&workspace, "Edit notes");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: 3,
+        };
+        let outcome = run_to_end(&engine, &provider, input).await.unwrap();
+        assert_eq!(outcome.run.status, RunStatus::Failed, "{case}");
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            1,
+            "{case}: no child egress"
+        );
+        assert!(provider.responses.lock().unwrap().is_empty());
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        assert_eq!(view.goals[0].status, arany::GoalStatus::Failed);
+        assert!(
+            view.runs[0]
+                .agents
+                .iter()
+                .all(|agent| agent.assignment.is_none())
+        );
+        assert_action_bounds(&events, false, false);
+    }
 }

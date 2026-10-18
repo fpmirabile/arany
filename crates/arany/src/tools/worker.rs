@@ -315,6 +315,17 @@ impl View {
         })
     }
 
+    pub(crate) fn note_intent(&mut self, intent: &EffectIntent) {
+        self.last_intent_digest = Some(intent.digest());
+    }
+
+    pub(crate) fn reusable_data(&self, bytes: &[u8]) -> Option<WorkerDataRef> {
+        self.sealed
+            .as_ref()
+            .filter(|data| data.sha256 == digest(bytes) && data.bytes as usize == bytes.len())
+            .cloned()
+    }
+
     pub(crate) fn manifest(&self) -> Result<Vec<u8>, ToolError> {
         serde_json::to_vec(&self.base.manifest()).map_err(|_| ToolError::Operation)
     }
@@ -905,7 +916,7 @@ pub(super) fn decode_handover(
     Ok(changes)
 }
 
-pub(super) fn transfer_time(intent: &EffectIntent) -> std::time::Duration {
+pub(crate) fn transfer_time(intent: &EffectIntent) -> std::time::Duration {
     if matches!(intent.target, EffectTarget::WorkerView { .. }) || handover_ref(intent).is_some() {
         std::time::Duration::from_millis(u64::from(intent.limits.runtime_ms.min(120_000)))
     } else {

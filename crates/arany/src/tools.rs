@@ -150,11 +150,18 @@ pub(crate) struct ToolRuntime {
     process_enforcement_digest: [u8; 32],
     context_limit_bytes: usize,
     queue_progress: Option<tokio::sync::watch::Sender<Option<uuid::Uuid>>>,
+    queue_wait: Option<std::sync::Arc<std::sync::Mutex<QueueWait>>>,
     active_action_gate: Option<tokio::sync::mpsc::Sender<ActiveActionRequest>>,
     hook_stdin: Option<std::sync::Arc<str>>,
     cache_state: Option<std::sync::Arc<StateRoot>>,
     #[cfg(target_os = "macos")]
     system_programs: Option<std::sync::Arc<guard::SystemPrograms>>,
+}
+
+#[derive(Default)]
+struct QueueWait {
+    waiting: Option<std::time::Instant>,
+    elapsed: Duration,
 }
 
 pub(crate) struct ActiveActionRequest {
@@ -178,6 +185,26 @@ impl ToolRuntime {
         let mut runtime = self.clone();
         runtime.queue_progress = sender;
         runtime
+    }
+
+    pub(crate) fn with_queue_accounting(&self) -> Self {
+        let mut runtime = self.clone();
+        runtime.queue_wait = Some(Default::default());
+        runtime
+    }
+
+    pub(crate) fn queued_duration(&self) -> Result<Duration, ToolError> {
+        let timing = self
+            .queue_wait
+            .as_ref()
+            .ok_or(ToolError::Configuration)?
+            .lock()
+            .map_err(|_| ToolError::Operation)?;
+        Ok(timing.elapsed.saturating_add(
+            timing
+                .waiting
+                .map_or(Duration::ZERO, |started| started.elapsed()),
+        ))
     }
 
     pub(crate) fn with_active_action_gate(
@@ -235,6 +262,15 @@ impl ToolRuntime {
     }
 
     pub(crate) fn queue_changed(&self, id: uuid::Uuid, queued: bool) {
+        if let Some(timing) = &self.queue_wait
+            && let Ok(mut timing) = timing.lock()
+        {
+            if queued {
+                timing.waiting.get_or_insert_with(std::time::Instant::now);
+            } else if let Some(started) = timing.waiting.take() {
+                timing.elapsed = timing.elapsed.saturating_add(started.elapsed());
+            }
+        }
         if let Some(sender) = &self.queue_progress {
             sender.send_replace(queued.then_some(id));
         }
@@ -263,7 +299,13 @@ impl ToolRuntime {
         (capacity >= 128).then_some(capacity)
     }
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
-        self.config.allows(call)
+        match call {
+            ToolCall::PrepareWorker { .. } => self.worker_policy().is_some(),
+            ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
+            } => self.config.write,
+            _ => self.config.allows(call),
+        }
     }
     pub(crate) fn allows_goal_contract(&self, contract: &crate::session::GoalPlanContract) -> bool {
         let criterion_allowed = match &contract.success_criterion {
@@ -468,6 +510,7 @@ impl ToolRuntime {
             permissions,
             unguarded_rules,
             queue_progress: None,
+            queue_wait: None,
             active_action_gate: None,
             hook_stdin: None,
             cache_state: Some(std::sync::Arc::new(
@@ -579,6 +622,65 @@ impl ToolRuntime {
         })
     }
 
+    pub(crate) fn worker_policy(&self) -> Option<crate::session::worker::WorkerPolicy> {
+        use crate::session::worker::*;
+        (self.config.write && self.definitions.pin().is_some())
+            .then(|| WorkerPolicy {
+                parent_grant: WorkerGrant {
+                    read_paths: self.config.workspace_paths.clone(),
+                    write_paths: self.config.workspace_paths.clone(),
+                    tools: vec![
+                        WorkerTool::List,
+                        WorkerTool::Read,
+                        WorkerTool::Search,
+                        WorkerTool::Mkdir,
+                        WorkerTool::Write,
+                        WorkerTool::Edit,
+                        WorkerTool::Skill,
+                        WorkerTool::McpList,
+                    ],
+                    skills: self.config.skills.iter().map(|s| s.name.clone()).collect(),
+                    mcp_servers: self.config.mcp.iter().map(|s| s.name.clone()).collect(),
+                    permission_mode: self.permissions().map(permissions::PermissionConfig::mode),
+                },
+                concurrency: 1,
+                max_turns: 17,
+                max_tools: 16,
+                data_bytes: WORKER_DATA_BYTES as u32,
+            })
+            .filter(WorkerPolicy::valid)
+    }
+
+    pub(crate) fn with_handover(&self, bytes: std::sync::Arc<[u8]>) -> Self {
+        let mut runtime = self.clone();
+        runtime.handover = Some(bytes);
+        runtime
+    }
+
+    pub(crate) fn editor_context(
+        &self,
+        grant: &crate::session::worker::WorkerGrant,
+        remaining: usize,
+    ) -> Result<ToolContext, ToolError> {
+        let mut context = self.research_context(remaining)?;
+        let mut catalog: serde_json::Value =
+            serde_json::from_str(&context.catalog).map_err(|_| ToolError::Configuration)?;
+        catalog["workspace_paths"] = serde_json::json!(grant.read_paths);
+        catalog["write"] = serde_json::json!(true);
+        catalog["skills"] = serde_json::json!([]);
+        catalog["mcp_servers"] = serde_json::json!([]);
+        catalog["file_tools"] = serde_json::json!(catalog::FILE_TOOLS);
+        catalog["operations"] = serde_json::json!(
+            grant
+                .tools
+                .iter()
+                .map(|tool| tool.label())
+                .collect::<Vec<_>>()
+        );
+        context.catalog = catalog.to_string();
+        Ok(context)
+    }
+
     pub(crate) fn research_context(
         &self,
         tool_calls_remaining: usize,
@@ -639,13 +741,6 @@ impl ToolRuntime {
         }
     }
 
-    #[cfg_attr(
-        not(any(test, feature = "test-support")),
-        expect(
-            dead_code,
-            reason = "Internal integration transport precedes Engine editor admission"
-        )
-    )]
     pub(crate) async fn apply_worker_handover(
         &self,
         intent: EffectIntent,
@@ -668,6 +763,17 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
+        if matches!(
+            intent.call,
+            ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+            }
+        ) && let Some(bytes) = &self.handover
+        {
+            return self
+                .apply_worker_handover(intent, bytes.clone(), cancellation)
+                .await;
+        }
         if intent.target != crate::session::worker::EffectTarget::Workspace
             || !self.config.allows(&intent.call)
         {

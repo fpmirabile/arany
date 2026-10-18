@@ -119,7 +119,7 @@ fn outcome_schema() -> Value {
                         "profile": {"type": ["string", "null"], "enum": [null], "description": "Eligible admitted profile, or null for the pinned child default."}
                     }, "required": ["objective", "profile"], "additionalProperties": false
                 }},
-                "agent": {"type": ["string", "null"], "description": "Admitted agent definition name, or null for the default researcher. Editors are unsupported."}
+                "agent": {"type": ["string", "null"], "description": "Admitted agent definition name, or null. An editor assignment selects its own exact admitted definition."}
             }, "required": ["type", "children", "agent"], "additionalProperties": false}
         ]}},
         "required": ["outcome"],
@@ -448,6 +448,7 @@ impl ProviderRequest {
         let root = matches!(self.phase, AgentPhase::RootPlan | AgentPhase::RootSynthesis);
         let role_fits = match input.role {
             PromptRole::Primary => root && input.tools.is_some(),
+            PromptRole::Editor => self.phase == AgentPhase::ChildWork && input.tools.is_some(),
             PromptRole::Researcher => self.phase == AgentPhase::ChildWork && input.tools.is_some(),
             PromptRole::ReadOnly => self.phase != AgentPhase::ToolReview && input.tools.is_none(),
             PromptRole::ToolReview => self.phase == AgentPhase::ToolReview && input.tools.is_none(),
@@ -521,6 +522,43 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
     profiles.push(Value::Null);
     schema["properties"]["outcome"]["anyOf"][1]["properties"]["children"]["items"]["properties"]
         ["profile"]["enum"] = json!(profiles);
+    if request.input.role == PromptRole::Primary
+        && let Some(tools) = &request.input.tools
+        && let Ok(catalog) = serde_json::from_str::<Value>(&tools.catalog)
+        && let Some(agents) = catalog["agents"].as_array()
+    {
+        let calls = crate::tools::catalog::catalog_call_schemas(&catalog);
+        let contract = crate::tools::catalog::plan_contract_property(&calls);
+        let criterion = contract["anyOf"][0]["properties"]["success_criterion"].clone();
+        let items =
+            &mut schema["properties"]["outcome"]["anyOf"][1]["properties"]["children"]["items"];
+        let mut branches = vec![items.clone()];
+        for agent in agents
+            .iter()
+            .filter(|agent| agent["editor"] == true && agent["supported"] == true)
+        {
+            branches.push(json!({
+                "type":"object", "properties": {
+                    "objective":{"type":"string", "description":"Repeat editor.mission exactly."},
+                    "profile":{"type":"null"},
+                    "editor":{"type":"object", "properties": {
+                        "definition":{"type":"string","enum":[agent["name"]]},
+                        "definition_digest":{"type":"array","items":{"type":"integer"},"description":format!("Exact admitted digest: {}",agent["digest"])},
+                        "mission":{"type":"string"}, "direction":{"type":"string"},
+                        "lease":{"type":"array","items":{"type":"string"},"description":"Sorted nonoverlapping ASCII relative files or subtrees within the Goal plan and parent grant."},
+                        "criterion":criterion,
+                        "mode":{"type":"string","enum":["foreground"]},
+                        "max_turns":{"type":"integer","description":format!("At most {}",agent["max_turns"])},
+                        "wave":{"type":"integer","enum":[1]},
+                        "resumes":{"type":"null"}, "supersedes":{"type":"null"}
+                    }, "required":["definition","definition_digest","mission","direction","lease","criterion","mode","max_turns","wave","resumes","supersedes"],"additionalProperties":false}
+                },"required":["objective","profile","editor"],"additionalProperties":false
+            }));
+        }
+        if branches.len() > 1 {
+            *items = json!({"anyOf":branches});
+        }
+    }
     schema
 }
 
@@ -627,6 +665,8 @@ pub struct Finish {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChildAssignment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<Box<crate::session::worker::EditorAssignment>>,
     pub objective: String,
     #[serde(deserialize_with = "Option::deserialize")]
     pub profile: Option<String>,
@@ -642,6 +682,14 @@ impl ChildAssignment {
         !self.objective.trim().is_empty()
             && self.objective.len() <= MAX_CHILD_OBJECTIVE_BYTES
             && self.profile.as_deref().is_none_or(valid_profile_name)
+            && self.editor.as_ref().is_none_or(|editor| {
+                self.profile.is_none()
+                    && self.objective == editor.mission
+                    && crate::session::worker::ChildAssignment::Editor {
+                        assignment: editor.clone(),
+                    }
+                    .valid()
+            })
     }
 }
 
@@ -719,6 +767,11 @@ impl ProviderResponse {
                         .is_some_and(|name| name.contains(secret))
                         || value.children.iter().any(|child| {
                             child.objective.contains(secret)
+                                || child.editor.as_ref().is_some_and(|editor| {
+                                    serde_json::to_value(editor).is_ok_and(|value| {
+                                        streaming::reflects_secret(&value, secret)
+                                    })
+                                })
                                 || child
                                     .profile
                                     .as_ref()
@@ -997,6 +1050,21 @@ stop_bytes: 0,
     }
 
     #[test]
+    fn editor_delegate_schema_does_not_change_when_the_plan_contract_arrives() {
+        let mut before = test_support::primary_request("scope-model");
+        before.collaboration = CollaborationPolicy::Auto {
+            max_active_children: 3,
+        };
+        let tools = before.input.tools.as_mut().unwrap();
+        let mut catalog: Value = serde_json::from_str(&tools.catalog).unwrap();
+        catalog["agents"] = json!([{"name": "editor", "editor": true, "supported": true, "digest": "d", "max_turns": 4}]);
+        tools.catalog = catalog.to_string();
+        let mut after = before.clone();
+        after.input.goal_plan_contract = Some(test_support::goal_plan_contract());
+        assert_eq!(run_outcome_schema(&before), run_outcome_schema(&after));
+    }
+
+    #[test]
     fn fallback_requires_a_server_failure_at_the_http_status_stage() {
         let anthropic_rate_limit = anthropic::http_failure(reqwest::StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
@@ -1173,6 +1241,7 @@ stop_bytes: 0,
         response.outcome = ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![crate::ChildAssignment {
+                editor: None,
                 objective: format!("child {secret}"),
                 profile: None,
             }],
@@ -1181,6 +1250,7 @@ stop_bytes: 0,
         response.outcome = ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![ChildAssignment {
+                editor: None,
                 objective: "safe".into(),
                 profile: Some(secret.into()),
             }],
