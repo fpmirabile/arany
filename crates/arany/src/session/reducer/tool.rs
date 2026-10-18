@@ -349,6 +349,7 @@ pub(super) fn apply(
                 || primary.id != *agent_run_id
                 || primary.status != AgentStatus::Active
                 || !valid_origin
+                || !run.hooks_settled()
                 || run
                     .tools
                     .iter()

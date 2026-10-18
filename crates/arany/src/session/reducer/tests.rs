@@ -3942,6 +3942,21 @@ mod goal_replay_tests {
             &view,
             started(HookEvent::PostToolUse, intent.digest())
         ));
+        let continuation = Event::ProviderCallRecorded {
+            run_id: run,
+            agent_run_id: agent,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                Some(0),
+            ),
+        };
+        let mut open = view.clone();
+        apply(&mut open, reserve_child_call(goal, run, agent)).unwrap();
+        assert!(
+            rejected(&open, continuation.clone()),
+            "no continuation is recorded while a PostToolUse hook is open"
+        );
         let mut hook_observation = observation_for(hook_intent.clone(), b"");
         hook_observation.disposition = ToolDisposition::Failed;
         hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "changeset": {"files": []}}).to_string();
@@ -3974,12 +3989,9 @@ mod goal_replay_tests {
             finished(hook_observation.clone(), feedback.clone()),
         )
         .unwrap();
-        let mut gapped = view.clone();
-        apply(&mut gapped, reserve_child_call(goal, run, agent)).unwrap();
-        assert!(
-            rejected(&gapped, finished(hook_observation, feedback)),
-            "a finish after a later Provider call is forged ordering"
-        );
+        let mut settled = accepted.clone();
+        apply(&mut settled, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut settled, continuation).unwrap();
         let tool = &accepted.runs[0].tools[0];
         assert_eq!(
             tool.hook_feedback(),
@@ -3997,6 +4009,76 @@ mod goal_replay_tests {
         apply(&mut view, finished(uncertain, unknown)).unwrap();
         assert!(!view.runs[0].tools[0].settled_without_stop());
         assert!(view.runs[0].tools[0].hook_feedback().is_empty());
+    }
+
+    #[test]
+    fn no_tool_starts_while_a_post_tool_use_hook_is_open() {
+        use crate::tools::permissions::{
+            Decision, HookEvent, HookInvocation, PermissionMode, PermissionSource,
+            PermissionVerdict,
+        };
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 2)).unwrap();
+        let (first, second) = (
+            read_intent(run, agent, "src/lib.rs"),
+            read_intent(run, agent, "src/lib.rs"),
+        );
+        apply(&mut view, tool_started(run, agent, &first)).unwrap();
+        apply(
+            &mut view,
+            Event::ToolPermissionDecided {
+                run_id: run,
+                agent_run_id: agent,
+                verdict: PermissionVerdict {
+                    intent_digest: first.digest(),
+                    decision: Decision::Allow,
+                    mode: Some(PermissionMode::Default),
+                    basis: PermissionSource::Mode,
+                    source: PermissionSource::Mode,
+                    approved: true,
+                    hook_restriction: None,
+                    hooks: 0,
+                },
+            },
+        )
+        .unwrap();
+        apply(&mut view, tool_finished(run, agent, &first, b"x")).unwrap();
+        let mut settled = view.clone();
+        apply(&mut settled, tool_started(run, agent, &second)).unwrap();
+        apply(
+            &mut view,
+            Event::HookStarted {
+                run_id: run,
+                agent_run_id: agent,
+                hook: HookInvocation {
+                    event: HookEvent::PostToolUse,
+                    group: 0,
+                    handler: 0,
+                    subject_digest: first.digest(),
+                    intent: child_intent(
+                        run,
+                        agent,
+                        ToolCall::Command {
+                            program: "sh".into(),
+                            args: vec!["-c".into(), "exit 0".into()],
+                            cwd: String::new(),
+                        },
+                    ),
+                    input_digest: [9; 32],
+                },
+            },
+        )
+        .unwrap();
+        assert!(rejected(&view, tool_started(run, agent, &second)));
     }
 
     struct Unguarded {

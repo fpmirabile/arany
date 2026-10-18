@@ -231,6 +231,17 @@ impl RunView {
             .count()
     }
 
+    // No Tool of the Run has an open or run-stopping hook; a Command's hooks sit on its source Tool.
+    pub(crate) fn hooks_settled(&self) -> bool {
+        self.tools.iter().all(|tool| {
+            tool.hooks.iter().all(|hook| {
+                hook.outcome
+                    .as_ref()
+                    .is_some_and(|outcome| !outcome.observation.stops_run())
+            })
+        })
+    }
+
     pub(crate) fn model_tools(&self) -> &[ToolView] {
         &self.tools[self.parse_count()..]
     }
@@ -367,6 +378,7 @@ fn is_tool_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallR
                         .find(|call| call.disposition == ProviderCallDisposition::ToolRequested)
                         .is_some_and(|call| call.phase == record.phase)
         })
+        && run.hooks_settled()
         && run.tools.last().is_some_and(|tool| {
             tool.settled_without_stop()
                 && tool.observation.as_ref().is_some_and(|observation| {
