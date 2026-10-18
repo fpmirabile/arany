@@ -4,6 +4,7 @@ use clap::ValueEnum;
 use serde::Deserialize;
 use std::path::PathBuf;
 
+pub(crate) mod acp;
 pub(crate) mod attached;
 pub(crate) mod exec;
 pub(crate) mod generate_schema;

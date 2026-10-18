@@ -53,7 +53,6 @@ fn wait_for_after(
     }
 }
 
-/// Waits for a frame whose final caret sits at `column`; Classic rows follow native insertion.
 #[track_caller]
 fn wait_for_caret(
     output: &mut impl Read,
@@ -89,7 +88,6 @@ fn wait_for_caret(
     }
 }
 
-/// Row of the latest drawn caret, for gates where the column alone is ambiguous.
 fn caret_row(transcript: &[u8]) -> String {
     let marker = b"\x1b[?25h\x1b[";
     let start = transcript
@@ -2036,7 +2034,6 @@ fn inline_session_picker_closes_after_quick_action() {
     session_picker_close_case(true);
 }
 
-/// Restores State's mode if an assertion fails while it is unavailable.
 struct StateModeGuard {
     path: std::path::PathBuf,
     mode: std::fs::Permissions,

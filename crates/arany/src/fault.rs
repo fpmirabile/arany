@@ -67,7 +67,6 @@ impl FaultPlan {
         (wait_entered, release)
     }
 
-    /// Makes the next candidate sync for this cache token fail once.
     #[cfg(test)]
     pub(crate) fn fail_candidate_sync(identity: &BuildCacheIdentity) {
         plan().push(Fault::CandidateSync(identity.token()));
@@ -93,7 +92,6 @@ impl FaultPlan {
         (wait_entered, release, wait_finished)
     }
 
-    /// Makes the next committed-marker write for this cache token fail once.
     #[cfg(test)]
     pub(crate) fn fail_commit_marker(identity: &BuildCacheIdentity) {
         plan().push(Fault::CommitMarker(identity.token()));

@@ -1,11 +1,11 @@
-use super::provider::select::ProviderArg;
+use super::provider::select::{ProviderArg, validate_headless_selection};
 use super::{CommandOutput, OutputArg};
 use crate::presentation::render_exec;
 use arany::{
     AdmittedProviders, CollaborationPolicy, Effort, Engine, EngineConfig, EngineError, GoalBudget,
     GoalId, GoalPhase, GoalRequest, GoalStatus, Provider, RunCancellation, RunControls, RunRequest,
     RunResult, RunStatus, SessionId, StateRoot, Store, Telemetry, ToolGrant,
-    native_protection_supported, resolve_native_effort_for_run, validate_native_model_id,
+    native_protection_supported,
 };
 use clap::{Args, ValueEnum};
 use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
@@ -15,6 +15,26 @@ pub(crate) enum CollaborationArg {
     Single,
     Auto,
     Team,
+}
+
+impl CollaborationArg {
+    pub(crate) fn policy(
+        self,
+        max_active_children: Option<u8>,
+    ) -> Result<CollaborationPolicy, &'static str> {
+        match (self, max_active_children) {
+            (Self::Single, None) => Ok(CollaborationPolicy::Single),
+            (Self::Auto, count) if count.unwrap_or(3) <= 8 => Ok(CollaborationPolicy::Auto {
+                max_active_children: count.unwrap_or(3),
+            }),
+            (Self::Team, count) if (1..=8).contains(&count.unwrap_or(3)) => {
+                Ok(CollaborationPolicy::Team {
+                    max_active_children: count.unwrap_or(3),
+                })
+            }
+            _ => Err("invalid collaboration policy"),
+        }
+    }
 }
 
 #[derive(Args)]
@@ -96,46 +116,14 @@ struct Admission {
 
 impl ExecArgs {
     fn admit(&self) -> Result<Admission, &'static str> {
-        if matches!(
-            self.provider.as_ref(),
-            Some(ProviderArg::Openai | ProviderArg::Anthropic | ProviderArg::Chatgpt)
-        ) && validate_native_model_id(self.model.as_deref().unwrap_or_default()).is_err()
-        {
-            return Err("invalid native model ID");
+        if let Some(provider) = &self.provider {
+            validate_headless_selection(
+                provider,
+                self.model.as_deref().unwrap_or_default(),
+                self.effort,
+            )?;
         }
-        if matches!(self.provider, Some(ProviderArg::Chatgpt)) && self.effort.is_none() {
-            return Err("ChatGPT requires --effort LEVEL");
-        }
-        if matches!(
-            self.provider,
-            Some(ProviderArg::Openai | ProviderArg::Anthropic)
-        ) && resolve_native_effort_for_run(
-            &self
-                .provider
-                .as_ref()
-                .expect("native Provider")
-                .profile_label(),
-            self.model.as_deref().unwrap_or_default(),
-            self.effort,
-        )
-        .is_err()
-        {
-            return Err("invalid native model/effort; unknown models require --effort LEVEL");
-        }
-        let policy = match (self.collaboration, self.max_active_children) {
-            (CollaborationArg::Single, None) => CollaborationPolicy::Single,
-            (CollaborationArg::Auto, count) if count.unwrap_or(3) <= 8 => {
-                CollaborationPolicy::Auto {
-                    max_active_children: count.unwrap_or(3),
-                }
-            }
-            (CollaborationArg::Team, count) if (1..=8).contains(&count.unwrap_or(3)) => {
-                CollaborationPolicy::Team {
-                    max_active_children: count.unwrap_or(3),
-                }
-            }
-            _ => return Err("invalid collaboration policy"),
-        };
+        let policy = self.collaboration.policy(self.max_active_children)?;
         let session_id = self
             .session_id
             .as_deref()

@@ -15,11 +15,11 @@ use serde_json::{Value, json};
 use std::{future::Future, path::PathBuf, sync::Arc, task::Poll};
 use tokio::sync::{mpsc, watch};
 
-pub(super) enum ClientMessage {
+pub(in crate::cli) enum ClientMessage {
     Message(Message),
     Eof,
 }
-pub(super) type ServerMessage = Message;
+pub(in crate::cli) type ServerMessage = Message;
 
 #[derive(Debug)]
 pub(super) struct Fault {
@@ -100,26 +100,40 @@ impl Drop for ActiveTurn {
     }
 }
 
-pub(super) async fn run(
+pub(in crate::cli) async fn run(
     engine: Engine,
     state: PathBuf,
     inbound: mpsc::Receiver<ClientMessage>,
     outbound: mpsc::Sender<ServerMessage>,
     shutdown: watch::Sender<bool>,
 ) -> Result<(), String> {
+    run_configured(engine, state, inbound, outbound, shutdown, None).await
+}
+
+pub(in crate::cli) async fn run_configured(
+    engine: Engine,
+    state: PathBuf,
+    inbound: mpsc::Receiver<ClientMessage>,
+    outbound: mpsc::Sender<ServerMessage>,
+    shutdown: watch::Sender<bool>,
+    roster: Option<crate::cli::provider::roster::SelectedRoster>,
+) -> Result<(), String> {
     run_inner(
         engine,
         state,
         inbound,
         outbound,
-        Threads::default(),
+        Threads {
+            roster,
+            ..Default::default()
+        },
         shutdown,
     )
     .await
 }
 
 #[cfg(test)]
-pub(super) async fn run_with_threads(
+pub(in crate::cli) async fn run_with_threads(
     engine: Engine,
     state: PathBuf,
     inbound: mpsc::Receiver<ClientMessage>,
