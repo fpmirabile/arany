@@ -1019,8 +1019,6 @@ async fn approval_scenario(case: ApprovalCase) {
             .await
             .unwrap();
         let mut wire_approval = None;
-        let mut expected_errors = 0;
-        let mut observed_errors = 0;
         let mut approval_count = 0;
         if case == ApprovalCase::Backpressure {
             loop {
@@ -1130,7 +1128,6 @@ async fn approval_scenario(case: ApprovalCase) {
                         ))
                         .await
                         .unwrap();
-                    expected_errors = 1;
                 }
                 ApprovalCase::Duplicate => {
                     input
@@ -1151,7 +1148,6 @@ async fn approval_scenario(case: ApprovalCase) {
                         ))
                         .await
                         .unwrap();
-                    expected_errors = 2;
                 }
                 ApprovalCase::Invalid => {
                     input
@@ -1161,7 +1157,6 @@ async fn approval_scenario(case: ApprovalCase) {
                         ))
                         .await
                         .unwrap();
-                    expected_errors = 1;
                 }
                 ApprovalCase::ClientError => input
                     .send(ClientMessage::Message(Message::Error(ErrorResponse {
@@ -1179,27 +1174,9 @@ async fn approval_scenario(case: ApprovalCase) {
             }
         }
         let mut completed = false;
-        while !completed || observed_errors < expected_errors {
+        while !completed {
             let message = next(&mut output).await;
-            if message.get("error").is_some() {
-                assert_eq!(
-                    message["error"]["code"],
-                    if case == ApprovalCase::Invalid {
-                        -32602
-                    } else {
-                        -32600
-                    }
-                );
-                assert_eq!(
-                    message["error"]["data"]["reason"],
-                    if case == ApprovalCase::Invalid {
-                        "invalidParams"
-                    } else {
-                        "approvalNotPending"
-                    }
-                );
-                observed_errors += 1;
-            }
+            assert!(message.get("error").is_none(), "{case:?}: {message}");
             if message
                 .get("method")
                 .and_then(Value::as_str)
@@ -1237,15 +1214,11 @@ async fn approval_scenario(case: ApprovalCase) {
                 usize::from(case != ApprovalCase::Backpressure)
             }
         );
-        assert_eq!(observed_errors, expected_errors);
         if case == ApprovalCase::Duplicate {
             input
                 .send(decision(json!(2), json!({"decision":"accept"})))
                 .await
                 .unwrap();
-            let late = next(&mut output).await;
-            assert_eq!(late["id"], 2);
-            assert_eq!(late["error"]["data"]["reason"], "approvalNotPending");
         }
         if case != ApprovalCase::Eof {
             input.send(ClientMessage::Eof).await.unwrap();
@@ -1257,6 +1230,15 @@ async fn approval_scenario(case: ApprovalCase) {
         client
     );
     result.unwrap();
+    while let Ok(message) = output.try_recv() {
+        assert!(
+            serde_json::to_value(&message)
+                .unwrap()
+                .get("error")
+                .is_none(),
+            "{case:?}: {message:?}"
+        );
+    }
     let (events, view) = closed_view(&state, id).await;
     let tools: Vec<_> = view.runs[0]
         .tools

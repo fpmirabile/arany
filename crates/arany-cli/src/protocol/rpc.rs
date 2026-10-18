@@ -86,7 +86,6 @@ pub enum Reason {
     ThreadLimit,
     TurnNotActive,
     ServerShuttingDown,
-    ApprovalNotPending,
     InvalidParams,
     UnsupportedPermissionMode,
     RunFull,

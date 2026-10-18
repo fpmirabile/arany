@@ -30,8 +30,10 @@ Responses carry `id` and `result`; error responses carry `id` and
 `error: {code, message, data?}`. `data` contains a closed camelCase `reason`.
 Envelope fields and typed params/results reject unknown fields, except
 `initialize.capabilities`, whose unknown keys are ignored for feature detection.
-Unknown notifications are ignored. Unmatched, late or duplicate approval responses
-are ignored with `-32600 approvalNotPending`; null-ID error responses are ignored.
+Unknown notifications are ignored. Client responses and error responses that match no
+pending approval request (unknown, late, duplicate or null-ID) are dropped silently:
+server and client request IDs are separate namespaces, so an answer could be mistaken
+for a reply to the client's own request.
 
 Protocol fields use camelCase. Embedded journal vocabulary (`EventLine`, Event
 payloads, Tool calls and intents) retains its existing snake_case bytes.
@@ -43,7 +45,7 @@ journal format. JSON is data; clients must render untrusted content inertly.
 | Code | Meaning | `data.reason` |
 |---|---|---|
 | `-32700` | Malformed message; null ID | Absent |
-| `-32600` | Invalid protocol state or oversized message | `notInitialized`, `alreadyInitialized`, `messageTooLarge`, `busy`, `threadNotLoaded`, `threadLimit`, `turnNotActive`, `serverShuttingDown`, `approvalNotPending` |
+| `-32600` | Invalid protocol state or oversized message | `notInitialized`, `alreadyInitialized`, `messageTooLarge`, `busy`, `threadNotLoaded`, `threadLimit`, `turnNotActive`, `serverShuttingDown` |
 | `-32601` | Unknown method | Absent |
 | `-32602` | Invalid parameters or unsupported permission mode | `invalidParams`, `unsupportedPermissionMode`; reserved steering refusals `runFull`, `empty`, `tooLarge`, `unavailable` |
 | `-32603` | Internal channel or serialization failure | Absent |
@@ -154,10 +156,9 @@ Failure to recover the matching committed intent denies without sending a reques
 
 The client returns `{decision:"accept"|"decline"|"cancel"}`. Accept resolves
 only that one pending ToolApproval; decline denies; cancel denies then signals
-turn cancellation. A matching client error or invalid result denies; an invalid
-result also returns `-32602 invalidParams`. Unknown, expired, cancelled, finished
-or already resolved request IDs never change a decision and return
-`-32600 approvalNotPending`. `acceptForSession` is excluded because an immutable
+turn cancellation. A matching client error or invalid result denies. Unknown,
+expired, cancelled, finished or already resolved request IDs never change a
+decision and get no reply. `acceptForSession` is excluded because an immutable
 one-use intent cannot become a remembered permission rule.
 
 Unanswered requests expire at the existing Engine approval deadline. EOF,
@@ -167,8 +168,10 @@ notification progress: a full outbound queue cannot hold Journal appends or
 prevent expiry. A request still waiting for outbound capacity at expiry is
 never sent. A request already queued can reach a slow client after expiry;
 its reply is late and cannot authorize anything. At most one approval is
-pending per connection; the Engine runs Tool steps one at a time, and a defensive
-additional request denies immediately without evicting or renewing the first. The Engine inbox additionally has one
+pending per connection. The Engine can abandon an ask before its intent expires
+(a child's delegation deadline), which clears the pending request at once; a
+request that still arrives while another is pending denies immediately without
+evicting or renewing the first. The Engine inbox additionally has one
 bounded ingress slot.
 
 This client is the human approval channel. Human-only requests, including

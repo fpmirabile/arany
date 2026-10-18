@@ -820,7 +820,6 @@
         "threadLimit",
         "turnNotActive",
         "serverShuttingDown",
-        "approvalNotPending",
         "invalidParams",
         "unsupportedPermissionMode",
         "runFull",

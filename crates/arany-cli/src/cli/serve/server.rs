@@ -126,7 +126,6 @@ impl Drop for ActiveTurn {
     fn drop(&mut self) {
         self.cancel.cancel();
         self.result.abort();
-        self.approvals.close();
     }
 }
 
@@ -352,11 +351,21 @@ async fn run_inner(
                                 let approvals = super::approvals::Approvals::start(
                                     inbox,
                                     cancel.clone(),
-                                    state.clone(),
                                     input.thread_id,
                                     outbound.clone(),
                                     next_server_id.clone(),
                                     approval_end,
+                                    {
+                                        let state = state.clone();
+                                        let thread_id = input.thread_id;
+                                        move |intent| {
+                                            super::approvals::started_at(
+                                                state.clone(),
+                                                thread_id,
+                                                intent,
+                                            )
+                                        }
+                                    },
                                 );
                                 active = Some(ActiveTurn {
                                     thread_id: input.thread_id,
@@ -406,20 +415,13 @@ async fn run_inner(
                 Next::Input(Some(ClientMessage::Message(
                     message @ (Message::Response(_) | Message::Error(_)),
                 ))) => {
-                    let id = match &message {
-                        Message::Response(reply) => Some(reply.id.clone()),
-                        Message::Error(reply) => reply.id.clone(),
-                        _ => unreachable!(),
+                    let (id, result) = match message {
+                        Message::Response(reply) => (Some(reply.id), Some(reply.result)),
+                        Message::Error(reply) => (reply.id, None),
+                        _ => (None, None),
                     };
-                    if let Some(id) = id {
-                        let outcome = active
-                            .as_ref()
-                            .filter(|turn| !turn.result.is_finished())
-                            .ok_or_else(|| Fault::state(Reason::ApprovalNotPending))
-                            .and_then(|turn| turn.approvals.respond(message));
-                        if let Err(error) = outcome {
-                            send(&outbound, error.message(Some(id))).await?;
-                        }
+                    if let (Some(id), Some(turn)) = (id, active.as_ref()) {
+                        turn.approvals.respond(id, result);
                     }
                 }
                 Next::Event(Some(event)) => {

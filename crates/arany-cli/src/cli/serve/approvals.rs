@@ -1,9 +1,11 @@
-use super::server::Fault;
 use arany::{
-    ApprovalInbox, Event, RunCancellation, SessionId, StateRoot, Store, ToolApproval, ToolCall,
+    ApprovalInbox, EffectIntent, Event, RunCancellation, SessionId, StateRoot, Store, ToolApproval,
+    ToolCall, UnguardedPrompt,
 };
 use arany_cli::protocol::{methods::*, rpc::*};
+use serde_json::Value;
 use std::{
+    future::Future,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -12,15 +14,16 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    sync::{Notify, mpsc},
+    sync::{Notify, mpsc, oneshot},
     time::Instant,
 };
 
 struct Pending {
     id: RequestId,
-    approval: ToolApproval,
     deadline: Instant,
+    expires_ms: u64,
     sent: bool,
+    decide: oneshot::Sender<bool>,
 }
 
 #[derive(Default)]
@@ -37,15 +40,19 @@ pub(super) struct Approvals {
 }
 
 impl Approvals {
-    pub fn start(
+    pub fn start<Lookup, Started>(
         mut inbox: ApprovalInbox,
         mut cancel: RunCancellation,
-        state_dir: PathBuf,
         thread_id: SessionId,
         outbound: mpsc::Sender<Message>,
         next_id: Arc<AtomicI64>,
         mut finished: RunCancellation,
-    ) -> Self {
+        started_at: Lookup,
+    ) -> Self
+    where
+        Lookup: Fn(EffectIntent) -> Started + Send + 'static,
+        Started: Future<Output = Option<i64>> + Send,
+    {
         let state = Arc::new(Mutex::new(State::default()));
         let changed = Arc::new(Notify::new());
         let mut owner = Self {
@@ -55,6 +62,8 @@ impl Approvals {
             worker: None,
         };
         owner.worker = Some(tokio::spawn(async move {
+            let mut current: Option<ToolApproval> = None;
+            let mut answer: Option<oneshot::Receiver<bool>> = None;
             let mut outgoing = None;
             let mut deadline = None;
             loop {
@@ -63,21 +72,33 @@ impl Approvals {
                     () = finished.cancelled() => break,
                     () = outbound.closed() => break,
                     () = changed.notified() => {
-                        let state = state.lock().expect("approval state");
-                        if state.closed { break; }
-                        if state.pending.is_none() {
-                            outgoing = None;
-                            deadline = None;
+                        if state.lock().expect("approval state").closed { break; }
+                    }
+                    allow = async { answer.as_mut().expect("answer").await }, if answer.is_some() => {
+                        if let Some(approval) = current.take() {
+                            approval.decide(allow.unwrap_or(false));
                         }
+                        answer = None;
+                        outgoing = None;
+                        deadline = None;
+                    }
+                    () = async { current.as_mut().expect("approval").abandoned().await }, if current.is_some() => {
+                        state.lock().expect("approval state").pending.take();
+                        current = None;
+                        answer = None;
+                        outgoing = None;
+                        deadline = None;
                     }
                     () = async { tokio::time::sleep_until(deadline.expect("pending expiry")).await }, if deadline.is_some() => {
                         state.lock().expect("approval state").pending.take();
+                        current = None;
+                        answer = None;
                         outgoing = None;
                         deadline = None;
                     }
                     approval = inbox.next() => {
                         let Some(approval) = approval else { break };
-                        if state.lock().expect("approval state").pending.is_some() {
+                        if current.is_some() {
                             approval.decide(false);
                             continue;
                         }
@@ -89,25 +110,38 @@ impl Approvals {
                             () = finished.cancelled() => break,
                             () = outbound.closed() => break,
                             () = tokio::time::sleep_until(expires) => None,
-                            message = approval_request(&state_dir, thread_id, &approval, &next_id) => message,
+                            started = started_at(approval.intent.clone()) => {
+                                started.and_then(|started| request(thread_id, &approval, started, &next_id))
+                            },
                         };
                         let Some(message) = message else { approval.decide(false); continue; };
+                        let (decide, decision) = oneshot::channel();
                         let mut state = state.lock().expect("approval state");
                         if state.closed { approval.decide(false); break; }
-                        state.pending = Some(Pending { id: message.id.clone(), approval, deadline: expires, sent: false });
+                        state.pending = Some(Pending {
+                            id: message.id.clone(),
+                            deadline: expires,
+                            expires_ms: approval.intent.expires_at_ms,
+                            sent: false,
+                            decide,
+                        });
+                        current = Some(approval);
+                        answer = Some(decision);
                         outgoing = Some(Message::Request(message));
                         deadline = Some(expires);
                     }
                     permit = outbound.reserve(), if outgoing.is_some() => {
                         let Ok(permit) = permit else { break };
                         let mut state = state.lock().expect("approval state");
-                        if let Some(pending) = &mut state.pending {
-                            if Instant::now() < pending.deadline {
+                        match (&mut state.pending, outgoing.take()) {
+                            (Some(pending), Some(message)) if Instant::now() < pending.deadline => {
                                 pending.sent = true;
-                                permit.send(outgoing.take().expect("queued approval"));
-                            } else {
-                                state.pending.take();
-                                outgoing = None;
+                                permit.send(message);
+                            }
+                            _ => {
+                                state.pending = None;
+                                current = None;
+                                answer = None;
                                 deadline = None;
                             }
                         }
@@ -121,45 +155,27 @@ impl Approvals {
         owner
     }
 
-    pub fn respond(&self, message: Message) -> Result<(), Fault> {
-        let (id, result) = match message {
-            Message::Response(reply) => (reply.id, Some(reply.result)),
-            Message::Error(reply) => (reply.id.expect("non-null response"), None),
-            _ => unreachable!(),
-        };
+    pub fn respond(&self, id: RequestId, result: Option<Value>) {
         let mut state = self.state.lock().expect("approval state");
-        let Some(pending) = &state.pending else {
-            return Err(Fault::state(Reason::ApprovalNotPending));
+        let closed = state.closed;
+        let Some(pending) = state.pending.take_if(|pending| {
+            !closed
+                && pending.id == id
+                && pending.sent
+                && Instant::now() < pending.deadline
+                && pending.expires_ms > now_ms()
+        }) else {
+            return;
         };
-        if pending.id != id
-            || !pending.sent
-            || Instant::now() >= pending.deadline
-            || pending.approval.intent.expires_at_ms <= now_ms()
-            || state.closed
-        {
-            return Err(Fault::state(Reason::ApprovalNotPending));
-        }
-        let pending = state.pending.take().expect("matched pending approval");
         let decision = result
-            .map(serde_json::from_value::<ApprovalResult>)
-            .transpose();
-        let cancel = matches!(
-            &decision,
-            Ok(Some(ApprovalResult {
-                decision: ApprovalDecision::Cancel
-            }))
-        );
-        pending.approval.decide(matches!(
-            &decision,
-            Ok(Some(ApprovalResult {
-                decision: ApprovalDecision::Accept
-            }))
-        ));
-        if cancel {
+            .and_then(|value| serde_json::from_value::<ApprovalResult>(value).ok())
+            .map(|result| result.decision);
+        let _ = pending
+            .decide
+            .send(matches!(decision, Some(ApprovalDecision::Accept)));
+        if matches!(decision, Some(ApprovalDecision::Cancel)) {
             self.cancel.cancel();
         }
-        self.changed.notify_one();
-        decision.map(|_| ()).map_err(|_| Fault::params())
     }
 
     pub fn close(&self) {
@@ -198,18 +214,23 @@ fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-async fn approval_request(
-    state_dir: &std::path::Path,
+pub(super) async fn started_at(
+    state_dir: PathBuf,
     thread_id: SessionId,
-    approval: &ToolApproval,
-    next_id: &AtomicI64,
-) -> Option<Request> {
-    let store = Store::open_read_only(StateRoot::open_existing(state_dir).ok()?).ok()?;
+    intent: EffectIntent,
+) -> Option<i64> {
+    let store = Store::open_read_only(StateRoot::open_existing(&state_dir).ok()?).ok()?;
     let events = store.load_session(thread_id).await;
     store.close().await.ok()?;
-    let intent = &approval.intent;
-    let started = events.ok()?.into_iter().find(|event| matches!(&event.event, Event::ToolStarted { intent: started, .. } if started == intent))?;
-    let method = match intent.call {
+    events
+        .ok()?
+        .into_iter()
+        .find(|event| matches!(&event.event, Event::ToolStarted { intent: started, .. } if *started == intent))
+        .map(|event| event.created_at_ms)
+}
+
+fn method(call: &ToolCall) -> &'static str {
+    match call {
         ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. } => {
             "item/commandExecution/requestApproval"
         }
@@ -218,11 +239,23 @@ async fn approval_request(
         | ToolCall::Mkdir { .. }
         | ToolCall::ApplyChangeset { .. } => "item/fileChange/requestApproval",
         _ => "item/tool/requestApproval",
-    };
-    let lines = match &approval.unguarded {
+    }
+}
+
+fn lines(intent: &EffectIntent, unguarded: Option<&UnguardedPrompt>) -> Vec<String> {
+    match unguarded {
         Some(prompt) => crate::presentation::unguarded_approval_lines(intent, prompt),
         None => crate::presentation::tool_approval_lines(intent),
-    };
+    }
+}
+
+fn request(
+    thread_id: SessionId,
+    approval: &ToolApproval,
+    started_at_ms: i64,
+    next_id: &AtomicI64,
+) -> Option<Request> {
+    let intent = &approval.intent;
     Some(Request {
         jsonrpc: Default::default(),
         id: RequestId::Integer(
@@ -230,18 +263,138 @@ async fn approval_request(
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                 .ok()?,
         ),
-        method: method.into(),
+        method: method(&intent.call).into(),
         params: Some(
             serde_json::to_value(ApprovalParams {
                 thread_id,
                 turn_id: intent.run_id,
                 item_id: intent.id.to_string(),
-                started_at_ms: started.created_at_ms,
+                started_at_ms,
                 expires_at_ms: intent.expires_at_ms.try_into().ok()?,
                 intent: serde_json::to_value(intent).ok()?,
-                lines,
+                lines: lines(intent, approval.unguarded.as_ref()),
             })
             .ok()?,
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arany::{AgentRunId, ApprovalMode, RunId, ToolApprovals, ToolLimits};
+    use std::time::Duration;
+
+    fn intent(call: ToolCall) -> EffectIntent {
+        EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: RunId::new(),
+            agent_run_id: AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call,
+            limits: ToolLimits::default(),
+            expires_at_ms: now_ms() + 60_000,
+            use_count: 1,
+        }
+    }
+
+    fn read() -> ToolCall {
+        ToolCall::Read {
+            path: "a".into(),
+            offset: 0,
+            limit: 1,
+        }
+    }
+
+    fn unguarded() -> ToolCall {
+        ToolCall::CommandUnguarded {
+            program: "sh".into(),
+            args: vec![],
+            cwd: String::new(),
+            justification: "reason".into(),
+        }
+    }
+
+    #[test]
+    fn methods_follow_the_call_family() {
+        for (call, expected) in [
+            (read(), "item/tool/requestApproval"),
+            (unguarded(), "item/commandExecution/requestApproval"),
+            (
+                ToolCall::Mkdir { path: "d".into() },
+                "item/fileChange/requestApproval",
+            ),
+        ] {
+            assert_eq!(method(&call), expected);
+        }
+    }
+
+    #[test]
+    fn unguarded_commands_use_the_full_unguarded_warning() {
+        let intent = intent(unguarded());
+        let prompt = UnguardedPrompt {
+            executable: "/bin/sh".into(),
+            attribution: None,
+        };
+        let warning = lines(&intent, Some(&prompt));
+        assert_eq!(warning[0], "Run outside the Guard? (unguarded)");
+        assert_ne!(warning, lines(&intent, None));
+    }
+
+    async fn next_request(output: &mut mpsc::Receiver<Message>) -> Request {
+        match tokio::time::timeout(Duration::from_secs(5), output.recv())
+            .await
+            .expect("request deadline")
+            .expect("request")
+        {
+            Message::Request(request) => request,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn one_approval_is_pending_and_an_abandoned_ask_frees_the_slot() {
+        let _deadline = crate::cli::serve::tests::deadline();
+        let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
+        let (outbound, mut output) = mpsc::channel(8);
+        let owner = Approvals::start(
+            inbox,
+            RunCancellation::new(),
+            SessionId::new(),
+            outbound,
+            Arc::new(AtomicI64::new(1)),
+            RunCancellation::new(),
+            |_| async { Some(1) },
+        );
+        let ask = |call| {
+            let approvals = approvals.clone();
+            tokio::spawn(async move {
+                arany::test_support::approval::ask(&approvals, &intent(call)).await
+            })
+        };
+        let first = ask(read());
+        let request = next_request(&mut output).await;
+        assert_eq!(request.id, RequestId::Integer(1));
+        assert!(!ask(read()).await.expect("second ask"));
+        assert!(output.try_recv().is_err());
+        owner.respond(request.id, Some(serde_json::json!({"decision":"accept"})));
+        assert!(first.await.expect("first ask"));
+
+        let abandoned = ask(read());
+        let request = next_request(&mut output).await;
+        assert_eq!(request.id, RequestId::Integer(2));
+        abandoned.abort();
+        let _ = abandoned.await;
+        let third = ask(read());
+        assert_eq!(next_request(&mut output).await.id, RequestId::Integer(3));
+        owner.respond(
+            RequestId::Integer(2),
+            Some(serde_json::json!({"decision":"accept"})),
+        );
+        owner.close();
+        assert!(!third.await.expect("third ask"));
+    }
 }
