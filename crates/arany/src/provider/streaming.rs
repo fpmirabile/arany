@@ -475,7 +475,8 @@ impl<'a> ResponsesPreview<'a> {
                     .get("output_index")
                     .and_then(Value::as_u64)
                     .filter(|index| *index < 8192)
-                    .ok_or(ProviderError::InvalidStream)? as usize;
+                    .and_then(|index| usize::try_from(index).ok())
+                    .ok_or(ProviderError::InvalidStream)?;
                 if self.items.values().any(|item| item.output_index == index) {
                     return Err(ProviderError::InvalidStream);
                 }
