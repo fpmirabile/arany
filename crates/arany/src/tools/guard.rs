@@ -64,6 +64,8 @@ struct Task {
     config: Config,
     intent: EffectIntent,
     cache: Option<BuildCacheTransfer>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    definition: Option<String>,
     #[cfg(target_os = "linux")]
     parent_namespaces: profile::Namespaces,
     #[cfg(target_os = "macos")]
@@ -898,6 +900,7 @@ pub(super) struct GuardContext<'a> {
     pub(super) root: &'a Path,
     pub(super) workspace: &'a Path,
     pub(super) skill: Option<Vec<u8>>,
+    pub(super) definition: Option<Vec<u8>>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
 }
@@ -1054,6 +1057,7 @@ pub(super) fn helper_main() -> ExitCode {
         {
             return Err(ToolError::ChangedInput);
         }
+        let definition = definition_bytes(&task)?;
         let skill = if task.intent.call.facts().family == Family::Skill {
             Some(load_skill_bytes(&task)?)
         } else {
@@ -1115,6 +1119,7 @@ pub(super) fn helper_main() -> ExitCode {
             root: &root,
             workspace,
             skill,
+            definition,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
@@ -1173,6 +1178,31 @@ pub(super) fn helper_main() -> ExitCode {
 #[cfg(target_os = "macos")]
 pub(super) fn unit_main() -> ExitCode {
     macos::unit_main()
+}
+
+fn definition_bytes(task: &Task) -> Result<Option<Vec<u8>>, ToolError> {
+    use base64::Engine as _;
+    match (&task.intent.call, &task.definition) {
+        (ToolCall::ParseAgentDefinition { raw_digest, .. }, Some(encoded)) => {
+            if encoded.len() > (64_usize * 1024).div_ceil(3) * 4 {
+                return Err(ToolError::Limit);
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| ToolError::Configuration)?;
+            if bytes.len() > 64 * 1024 {
+                return Err(ToolError::Limit);
+            }
+            if digest(&bytes) != *raw_digest
+                || base64::engine::general_purpose::STANDARD.encode(&bytes) != *encoded
+            {
+                return Err(ToolError::ChangedInput);
+            }
+            Ok(Some(bytes))
+        }
+        (ToolCall::ParseAgentDefinition { .. }, _) | (_, Some(_)) => Err(ToolError::Configuration),
+        (_, None) => Ok(None),
+    }
 }
 
 fn load_skill_bytes(task: &Task) -> Result<Vec<u8>, ToolError> {
@@ -1295,6 +1325,57 @@ pub(super) fn payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_definition_guard_task_binds_snapshot_digest_and_closed_payload() {
+        use base64::Engine as _;
+        let raw = vec![b' '; 64 * 1024];
+        let call = ToolCall::ParseAgentDefinition {
+            index: 0,
+            raw_digest: digest(&raw),
+        };
+        let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let mut task = Task {
+            config,
+            intent: intent(call),
+            cache: None,
+            definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+            #[cfg(target_os = "linux")]
+            parent_namespaces: profile::Namespaces::read().unwrap(),
+            #[cfg(target_os = "macos")]
+            workspace: "/private/fixture/workspace".into(),
+            #[cfg(target_os = "macos")]
+            guard_executable: "/private/fixture/arany".into(),
+            #[cfg(target_os = "macos")]
+            system_programs: None,
+        };
+        let encoded = encode_task(&task).unwrap();
+        assert!(encoded.len() <= TASK_BYTES_CAP + 1);
+        let decoded = read_task(&mut std::io::BufReader::new(encoded.as_slice())).unwrap();
+        assert_eq!(
+            definition_bytes(&decoded).unwrap().unwrap().len(),
+            raw.len()
+        );
+        let mut value = serde_json::to_value(&task).unwrap();
+        value.as_object_mut().unwrap().remove("definition");
+        let mut missing = serde_json::to_vec(&value).unwrap();
+        missing.push(b'\n');
+        assert!(read_task(&mut std::io::BufReader::new(missing.as_slice())).is_err());
+        task.definition =
+            Some(base64::engine::general_purpose::STANDARD.encode(vec![b' '; 64 * 1024 + 1]));
+        assert!(matches!(definition_bytes(&task), Err(ToolError::Limit)));
+        task.definition = Some(base64::engine::general_purpose::STANDARD.encode(b"changed"));
+        assert!(matches!(
+            definition_bytes(&task),
+            Err(ToolError::ChangedInput)
+        ));
+        task.definition = None;
+        assert!(definition_bytes(&task).is_err());
+        task.definition = Some("invalid*".into());
+        assert!(definition_bytes(&task).is_err());
+        task.intent.call = ToolCall::List { path: ".".into() };
+        assert!(definition_bytes(&task).is_err());
+    }
 
     #[test]
     fn worker_failure_lines_keep_their_closed_stage() {

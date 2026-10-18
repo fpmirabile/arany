@@ -262,3 +262,87 @@ async fn run_started_pins_the_rules_digest_and_a_later_edit_does_not_change_the_
     }
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn agent_definition_unsafe_sources_refuse_before_provider() {
+    for case in [
+        "symlink",
+        "hardlink",
+        "public-private",
+        "oversized",
+        "linked-project-root",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
+        let state = temp.path().join("state");
+        let root = StateRoot::admit(&state).unwrap();
+        private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+        let agents = state.join("agents");
+        std::fs::create_dir(&agents).unwrap();
+        std::fs::set_permissions(&agents, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = agents.join("reader.md");
+        let valid = b"---\nname: reader\ndescription: Inspect\n---\nBody";
+        match case {
+            "symlink" => std::os::unix::fs::symlink(temp.path().join("outside"), &path).unwrap(),
+            "hardlink" => {
+                private_file(&temp.path().join("outside"), valid);
+                std::fs::hard_link(temp.path().join("outside"), &path).unwrap();
+            }
+            "public-private" => {
+                private_file(&path, valid);
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            "oversized" => private_file(&path, &vec![b' '; 64 * 1024 + 1]),
+            "linked-project-root" => {
+                std::os::unix::fs::symlink(&agents, workspace.join(".claude")).unwrap()
+            }
+            _ => unreachable!(),
+        }
+        let engine = Engine::open(
+            root,
+            EngineConfig {
+                guard_executable: Some(std::env::current_exe().unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            arany::test_support::goals::finish_with("forbidden egress reached a valid response"),
+        ]));
+        let mut input = request(&workspace, "Inspect");
+        input.include_paths.clear();
+        let result = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Tool(
+                    arany::ToolError::Path | arany::ToolError::Limit
+                ))
+            ),
+            "unsafe source rejected: {case}"
+        );
+        assert!(
+            provider.requests.lock().unwrap().is_empty(),
+            "no Provider disclosure"
+        );
+        engine.close().await.unwrap();
+        let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind IN ('RunStarted', 'ToolStarted')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+}

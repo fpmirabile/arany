@@ -37,6 +37,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         unguarded_rules_digest: None,
     };
     let config = RunConfig {
+        agent_definitions: None,
         providers: None,
         provider: "scripted".into(),
         model: "replay-model".into(),
@@ -149,6 +150,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
         },
         Event::AgentSpawned {
+            definition: None,
             run_id: run,
             agent_run_id: primary,
             role: AgentRole::Primary,

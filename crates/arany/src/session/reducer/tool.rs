@@ -23,12 +23,31 @@ pub(super) fn apply(
             .as_ref()
             .and_then(|config| config.tool_policy.as_ref())
             .is_some_and(|policy| policy.permissions_digest.is_some());
-        if configured {
+        let definition_mode = super::definition_mode(run, *agent_run_id)?;
+        if configured || definition_mode.is_some() {
             let tool = pending_tool(run, *agent_run_id)?;
             let verdict = tool
                 .permission_verdict
                 .as_ref()
                 .ok_or(ReplayError::InvalidTransition)?;
+            if let Some(mode) = definition_mode {
+                let restriction = crate::tools::permissions::PermissionConfig::evaluate_mode(
+                    mode,
+                    &observation.intent.call,
+                )
+                .0;
+                if verdict.approved
+                    && (restriction == crate::tools::permissions::Decision::Deny
+                        || restriction == crate::tools::permissions::Decision::Ask
+                            && !matches!(
+                                verdict.source,
+                                crate::tools::permissions::PermissionSource::Human
+                                    | crate::tools::permissions::PermissionSource::AiReview
+                            ))
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
             if !verdict.approved
                 && (observation.attestation.is_some()
                     || observation.cache_update != crate::tools::CacheUpdate::NotApplicable
@@ -49,6 +68,7 @@ pub(super) fn apply(
             verdict,
         } => {
             let run = active_run(current, *run_id)?;
+            let definition_mode = super::definition_mode(run, *agent_run_id)?;
             let rules_pinned = match run
                 .config
                 .as_ref()
@@ -57,9 +77,13 @@ pub(super) fn apply(
                 Some(policy) if policy.permissions_digest.is_some() => {
                     policy.unguarded_rules_digest.is_some()
                 }
+                _ if definition_mode.is_some() => false,
                 _ => return Err(ReplayError::InvalidTransition),
             };
-            if verdict.mode.is_none() {
+            if verdict.mode.is_none()
+                || definition_mode == Some(crate::tools::permissions::PermissionMode::DontAsk)
+                    && verdict.decision == crate::tools::permissions::Decision::Ask
+            {
                 return Err(ReplayError::InvalidTransition);
             }
             if verdict.source == crate::tools::permissions::PermissionSource::AiReview
@@ -113,7 +137,12 @@ pub(super) fn apply(
             let goal = active_run_goal(current, *run_id).ok_or(ReplayError::InvalidTransition)?;
             let phase_allows_call =
                 goal.phase == GoalPhase::Implementation || intent.call.is_goal_plan_prelude();
-            let plan_allows_call = if let Some(contract) = &goal.plan_contract {
+            let plan_allows_call = if matches!(
+                intent.call,
+                crate::tools::ToolCall::ParseAgentDefinition { .. }
+            ) {
+                true
+            } else if let Some(contract) = &goal.plan_contract {
                 !goal.awaiting_plan_contract
                     && (contract.allows_call(&intent.call)
                         || matches!(&intent.call, crate::tools::ToolCall::ApplyChangeset { .. }))
@@ -134,7 +163,24 @@ pub(super) fn apply(
             let primary = run.primary().ok_or(ReplayError::InvalidTransition)?;
             let integration = matches!(&intent.call, crate::tools::ToolCall::ApplyChangeset { .. });
             let valid_origin =
-                if integration {
+                if let crate::tools::ToolCall::ParseAgentDefinition { index, raw_digest } =
+                    &intent.call
+                {
+                    let parsed = run.tools.len();
+                    primary.provider_calls.is_empty()
+                        && run.agents.len() == 1
+                        && usize::from(*index) == parsed
+                        && config
+                            .agent_definitions
+                            .as_ref()
+                            .and_then(|pin| pin.files.get(parsed))
+                            .is_some_and(|file| file.digest == *raw_digest)
+                        && run.tools.iter().all(|tool| {
+                            tool.observation.as_ref().is_some_and(|observation| {
+                                observation.disposition == crate::tools::ToolDisposition::Succeeded
+                            })
+                        })
+                } else if integration {
                     valid_integration_source(run, intent)
                 } else {
                     primary.provider_calls.last().is_some_and(|call| {

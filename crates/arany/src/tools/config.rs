@@ -229,6 +229,7 @@ impl Config {
             return false;
         }
         let path = match call {
+            ToolCall::ParseAgentDefinition { .. } => return true,
             ToolCall::List { path }
             | ToolCall::Read { path, .. }
             | ToolCall::Search { path, .. }

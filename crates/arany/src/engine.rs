@@ -1319,6 +1319,7 @@ impl Engine {
         };
         ledger.append(&self.journal, session_id, started).await?;
         let spawned = Event::AgentSpawned {
+            definition: None,
             run_id,
             agent_run_id,
             role: AgentRole::Primary,
@@ -1569,6 +1570,7 @@ impl Engine {
             .iter()
             .all(|chain| chain.len() == 1 && chain[0] == *identity);
         let config = RunConfig {
+            agent_definitions: tools.as_ref().and_then(|tools| tools.definitions.pin()),
             providers: (!inherited).then_some(routes),
             provider: identity.profile.clone(),
             model: identity.model.clone(),

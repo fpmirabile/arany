@@ -74,6 +74,7 @@ async fn rejected_child_feedback_uses_the_committed_account_failure() {
     let provider = ScriptedProvider::new(vec![]);
     *provider.responses.lock().unwrap() = VecDeque::from([
         Ok(ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec!["B".into()],
         })),
         Err(ProviderError::RemoteHttp(403)),
@@ -110,6 +111,7 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                         max_active_children: 1,
                     };
                     responses.push_back(Ok(ProviderOutcome::Delegate(Delegate {
+                        agent: None,
                         children: vec!["A".into()],
                     })));
                     responses.push_back(Ok(ProviderOutcome::Finish(Finish {

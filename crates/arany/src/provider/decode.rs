@@ -13,8 +13,14 @@ struct OutcomeEnvelope {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum StructuredOutcome {
-    Finish { summary: String, result: String },
-    Delegate { children: Vec<String> },
+    Finish {
+        summary: String,
+        result: String,
+    },
+    Delegate {
+        children: Vec<String>,
+        agent: Option<String>,
+    },
 }
 
 impl From<StructuredOutcome> for ProviderOutcome {
@@ -23,7 +29,9 @@ impl From<StructuredOutcome> for ProviderOutcome {
             StructuredOutcome::Finish { summary, result } => {
                 Self::Finish(Finish { summary, result })
             }
-            StructuredOutcome::Delegate { children } => Self::Delegate(Delegate { children }),
+            StructuredOutcome::Delegate { children, agent } => {
+                Self::Delegate(Delegate { children, agent })
+            }
         }
     }
 }

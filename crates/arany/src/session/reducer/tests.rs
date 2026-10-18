@@ -149,6 +149,7 @@ mod goal_replay_tests {
 
     fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
         RunConfig {
+            agent_definitions: None,
             providers: None,
             provider: "openai".into(),
             model: "gpt-5.4".into(),
@@ -265,6 +266,7 @@ mod goal_replay_tests {
                 active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
             },
             Event::AgentSpawned {
+                definition: None,
                 run_id,
                 agent_run_id,
                 role: AgentRole::Primary,
@@ -786,6 +788,7 @@ mod goal_replay_tests {
                 ),
             });
             events.push(Event::AgentSpawned {
+                definition: None,
                 run_id,
                 agent_run_id: child,
                 role: AgentRole::Child,
@@ -2229,6 +2232,7 @@ mod goal_replay_tests {
                     false,
                 )),
                 agents: vec![AgentView {
+                    definition: None,
                     id: agent_run_id,
                     role: AgentRole::Primary,
                     ordinal: 0,
@@ -2297,6 +2301,7 @@ mod goal_replay_tests {
     fn apply_child_spawn(view: &mut SessionView, grant: ChildGrant) -> Result<(), ReplayError> {
         let run_id = view.runs[0].id;
         let event = Event::AgentSpawned {
+            definition: None,
             run_id,
             agent_run_id: AgentRunId::new(),
             role: AgentRole::Child,
@@ -2843,6 +2848,7 @@ mod goal_replay_tests {
                 images: Vec::new(),
                 config: Some(config(CollaborationPolicy::Single, true)),
                 agents: vec![AgentView {
+                    definition: None,
                     id: agent_run_id,
                     role: AgentRole::Primary,
                     ordinal: 0,
@@ -3005,6 +3011,7 @@ mod goal_replay_tests {
                     images: Vec::new(),
                     config: Some(config(CollaborationPolicy::Single, true)),
                     agents: vec![AgentView {
+                        definition: None,
                         id: agent_run_id,
                         role: AgentRole::Primary,
                         ordinal: 0,
@@ -3669,5 +3676,180 @@ mod goal_replay_tests {
             child_record(run, child, ProviderCallDisposition::ToolRequested),
         )
         .expect("single child request");
+    }
+    fn definition_preparation(
+        model: Option<&str>,
+    ) -> (SessionView, GoalId, EffectIntent, ToolObservation) {
+        let (session, goal, run, actor) = (
+            SessionId::new(),
+            GoalId::new(),
+            RunId::new(),
+            AgentRunId::new(),
+        );
+        let files = vec![crate::tools::definitions::DefinitionFilePin {
+            private: false,
+            filename: "reader.md".into(),
+            digest: [3; 32],
+        }];
+        let mut configured = config(CollaborationPolicy::Single, true);
+        configured.agent_definitions = Some(crate::tools::DefinitionRegistryPin {
+            digest: crate::tools::types::digest(&serde_json::to_vec(&files).unwrap()),
+            files,
+        });
+        let mut events = vec![goal_started(goal, GoalBudget::default())];
+        events.extend(start_run(goal, run, actor, configured));
+        let view = SessionView::replay_open(session, &session_with(session, events))
+            .unwrap()
+            .unwrap();
+        let intent = child_intent(
+            run,
+            actor,
+            ToolCall::ParseAgentDefinition {
+                index: 0,
+                raw_digest: [3; 32],
+            },
+        );
+        let output = serde_json::json!({"version":1,"name":"reader","description":"Inspect","tools":["read"],"disallowed_tools":[],"model":model,"permission_mode":null,"max_turns":17,"isolation":null,"background":false,"body":"Untrusted guidance"}).to_string();
+        let observation = ToolObservation {
+            intent: intent.clone(),
+            disposition: ToolDisposition::Succeeded,
+            output,
+            attestation: Some(crate::tools::Attestation::Guard(
+                crate::tools::GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                },
+            )),
+            cache_update: CacheUpdate::NotApplicable,
+            enforcement_cause: None,
+        };
+        (view, goal, intent, observation)
+    }
+
+    #[test]
+    fn agent_definition_initialization_replay_requires_pinned_guard_observations() {
+        let (mut view, goal, intent, observation) = definition_preparation(None);
+        let reserve = || reserve_child_call(goal, intent.run_id, intent.agent_run_id);
+        assert!(
+            rejected(&view, reserve()),
+            "no Provider disclosure before parsing"
+        );
+        let start = |intent: EffectIntent| Event::ToolStarted {
+            run_id: intent.run_id,
+            agent_run_id: intent.agent_run_id,
+            intent,
+            active_ceiling_ms: 0,
+        };
+        for changed in [
+            ToolCall::ParseAgentDefinition {
+                index: 1,
+                raw_digest: [3; 32],
+            },
+            ToolCall::ParseAgentDefinition {
+                index: 0,
+                raw_digest: [4; 32],
+            },
+        ] {
+            let mut wrong = intent.clone();
+            wrong.call = changed;
+            assert!(rejected(&view, start(wrong)));
+        }
+        apply(&mut view, start(intent.clone())).unwrap();
+        assert!(
+            rejected(&view, reserve()),
+            "unfinished parser is not permission"
+        );
+        let mut in_process = observation.clone();
+        in_process.attestation = Some(crate::tools::Attestation::InProcess {
+            policy_digest: intent.policy_digest,
+            workspace_device: 1,
+            workspace_inode: 2,
+        });
+        assert!(rejected(
+            &view,
+            Event::ToolFinished {
+                run_id: intent.run_id,
+                agent_run_id: intent.agent_run_id,
+                observation: in_process
+            }
+        ));
+        apply(
+            &mut view,
+            Event::ToolFinished {
+                run_id: intent.run_id,
+                agent_run_id: intent.agent_run_id,
+                observation,
+            },
+        )
+        .unwrap();
+        assert!(
+            rejected(&view, start(intent.clone())),
+            "duplicate parse rejected"
+        );
+        apply(&mut view, reserve()).unwrap();
+        apply(
+            &mut view,
+            Event::ProviderCallRecorded {
+                run_id: intent.run_id,
+                agent_run_id: intent.agent_run_id,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Finished,
+                    Some(0),
+                ),
+            },
+        )
+        .unwrap();
+        assert!(rejected(&view, start(intent)), "no late registry refresh");
+    }
+
+    #[test]
+    fn agent_definition_replay_rejects_unadmitted_model_and_noncurrent_normalization() {
+        for case in ["model", "missing-field", "unknown-field", "failed"] {
+            let (mut view, goal, intent, mut observation) =
+                definition_preparation((case == "model").then_some("unadmitted"));
+            let mut output: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+            match case {
+                "missing-field" => {
+                    output.as_object_mut().unwrap().remove("model");
+                }
+                "unknown-field" => {
+                    output["hooks"] = serde_json::json!({});
+                }
+                "failed" => {
+                    observation.disposition = ToolDisposition::Failed;
+                }
+                _ => {}
+            }
+            observation.output = output.to_string();
+            apply(
+                &mut view,
+                Event::ToolStarted {
+                    run_id: intent.run_id,
+                    agent_run_id: intent.agent_run_id,
+                    intent: intent.clone(),
+                    active_ceiling_ms: 0,
+                },
+            )
+            .unwrap();
+            apply(
+                &mut view,
+                Event::ToolFinished {
+                    run_id: intent.run_id,
+                    agent_run_id: intent.agent_run_id,
+                    observation,
+                },
+            )
+            .unwrap();
+            assert!(
+                rejected(
+                    &view,
+                    reserve_child_call(goal, intent.run_id, intent.agent_run_id)
+                ),
+                "no egress: {case}"
+            );
+        }
     }
 }

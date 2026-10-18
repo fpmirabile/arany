@@ -58,6 +58,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     let mut bytes = b"arany-guard-v15:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
+    bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -790,6 +791,29 @@ fn verify_ready(
     Ok(())
 }
 
+fn prepare_seed(
+    permit: &super::admission::Permit,
+    workspace: &cap_std::fs::Dir,
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+) -> Result<(std::path::PathBuf, cap_std::fs::Dir), ToolError> {
+    let parser_config;
+    let seed_config = if matches!(intent.call, ToolCall::ParseAgentDefinition { .. }) {
+        parser_config = super::Config {
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp: Vec::new(),
+            git: None,
+            runtime_grants: Vec::new(),
+            ..runtime.config.clone()
+        };
+        &parser_config
+    } else {
+        &runtime.config
+    };
+    permit.prepare_seed(workspace, seed_config, intent.call.is_process())
+}
+
 pub(super) async fn execute_inner(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -817,8 +841,7 @@ pub(super) async fn execute_inner(
     let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
     let mut cache = super::build_cache_session(runtime, intent)?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
-    let (seed_path, seed_dir) =
-        permit.prepare_seed(&workspace, &runtime.config, intent.call.is_process())?;
+    let (seed_path, seed_dir) = prepare_seed(&permit, &workspace, runtime, intent)?;
     let mut unit = Unit {
         name: format!("arany-tool-{}.service", permit.id),
         invocation: None,
@@ -849,6 +872,7 @@ pub(super) async fn execute_inner(
     let mut stderr_task = tokio::spawn(read_capped(stderr, CAPTURE_BYTES));
     let execution = async {
         let task = encode_task(&Task {
+            definition: runtime.definitions.payload(&intent.call)?,
             config: runtime.config.clone(),
             intent: intent.clone(),
             cache: cache_transfer,

@@ -139,22 +139,22 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "GoalResumed"
         | "GoalPlanContractRecorded"
         | "MessageAccepted"
-        | "AgentSpawned"
         | "ProviderCallRecorded"
         | "GoalContextCompacted"
         | "GoalSteeringNoteRecorded"
         | "AssistantDisplayRecorded"
         | "AgentFinished"
         | "MessageCommitted" => Some(6),
+        "AgentSpawned" => Some(7),
         "GoalStarted" | "GoalFinished" => Some(7),
         "ProviderFallbackUsed" => Some(1),
         "ToolPermissionDecided" => Some(2),
-        "ToolFinished" => Some(9),
-        "RunStarted" => Some(10),
+        "ToolFinished" => Some(10),
+        "RunStarted" => Some(11),
         "RunFinished" => Some(7),
         "GoalProviderCallReserved" => Some(7),
         "GoalCompactionCallReserved" => Some(7),
-        "ToolStarted" => Some(8),
+        "ToolStarted" => Some(9),
         "ContextCompacted" => Some(7),
         _ => None,
     }
@@ -264,6 +264,7 @@ pub enum Event {
         ordinal: u8,
         objective: Option<String>,
         grant: Option<ChildGrant>,
+        definition: Option<String>,
     },
     ProviderFallbackUsed {
         run_id: RunId,
@@ -475,6 +476,8 @@ struct GoalSteeringNotePayload {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnPayload {
+    #[serde(deserialize_with = "Option::deserialize")]
+    definition: Option<String>,
     role: AgentRole,
     ordinal: u8,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -719,8 +722,10 @@ impl Event {
                 ordinal,
                 objective,
                 grant,
+                definition,
                 ..
             } => serialize(&SpawnPayload {
+                definition: definition.clone(),
                 role: *role,
                 ordinal: *ordinal,
                 objective: objective.clone(),
@@ -907,6 +912,7 @@ impl Event {
                     ordinal: data.ordinal,
                     objective: data.objective,
                     grant: data.grant,
+                    definition: data.definition,
                 }
             }
             "AgentFinished" if run_id.is_some() && agent_run_id.is_some() => {

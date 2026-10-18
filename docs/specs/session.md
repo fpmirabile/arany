@@ -43,6 +43,10 @@ A Workspace is hostile before admission. Trusted user/process configuration and 
 
 Only exact Workspace-root `AGENTS.md` is discovered, with exact `CLAUDE.md` as an absence-only fallback. Instructions and explicit includes are bounded immutable no-follow snapshots. Their text, repository content, Skills, prompts, model output, Tool or MCP output, Memory and replayed Events are data, never authority. Instruction text never changes Policy; any future restrict-only instruction policy may only narrow. It never selects or widens trust, permission, approval, sandbox, Provider or update modes, roots, endpoints, credentials, executables, budgets or capabilities. Authenticated user or administrator configuration fixes authority before untrusted input; models and classifiers may only raise risk or narrow it. [Tools](./tools.md#folder-trust-and-approvals) owns path and scope admission; [Credentials](./credentials.md#account-scope-and-identity) owns private directory admission.
 
+## Agent definition recovery decision
+
+**Recorded owner decision — 2026-10-18, future C2 ID resume unavailable:** an explicit exact historical child ID will supply bounded task context to a new assignment with a fresh AgentRun ID and `resumes` lineage. Fresh authority, base and lease are mandatory; an active ID can only be inspected or waited for. Private state, old permissions and cross-Run leases never revive. This intentionally diverges from Claude Code's retained-worker continuation to preserve strict replay and disposable worker storage. Slice 1 only admits [researcher definitions](./execution.md#agent-definitions); it adds no resume operation or private worker execution.
+
 ## Context and compaction
 
 - Explicit include data carries an escaped relative path, the SHA-256 of the raw bytes and untrusted snapshot text. The full envelope counts toward the context budget; the raw file digest stays pinned separately. Historical Tool context identifies its previous-Run scope and never forbids fresh inspection.

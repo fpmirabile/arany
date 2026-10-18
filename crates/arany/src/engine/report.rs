@@ -270,6 +270,7 @@ fn push_success_facts(
             }
             let call = &tool.intent.call;
             match call {
+                crate::tools::ToolCall::ParseAgentDefinition { .. } => {}
                 crate::tools::ToolCall::Write { path, .. }
                 | crate::tools::ToolCall::Edit { path, .. } => {
                     push_goal_report_item(
@@ -416,6 +417,9 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
 
 fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
     match call {
+        crate::tools::ToolCall::ParseAgentDefinition { .. } => {
+            "Agent definition preparation".into()
+        }
         crate::tools::ToolCall::Read { path, .. }
         | crate::tools::ToolCall::List { path }
         | crate::tools::ToolCall::Search { path, .. }
@@ -439,6 +443,9 @@ fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
 fn goal_report_evidence(call: &crate::tools::ToolCall, output: &str, in_process: bool) -> String {
     let attester = if in_process { "The Engine" } else { "Guard" };
     match call {
+        crate::tools::ToolCall::ParseAgentDefinition { .. } => {
+            "Agent definition preparation".into()
+        }
         crate::tools::ToolCall::Command { program, .. } => {
             serde_json::from_str::<crate::tools::types::CommandResult>(output)
                 .ok()

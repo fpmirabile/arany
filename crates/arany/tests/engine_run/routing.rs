@@ -12,6 +12,7 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
     let primary = route(
         ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
+                agent: None,
                 children: vec!["Inspect".into()],
             }),
             finish("done"),
@@ -159,6 +160,7 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
     let primary = route(
         ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
+                agent: None,
                 children: vec!["Inspect".into(), "Compare".into()],
             }),
             finish("done"),

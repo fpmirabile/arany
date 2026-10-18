@@ -204,6 +204,7 @@ mod tests {
             config: None,
             agents: vec![
                 AgentView {
+                    definition: None,
                     id: AgentRunId::new(),
                     role: AgentRole::Primary,
                     ordinal: 0,
@@ -216,6 +217,7 @@ mod tests {
                     status: AgentStatus::Finished,
                 },
                 AgentView {
+                    definition: None,
                     id: AgentRunId::new(),
                     role: AgentRole::Child,
                     ordinal: 1,

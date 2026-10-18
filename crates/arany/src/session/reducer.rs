@@ -180,6 +180,7 @@ mod tests;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentView {
+    pub definition: Option<String>,
     pub id: AgentRunId,
     pub role: AgentRole,
     pub ordinal: u8,
@@ -233,7 +234,13 @@ fn all_children_finished(run: &RunView) -> bool {
 fn model_tool_count(run: &RunView) -> usize {
     run.tools
         .iter()
-        .filter(|tool| !is_integration_tool(tool))
+        .filter(|tool| {
+            !is_integration_tool(tool)
+                && !matches!(
+                    tool.intent.call,
+                    crate::tools::ToolCall::ParseAgentDefinition { .. }
+                )
+        })
         .count()
 }
 
@@ -729,4 +736,79 @@ fn active_run(view: &mut SessionView, id: RunId) -> Result<&mut RunView, ReplayE
         return Err(ReplayError::InvalidTransition);
     }
     Ok(run)
+}
+
+fn definition_registry(
+    run: &RunView,
+) -> Result<
+    std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
+    ReplayError,
+> {
+    let Some(pin) = run
+        .config
+        .as_ref()
+        .and_then(|config| config.agent_definitions.as_ref())
+    else {
+        return Ok(Default::default());
+    };
+    let outputs: Vec<_> = run
+        .tools
+        .iter()
+        .filter(|tool| {
+            matches!(
+                tool.intent.call,
+                crate::tools::ToolCall::ParseAgentDefinition { .. }
+            )
+        })
+        .map(|tool| {
+            tool.observation
+                .as_ref()
+                .filter(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Succeeded
+                        && observation.attestation.is_some()
+                })
+                .map(|observation| observation.output.as_str())
+                .ok_or(ReplayError::InvalidTransition)
+        })
+        .collect::<Result<_, _>>()?;
+    if outputs.len() != pin.files.len() {
+        return Err(ReplayError::InvalidTransition);
+    }
+    let registry = crate::tools::definitions::registry(pin, outputs.into_iter())
+        .map_err(|_| ReplayError::InvalidTransition)?;
+    let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
+    let child_model = config
+        .providers
+        .as_ref()
+        .map_or(config.model.as_str(), |routes| {
+            routes.child[0].model.as_str()
+        });
+    if registry.values().any(|definition| {
+        definition
+            .model
+            .as_ref()
+            .is_some_and(|model| model != child_model)
+    }) {
+        return Err(ReplayError::InvalidTransition);
+    }
+    Ok(registry)
+}
+
+fn definition_mode(
+    run: &RunView,
+    actor: AgentRunId,
+) -> Result<Option<crate::tools::permissions::PermissionMode>, ReplayError> {
+    let Some(name) = run
+        .agents
+        .iter()
+        .find(|agent| agent.id == actor)
+        .and_then(|agent| agent.definition.as_ref())
+    else {
+        return Ok(None);
+    };
+    let registry = definition_registry(run)?;
+    Ok(registry
+        .get(name)
+        .ok_or(ReplayError::InvalidTransition)?
+        .permission_mode)
 }

@@ -226,6 +226,27 @@ impl SessionView {
             .agents
             .iter()
             .any(|agent| agent.id == *agent_run_id && agent.status == AgentStatus::Active);
+        let run = current_run(self, *run_id)?;
+        if let Some(agent) = run.agents.iter().find(|agent| agent.id == *agent_run_id)
+            && let Some(name) = &agent.definition
+        {
+            let registry = super::definition_registry(run)?;
+            let definition = registry.get(name).ok_or(ReplayError::InvalidTransition)?;
+            let own_tool_pending = agent
+                .tools
+                .last()
+                .is_some_and(|tool| tool.observation.is_none());
+            if !own_tool_pending
+                && agent
+                    .provider_calls
+                    .iter()
+                    .filter(|call| call.phase == AgentPhase::ChildWork)
+                    .count()
+                    >= usize::from(definition.max_turns)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
         let goal = current_goal_mut(self, *goal_id)?;
         let budget = goal.effective_budget();
         if goal.status != GoalStatus::Running
@@ -586,6 +607,13 @@ pub(super) fn apply(
             agent_run_id,
             active_ceiling_ms,
         } => {
+            if let Some(run) = current.runs.last().filter(|run| run.id == *run_id)
+                && run.primary().is_some_and(|primary| {
+                    primary.provider_calls.is_empty() && primary.id == *agent_run_id
+                })
+            {
+                super::definition_registry(run)?;
+            }
             current.reserve_goal_provider_call(goal_id, run_id, agent_run_id)?;
             record_active_ceiling(current_goal_mut(current, *goal_id)?, *active_ceiling_ms);
         }

@@ -114,6 +114,8 @@ impl ContextUsage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub agent_definitions: Option<crate::tools::DefinitionRegistryPin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<crate::provider::ProviderRoutes>,
     pub provider: String,
@@ -185,30 +187,36 @@ impl RunConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
-        if self.providers.as_ref().is_some_and(|providers| {
-            !providers.valid()
-                || providers
-                    .values()
-                    .iter()
-                    .all(|chain| chain.len() == 1 && chain[0] == providers.primary[0])
-                || self.identity().is_none_or(|identity| {
-                    let primary = &providers.primary[0];
-                    identity.profile != primary.profile
-                        || identity.model != primary.model
-                        || identity.effort != primary.effort
-                        || identity.provenance != primary.provenance
-                        || identity.limits.max_output_tokens != primary.limits.max_output_tokens
-                        || identity.limits.output_token_bound != primary.limits.output_token_bound
-                        || self.provider_concurrency > primary.limits.concurrency
-                })
-                || self.tool_policy.is_some()
-                    && providers.values().iter().take(2).any(|chain| {
-                        chain.iter().any(|identity| {
-                            identity.custom_provenance().is_some()
-                                || !identity.shares_account(&chain[0])
-                        })
+        if self
+            .agent_definitions
+            .as_ref()
+            .is_some_and(|pin| !pin.valid() || self.tool_policy.is_none())
+            || self.providers.as_ref().is_some_and(|providers| {
+                !providers.valid()
+                    || providers
+                        .values()
+                        .iter()
+                        .all(|chain| chain.len() == 1 && chain[0] == providers.primary[0])
+                    || self.identity().is_none_or(|identity| {
+                        let primary = &providers.primary[0];
+                        identity.profile != primary.profile
+                            || identity.model != primary.model
+                            || identity.effort != primary.effort
+                            || identity.provenance != primary.provenance
+                            || identity.limits.max_output_tokens != primary.limits.max_output_tokens
+                            || identity.limits.output_token_bound
+                                != primary.limits.output_token_bound
+                            || self.provider_concurrency > primary.limits.concurrency
                     })
-        }) || !self.identity().is_some_and(|identity| identity.valid())
+                    || self.tool_policy.is_some()
+                        && providers.values().iter().take(2).any(|chain| {
+                            chain.iter().any(|identity| {
+                                identity.custom_provenance().is_some()
+                                    || !identity.shares_account(&chain[0])
+                            })
+                        })
+            })
+            || !self.identity().is_some_and(|identity| identity.valid())
             || self
                 .tool_policy
                 .as_ref()

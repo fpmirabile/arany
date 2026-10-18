@@ -604,6 +604,7 @@ mod tests {
             images: Vec::new(),
             config: None,
             agents: vec![AgentView {
+                definition: None,
                 id: AgentRunId::new(),
                 role: AgentRole::Primary,
                 ordinal: 0,

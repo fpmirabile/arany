@@ -332,7 +332,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
 
 
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate { children: vec!["Inspect current image".into()] }),
+            ProviderOutcome::Delegate(Delegate { agent: None, children: vec!["Inspect current image".into()] }),
             ProviderOutcome::Finish(Finish { summary: "inspected".into(), result: "Child answer".into() }),
             ProviderOutcome::Finish(Finish { summary: "combined".into(), result: "Team answer".into() }),
             ProviderOutcome::Finish(Finish { summary: "large".into(), result: "Large image answer".into() }),
@@ -1693,6 +1693,7 @@ async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit(
         },
         vec![
             ProviderOutcome::Delegate(Delegate {
+                agent: None,
                 children: vec!["Inspect the fact".into()],
             }),
             tool_outcome(read(), None),
@@ -1741,6 +1742,7 @@ async fn researcher_tool_step_events_match_the_snapshot() {
     ] {
         let outcomes = vec![
             ProviderOutcome::Delegate(Delegate {
+                agent: None,
                 children: vec!["Inspect the fact".into()],
             }),
             tool_outcome(call, None),

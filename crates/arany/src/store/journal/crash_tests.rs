@@ -88,6 +88,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
             Event::RunStarted {
                 run_id,
                 config: RunConfig {
+                    agent_definitions: None,
                     providers: None,
                     provider: "scripted".into(),
                     model: "test-model".into(),
@@ -113,6 +114,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
                 active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
             },
             Event::AgentSpawned {
+                definition: None,
                 run_id,
                 agent_run_id: primary_id,
                 role: AgentRole::Primary,

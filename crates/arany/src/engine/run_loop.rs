@@ -110,6 +110,9 @@ pub(super) struct RunLoop<'a> {
     controls: LoopControls<'a>,
     ledger: &'a GoalLedger,
     progress: Option<&'a ProgressPublisher>,
+    definitions: std::sync::OnceLock<
+        std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
+    >,
 }
 
 pub(super) struct LoopControls<'a> {
@@ -145,6 +148,7 @@ impl<'a> RunLoop<'a> {
                 ledger,
                 publisher: progress,
             },
+            definitions: std::sync::OnceLock::new(),
             journal,
             session_id: identity.session_id,
             run_id: identity.run_id,
@@ -394,6 +398,9 @@ impl<'a> RunLoop<'a> {
         &self,
         mut root_request: ProviderRequest,
     ) -> Result<(), EngineError> {
+        if !self.initialize_definitions(&mut root_request).await? {
+            return self.fail_primary().await;
+        }
         self.drive_primary(&mut root_request).await
     }
 
@@ -428,7 +435,11 @@ impl<'a> RunLoop<'a> {
                     outcome: ProviderOutcome::Delegate(delegation),
                     ..
                 }) => (
-                    planning && self.well_formed_delegation(&delegation.children),
+                    planning
+                        && self.well_formed_delegation(
+                            &delegation.children,
+                            delegation.agent.as_deref(),
+                        ),
                     self.ledger().can_start_provider_call(),
                 ),
                 CallResult::Response(ProviderResponse {
@@ -473,7 +484,7 @@ impl<'a> RunLoop<'a> {
                         return self.settle_stopped_primary().await;
                     }
                     return self
-                        .run_children(root_request, delegation.children, turn)
+                        .run_children(root_request, delegation.children, delegation.agent, turn)
                         .await;
                 }
                 CallResult::Response(ProviderResponse {
@@ -754,7 +765,11 @@ impl<'a> RunLoop<'a> {
             && plan_and_call_fit
             && plan_valid
             && contract_budget_available
-            && !matches!(call, crate::tools::ToolCall::ApplyChangeset { .. })
+            && !matches!(
+                call,
+                crate::tools::ToolCall::ApplyChangeset { .. }
+                    | crate::tools::ToolCall::ParseAgentDefinition { .. }
+            )
     }
 
     pub(super) async fn begin_tool_step(

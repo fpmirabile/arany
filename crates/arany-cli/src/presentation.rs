@@ -23,6 +23,7 @@ pub enum Output {
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     use arany::{ToolCall, ToolDisposition};
     let operation = match &tool.intent.call {
+        ToolCall::ParseAgentDefinition { .. } => "Parse agent definition".into(),
         ToolCall::List { path } => format!("List {path}"),
         ToolCall::Read { path, .. } => format!("Read {path}"),
         ToolCall::Search { path, .. } => format!("Search {path}"),

@@ -158,6 +158,18 @@ impl PermissionConfig {
         self.decision_with_source(call).0
     }
 
+    pub(crate) fn evaluate_mode(
+        mode: PermissionMode,
+        call: &ToolCall,
+    ) -> (Decision, PermissionSource, Option<ApprovalMode>) {
+        Self {
+            mode,
+            rules: Vec::new(),
+            hooks: HookConfig::validate(Default::default()).expect("empty hooks"),
+        }
+        .evaluate(call)
+    }
+
     pub(crate) fn evaluate(
         &self,
         call: &ToolCall,

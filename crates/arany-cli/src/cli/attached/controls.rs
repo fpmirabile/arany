@@ -1232,6 +1232,7 @@ mod tests {
             images: Vec::new(),
             config: None,
             agents: vec![AgentView {
+                definition: None,
                 id: AgentRunId::new(),
                 role: AgentRole::Primary,
                 ordinal: 0,
@@ -1259,6 +1260,7 @@ mod tests {
             "Task: working · 1 agent · details: /agents"
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
+            agent_definitions: None,
             providers: None,
             provider: "openai".into(),
             model: "gpt-5.4".into(),

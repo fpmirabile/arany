@@ -235,6 +235,7 @@ struct Budget {
     max_nodes: usize,
     max_bytes: usize,
     max_depth: usize,
+    count_keys: bool,
 }
 struct Bounded<'a> {
     budget: &'a mut Budget,
@@ -326,6 +327,12 @@ impl<'de> Visitor<'de> for Bounded<'_> {
             if self.budget.bytes > self.budget.max_bytes {
                 return Err(A::Error::custom("metadata limit"));
             }
+            if self.budget.count_keys {
+                self.budget.nodes += 1;
+                if self.budget.nodes > self.budget.max_nodes {
+                    return Err(A::Error::custom("metadata limit"));
+                }
+            }
             let value = map.next_value_seed(Bounded {
                 budget: self.budget,
                 depth: self.depth + 1,
@@ -344,6 +351,7 @@ pub(super) fn metadata(expected_name: &str, bytes: &[u8]) -> Result<Value, ToolE
     let yaml = frontmatter(text).ok_or(ToolError::Configuration)?;
     let mut documents = yaml_serde::Deserializer::from_str(yaml);
     let mut budget = Budget {
+        count_keys: false,
         nodes: 0,
         bytes: 0,
         max_nodes: 256,
@@ -386,11 +394,87 @@ fn frontmatter(text: &str) -> Option<&str> {
     Some(&text[..boundary])
 }
 
+fn check_yaml_tokens(yaml: &str) -> Result<(), ToolError> {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut block_indent = None;
+    for line in yaml.lines() {
+        let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+        if block_indent.is_some_and(|base| line.trim().is_empty() || indent > base) {
+            continue;
+        }
+        block_indent = None;
+        let mut previous = b' ';
+        for byte in line.bytes() {
+            if let Some(delimiter) = quote {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' && delimiter == b'"' {
+                    escaped = true;
+                } else if byte == delimiter {
+                    quote = None;
+                }
+            } else if byte == b'#' && previous.is_ascii_whitespace() {
+                break;
+            } else if matches!(byte, b'\'' | b'"')
+                && (previous.is_ascii_whitespace() || matches!(previous, b'[' | b'{' | b':' | b','))
+            {
+                quote = Some(byte);
+            } else if matches!(byte, b'&' | b'*' | b'!')
+                && (previous.is_ascii_whitespace()
+                    || matches!(previous, b'[' | b'{' | b':' | b',' | b'?'))
+            {
+                return Err(ToolError::Configuration);
+            } else if matches!(byte, b'|' | b'>') && previous.is_ascii_whitespace() {
+                block_indent = Some(indent);
+            }
+            previous = byte;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn definition_document(bytes: &[u8]) -> Result<(Value, &str), ToolError> {
+    if bytes.len() > MAX_TOOL_RESULT_BYTES {
+        return Err(ToolError::Limit);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| ToolError::Configuration)?;
+    let yaml = frontmatter(text).ok_or(ToolError::Configuration)?;
+    check_yaml_tokens(yaml)?;
+    let mut documents = yaml_serde::Deserializer::from_str(yaml);
+    let mut budget = Budget {
+        count_keys: true,
+        nodes: 0,
+        bytes: 0,
+        max_nodes: 4096,
+        max_bytes: MAX_TOOL_RESULT_BYTES,
+        max_depth: 32,
+    };
+    let value = Bounded {
+        budget: &mut budget,
+        depth: 0,
+    }
+    .deserialize(documents.next().ok_or(ToolError::Configuration)?)
+    .map_err(|_| ToolError::Configuration)?;
+    if documents.next().is_some() || !value.is_object() {
+        return Err(ToolError::Configuration);
+    }
+    let prefix = if text.starts_with("---\r\n") { 5 } else { 4 };
+    let rest = &text[prefix + yaml.len()..];
+    let body = rest
+        .strip_prefix("---\r\n")
+        .or_else(|| rest.strip_prefix("---\n"))
+        .or_else(|| (rest == "---").then_some(""))
+        .ok_or(ToolError::Configuration)?;
+    Ok((value, body))
+}
+
 pub(crate) fn parse_json(bytes: &[u8], max_bytes: usize) -> Result<Value, ToolError> {
     if bytes.len() > max_bytes {
         return Err(ToolError::Limit);
     }
     let mut budget = Budget {
+        count_keys: false,
         nodes: 0,
         bytes: 0,
         max_nodes: 4096,

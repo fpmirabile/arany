@@ -109,8 +109,9 @@ fn outcome_schema() -> Value {
             }, "required": ["type", "summary", "result"], "additionalProperties": false},
             {"type": "object", "properties": {
                 "type": {"type": "string", "enum": ["delegate"]},
-                "children": {"type": "array", "items": {"type": "string"}}
-            }, "required": ["type", "children"], "additionalProperties": false}
+                "children": {"type": "array", "items": {"type": "string"}},
+                "agent": {"type": ["string", "null"], "description": "Admitted agent definition name, or null for the default researcher. Editors are unsupported."}
+            }, "required": ["type", "children", "agent"], "additionalProperties": false}
         ]}},
         "required": ["outcome"],
         "additionalProperties": false
@@ -572,6 +573,7 @@ pub struct Finish {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Delegate {
+    pub agent: Option<String>,
     pub children: Vec<String>,
 }
 
@@ -628,7 +630,11 @@ impl ProviderResponse {
                     value.summary.contains(secret) || value.result.contains(secret)
                 }
                 ProviderOutcome::Delegate(value) => {
-                    value.children.iter().any(|child| child.contains(secret))
+                    value
+                        .agent
+                        .as_ref()
+                        .is_some_and(|name| name.contains(secret))
+                        || value.children.iter().any(|child| child.contains(secret))
                 }
                 ProviderOutcome::Tools(requests) => requests
                     .iter()
@@ -1075,6 +1081,7 @@ mod tests {
         });
         assert!(response.reflects_secret(secret));
         response.outcome = ProviderOutcome::Delegate(Delegate {
+            agent: None,
             children: vec![format!("child {secret}")],
         });
         assert!(response.reflects_secret(secret));

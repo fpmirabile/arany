@@ -237,6 +237,7 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
         .tools
         .iter()
         .skip(run.tool_compaction_covered_count as usize)
+        .filter(|tool| !matches!(tool.intent.call, crate::tools::ToolCall::ParseAgentDefinition { .. }))
         .map(|tool| match &tool.observation {
             Some(observation) => model_observation(observation),
             None => json!({"call": model_call(&tool.intent.call), "execution": "uncertain; never replay"}),

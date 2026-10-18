@@ -141,6 +141,10 @@ impl CommandResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolCall {
+    ParseAgentDefinition {
+        index: u16,
+        raw_digest: [u8; 32],
+    },
     List {
         path: String,
     },
@@ -258,6 +262,9 @@ impl ToolCall {
             Family::Skill => super::skills::valid(self),
             Family::Mcp => super::mcp::valid(self),
             Family::Git => super::git::valid(self),
+            Family::Preparation => {
+                matches!(self, Self::ParseAgentDefinition { index, .. } if usize::from(*index) < 128)
+            }
         }
     }
 

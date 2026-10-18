@@ -1599,7 +1599,8 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .await
             .expect("pending objective");
         let mut config = RunConfig {
-            providers: None,
+            agent_definitions: None,
+providers: None,
             provider: "scripted".into(),
             model: "test-model".into(),
             effort: None,
@@ -2197,6 +2198,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
             let interrupted_run = RunId::new();
             let primary = AgentRunId::new();
             let config = RunConfig {
+                agent_definitions: None,
                 providers: None,
                 provider: "scripted".into(),
                 model: "test-model".into(),
@@ -2252,6 +2254,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                 },
                 Event::AgentSpawned {
+                    definition: None,
                     run_id: interrupted_run,
                     agent_run_id: primary,
                     role: AgentRole::Primary,
@@ -2463,6 +2466,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 .append(
                     session_id,
                     Event::AgentSpawned {
+                        definition: None,
                         run_id: next_run,
                         agent_run_id: AgentRunId::new(),
                         role: AgentRole::Primary,
