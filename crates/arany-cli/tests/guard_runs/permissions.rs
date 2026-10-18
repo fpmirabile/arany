@@ -2662,39 +2662,122 @@ async fn hook_post_tool_use_sets_that_cannot_run_deny_the_tool_before_dispatch()
 }
 
 #[tokio::test]
-async fn hook_post_tool_use_denies_a_researcher_tool_before_dispatch() {
-    let fixture = Fixture::new(Some(&read_post_settings(vec![shell_hook("exit 2")])), false);
-    let (result, _, _) = fixture
-        .run(
-            vec![
-                ProviderOutcome::Delegate(Delegate {
-                    agent: None,
-                    children: vec![arany::ChildAssignment {
-                        editor: None,
-                        objective: "Inspect facts".into(),
-                        profile: None,
-                    }],
-                }),
-                tool_outcome(call("read"), None),
-                finish("report"),
-                finish("answer"),
-            ],
-            None,
-            true,
-        )
-        .await;
-    let tool = result
-        .run
-        .agents
-        .iter()
-        .flat_map(|agent| &agent.tools)
-        .next()
-        .unwrap();
-    assert_eq!(
-        tool.observation.as_ref().unwrap().output,
-        "Hook denied this Tool: hooks are unavailable to delegated research"
-    );
-    assert!(tool.hooks.is_empty());
+async fn hook_researcher_tools_use_the_parent_hooks_and_child_journal_identity() {
+    for deny in [true, false] {
+        let settings = if deny {
+            hook_settings(json!({}), vec![shell_hook("echo child-denied >&2; exit 2")])
+        } else {
+            read_post_settings(vec![shell_hook("echo child-feedback >&2; exit 2")])
+        };
+        let fixture = Fixture::new(Some(&settings), false);
+        let (result, requests, _) = fixture
+            .run(
+                vec![
+                    ProviderOutcome::Delegate(Delegate {
+                        agent: None,
+                        children: vec![arany::ChildAssignment {
+                            editor: None,
+                            objective: "Inspect facts".into(),
+                            profile: None,
+                        }],
+                    }),
+                    tool_outcome(call("read"), None),
+                    finish("report"),
+                    finish("answer"),
+                ],
+                None,
+                true,
+            )
+            .await;
+        assert_eq!(result.run.status, RunStatus::Finished);
+        let child = result
+            .run
+            .agents
+            .iter()
+            .find(|agent| agent.role == arany::AgentRole::Child)
+            .unwrap();
+        let tool = &child.tools[0];
+        assert_eq!(
+            tool.observation.as_ref().unwrap().disposition,
+            if deny {
+                arany::ToolDisposition::Denied
+            } else {
+                arany::ToolDisposition::Succeeded
+            }
+        );
+        assert_eq!(tool.hooks.len(), 1);
+        assert_eq!(tool.hooks[0].invocation.intent.agent_run_id, child.id);
+        assert!(
+            tool.hooks[0]
+                .outcome
+                .as_ref()
+                .unwrap()
+                .observation
+                .attestation
+                .is_some()
+        );
+        let context = requests
+            .iter()
+            .filter(|request| request.phase == AgentPhase::ChildWork)
+            .nth(1)
+            .unwrap()
+            .input
+            .tools
+            .as_ref()
+            .unwrap();
+        if deny {
+            assert_eq!(
+                context.steps[0].observations[0].output,
+                "Hook denied this Tool: child-denied"
+            );
+        } else {
+            assert_eq!(
+                context.steps[0].hook_feedback[&0],
+                vec!["hook feedback: child-feedback"]
+            );
+        }
+        let (events, view) = fixture.reopen(result.session_id).await;
+        assert_eq!(view.runs[0].agents[1].tools[0].hooks.len(), 1);
+        assert_action_bounds(&events, false, false);
+    }
+}
+
+#[tokio::test]
+async fn hook_pre_tool_use_continue_false_stops_before_primary_or_child_tool_dispatch() {
+    for child in [false, true] {
+        let fixture = Fixture::new(
+            Some(&hook_settings(
+                json!({}),
+                vec![shell_hook(
+                    r#"printf '%s' '{"continue":false,"stopReason":"halt","decision":"block","reason":"not feedback"}'"#,
+                )],
+            )),
+            false,
+        );
+        let mut outcomes = Vec::new();
+        if child {
+            outcomes.push(ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: vec![arany::ChildAssignment {
+                    editor: None,
+                    objective: "Inspect facts".into(),
+                    profile: None,
+                }],
+            }));
+        }
+        outcomes.push(tool_outcome(call("read"), None));
+        let (result, _, _) = fixture.run(outcomes, None, child).await;
+        assert_eq!(result.run.status, RunStatus::StoppedByHook);
+        assert_eq!(result.run.hook_stop_reason(), Some(Some("halt")));
+        assert!(result.run.assistant_message.is_none());
+        let (_, view) = fixture.reopen(result.session_id).await;
+        let tool = if child {
+            &view.runs[0].agents[1].tools[0]
+        } else {
+            &view.runs[0].tools[0]
+        };
+        assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+    }
 }
 
 fn narrowing_script(updated: &Value, only_when: &str) -> String {

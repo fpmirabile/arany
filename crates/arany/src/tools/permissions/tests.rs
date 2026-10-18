@@ -1218,7 +1218,7 @@ fn hook_output_parsing_copies_peer_exit_codes_and_json_precedence() {
             Some(0),
             json!({"continue": false, "stopReason": "halt"}).to_string(),
             "",
-            deny_with(Some("halt")),
+            HookResult::Stopped { reason: Some("halt".into()) },
         ),
         (Some(2), "{}".into(), "blocked\nby policy", deny_with(Some("blockedby policy"))),
         (Some(2), String::new(), "", deny_with(None)),

@@ -485,7 +485,23 @@ impl crate::Provider for ForegroundWorkerProvider {
                 }
                 finish_with("Private changes ready")
             }
-            (AgentPhase::RootSynthesis, 0) if matches!(self.case, "success" | "unverified") => {
+            (AgentPhase::ChildWork, 4..=11) if self.case == "hook_stop_block" => {
+                self.check(
+                    request.input.stop_hook_feedback.len() == step - 3,
+                    "worker stop feedback was not retained",
+                );
+                finish_with("Private changes ready")
+            }
+            (AgentPhase::RootSynthesis, 0)
+                if matches!(
+                    self.case,
+                    "success"
+                        | "unverified"
+                        | "hook_write"
+                        | "hook_stop_block"
+                        | "hook_handover_post"
+                ) =>
+            {
                 self.check(
                     std::fs::read(self.workspace.join("notes/a")).unwrap() == b"edited a",
                     "integration was not visible to primary",

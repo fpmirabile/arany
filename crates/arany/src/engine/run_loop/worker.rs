@@ -296,6 +296,7 @@ impl RunLoop<'_> {
         &self,
         runtime: &ToolRuntime,
         intent: EffectIntent,
+        cancellation: crate::engine::RunCancellation,
     ) -> Result<
         (
             ToolObservation,
@@ -313,9 +314,7 @@ impl RunLoop<'_> {
             return Ok((view.read(intent), None));
         }
         let runtime = runtime.with_queue_accounting();
-        let result = view
-            .edit(&runtime, intent.clone(), self.controls.cancellation.clone())
-            .await;
+        let result = view.edit(&runtime, intent.clone(), cancellation).await;
         self.ledger()
             .exclude_idle_approval(runtime.queued_duration()?)?;
         let candidate = match result {
@@ -639,6 +638,7 @@ impl RunLoop<'_> {
             .dispose()?;
         let no_change = bytes.as_ref().is_some_and(|b| matches!(decode_data(b, WorkerDataPurpose::Handover), Ok(WorkerDataFacts::Changes(files)) if files.is_empty()));
         let success = data.is_some();
+        let hook_stopped = self.hook_requested_stop()?;
         let (disposition, cause) = if private_uncertain {
             (
                 WorkerDisposition::PrivateUncertain,
@@ -653,6 +653,8 @@ impl RunLoop<'_> {
                 },
                 WorkerCause::Finished,
             )
+        } else if hook_stopped {
+            (WorkerDisposition::Failed, WorkerCause::StoppedByHook)
         } else if self.controls.cancellation.is_cancelled() {
             (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
         } else {
@@ -668,7 +670,9 @@ impl RunLoop<'_> {
         self.append(Event::AgentFinished {
             run_id: self.run_id,
             agent_run_id: id,
-            disposition: if success {
+            disposition: if hook_stopped {
+                AgentDisposition::StoppedByHook
+            } else if success {
                 AgentDisposition::Finished
             } else if disposition == WorkerDisposition::Cancelled {
                 AgentDisposition::Cancelled
@@ -770,6 +774,16 @@ impl RunLoop<'_> {
             .await?;
             let sequence = self.sequence()?;
             if !Box::pin(self.integrate_worker(root, id, sequence, data)).await? {
+                if self.hook_requested_stop()? {
+                    return self.finish_hook_stop().await;
+                }
+                if !self.ledger().view(|view| {
+                    view.runs
+                        .last()
+                        .is_some_and(crate::session::RunView::hooks_settled)
+                })? {
+                    return self.fail_primary().await;
+                }
                 if self.observe_worker_stop().await? {
                     return self.settle_stopped_primary().await;
                 }
@@ -796,6 +810,16 @@ impl RunLoop<'_> {
                 ))
                 .await;
             }
+        }
+        if self.hook_requested_stop()? {
+            return self.finish_hook_stop().await;
+        }
+        if !self.ledger().view(|view| {
+            view.runs
+                .last()
+                .is_some_and(crate::session::RunView::hooks_settled)
+        })? {
+            return self.fail_primary().await;
         }
         if stopped || self.observe_worker_stop().await? {
             return self.settle_stopped_primary().await;
@@ -831,6 +855,7 @@ impl RunLoop<'_> {
         deadline: tokio::time::Instant,
     ) -> Result<Option<crate::provider::Finish>, EngineError> {
         while child.turns_remaining > 0
+            && tokio::time::Instant::now() < deadline
             && !self.controls.cancellation.is_cancelled()
             && !self.pause_requested()
             && self.ledger().can_start_provider_call()
@@ -869,6 +894,7 @@ impl RunLoop<'_> {
                     tools: child.tools.clone(),
                     goal_budget: Some(self.ledger().effective_budget()?),
                     goal_plan_contract: self.ledger().plan_contract()?,
+                    stop_hook_feedback: child.stop_hook_feedback.clone(),
                     workspace_guidance: Some(format!(
                         "{}\n\nUntrusted worker assignment: {}\n{}",
                         root.input.workspace_guidance.as_deref().unwrap_or_default(),
@@ -921,20 +947,26 @@ impl RunLoop<'_> {
                 record: call_record(AgentPhase::ChildWork, &result, valid, None),
             })
             .await?;
-            self.ledger().child_call_finished()?;
             if !valid {
+                self.ledger().child_call_finished()?;
                 return Ok(None);
             }
             match result {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(f),
+                    turn,
                     ..
-                }) => return Ok(Some(f)),
+                }) => match self.worker_stop(child, &f, turn, deadline).await? {
+                    super::children::ChildStop::Proceed => return Ok(Some(f)),
+                    super::children::ChildStop::Reprompt => continue,
+                    super::children::ChildStop::End(_) => return Ok(None),
+                },
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Tools(mut requests),
                     turn,
                     ..
                 }) => {
+                    self.ledger().child_call_finished()?;
                     if self.observe_worker_stop().await?
                         || self.ledger().remaining_calls().is_some_and(|n| n < 2)
                     {
@@ -963,6 +995,61 @@ impl RunLoop<'_> {
             }
         }
         Ok(None)
+    }
+
+    async fn worker_stop(
+        &self,
+        child: &mut ChildWork,
+        finish: &crate::provider::Finish,
+        turn: ProviderTurn,
+        deadline: tokio::time::Instant,
+    ) -> Result<super::children::ChildStop, EngineError> {
+        use super::children::ChildStop;
+        let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
+        let subject = child
+            .definition
+            .as_ref()
+            .map_or("editor", |definition| definition.name.as_str());
+        let fits = child
+            .tools
+            .as_ref()
+            .is_none_or(|tools| tools.has_stop_room(&turn, runtime.context_limit_bytes()));
+        let stop = self
+            .lifecycle_hooks(
+                child.agent_run_id,
+                crate::tools::permissions::HookEvent::SubagentStop,
+                subject,
+                &finish.result,
+                Some(deadline),
+                fits,
+            )
+            .await;
+        self.ledger().child_call_finished()?;
+        match stop {
+            Ok(Some(feedback)) => {
+                if let Some(tools) = child.tools.as_mut() {
+                    tools.add_stop_feedback(&turn, &feedback);
+                }
+                child
+                    .stop_hook_feedback
+                    .push(crate::provider::StopHookFeedback {
+                        after_step: child.tools.as_ref().map_or(0, |tools| tools.steps.len()),
+                        turn,
+                        text: feedback,
+                        facts: None,
+                        steering_notes: Vec::new(),
+                    });
+                Ok(ChildStop::Reprompt)
+            }
+            Ok(None) if !self.hook_requested_stop()? => Ok(ChildStop::Proceed),
+            Ok(None)
+            | Err(
+                EngineError::GoalBudgetExhausted
+                | EngineError::ContextTooLarge
+                | EngineError::Tool(crate::tools::ToolError::Uncertain),
+            ) => Ok(ChildStop::End(AgentDisposition::Failed)),
+            Err(error) => Err(error),
+        }
     }
 
     async fn capture_handover(
@@ -1033,7 +1120,7 @@ impl RunLoop<'_> {
                 data,
             },
         };
-        let Some(intent) = self.primary_intent(runtime, call.clone())? else {
+        let Some(mut intent) = self.primary_intent(runtime, call.clone())? else {
             self.record_capacity_stop().await?;
             self.discard_worker(
                 id,
@@ -1044,6 +1131,9 @@ impl RunLoop<'_> {
             .await?;
             return Ok(false);
         };
+        intent.expires_at_ms = intent
+            .expires_at_ms
+            .saturating_add(self.hook_admission(runtime, &call, &call).1);
         let tool_id = intent.id;
         let result = self
             .run_intent(
@@ -1078,6 +1168,15 @@ impl RunLoop<'_> {
             )
             .await?;
             return Ok(false);
+        }
+        let observation = tool
+            .observation
+            .as_ref()
+            .ok_or(EngineError::InvalidHistory)?;
+        if observation.disposition == ToolDisposition::Succeeded
+            && let Some(config) = runtime.permissions()
+        {
+            Box::pin(self.post_tool_use_hooks(runtime, config, observation, None)).await?;
         }
         self.observe_worker_stop().await?;
         let observation = tool.observation.ok_or(EngineError::InvalidHistory)?;

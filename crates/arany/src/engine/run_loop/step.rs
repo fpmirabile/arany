@@ -39,6 +39,13 @@ pub(super) enum Grant<'s> {
 }
 
 impl Grant<'_> {
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        match self {
+            Self::Primary { .. } => None,
+            Self::Researcher { deadline, .. } => Some(*deadline),
+        }
+    }
+
     fn context(&self) -> Result<&ToolContext, EngineError> {
         match self {
             Self::Primary { request, .. } => request
@@ -239,7 +246,8 @@ impl RunLoop<'_> {
             };
             let command = matches!(intent.call, ToolCall::Command { .. });
             let source_intent_digest = intent.digest();
-            let narrowable = narrowings < MAX_NARROWINGS_PER_STEP;
+            let narrowable =
+                matches!(grant, Grant::Primary { .. }) && narrowings < MAX_NARROWINGS_PER_STEP;
             // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
             let Some((observation, narrowed)) = self
                 .run_intent(&grant, runtime, intent, &source_call, narrowable)
@@ -289,8 +297,7 @@ impl RunLoop<'_> {
             }
         }
         // The hooks see the published tree: a Command's changeset is integrated first.
-        if matches!(grant, Grant::Primary { .. })
-            && let Some(config) = runtime.permissions()
+        if let Some(config) = runtime.permissions()
             && let Some(source) = step.observations.get(narrowings)
             && source.disposition == ToolDisposition::Succeeded
             && !source.intent.call.is_internal()
@@ -298,13 +305,16 @@ impl RunLoop<'_> {
                 .iter()
                 .all(|integration| integration.disposition == ToolDisposition::Succeeded)
         {
-            let post = Box::pin(self.post_tool_use_hooks(runtime, config, source)).await?;
+            let post =
+                Box::pin(self.post_tool_use_hooks(runtime, config, source, grant.deadline()))
+                    .await?;
             match post.stop {
                 HookStop::None if !post.feedback.is_empty() => {
                     step.hook_feedback.insert(narrowings, post.feedback);
                 }
                 HookStop::None => {}
                 HookStop::Uncertain | HookStop::Requested => return Ok(false),
+                HookStop::ActiveTime if grant.deadline().is_some() => return Ok(false),
                 HookStop::ActiveTime => return Err(EngineError::GoalBudgetExhausted),
             }
         }
@@ -315,7 +325,8 @@ impl RunLoop<'_> {
                 return Ok(false);
             }
         }
-        Ok(grant.context()?.rendered_len() <= runtime.context_limit_bytes())
+        Ok(!self.hook_requested_stop()?
+            && grant.context()?.rendered_len() <= runtime.context_limit_bytes())
     }
 
     fn sized_intent(
@@ -362,10 +373,9 @@ impl RunLoop<'_> {
             return Ok(None);
         };
         // The PreToolUse hooks run before dispatch, so the authorization outlives them.
-        intent.expires_at_ms = intent.expires_at_ms.saturating_add(
-            self.hook_admission(grant, runtime, &intent.call, post_call)
-                .1,
-        );
+        intent.expires_at_ms = intent
+            .expires_at_ms
+            .saturating_add(self.hook_admission(runtime, &intent.call, post_call).1);
         let integration =
             matches!(intent.call, ToolCall::Command { .. }).then(|| ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::CommandReceipt {
@@ -521,8 +531,7 @@ impl RunLoop<'_> {
         narrowable: bool,
     ) -> Result<Option<(ToolObservation, Option<ToolCall>)>, EngineError> {
         let permission = self.permission(grant, runtime, &intent.call);
-        let (hook_events, pre_ms, post_ms) =
-            self.hook_admission(grant, runtime, &intent.call, post_call);
+        let (hook_events, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
         if !self
             .admit_tool(grant, runtime, &intent, permission, hook_events, narrowable)
             .await?
@@ -570,17 +579,32 @@ impl RunLoop<'_> {
                 Grant::Primary { .. } => {
                     self.dispatch_primary(runtime, intent, queue_pause).await?
                 }
-                Grant::Researcher { child, .. } => Answer {
-                    observation: if child.editor {
-                        let (observation, pending) = self.dispatch_worker(runtime, intent).await?;
-                        candidate = pending;
-                        observation
-                    } else {
-                        execute_cancellable(runtime, intent, &self.controls.cancellation).await
-                    },
-                    refused: false,
-                    active_time: None,
-                },
+                Grant::Researcher { child, deadline } => {
+                    let cancellation = RunCancellation::new();
+                    let mut parent = self.controls.cancellation.clone();
+                    let execution = async {
+                        if child.editor {
+                            let (observation, pending) = self
+                                .dispatch_worker(runtime, intent, cancellation.clone())
+                                .await?;
+                            candidate = pending;
+                            Ok::<_, EngineError>(observation)
+                        } else {
+                            Ok(runtime.execute(intent, cancellation.clone()).await)
+                        }
+                    };
+                    tokio::pin!(execution);
+                    let observation = tokio::select! {
+                        result = &mut execution => result?,
+                        () = tokio::time::sleep_until(*deadline) => { cancellation.cancel(); execution.await? },
+                        () = parent.cancelled() => { cancellation.cancel(); execution.await? },
+                    };
+                    Answer {
+                        observation,
+                        refused: false,
+                        active_time: None,
+                    }
+                }
             },
         };
         self.append(Event::ToolFinished {
@@ -617,7 +641,7 @@ impl RunLoop<'_> {
         hook_events: usize,
         narrowable: bool,
     ) -> Result<bool, EngineError> {
-        if matches!(
+        let worker = matches!(
             intent.target,
             crate::session::worker::EffectTarget::WorkerView { .. }
         ) || matches!(
@@ -626,10 +650,7 @@ impl RunLoop<'_> {
                 | ToolCall::ApplyChangeset {
                     source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
                 }
-        ) {
-            self.admit_worker_action(self.worker_call_chunks(&intent.call)?)
-                .await?;
-        }
+        );
         let (tail, observations) = match grant {
             Grant::Primary { review_allowed, .. } => {
                 // The primary keeps one Provider call for its next turn and one for a review.
@@ -664,10 +685,22 @@ impl RunLoop<'_> {
                     research: true,
                 };
                 (
-                    step.max_events_for_admitted(&self.routing.providers),
-                    step.tool_observations(),
+                    step.max_events_for_admitted(&self.routing.providers)
+                        .saturating_add(2 * hook_events),
+                    step.tool_observations().saturating_add(hook_events),
                 )
             }
+        };
+        let tail = if worker {
+            tail.max(
+                Action::Worker {
+                    chunks: self.worker_call_chunks(&intent.call)?,
+                }
+                .max_events_for_admitted(&self.routing.providers)
+                .saturating_add(2 * hook_events),
+            )
+        } else {
+            tail
         };
         self.journal
             .admit(self.session_id, tail, observations)
@@ -805,7 +838,7 @@ impl RunLoop<'_> {
                 if !intent.call.is_internal()
                     && permission.decision != Decision::Deny
                     && timeout_limit.is_none()
-                    && self.ledger().allows_tool(&intent.call) =>
+                    && self.plan_allows(&intent.call) =>
             {
                 // Boxed like the other Tool futures so the hook loop does not inflate every agent step.
                 Box::pin(self.pre_tool_use_hooks(grant, runtime, config, &intent, narrowable))
@@ -839,7 +872,7 @@ impl RunLoop<'_> {
             )
         } else if decision == Decision::Deny || hooks.exhausted() {
             let answer = if hooks.exhausted() || source == PermissionSource::Hook {
-                hooks.denial(intent)
+                hooks.denial(intent, grant.deadline().is_some())
             } else {
                 Answer {
                     observation: not_dispatched(

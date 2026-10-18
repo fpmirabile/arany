@@ -567,7 +567,9 @@ impl RunLoop<'_> {
                     child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
                     return Ok(None);
                 }
-                let disposition = if skipped || self.controls.cancellation.is_cancelled() {
+                let disposition = if self.hook_requested_stop()? {
+                    AgentDisposition::StoppedByHook
+                } else if skipped || self.controls.cancellation.is_cancelled() {
                     AgentDisposition::Cancelled
                 } else {
                     AgentDisposition::Failed
@@ -696,14 +698,25 @@ impl RunLoop<'_> {
             .collect::<Option<Vec<_>>>()
             .ok_or(EngineError::CoordinatorFailed)?;
         if let Some(tools) = root_request.input.tools.as_mut() {
+            let integrations = self.ledger().view(|view| view.runs.last().into_iter().flat_map(|run| &run.tools).filter(|tool| matches!(tool.intent.call, ToolCall::ApplyChangeset { source: crate::session::worker::ChangesetSource::WorkerHandover { .. } })).cloned().collect::<Vec<_>>())?;
             tools.steps.push(ToolStep {
                 turn: delegate_turn,
                 requests: Vec::new(),
-                observations: self.ledger().view(|view| view.runs.last().into_iter().flat_map(|run| &run.tools).filter(|tool| matches!(tool.intent.call, ToolCall::ApplyChangeset { source: crate::session::worker::ChangesetSource::WorkerHandover { .. } })).filter_map(|tool| tool.observation.clone()).collect())?,
+                observations: integrations
+                    .iter()
+                    .filter_map(|tool| tool.observation.clone())
+                    .collect(),
                 facts: None,
                 steering_notes: Vec::new(),
                 calls_remaining: None,
-                hook_feedback: Default::default(),
+                hook_feedback: integrations
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, tool)| {
+                        let feedback = tool.hook_feedback();
+                        (!feedback.is_empty()).then_some((index, feedback))
+                    })
+                    .collect(),
             });
         }
         // drive_primary reaches run_children, which reaches synthesize again.
@@ -894,7 +907,7 @@ impl RunLoop<'_> {
     }
 }
 
-enum ChildStop {
+pub(super) enum ChildStop {
     Proceed,
     Reprompt,
     End(AgentDisposition),

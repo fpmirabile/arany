@@ -89,6 +89,40 @@ async fn worker_case(case: &'static str) {
             br#"{"permissions":{"defaultMode":"default"}}"#,
         );
     }
+    if case.starts_with("hook_") {
+        let shell = std::fs::canonicalize("/bin/sh").unwrap();
+        let hash: String = Sha256::digest(std::fs::read(&shell).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["notes"],"write":true,"commands":[{"name":"sh","executable":shell,"sha256":hash,"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]})).unwrap());
+        let command =
+            |script: &str| serde_json::json!({"type":"command","command":script,"timeout":5});
+        let hooks = match case {
+            "hook_write" => {
+                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("exit 0")]}],"PostToolUse":[{"matcher":"Write","hooks":[command("echo checked >&2; exit 2")]}]})
+            }
+            "hook_stop_block" => {
+                serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command("echo verify-worker >&2; exit 2")]}]})
+            }
+            "hook_stop" => {
+                serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
+            }
+            "hook_write_stop" => {
+                serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
+            }
+            "hook_handover_post" => {
+                serde_json::json!({"PostToolUse":[{"matcher":"Edit","hooks":[command("echo published >&2; exit 2")]}]})
+            }
+            _ => {
+                serde_json::json!({"PreToolUse":[{"matcher":"Edit","hooks":[command(r#"IFS= read -r input; case "$input" in *'"files":["notes/a","notes/b"]'*) echo sealed-denial >&2; exit 2;; *) exit 0;; esac"#)]}]})
+            }
+        };
+        private_file(
+            &state.join("permissions.json"),
+            &serde_json::to_vec(&serde_json::json!({"hooks":hooks})).unwrap(),
+        );
+    }
     let engine = engine_support::open(
         root,
         EngineConfig {
@@ -226,9 +260,44 @@ async fn worker_case(case: &'static str) {
         let result = result.expect(case);
         assert!(result.stopped.is_none(), "{case}");
         assert!(worker.released.is_some(), "{case}");
-        if case == "success" {
+        if matches!(
+            case,
+            "success" | "hook_write" | "hook_stop_block" | "hook_handover_post"
+        ) {
             assert_eq!(run.status, RunStatus::Finished);
-            assert_eq!(child_calls, 4);
+            assert_eq!(child_calls, if case == "hook_stop_block" { 12 } else { 4 });
+            if case == "hook_stop_block" {
+                assert_eq!(run.lifecycle_hooks.len(), 8);
+            }
+            if case == "hook_write" {
+                let tools = &run.agents[1].tools;
+                assert_eq!(tools[0].hooks.len(), 2);
+                assert_eq!(tools[1].hooks.len(), 2);
+                assert!(tools[..2].iter().all(|tool| {
+                    tool.hooks
+                        .iter()
+                        .all(|hook| hook.invocation.intent.agent_run_id == run.agents[1].id)
+                }));
+            }
+            if case == "hook_handover_post" {
+                let synthesis = calls
+                    .iter()
+                    .find(|call| call.phase == AgentPhase::RootSynthesis)
+                    .unwrap();
+                assert!(
+                    synthesis
+                        .input
+                        .tools
+                        .as_ref()
+                        .unwrap()
+                        .steps
+                        .iter()
+                        .any(|step| step
+                            .hook_feedback
+                            .values()
+                            .any(|lines| lines == &["hook feedback: published"]))
+                );
+            }
             assert_eq!(synthesis_calls, 2);
             assert!(worker.verification.as_ref().unwrap().1.passed);
             assert_eq!(
@@ -244,7 +313,30 @@ async fn worker_case(case: &'static str) {
                 b"edited a"
             );
         } else {
-            assert_eq!(run.status, RunStatus::Failed, "{case}");
+            assert_eq!(
+                run.status,
+                if matches!(case, "hook_stop" | "hook_write_stop") {
+                    RunStatus::StoppedByHook
+                } else {
+                    RunStatus::Failed
+                },
+                "{case}"
+            );
+            if matches!(case, "hook_stop" | "hook_write_stop") {
+                assert_eq!(synthesis_calls, 0);
+                assert!(worker.handover.is_none());
+                assert_eq!(run.hook_stop_reason(), Some(Some("halt")));
+                assert_eq!(run.agents[1].status, arany::AgentStatus::StoppedByHook);
+            }
+            if case == "hook_handover_deny" {
+                assert_eq!(
+                    worker.integration.as_ref().unwrap().1.outcome,
+                    WorkerIntegrationOutcome::Denied
+                );
+                let tool = run.tools.last().unwrap();
+                assert_eq!(tool.hooks.len(), 1);
+                assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+            }
             if case == "private_loss" {
                 assert!(injected, "{case}");
                 assert_eq!(synthesis_calls, 1, "{case}");
@@ -294,6 +386,20 @@ async fn foreground_worker_guard_journey_budgets_denials_and_private_vs_publicat
         "background",
         "mixed",
         "wave",
+    ] {
+        worker_case(case).await;
+    }
+}
+
+#[tokio::test]
+async fn foreground_worker_hook_journey_bounds_stop_blocks_and_denies_sealed_handover() {
+    for case in [
+        "hook_write",
+        "hook_stop_block",
+        "hook_handover_deny",
+        "hook_handover_post",
+        "hook_stop",
+        "hook_write_stop",
     ] {
         worker_case(case).await;
     }

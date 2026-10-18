@@ -551,11 +551,13 @@ pub(crate) fn parse_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -
         return HookResult::Passed;
     };
     let text = |value: Option<&Value>| value.and_then(Value::as_str).and_then(bounded_reason);
+    if output.get("continue") == Some(&Value::Bool(false)) {
+        return HookResult::Stopped {
+            reason: text(output.get("stopReason")),
+        };
+    }
     if output.get("decision").and_then(Value::as_str) == Some("block") {
         return deny(text(output.get("reason")));
-    }
-    if output.get("continue") == Some(&Value::Bool(false)) {
-        return deny(text(output.get("stopReason")));
     }
     let Some(specific) = output.get("hookSpecificOutput") else {
         return HookResult::Passed;
@@ -679,7 +681,7 @@ pub(crate) fn stop_feedback<'a>(results: impl IntoIterator<Item = &'a HookResult
 }
 
 pub(super) fn parse_lifecycle_output(
-    event: HookEvent,
+    _event: HookEvent,
     exit_code: Option<i32>,
     stdout: &str,
     stderr: &str,
@@ -700,20 +702,11 @@ pub(super) fn parse_lifecycle_output(
         return HookResult::Passed;
     };
     if output.get("continue") == Some(&Value::Bool(false)) {
-        if event == HookEvent::PreCompact {
-            HookResult::Blocked {
-                reason: output
-                    .get("stopReason")
-                    .and_then(Value::as_str)
-                    .and_then(bounded_reason),
-            }
-        } else {
-            HookResult::Stopped {
-                reason: output
-                    .get("stopReason")
-                    .and_then(Value::as_str)
-                    .and_then(bounded_reason),
-            }
+        HookResult::Stopped {
+            reason: output
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .and_then(bounded_reason),
         }
     } else if output.get("decision").and_then(Value::as_str) == Some("block") {
         HookResult::Blocked {

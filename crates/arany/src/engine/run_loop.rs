@@ -217,30 +217,42 @@ impl<'a> RunLoop<'a> {
                         && outcome.observation.disposition
                             != crate::tools::ToolDisposition::Cancelled
                 })
-            }) || run.tools.iter().any(|tool| {
-                tool.observation
-                    .iter()
-                    .chain(tool.hooks.iter().filter_map(|hook| {
-                        hook.outcome.as_ref().map(|outcome| &outcome.observation)
-                    }))
-                    .any(|observation| {
-                        observation.disposition == crate::tools::ToolDisposition::Uncertain
-                    })
-            });
+            }) || run
+                .tools
+                .iter()
+                .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+                .any(|tool| {
+                    tool.observation
+                        .iter()
+                        .chain(tool.hooks.iter().filter_map(|hook| {
+                            hook.outcome.as_ref().map(|outcome| &outcome.observation)
+                        }))
+                        .any(|observation| {
+                            observation.disposition == crate::tools::ToolDisposition::Uncertain
+                        })
+                });
             let action_cancelled = run.lifecycle_hooks.iter().any(|hook| {
                 hook.outcome.as_ref().is_some_and(|outcome| {
                     outcome.observation.disposition == crate::tools::ToolDisposition::Cancelled
                 })
-            }) || run.tools.iter().any(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.disposition == crate::tools::ToolDisposition::Cancelled
-                })
-            });
-            let actions_acknowledged = run.tools.iter().all(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.disposition != crate::tools::ToolDisposition::Uncertain
-                })
-            });
+            }) || run
+                .tools
+                .iter()
+                .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+                .any(|tool| {
+                    tool.observation.as_ref().is_some_and(|observation| {
+                        observation.disposition == crate::tools::ToolDisposition::Cancelled
+                    })
+                });
+            let actions_acknowledged = run
+                .tools
+                .iter()
+                .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+                .all(|tool| {
+                    tool.observation.as_ref().is_some_and(|observation| {
+                        observation.disposition != crate::tools::ToolDisposition::Uncertain
+                    })
+                });
             let goal_open = goal.status == crate::session::GoalStatus::Running
                 && goal.active_run == Some(self.run_id)
                 && goal.unobserved_provider_calls.is_empty()
