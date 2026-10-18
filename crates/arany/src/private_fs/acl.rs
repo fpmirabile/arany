@@ -204,6 +204,7 @@ mod tests {
             .unwrap();
         for (name, grant) in [
             ("account-credentials.json".to_owned(), "everyone allow read"),
+            ("provider-roster.json".to_owned(), "everyone allow read"),
             (
                 "account-credentials.pending".to_owned(),
                 "everyone allow write",
@@ -233,6 +234,15 @@ mod tests {
                         Err(StoreError::StateNotPrivate)
                     ) && matches!(
                         state.record(RecordKind::SavedAccount).present(),
+                        Err(StoreError::StateNotPrivate)
+                    )
+                }
+                "provider-roster.json" => {
+                    matches!(
+                        state.record(RecordKind::ProviderRoster).read(),
+                        Err(StoreError::StateNotPrivate)
+                    ) && matches!(
+                        state.record(RecordKind::ProviderRoster).present(),
                         Err(StoreError::StateNotPrivate)
                     )
                 }

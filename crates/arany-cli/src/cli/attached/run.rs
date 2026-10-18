@@ -28,6 +28,8 @@ pub(super) enum RunAttemptError {
 pub(super) enum RunFailure {
     #[error(transparent)]
     Selection(SelectionError),
+    #[error("{0}")]
+    Roster(String),
     #[error(transparent)]
     Routing(RoutingError),
     #[error("state directory unavailable or unsafe")]
@@ -61,9 +63,22 @@ pub(super) async fn run_selected(
     progress: RunProgress,
     tools: ToolAccess<'_>,
     steering: RunSteering,
+    roster: Option<crate::cli::provider::roster::SelectedRoster>,
 ) -> Result<RunOutcome, RunAttemptError> {
     let mut admission_cancellation = cancellation.clone();
     let admit = async {
+        engine
+            .readmit_state()
+            .map_err(|_| RunFailure::StateUnavailable)?;
+        if let Some(roster) = &roster {
+            roster
+                .matches_selection(selection)
+                .map_err(RunFailure::Roster)?;
+            return roster
+                .admit(state_dir, &request.workspace)
+                .await
+                .map_err(RunFailure::Roster);
+        }
         let provider = select_provider(state_dir, selection)
             .await
             .map_err(RunFailure::Selection)?;
@@ -167,17 +182,29 @@ pub(super) async fn compact_selected(
     session_id: SessionId,
     workspace: &Path,
     expected_run_id: Option<RunId>,
+    pinned_roster: Option<&arany::RunConfig>,
 ) -> Result<Option<CompactionRecord>, String> {
-    let provider = select_provider(state_dir, selection)
-        .await
-        .map_err(|error| error.to_string())?;
     engine
         .readmit_state()
-        .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-    let providers =
-        crate::cli::provider::routing::configured_providers(state_dir, workspace, provider)
+        .map_err(|_| "state directory unavailable or unsafe")?;
+    let providers = if let Some(config) = pinned_roster {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            crate::cli::provider::roster::pinned_compaction(state_dir, workspace, config),
+        )
+        .await
+        .map_err(|_| "compaction admission exceeded 120 seconds")??
+    } else {
+        let provider = select_provider(state_dir, selection)
             .await
             .map_err(|error| error.to_string())?;
+        engine
+            .readmit_state()
+            .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+        crate::cli::provider::routing::configured_providers(state_dir, workspace, provider)
+            .await
+            .map_err(|error| error.to_string())?
+    };
     match expected_run_id {
         Some(expected_run_id) => {
             engine

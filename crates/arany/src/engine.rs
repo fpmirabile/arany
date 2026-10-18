@@ -64,6 +64,9 @@ const STORE_ACTION_OVERHEAD: std::time::Duration =
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    #[error("restore the matching --profile preset to resume this Goal, or start a new Goal")]
+    RosterSelectionMismatch,
+
     #[error(
         "Tool-enabled primary and child fallback chains must keep the same adapter and account"
     )]
@@ -1405,6 +1408,29 @@ impl Engine {
             ensure_session_workspace(view, workspace_identity)?;
         }
         let goal = resolve_goal_admission(request, history.as_ref(), entry)?;
+        if entry == GoalEntry::Resume {
+            let previous = history
+                .as_ref()
+                .and_then(|view| {
+                    let stored = view.goal(goal.id)?;
+                    view.runs
+                        .iter()
+                        .rev()
+                        .filter(|run| stored.run_ids.contains(&run.id))
+                        .find_map(|run| run.config.as_ref())
+                })
+                .and_then(|config| config.roster.as_ref());
+            let selected = submission
+                .providers
+                .roster
+                .as_ref()
+                .map(|roster| &roster.snapshot);
+            if previous.is_some_and(|roster| {
+                Some(roster.selection_digest) != selected.map(|selected| selected.selection_digest)
+            }) {
+                return Err(EngineError::RosterSelectionMismatch);
+            }
+        }
         let objective = if request.objective.trim().is_empty()
             && (request.goal.id.is_some() || request.goal.continues.is_some())
         {
@@ -1546,22 +1572,20 @@ impl Engine {
         if let Some(runtime) = &mut tools {
             runtime.set_context_limit(context.tool_context_budget_bytes)?;
         }
-        if identity.custom_provenance().is_some() && !context.images.is_empty() {
+        if !context.images.is_empty()
+            && submission.providers.agent_chains().iter().any(|chain| {
+                chain
+                    .iter()
+                    .any(|provider| provider.identity().custom_provenance().is_some())
+            })
+        {
             return Err(EngineError::ImagesNotAdmitted);
         }
         let context_ended = SystemTime::now();
         let provider_concurrency = if budget.max_tokens.is_some() {
             1
         } else {
-            identity.limits.concurrency.min(
-                submission
-                    .providers
-                    .child
-                    .iter()
-                    .map(|provider| provider.identity().limits.concurrency)
-                    .min()
-                    .unwrap_or(1),
-            )
+            submission.providers.agent_concurrency()
         };
         let routes = submission.providers.identities();
         let inherited = routes
@@ -1569,6 +1593,11 @@ impl Engine {
             .iter()
             .all(|chain| chain.len() == 1 && chain[0] == *identity);
         let config = RunConfig {
+            roster: submission
+                .providers
+                .roster
+                .as_ref()
+                .map(|roster| Box::new(roster.snapshot.clone())),
             providers: (!inherited).then_some(routes),
             provider: identity.profile.clone(),
             model: identity.model.clone(),
@@ -1728,10 +1757,32 @@ impl Engine {
 }
 
 fn admit_providers(providers: &crate::provider::AdmittedProviders) -> Result<(), EngineError> {
-    if !providers.identities().valid() {
+    if !providers.identities().valid()
+        || providers.roster.as_ref().is_some_and(|roster| {
+            !roster.valid()
+                || roster.snapshot.role_routes().as_ref() != Some(&providers.identities())
+        })
+    {
         return Err(EngineError::InvalidRequest);
     }
-    for chain in providers.values() {
+    if providers.roster.is_some() {
+        let pinned_bytes = serde_json::to_vec(&(
+            &providers.identities(),
+            providers.roster.as_ref().map(|roster| &roster.snapshot),
+        ))
+        .map_err(|_| EngineError::InvalidRequest)?
+        .len();
+        // Remaining RunStarted metadata fits 16 KiB at the existing digest, history and Tool-receipt bounds.
+        if pinned_bytes + 16 * 1024 > 64 * 1024 {
+            return Err(EngineError::InvalidRequest);
+        }
+    }
+    for chain in providers.values().into_iter().chain(
+        providers
+            .roster
+            .iter()
+            .flat_map(|roster| roster.profiles.iter().map(|(_, chain)| chain)),
+    ) {
         for provider in chain {
             checked_identity(provider.as_ref())?;
         }
@@ -1745,7 +1796,7 @@ fn validate_turn_providers(
 ) -> Result<(), EngineError> {
     let providers = &submission.providers;
     if !request.images.is_empty()
-        && providers.values().iter().take(2).any(|chain| {
+        && providers.agent_chains().iter().any(|chain| {
             chain
                 .iter()
                 .any(|candidate| candidate.identity().custom_provenance().is_some())
@@ -1754,7 +1805,7 @@ fn validate_turn_providers(
         return Err(EngineError::ImagesNotAdmitted);
     }
     if submission.tools.is_some()
-        && [&providers.primary, &providers.child].iter().any(|chain| {
+        && providers.agent_chains().iter().any(|chain| {
             chain
                 .iter()
                 .any(|candidate| !candidate.identity().shares_account(chain[0].identity()))
@@ -1763,7 +1814,7 @@ fn validate_turn_providers(
         return Err(EngineError::IncompatibleProviderChain);
     }
     if submission.tools.is_some()
-        && providers.values().iter().take(2).any(|chain| {
+        && providers.agent_chains().iter().any(|chain| {
             chain
                 .iter()
                 .any(|candidate| candidate.identity().custom_provenance().is_some())

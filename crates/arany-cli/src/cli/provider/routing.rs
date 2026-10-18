@@ -53,17 +53,17 @@ struct RoutingConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Route {
-    provider: String,
-    model: String,
+pub(crate) struct Route {
+    pub(crate) provider: String,
+    pub(crate) model: String,
     #[serde(deserialize_with = "Option::deserialize")]
-    effort: Option<Effort>,
+    pub(crate) effort: Option<Effort>,
     #[serde(deserialize_with = "Option::deserialize")]
-    account_id: Option<Uuid>,
+    pub(crate) account_id: Option<Uuid>,
 }
 
 impl Route {
-    fn validate(&self) -> Result<(), RoutingError> {
+    pub(super) fn validate(&self) -> Result<(), RoutingError> {
         let profile =
             ProviderArg::from_str(&self.provider).map_err(RoutingError::InvalidProvider)?;
         if self.model.is_empty()
@@ -125,7 +125,7 @@ pub(crate) async fn configured_providers(
         .read()
         .map_err(|_| RoutingError::RoutingUnavailable)?
     else {
-        return Ok(Providers::all(vec![primary]));
+        return Ok(AdmittedProviders::single(primary));
     };
     let config = parse(&bytes)?;
     let mut providers = Providers::all(vec![Arc::clone(&primary)]);
@@ -181,10 +181,10 @@ pub(crate) async fn configured_providers(
         };
         *providers.get_mut(role) = chain;
     }
-    Ok(providers)
+    Ok(AdmittedProviders::from_roles(providers))
 }
 
-async fn admit(
+pub(super) async fn admit(
     state_dir: &Path,
     workspace: &Path,
     route: &Route,

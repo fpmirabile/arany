@@ -77,6 +77,7 @@ pub enum RecordKind {
     WorkspacePermissions,
     ProviderProfiles,
     ProviderRouting,
+    ProviderRoster,
     Permissions,
     UnguardedCommands,
     SavedAccount,
@@ -96,6 +97,7 @@ impl RecordKind {
                 Some("workspace-permissions.pending"),
                 64 * 1024,
             ),
+            Self::ProviderRoster => ("provider-roster.json", None, 64 * 1024),
             Self::ProviderRouting => ("provider-routing.json", None, 16 * 1024),
             Self::Permissions => ("permissions.json", None, 64 * 1024),
             Self::UnguardedCommands => (
@@ -603,6 +605,13 @@ mod tests {
                         Some(RECORD)
                     );
 
+                    std::fs::write(state.path.join(RecordKind::ProviderRoster.file()), RECORD)
+                        .unwrap();
+                    std::fs::set_permissions(
+                        state.path.join(RecordKind::ProviderRoster.file()),
+                        std::fs::Permissions::from_mode(0o600),
+                    )
+                    .unwrap();
                     let output = std::process::Command::new("/usr/bin/setpriv")
                         .args([
                             "--reuid",
@@ -652,6 +661,14 @@ mod tests {
                         std::fs::read(Path::new(OWNER_ROOT).join(RecordKind::SavedAccount.file()))
                             .expect_err("another OS user read the saved record")
                             .kind(),
+                        io::ErrorKind::PermissionDenied
+                    );
+                    assert_eq!(
+                        std::fs::read(
+                            Path::new(OWNER_ROOT).join(RecordKind::ProviderRoster.file())
+                        )
+                        .unwrap_err()
+                        .kind(),
                         io::ErrorKind::PermissionDenied
                     );
                     assert!(StateRoot::open_existing(Path::new(OWNER_ROOT)).is_err());
@@ -752,6 +769,8 @@ mod tests {
         for kind in [
             RecordKind::ToolsConfig,
             RecordKind::ProviderProfiles,
+            RecordKind::ProviderRouting,
+            RecordKind::ProviderRoster,
             RecordKind::Permissions,
         ] {
             assert!(matches!(
@@ -1217,5 +1236,63 @@ mod tests {
             StateRoot::open_existing(&path),
             Err(StoreError::StateNotPrivate)
         ));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod roster_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn provider_roster_records_refuse_unsafe_objects_and_keep_the_opened_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        let root = StateRoot::admit(&path).unwrap();
+        let record = root.record(RecordKind::ProviderRoster);
+        let file = path.join("provider-roster.json");
+        assert!(record.read().unwrap().is_none());
+        let target = temp.path().join("target");
+        std::fs::write(&target, b"private canary").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&target, &file).unwrap();
+        assert!(record.read().is_err());
+        std::fs::remove_file(&file).unwrap();
+        std::fs::hard_link(&target, &file).unwrap();
+        assert!(record.read().is_err());
+        std::fs::remove_file(&file).unwrap();
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &file,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        assert!(record.read().is_err());
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(record.read().is_err());
+        std::fs::remove_dir(&file).unwrap();
+        for (size, private, accepted) in [
+            (64 * 1024, true, true),
+            (64 * 1024 + 1, true, false),
+            (1, false, false),
+        ] {
+            std::fs::write(&file, vec![b' '; size]).unwrap();
+            std::fs::set_permissions(
+                &file,
+                std::fs::Permissions::from_mode(if private { 0o600 } else { 0o644 }),
+            )
+            .unwrap();
+            assert_eq!(record.read().is_ok(), accepted);
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"private canary");
+        std::fs::write(&file, b"original").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::rename(&path, temp.path().join("old-state")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(path.join("provider-roster.json"), b"replacement").unwrap();
+        assert!(root.readmit().is_err());
+        assert_eq!(record.read().unwrap().unwrap(), b"original");
     }
 }

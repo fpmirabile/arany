@@ -52,6 +52,8 @@ pub(crate) struct AttachedArgs {
     #[arg(long, help = "openai, anthropic, chatgpt, or custom:NAME")]
     provider: Option<ProviderArg>,
     #[arg(long)]
+    profile: Option<String>,
+    #[arg(long)]
     model: Option<String>,
     #[arg(long, help = "Model-specific reasoning effort")]
     effort: Option<Effort>,
@@ -169,6 +171,7 @@ struct Admission {
     telemetry: Telemetry,
     state_dir: PathBuf,
     explicit_state_dir: bool,
+    roster: Option<String>,
     workspace: PathBuf,
     include_paths: Vec<PathBuf>,
     tools: bool,
@@ -187,6 +190,7 @@ impl AttachedArgs {
     pub(crate) fn is_empty(&self) -> bool {
         self.state_dir.is_none()
             && self.workspace.is_none()
+            && self.profile.is_none()
             && self.provider.is_none()
             && self.model.is_none()
             && self.effort.is_none()
@@ -289,6 +293,7 @@ impl AttachedArgs {
             telemetry,
             state_dir,
             explicit_state_dir,
+            roster: self.profile,
             workspace,
             include_paths: self.include_paths,
             tools: self.tools,
@@ -306,8 +311,32 @@ impl AttachedArgs {
     }
 }
 
-pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), String> {
+pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<(), String> {
+    let selected = if let Some(name) = &args.profile {
+        if args.setup {
+            return Err("--setup cannot be combined with --profile".into());
+        }
+        let (workspace, state_dir) =
+            super::admit_workspace(args.workspace.clone(), args.state_dir.clone())
+                .map_err(str::to_owned)?;
+        let selected = super::provider::roster::load(&state_dir, &workspace, name)?;
+        selected.matches(args.provider.as_ref(), args.model.as_deref(), args.effort)?;
+        let primary = selected.primary();
+        args.provider = Some(ProviderArg::from_str(&primary.provider).map_err(str::to_owned)?);
+        args.model = Some(primary.model.clone());
+        args.effort = primary.effort;
+        use std::io::Write;
+        std::io::stderr()
+            .write_all(selected.manifest()?.as_bytes())
+            .map_err(|_| "roster manifest output failed")?;
+        Some(selected)
+    } else {
+        None
+    };
     let mut admission = args.admit(telemetry)?;
+    if let Some(selected) = selected {
+        admission.defaults.account_id = selected.primary().account_id;
+    }
     let goal_resume = admission.resume_goal;
     let restored_settings = controls::restore_settings(&admission).await;
     let mut saved_view = restored_settings.as_ref().copied().unwrap_or_default().view;
@@ -343,7 +372,9 @@ pub(crate) async fn run(args: AttachedArgs, telemetry: Telemetry) -> Result<(), 
         append_notice(&mut setup_notice, permissions::UNAVAILABLE_NOTICE);
     }
     let explicit_provider = admission.defaults.provider.is_some();
-    if admission.defaults.provider.as_deref() == Some("chatgpt") {
+    if admission.defaults.provider.as_deref() == Some("chatgpt")
+        && admission.defaults.account_id.is_none()
+    {
         match chatgpt::selected_account_id() {
             Ok(id) => admission.defaults.account_id = Some(id),
             Err(error) => {
@@ -2408,6 +2439,7 @@ mod tests {
             policy: CollaborationPolicy::Single,
         };
         let new = Admission {
+            roster: None,
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
             explicit_state_dir: false,
@@ -2441,6 +2473,7 @@ mod tests {
             .expect("first submission saves the conversation");
 
         let resumed = Admission {
+            roster: None,
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
             explicit_state_dir: false,
@@ -2469,6 +2502,7 @@ mod tests {
         assert_eq!(resumed_view.defaults.model.as_deref(), Some("gpt-5.4-mini"));
 
         let continued = Admission {
+            roster: None,
             telemetry: Telemetry::disabled(),
             state_dir: state_dir.clone(),
             explicit_state_dir: false,
@@ -2513,6 +2547,7 @@ mod tests {
         assert_eq!(preserved.defaults, defaults);
 
         let forked = Admission {
+            roster: None,
             telemetry: Telemetry::disabled(),
             state_dir,
             explicit_state_dir: false,

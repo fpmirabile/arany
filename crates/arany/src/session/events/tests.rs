@@ -644,6 +644,7 @@ mod account_default_tests {
     #[test]
     fn run_account_provenance_separates_api_keys_and_subscription_bounds() {
         let mut config = RunConfig {
+            roster: None,
             providers: None,
             provider: "openai".into(),
             model: "gpt-5.4".into(),
@@ -676,9 +677,42 @@ mod account_default_tests {
         };
         assert_eq!(
             event.payload().unwrap(),
-            r#"{"config":{"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
+            r#"{"config":{"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
         );
-        assert_eq!(payload_version("RunStarted"), Some(10));
+        let Event::RunStarted {
+            config: ordinary, ..
+        } = &event
+        else {
+            unreachable!()
+        };
+        let mut roster_config = ordinary.clone();
+        let mut roster = crate::provider::RosterSnapshot {
+            preset: "coding".into(),
+            selection_digest: [0; 32],
+            profiles: vec![crate::provider::NamedProviderRoutes {
+                name: "main".into(),
+                routes: vec![ordinary.identity().unwrap()],
+            }],
+            providers: crate::provider::Providers::all("main".into()),
+            child_profiles: vec!["main".into()],
+        };
+        roster.selection_digest = roster.digest().unwrap();
+        roster_config.roster = Some(Box::new(roster));
+        assert!(roster_config.validate().is_ok());
+        for change in 0..4 {
+            let mut forged = roster_config.clone();
+            match change {
+                0 => forged.roster.as_mut().unwrap().selection_digest[0] ^= 1,
+                1 => forged.model = "changed".into(),
+                2 => forged.roster.as_mut().unwrap().profiles[0].routes[0].model = "changed".into(),
+                _ => forged.roster.as_mut().unwrap().child_profiles.clear(),
+            }
+            assert!(forged.validate().is_err());
+        }
+        let mut missing_roster = serde_json::to_value(ordinary).unwrap();
+        missing_roster.as_object_mut().unwrap().remove("roster");
+        assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
+        assert_eq!(payload_version("RunStarted"), Some(11));
         assert_eq!(payload_version("ProviderCallRecorded"), Some(6));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
@@ -1440,6 +1474,7 @@ mod payload_version_tests {
         let agent = AgentRunId::new();
         let goal_id = GoalId::new();
         let config = RunConfig {
+            roster: None,
             providers: None,
             provider: "openai".into(),
             model: "gpt-5.4".into(),
@@ -1495,7 +1530,7 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 10,
+                Event::RunStarted { .. } => 11,
                 Event::ToolStarted { .. } => 8,
                 _ => 7,
             };

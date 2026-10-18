@@ -1,0 +1,174 @@
+use super::*;
+use serde_json::json;
+use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio};
+
+fn record() -> serde_json::Value {
+    json!({"version":1,"profiles":[
+        {"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":"low","account_id":null}]},
+        {"name":"unused","routes":[{"provider":"anthropic","model":"claude-sonnet-5","effort":"high","account_id":null}]}
+    ],"presets":[{"name":"coding","providers":{"primary":"main","child":null,"review":null,"compaction":null},"child_profiles":["main","unused"]}]})
+}
+
+fn command(workspace: &Path, state: &Path, extra: &[&str]) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+    command
+        .env_clear()
+        .current_dir(workspace)
+        .args(["exec", "--profile", "coding", "--state-dir"])
+        .arg(state)
+        .arg("--workspace")
+        .arg(workspace)
+        .args(extra)
+        .arg("answer")
+        .stdin(Stdio::null());
+    command.bounded_output().unwrap()
+}
+
+#[test]
+fn profile_refusals_precede_workspace_input_and_keep_stdout_empty() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        workspace.join("AGENTS.md"),
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    StateRoot::admit(&state).unwrap();
+    let roster = state.join("provider-roster.json");
+    let value = record();
+    private_file(&roster, &serde_json::to_vec(&value).unwrap());
+    let manifest = "Roster preset: coding\nRoles: primary=main, child=main, review=main, compaction=main\nEligible child profiles: main, unused\n  main[0]: openai/gpt-5.4 effort=low (native API)\n  unused[0]: anthropic/claude-sonnet-5 effort=high (native API)\n";
+    for (extra, expected) in [
+        (
+            vec!["--provider", "anthropic"],
+            "error: explicit Provider/model/effort differs from --profile primary\n".to_owned(),
+        ),
+        (
+            vec!["--model", "gpt-6-luna"],
+            "error: explicit Provider/model/effort differs from --profile primary\n".to_owned(),
+        ),
+        (
+            vec!["--effort", "high"],
+            "error: explicit Provider/model/effort differs from --profile primary\n".to_owned(),
+        ),
+        (
+            vec![],
+            format!(
+                "{manifest}error: roster profile main route 0 refused: Provider role route openai/gpt-5.4 refused: selected native API credentials or workspace configuration unavailable\n"
+            ),
+        ),
+        (
+            vec!["--output", "jsonl"],
+            format!(
+                "{manifest}error: roster profile main route 0 refused: Provider role route openai/gpt-5.4 refused: selected native API credentials or workspace configuration unavailable\n"
+            ),
+        ),
+    ] {
+        let output = command(&workspace, &state, &extra);
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.stdout, b"");
+        assert_eq!(output.stderr, expected.as_bytes());
+    }
+    let mut unused = Command::new(env!("CARGO_BIN_EXE_arany"));
+    let output = unused
+        .env_clear()
+        .env("OPENAI_API_KEY", "synthetic-roster-key")
+        .current_dir(&workspace)
+        .args(["exec", "--profile", "coding", "--state-dir"])
+        .arg(&state)
+        .arg("answer")
+        .stdin(Stdio::null())
+        .bounded_output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, b"");
+    assert_eq!(output.stderr, format!("{manifest}error: roster profile unused route 0 refused: Provider role route anthropic/claude-sonnet-5 refused: selected native API credentials or workspace configuration unavailable\n").as_bytes());
+    private_file(&state.join("provider-routing.json"), b"{}");
+    let conflict = command(&workspace, &state, &[]);
+    assert_eq!(conflict.status.code(), Some(1));
+    assert_eq!(conflict.stdout, b"");
+    assert_eq!(
+        conflict.stderr,
+        b"error: --profile conflicts with provider-routing.json; choose one routing source\n"
+    );
+    std::fs::remove_file(state.join("provider-routing.json")).unwrap();
+    std::fs::set_permissions(&roster, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let unsafe_file = command(&workspace, &state, &[]);
+    assert_eq!(unsafe_file.status.code(), Some(1));
+    assert_eq!(unsafe_file.stdout, b"");
+    assert_eq!(
+        unsafe_file.stderr,
+        b"error: Provider roster unavailable or unsafe\n"
+    );
+    std::fs::remove_file(&roster).unwrap();
+    let missing = command(&workspace, &state, &[]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(missing.stdout, b"");
+    assert_eq!(
+        missing.stderr,
+        b"error: provider-roster.json is unavailable\n"
+    );
+    assert!(
+        !state.join("events.sqlite3").exists(),
+        "refusal creates no journal"
+    );
+}
+
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[test]
+fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    rustix::fs::mkfifoat(
+        rustix::fs::CWD,
+        workspace.join("AGENTS.md"),
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    StateRoot::admit(&state).unwrap();
+    let account_root = temp.path().join("account-root");
+    let account = super::setup::prepare_test_file_account_at(&account_root);
+    let mut roster = record();
+    roster["profiles"][0]["routes"][0]["account_id"] = json!(account);
+    let same = json!({"name":"same","routes":[{"provider":"openai","model":"gpt-6-luna","effort":"low","account_id":account}]});
+    roster["profiles"].as_array_mut().unwrap().push(same);
+    roster["presets"][0]["child_profiles"] = json!(["main", "same", "unused"]);
+    for other in [false, true] {
+        if other {
+            roster["profiles"][2]["routes"][0]["account_id"] = json!(uuid::Uuid::now_v7());
+        }
+        private_file(
+            &state.join("provider-roster.json"),
+            &serde_json::to_vec(&roster).unwrap(),
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
+            .env("HOME", temp.path().join("home"))
+            .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+            .current_dir(&workspace)
+            .args(["exec", "--profile", "coding", "--state-dir"])
+            .arg(&state)
+            .arg("answer")
+            .stdin(Stdio::null())
+            .bounded_output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.stdout, b"");
+        let error = if other {
+            "error: roster profile same route 0 refused: Provider role route openai/gpt-6-luna refused: invalid saved account; use arany --setup to choose or reset access\n"
+        } else {
+            "error: roster profile unused route 0 refused: Provider role route anthropic/claude-sonnet-5 refused: selected native API credentials or workspace configuration unavailable\n"
+        };
+        let expected = format!(
+            "Roster preset: coding\nRoles: primary=main, child=main, review=main, compaction=main\nEligible child profiles: main, same, unused\n  main[0]: openai/gpt-5.4 effort=low (native API)\n  same[0]: openai/gpt-6-luna effort=low (native API)\n  unused[0]: anthropic/claude-sonnet-5 effort=high (native API)\n{error}"
+        );
+        assert_eq!(output.stderr, expected.as_bytes());
+        assert!(!state.join("events.sqlite3").exists());
+    }
+}

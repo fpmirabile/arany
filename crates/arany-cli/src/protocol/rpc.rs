@@ -133,7 +133,9 @@ pub enum Reason {
 
 const _: fn(&arany::EngineError) -> Reason = |error| match error {
     arany::EngineError::IncompatibleProviderChain => Reason::IncompatibleProviderChain,
-    arany::EngineError::InvalidRequest => Reason::InvalidRequest,
+    arany::EngineError::RosterSelectionMismatch | arany::EngineError::InvalidRequest => {
+        Reason::InvalidRequest
+    }
     arany::EngineError::MissingSession => Reason::MissingSession,
     arany::EngineError::NoSessionForWorkspace => Reason::NoSessionForWorkspace,
     arany::EngineError::TooManySessions => Reason::TooManySessions,

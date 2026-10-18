@@ -37,6 +37,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         unguarded_rules_digest: None,
     };
     let config = RunConfig {
+        roster: None,
         providers: None,
         provider: "scripted".into(),
         model: "replay-model".into(),
