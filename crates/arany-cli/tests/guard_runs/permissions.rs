@@ -736,6 +736,7 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
                 children: vec![arany::ChildAssignment {
+                    editor: None,
                     objective: "Inspect the facts".into(),
                     profile: None,
                 }],
@@ -792,6 +793,7 @@ async fn researcher_review_approval_dispatches_within_a_short_goal_budget() {
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
                     children: vec![arany::ChildAssignment {
+                        editor: None,
                         objective: "Inspect the facts".into(),
                         profile: None,
                     }],
@@ -848,6 +850,7 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
                 children: vec![arany::ChildAssignment {
+                    editor: None,
                     objective: "Inspect the facts".into(),
                     profile: None,
                 }],
@@ -983,6 +986,7 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
                 children: vec![arany::ChildAssignment {
+                    editor: None,
                     objective: "Inspect the task".into(),
                     profile: None,
                 }],
@@ -1689,6 +1693,7 @@ async fn agent_definition_guard_registry_research_selection_and_replay() {
                 ProviderOutcome::Delegate(Delegate {
                     agent: Some("reader".into()),
                     children: vec![arany::ChildAssignment {
+                        editor: None,
                         objective: "Inspect facts".into(),
                         profile: None,
                     }],
@@ -1842,6 +1847,7 @@ async fn agent_definition_guard_skips_invalid_files_and_refuses_their_selection(
             vec![ProviderOutcome::Delegate(Delegate {
                 agent: Some("reader".into()),
                 children: vec![arany::ChildAssignment {
+                    editor: None,
                     objective: "Inspect facts".into(),
                     profile: None,
                 }],
@@ -1877,6 +1883,7 @@ async fn agent_definition_guard_editor_turn_and_tool_limits_refuse_child_egress(
         let mut responses = vec![ProviderOutcome::Delegate(Delegate {
             agent: Some("reader".into()),
             children: vec![arany::ChildAssignment {
+                editor: None,
                 objective: "Inspect facts".into(),
                 profile: None,
             }],
@@ -2086,6 +2093,7 @@ async fn agent_definition_guard_modes_preserve_parent_asks_and_add_review() {
             ProviderOutcome::Delegate(Delegate {
                 agent: Some("reader".into()),
                 children: vec![arany::ChildAssignment {
+                    editor: None,
                     objective: "Inspect".into(),
                     profile: None,
                 }],
@@ -2662,6 +2670,7 @@ async fn hook_post_tool_use_denies_a_researcher_tool_before_dispatch() {
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
                     children: vec![arany::ChildAssignment {
+                        editor: None,
                         objective: "Inspect facts".into(),
                         profile: None,
                     }],
@@ -2899,6 +2908,7 @@ mod lifecycle_hooks {
                 vec![
                     ProviderOutcome::Delegate(arany::Delegate {
                         children: vec![arany::ChildAssignment {
+                            editor: None,
                             objective: "Research the task".into(),
                             profile: None,
                         }],
@@ -2943,6 +2953,7 @@ mod lifecycle_hooks {
         let mut fixture = Fixture::new(Some(&settings), false);
         fixture.max_children = 2;
         let child = |objective: &str| arany::ChildAssignment {
+            editor: None,
             objective: objective.into(),
             profile: None,
         };
@@ -3066,6 +3077,7 @@ mod lifecycle_hooks {
             children: vec![arany::ChildAssignment {
                 objective: "Research the task".into(),
                 profile: None,
+                editor: None,
             }],
             agent: None,
         })];
@@ -3181,6 +3193,7 @@ mod lifecycle_hooks {
                 .map(|index| arany::ChildAssignment {
                     objective: format!("Research part {index}"),
                     profile: None,
+                    editor: None,
                 })
                 .collect(),
             agent: None,

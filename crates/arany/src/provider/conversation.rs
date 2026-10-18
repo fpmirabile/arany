@@ -15,6 +15,7 @@ use serde_json::Value;
 pub enum PromptRole {
     Primary,
     Researcher,
+    Editor,
     ReadOnly,
     ToolReview,
 }

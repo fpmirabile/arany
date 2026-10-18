@@ -500,7 +500,7 @@ fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCal
             .is_some_and(|call| call.disposition == ProviderCallDisposition::Delegated)
         && record.phase == AgentPhase::RootSynthesis
         && (all_children_finished(run)
-            || record.disposition == ProviderCallDisposition::ToolRequested
+            || record.disposition != ProviderCallDisposition::Delegated
                 && worker::coordination_ready(run))
 }
 

@@ -313,9 +313,11 @@ impl Fixture {
         let outcome = match disposition {
             ToolDisposition::Succeeded => WorkerIntegrationOutcome::Integrated,
             ToolDisposition::Conflict => WorkerIntegrationOutcome::Conflict,
-            ToolDisposition::Denied => WorkerIntegrationOutcome::Denied,
+            ToolDisposition::Denied
+            | ToolDisposition::Failed
+            | ToolDisposition::Limit
+            | ToolDisposition::Cancelled => WorkerIntegrationOutcome::Denied,
             ToolDisposition::Uncertain => WorkerIntegrationOutcome::Uncertain,
-            _ => unreachable!(),
         };
         self.push(Event::WorkerIntegrationRecorded {
             run_id: self.run,
@@ -1774,6 +1776,9 @@ fn worker_protocol_no_change_conflict_and_denial_settle_without_publication() {
     for (disposition, reason) in [
         (ToolDisposition::Conflict, WorkerSettlementReason::Conflict),
         (ToolDisposition::Denied, WorkerSettlementReason::Denied),
+        (ToolDisposition::Failed, WorkerSettlementReason::Denied),
+        (ToolDisposition::Limit, WorkerSettlementReason::Denied),
+        (ToolDisposition::Cancelled, WorkerSettlementReason::Denied),
     ] {
         let mut f = fixture();
         f.mutation();
@@ -2863,4 +2868,48 @@ fn worker_protocol_absent_subtree_accepts_private_mkdir_then_file_creation() {
     assert_eq!(worker.revision, 2);
     assert_eq!(worker.overlay.len(), 1);
     assert_eq!(worker.overlay[0].before, WorkerBaseVersion::Absent);
+}
+
+#[test]
+fn worker_protocol_unverified_synthesis_is_recorded_but_cannot_finish() {
+    let mut f = fixture();
+    f.mutation();
+    let data = f.finish_worker();
+    let h = f.handover(data.clone());
+    let i = f.integrate(h, data, ToolDisposition::Succeeded);
+    f.release(Some(h), i);
+    f.call(
+        f.primary,
+        AgentPhase::RootSynthesis,
+        ProviderCallDisposition::Finished,
+        None,
+    );
+    let events = f.envelopes();
+    let decoded: Vec<_> = events
+        .iter()
+        .map(|e| EventEnvelope {
+            event: Event::decode(
+                e.event.kind(),
+                e.event.version(),
+                &e.event.payload().unwrap(),
+                e.run_id,
+                e.agent_run_id,
+            )
+            .unwrap(),
+            ..e.clone()
+        })
+        .collect();
+    assert!(SessionView::replay(f.session, &decoded).unwrap().is_some());
+    refused(
+        &f,
+        Event::AgentFinished {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            disposition: AgentDisposition::Finished,
+            summary: Some("done".into()),
+            result: Some("done".into()),
+            worker: None,
+        },
+        "finish without fresh verification",
+    );
 }

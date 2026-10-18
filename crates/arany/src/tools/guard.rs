@@ -637,7 +637,7 @@ pub(super) async fn execute(
     let result = Err(ToolError::ProtectionUnavailable);
     #[cfg(any(test, feature = "test-support"))]
     if result.is_ok()
-        && runtime.worker.is_some()
+        && (runtime.worker.is_some() || runtime.handover.is_some())
         && crate::fault::FaultPlan::worker_receipt_lost(intent.id)
     {
         return Err(ToolError::Uncertain);

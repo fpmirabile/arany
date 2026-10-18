@@ -53,7 +53,7 @@ impl WorkerView {
             interrupted: false,
         }
     }
-    fn settled(&self) -> bool {
+    pub(crate) fn settled(&self) -> bool {
         self.released.is_some()
             && (self.outcome.as_ref().is_some_and(|(_, o)| {
                 !matches!(
@@ -293,9 +293,9 @@ fn validate_request(
             .lease
             .iter()
             .any(|p| !within(p, &plan.paths) || !within(p, &policy.parent_grant.write_paths))
-        || ![WorkerTool::Write, WorkerTool::Edit].iter().any(|op| {
-            policy.parent_grant.tools.contains(op) && definition.allows_worker(&sample_call(*op))
-        })
+        || ![WorkerTool::Write, WorkerTool::Edit]
+            .iter()
+            .any(|op| policy.parent_grant.tools.contains(op) && definition.allows_worker_tool(*op))
         || match &request.criterion {
             GoalSuccessCriterion::ToolCallSucceeded { call } => !plan.allows_call(call),
             GoalSuccessCriterion::WorkspaceFileContent { path, .. }
@@ -434,8 +434,7 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
                 return Err(ReplayError::InvalidTransition);
             }
             for op in &p.grant.tools {
-                let call = sample_call(*op);
-                if !def.allows_worker(&call) {
+                if !def.allows_worker_tool(*op) {
                     return Err(ReplayError::InvalidTransition);
                 }
             }
@@ -473,40 +472,6 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
         _ => Err(ReplayError::InvalidTransition),
     }
 }
-fn sample_call(tool: WorkerTool) -> ToolCall {
-    match tool {
-        WorkerTool::List => ToolCall::List { path: ".".into() },
-        WorkerTool::Read => ToolCall::Read {
-            path: "file".into(),
-            offset: 0,
-            limit: 1,
-        },
-        WorkerTool::Search => ToolCall::Search {
-            path: ".".into(),
-            query: "x".into(),
-        },
-        WorkerTool::Mkdir => ToolCall::Mkdir { path: "dir".into() },
-        WorkerTool::Write => ToolCall::Write {
-            path: "file".into(),
-            expected_digest: None,
-            content: String::new(),
-        },
-        WorkerTool::Edit => ToolCall::Edit {
-            path: "file".into(),
-            expected_digest: "0".repeat(64),
-            old: "a".into(),
-            new: "b".into(),
-        },
-        WorkerTool::Skill => ToolCall::Skill {
-            name: "skill".into(),
-            resource: None,
-        },
-        WorkerTool::McpList => ToolCall::McpList {
-            server: "server".into(),
-        },
-    }
-}
-
 pub(super) fn child_tool_admissible(
     run: &RunView,
     id: AgentRunId,
@@ -710,6 +675,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                     .is_some_and(|o| o.disposition != ToolDisposition::Succeeded)
             })
             || !reviewing
+                && !matches!(event, Event::ProviderCallRecorded { .. })
                 && a.provider_calls
                     .iter()
                     .filter(|r| r.phase == AgentPhase::ChildWork)
@@ -1267,6 +1233,11 @@ pub(super) fn apply(
                 }
                 ToolDisposition::Conflict => WorkerIntegrationOutcome::Conflict,
                 ToolDisposition::Denied => WorkerIntegrationOutcome::Denied,
+                ToolDisposition::Failed | ToolDisposition::Limit | ToolDisposition::Cancelled
+                    if o.attestation.is_none() =>
+                {
+                    WorkerIntegrationOutcome::Denied
+                }
                 ToolDisposition::Uncertain => WorkerIntegrationOutcome::Uncertain,
                 _ => return Err(ReplayError::InvalidTransition),
             };

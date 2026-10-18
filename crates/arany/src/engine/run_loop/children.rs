@@ -26,10 +26,11 @@ const MIN_CHILD_RESULT_BYTES: usize = 4096 + 512;
 
 pub(super) struct ChildWork {
     pub(super) agent_run_id: AgentRunId,
-    objective: String,
+    pub(super) objective: String,
     pub(super) definition: Option<crate::tools::definitions::AgentDefinition>,
-    turns_remaining: u8,
-    stop_hook_feedback: Vec<crate::provider::StopHookFeedback>,
+    pub(super) turns_remaining: u8,
+    pub(super) editor: bool,
+    pub(super) stop_hook_feedback: Vec<crate::provider::StopHookFeedback>,
     pub(super) tools: Option<ToolContext>,
     pub(super) tool_calls_remaining: usize,
 }
@@ -105,6 +106,9 @@ impl RunLoop<'_> {
         children: &[ChildAssignment],
         agent: Option<&str>,
     ) -> bool {
+        if children.iter().any(|child| child.editor.is_some()) {
+            return self.valid_editor_delegation(children, agent);
+        }
         agent.is_none_or(|name| {
             self.definitions
                 .get()
@@ -131,6 +135,10 @@ impl RunLoop<'_> {
         agent: Option<String>,
         delegate_turn: ProviderTurn,
     ) -> Result<(), EngineError> {
+        if objectives.iter().any(|child| child.editor.is_some()) {
+            return Box::pin(self.run_foreground_worker(root_request, objectives, delegate_turn))
+                .await;
+        }
         let Some(Spawned {
             mut children,
             parallel,
@@ -282,6 +290,7 @@ impl RunLoop<'_> {
                 turns_remaining: definition
                     .as_ref()
                     .map_or(MAX_CHILD_TURNS, |definition| definition.max_turns),
+                editor: false,
                 definition: definition.clone(),
                 tools: research_template.clone(),
                 tool_calls_remaining: tool_allowance,
@@ -672,7 +681,7 @@ impl RunLoop<'_> {
         Ok(ChildStop::End(AgentDisposition::Failed))
     }
 
-    async fn synthesize(
+    pub(super) async fn synthesize(
         &self,
         root_request: &mut ProviderRequest,
         results: Vec<Option<ChildResult>>,
@@ -690,7 +699,7 @@ impl RunLoop<'_> {
             tools.steps.push(ToolStep {
                 turn: delegate_turn,
                 requests: Vec::new(),
-                observations: Vec::new(),
+                observations: self.ledger().view(|view| view.runs.last().into_iter().flat_map(|run| &run.tools).filter(|tool| matches!(tool.intent.call, ToolCall::ApplyChangeset { source: crate::session::worker::ChangesetSource::WorkerHandover { .. } })).filter_map(|tool| tool.observation.clone()).collect())?,
                 facts: None,
                 steering_notes: Vec::new(),
                 calls_remaining: None,

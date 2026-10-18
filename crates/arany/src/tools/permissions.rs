@@ -223,7 +223,15 @@ impl PermissionConfig {
         &self,
         call: &ToolCall,
     ) -> (Decision, PermissionSource, Option<ApprovalMode>) {
-        let (decision, source) = self.decision_with_source(call);
+        self.evaluate_worker_paths(call, None)
+    }
+
+    pub(crate) fn evaluate_worker_paths(
+        &self,
+        call: &ToolCall,
+        paths: Option<&[crate::session::worker::WorkerFileFact]>,
+    ) -> (Decision, PermissionSource, Option<ApprovalMode>) {
+        let (decision, source) = self.decision_with_worker_paths(call, paths);
         let approval = (decision == Decision::Ask).then_some(
             if self.mode == PermissionMode::Auto
                 && source != PermissionSource::Rule
@@ -238,6 +246,14 @@ impl PermissionConfig {
     }
 
     fn decision_with_source(&self, call: &ToolCall) -> (Decision, PermissionSource) {
+        self.decision_with_worker_paths(call, None)
+    }
+
+    fn decision_with_worker_paths(
+        &self,
+        call: &ToolCall,
+        paths: Option<&[crate::session::worker::WorkerFileFact]>,
+    ) -> (Decision, PermissionSource) {
         if !valid_call(call) {
             return (Decision::Deny, PermissionSource::Mode);
         }
@@ -258,7 +274,8 @@ impl PermissionConfig {
             if *decision == Decision::Allow && !allow_skips_approval {
                 None
             } else {
-                rule.matches(call, *decision).then_some(*decision)
+                rule.matches_worker_paths(call, *decision, paths)
+                    .then_some(*decision)
             }
         });
         let decision = matched.unwrap_or_else(|| {
@@ -528,7 +545,12 @@ impl Rule {
         Ok(Self { tool, pattern })
     }
 
-    fn matches(&self, call: &ToolCall, decision: Decision) -> bool {
+    fn matches_worker_paths(
+        &self,
+        call: &ToolCall,
+        decision: Decision,
+        paths: Option<&[crate::session::worker::WorkerFileFact]>,
+    ) -> bool {
         let facts = call.facts();
         let matches_tool = match &self.tool {
             Tool::Bash => facts.family == Family::Process,
@@ -599,6 +621,20 @@ impl Rule {
                             .any(|(index, _)| pattern.is_match(&text[index + 1..]))
             }
             ToolCall::Skill { name, .. } => pattern.is_match(name),
+            ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
+            } => paths.map_or(decision != Decision::Allow, |paths| {
+                if decision == Decision::Allow {
+                    !paths.is_empty()
+                        && paths
+                            .iter()
+                            .all(|file| path_matches(pattern, &file.path, decision))
+                } else {
+                    paths
+                        .iter()
+                        .any(|file| path_matches(pattern, &file.path, decision))
+                }
+            }),
             ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
             } => {

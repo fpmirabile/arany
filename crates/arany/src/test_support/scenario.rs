@@ -274,14 +274,17 @@ impl Provider for GatedProvider {
                 agent: None,
                 children: vec![
                     crate::ChildAssignment {
+                        editor: None,
                         objective: "A".into(),
                         profile: None,
                     },
                     crate::ChildAssignment {
+                        editor: None,
                         objective: "B".into(),
                         profile: None,
                     },
                     crate::ChildAssignment {
+                        editor: None,
                         objective: "C".into(),
                         profile: None,
                     },

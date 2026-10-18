@@ -15,7 +15,7 @@ Read the section for the affected boundary:
 
 ## 1. What the beta must prove
 
-Arany is an interactive Session-oriented CLI, not a one-shot team demo. Bare `arany` opens a local conversation and creates its durable Session on the first task submission; every accepted user Message starts one bounded Run; each Run has one accountable primary AgentRun and may admit `0..N` direct read-only children.
+Arany is an interactive Session-oriented CLI, not a one-shot team demo. Bare `arany` opens a local conversation and creates its durable Session on the first task submission; every accepted user Message starts one bounded Run; each Run has one accountable primary AgentRun and may admit direct read-only children or one foreground EditOnly worker.
 
 The full product contract is successful when it proves all of these together:
 
@@ -56,10 +56,9 @@ cannot hold Journal appends. The library has no protocol or transport dependency
 
 The Engine owns admission, scheduling, context, Goal accounting and Run
 transitions. `GoalLedger` admits, reserves and settles actions over the reducer's
-`GoalView`, with `Action::max_events` owning Event headroom. Primary and
-researcher Tool steps share `execute_step`: reservation, committed intent,
+`GoalView`, with `Action::max_events` owning Event headroom. Primary, researcher and foreground editor Tool steps share `execute_step`: reservation, committed intent,
 approval, dispatch, committed observation and continuation have one owner.
-Only the primary integrates changesets. The [execution contract](../specs/execution.md)
+Only the primary integrates changesets. The Engine coordinator owns the bounded immutable worker base, acknowledged overlay and pending handover bytes for the live Run; no native filesystem persists across worker calls. The reducer owns canonical leases, target revisions, data references, worker dispositions, integration and verification. Guard owns each disposable file view, attests private mutation/capture and publishes only the primary's eligible changeset. Journal acknowledgments advance in-memory worker state, never the reverse. The [execution contract](../specs/execution.md)
 and [Goal contract](../specs/goals.md) own lifecycle, budgets and recovery.
 
 `Journal::append` publishes only committed Events to a bounded broadcast ring of
@@ -129,8 +128,11 @@ descriptions and byte-stable ordering; a derive needs caching evidence and a
 byte snapshot before reconsideration. Guard adapters remain `cfg`-selected
 functions because the host kernel, not runtime configuration, selects them.
 
-Children are direct read-only AgentRuns: without Tools they make one reasoning
+Researcher children are direct read-only AgentRuns: without Tools they make one reasoning
 call; with Tools they may make up to 16 read-only Tool calls before reporting.
+One foreground editor instead edits its leased private base/overlay through the shared Tool step,
+returns one handover and waits for primary integration and fresh criterion verification.
+Mixed/background editor teams and later waves remain refused.
 The [researcher contract](../specs/execution.md#researcher-children) owns their
 catalog, budgets, ordering and failure rules; children never inherit a broader
 grant than their parent.

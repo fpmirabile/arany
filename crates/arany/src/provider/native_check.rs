@@ -566,6 +566,7 @@ mod tests {
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
                     children: vec![crate::ChildAssignment {
+                        editor: None,
                         objective: "What is two?".into(),
                         profile: None,
                     }],

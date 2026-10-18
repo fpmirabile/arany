@@ -96,6 +96,17 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
             _ => None,
         })
         .collect();
+    let workers: std::collections::HashMap<_, _> = events
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            Event::AgentSpawned {
+                agent_run_id,
+                assignment: Some(pins),
+                ..
+            } => Some((*agent_run_id, pins.data_bytes as usize)),
+            _ => None,
+        })
+        .collect();
     let primary_call = |index: usize| {
         matches!(
             &events[index].event,
@@ -117,6 +128,8 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                     Action::Review
                 } else if primaries.contains(agent_run_id) {
                     Action::ProviderCall { previews, steering }
+                } else if workers.contains_key(agent_run_id) {
+                    Action::Worker { chunks: 0 }
                 } else {
                     Action::Child {
                         in_flight: in_flight(index),
@@ -125,6 +138,10 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 };
                 points.push((index, action, None));
             }
+            Event::AgentSpawned {
+                assignment: Some(_),
+                ..
+            } => points.push((index, Action::Worker { chunks: 0 }, None)),
             Event::AgentSpawned { grant: Some(_), .. }
                 if !matches!(previous, Some(Event::AgentSpawned { .. })) =>
             {
@@ -192,8 +209,31 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 points.push((index, Action::BoundaryCompaction { goal: false }, None));
             }
             Event::GoalPlanContractRecorded { .. } => points.push((index, Action::Tool, None)),
-            Event::ToolStarted { agent_run_id, .. } => {
-                let action = if primaries.contains(agent_run_id) {
+            Event::ToolStarted {
+                agent_run_id,
+                intent,
+                ..
+            } => {
+                let action = if let crate::ToolCall::PrepareWorker { preparation } = &intent.call {
+                    Action::Worker {
+                        chunks: usize::from(preparation.max_chunks),
+                    }
+                } else if workers.contains_key(agent_run_id) {
+                    Action::Worker {
+                        chunks: if intent.call.mutates() {
+                            workers[agent_run_id].div_ceil(crate::worker::WORKER_CHUNK_BYTES)
+                        } else {
+                            0
+                        },
+                    }
+                } else if matches!(
+                    intent.call,
+                    crate::ToolCall::ApplyChangeset {
+                        source: crate::worker::ChangesetSource::WorkerHandover { .. }
+                    }
+                ) {
+                    Action::Worker { chunks: 0 }
+                } else if primaries.contains(agent_run_id) {
                     Action::Tool
                 } else {
                     Action::Child {
@@ -263,5 +303,235 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
             bound >= observed,
             "{action:?} at {index} bounds {bound} Events but appends {observed}",
         );
+    }
+}
+
+pub struct ForegroundWorkerProvider {
+    pub workspace: std::path::PathBuf,
+    pub case: &'static str,
+    pub budget: crate::GoalBudget,
+    pub requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
+    pub violations: std::sync::Mutex<Vec<&'static str>>,
+}
+
+impl ForegroundWorkerProvider {
+    pub fn new(workspace: &Path, case: &'static str, budget: crate::GoalBudget) -> Self {
+        Self {
+            workspace: workspace.into(),
+            case,
+            budget,
+            requests: Default::default(),
+            violations: Default::default(),
+        }
+    }
+
+    fn check(&self, condition: bool, message: &'static str) {
+        if !condition {
+            self.violations.lock().unwrap().push(message);
+        }
+    }
+
+    fn plan(&self) -> crate::GoalPlanContract {
+        crate::GoalPlanContract {
+            mission: "Edit two leased files and verify their publication".into(),
+            paths: vec!["notes".into()],
+            commands: Vec::new(),
+            resource_class: crate::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            budget: self.budget,
+            success_criterion: crate::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "notes/a".into(),
+                content: "edited a".into(),
+            },
+        }
+    }
+
+    fn delegation(&self, request: &crate::ProviderRequest) -> crate::ProviderOutcome {
+        let catalog: serde_json::Value =
+            serde_json::from_str(&request.input.tools.as_ref().unwrap().catalog).unwrap();
+        let digest = catalog["agents"]
+            .as_array()
+            .and_then(|agents| agents.iter().find(|a| a["name"] == "editor"))
+            .map(|a| a["digest"].clone())
+            .and_then(|d| serde_json::from_value(d).ok())
+            .unwrap_or([1; 32]);
+        let mut children = vec![crate::ChildAssignment {
+            objective: "Edit the leased notes".into(),
+            profile: None,
+            editor: Some(Box::new(crate::worker::EditorAssignment {
+                definition: "editor".into(),
+                definition_digest: digest,
+                mission: "Edit the leased notes".into(),
+                direction: "Return one whole changeset".into(),
+                lease: vec!["notes".into()],
+                criterion: self.plan().success_criterion,
+                mode: crate::worker::WorkerMode::Foreground,
+                max_turns: 17,
+                wave: 1,
+                resumes: None,
+                supersedes: None,
+            })),
+        }];
+        if self.case == "background" {
+            children[0].editor.as_mut().unwrap().mode = crate::worker::WorkerMode::Background;
+        }
+        if self.case == "wave" {
+            children[0].editor.as_mut().unwrap().wave = 2;
+        }
+        if self.case == "mixed" {
+            children.push(crate::ChildAssignment {
+                editor: None,
+                objective: "Research".into(),
+                profile: None,
+            });
+        }
+        crate::ProviderOutcome::Delegate(crate::Delegate {
+            agent: None,
+            children,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::Provider for ForegroundWorkerProvider {
+    fn identity(&self) -> &crate::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<crate::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                crate::ProviderIdentity::new("scripted", "test-model", crate::Provenance::native())
+            });
+        &IDENTITY
+    }
+
+    async fn invoke(
+        &self,
+        request: crate::ProviderRequest,
+    ) -> Result<crate::ProviderResponse, crate::ProviderError> {
+        use crate::{ProviderOutcome, ToolCall};
+        let step = self
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.phase == request.phase)
+            .count();
+        self.requests.lock().unwrap().push(request.clone());
+        let outcome = match (request.phase, step) {
+            (AgentPhase::RootPlan, 0) => super::scenario::tool_outcome(
+                ToolCall::Read {
+                    path: "notes/a".into(),
+                    offset: 0,
+                    limit: 128,
+                },
+                Some(Box::new(self.plan())),
+            ),
+            (AgentPhase::RootPlan, 1) => self.delegation(&request),
+            (AgentPhase::ChildWork, 0) if self.case == "calls" => {
+                finish_with("No Tool allowance remains")
+            }
+            (AgentPhase::ChildWork, 0 | 1) => {
+                self.check(
+                    std::fs::read(self.workspace.join("notes/a")).unwrap() == b"original a",
+                    "Workspace changed before integration",
+                );
+                self.check(
+                    request.input.role == crate::PromptRole::Editor,
+                    "editor prompt role",
+                );
+                let (path, old, new) = if step == 0 {
+                    ("notes/a", b"original a".as_slice(), "edited a")
+                } else {
+                    ("notes/b", b"original b".as_slice(), "edited b")
+                };
+                super::scenario::tool_outcome(
+                    ToolCall::Write {
+                        path: path.into(),
+                        expected_digest: Some(crate::tools::types::hex_digest(old)),
+                        content: new.into(),
+                    },
+                    None,
+                )
+            }
+            (AgentPhase::ChildWork, 2) => {
+                self.check(
+                    std::fs::read(self.workspace.join("notes/a")).unwrap() == b"original a",
+                    "private edit leaked to Workspace",
+                );
+                super::scenario::tool_outcome(
+                    ToolCall::Read {
+                        path: "notes/a".into(),
+                        offset: 0,
+                        limit: 128,
+                    },
+                    None,
+                )
+            }
+            (AgentPhase::ChildWork, 3) => {
+                let tools = request.input.tools.as_ref().unwrap();
+                self.check(
+                    tools
+                        .observations()
+                        .last()
+                        .is_some_and(|o| o.output.contains("edited a")),
+                    "Read did not see acknowledged private edit",
+                );
+                if self.case == "conflict" {
+                    std::fs::write(self.workspace.join("notes/b"), "host b").unwrap();
+                }
+                if self.case == "time" {
+                    tokio::time::pause();
+                    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+                }
+                finish_with("Private changes ready")
+            }
+            (AgentPhase::RootSynthesis, 0) if matches!(self.case, "success" | "unverified") => {
+                self.check(
+                    std::fs::read(self.workspace.join("notes/a")).unwrap() == b"edited a",
+                    "integration was not visible to primary",
+                );
+                if self.case == "unverified" {
+                    finish_with("Unverified finish")
+                } else {
+                    super::scenario::tool_outcome(
+                        ToolCall::Read {
+                            path: "notes/a".into(),
+                            offset: 0,
+                            limit: 128,
+                        },
+                        None,
+                    )
+                }
+            }
+            (AgentPhase::RootSynthesis, 0) if self.case == "calls" => {
+                super::scenario::tool_outcome(
+                    ToolCall::Read {
+                        path: "notes/a".into(),
+                        offset: 0,
+                        limit: 128,
+                    },
+                    None,
+                )
+            }
+            (AgentPhase::RootSynthesis, 0 | 1) => finish_with("Primary verified published notes"),
+            _ => {
+                self.check(false, "unexpected Provider call");
+                ProviderOutcome::Finish(crate::Finish {
+                    summary: "unexpected".into(),
+                    result: "unexpected".into(),
+                })
+            }
+        };
+        Ok(crate::ProviderResponse {
+            turn: crate::ProviderTurn::scripted(),
+            outcome,
+            response_id: None,
+            usage: crate::Usage {
+                input_tokens: Some(2),
+                output_tokens: Some(2),
+                ..Default::default()
+            },
+            wire_provenance: None,
+        })
     }
 }

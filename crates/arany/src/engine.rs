@@ -1608,7 +1608,7 @@ impl Engine {
             .iter()
             .all(|chain| chain.len() == 1 && chain[0] == *identity);
         let config = RunConfig {
-            worker_policy: None,
+            worker_policy: tools.as_ref().and_then(|tools| tools.worker_policy()),
             agent_definitions: tools.as_ref().and_then(|tools| tools.definitions.pin()),
             roster: submission
                 .providers
