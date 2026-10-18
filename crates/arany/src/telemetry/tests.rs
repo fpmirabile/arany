@@ -687,6 +687,101 @@ fn finished_spans(telemetry: &Telemetry, exporter: &InMemorySpanExporter) -> Vec
     exporter.get_finished_spans().expect("finished spans")
 }
 
+#[test]
+fn unguarded_counts_retain_only_pending_digests_and_approval_flags() {
+    use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
+    use crate::tools::{Attestation, CacheUpdate, EffectIntent, ToolCall, ToolDisposition};
+
+    for (approved, outcome, expected) in [
+        (false, None, 0),
+        (true, None, 1),
+        (true, Some((ToolDisposition::Succeeded, true)), 1),
+        (true, Some((ToolDisposition::Failed, true)), 1),
+        (true, Some((ToolDisposition::Uncertain, false)), 1),
+        (true, Some((ToolDisposition::Denied, false)), 0),
+        (true, Some((ToolDisposition::Cancelled, false)), 0),
+        (false, Some((ToolDisposition::Denied, false)), 0),
+    ] {
+        let (telemetry, exporter) = in_memory();
+        let mut segment = Segment::begin(&telemetry, unit_context());
+        let agent_run_id = segment.spawn(AgentRole::Primary);
+        let intent = EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
+            id: uuid::Uuid::now_v7(),
+            run_id: segment.run_id,
+            agent_run_id,
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 1,
+            call: ToolCall::CommandUnguarded {
+                program: "cargo".into(),
+                args: vec!["tool-argument-canary".repeat(1024)],
+                cwd: String::new(),
+                justification: "Run the failed command once".into(),
+            },
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        let digest = intent.digest();
+        segment.commit(Event::ToolStarted {
+            run_id: segment.run_id,
+            agent_run_id,
+            intent: intent.clone(),
+            active_ceiling_ms: 1,
+        });
+        assert_eq!(segment.trace.unguarded_effects(), 0);
+        segment.commit(Event::ToolPermissionDecided {
+            run_id: segment.run_id,
+            agent_run_id,
+            verdict: PermissionVerdict {
+                intent_digest: digest,
+                decision: Decision::Ask,
+                mode: None,
+                basis: PermissionSource::Mode,
+                source: PermissionSource::Human,
+                approved,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            },
+        });
+        assert_eq!(segment.trace.unguarded_effects(), i64::from(approved));
+        assert_eq!(
+            segment.trace.unguarded_pending,
+            HashMap::from([(digest, approved)])
+        );
+        if let Some((disposition, attested)) = outcome {
+            segment.commit(Event::ToolFinished {
+                run_id: segment.run_id,
+                agent_run_id,
+                observation: crate::tools::ToolObservation {
+                    attestation: attested.then(|| Attestation::for_site(&intent)),
+                    intent,
+                    disposition,
+                    enforcement_cause: None,
+                    output: "tool-output-canary".repeat(1024),
+                    cache_update: CacheUpdate::NotApplicable,
+                },
+            });
+            assert!(segment.trace.unguarded_pending.is_empty());
+            assert_eq!(segment.trace.unguarded_completed, expected);
+        }
+        assert_eq!(segment.trace.unguarded_effects(), saturating_i64(expected));
+        segment.finish_agent(agent_run_id, AgentDisposition::Finished);
+        segment.finish(RunDisposition::Finished, Some(&goal_view()));
+        let spans = finished_spans(&telemetry, &exporter);
+        for (name, key) in [
+            ("invoke_workflow arany.run", "arany.run.unguarded_effects"),
+            ("invoke_workflow arany.goal", "arany.goal.unguarded_effects"),
+        ] {
+            let span = spans.iter().find(|span| span.name == name).expect("span");
+            assert!(has_attribute(span, key, saturating_i64(expected).into()));
+        }
+    }
+}
+
 fn has_attribute(span: &SpanData, key: &str, value: Value) -> bool {
     span.attributes
         .iter()
