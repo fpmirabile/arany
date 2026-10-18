@@ -264,10 +264,12 @@ fn worker_protocol_store_cold_prefixes_and_old_versions_preserve_data() {
         "WorkerVerificationRecorded",
     ] {
         let current = payload_version(kind).unwrap();
+        // A version-1 kind has no previous version; a foreign version must reject just the same.
+        let stale = if current > 1 { current - 1 } else { current + 1 };
         connection
             .execute(
                 "UPDATE events SET event_version=?1 WHERE kind=?2",
-                params![current - 1, kind],
+                params![stale, kind],
             )
             .unwrap();
         let before = std::fs::read(root.path().join(DATABASE_FILE)).unwrap();
