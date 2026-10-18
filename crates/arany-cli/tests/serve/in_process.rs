@@ -882,6 +882,14 @@ async fn approval_accept_dispatches_the_exact_journaled_intent_once() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn hook_ask_reaches_the_serve_client_as_a_human_approval() {
+    let _deadline = deadline();
+    approval_scenario_with(ApprovalCase::Accept, true).await;
+    approval_scenario_with(ApprovalCase::Decline, true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn approval_decline_invalid_and_client_error_deny() {
     let _deadline = deadline();
     for case in [
@@ -937,24 +945,68 @@ fn decision(id: Value, result: Value) -> ClientMessage {
 
 #[cfg(unix)]
 async fn approval_scenario(case: ApprovalCase) {
+    approval_scenario_with(case, false).await;
+}
+
+// A hook needs the real Guard binary, which unit tests only find next to the test executable.
+#[cfg(unix)]
+fn built_guard() -> std::path::PathBuf {
+    let binary = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .join("arany");
+    assert!(
+        binary.exists(),
+        "build the arany binary first: cargo build -p arany-cli"
+    );
+    binary
+}
+
+#[cfg(unix)]
+async fn approval_scenario_with(case: ApprovalCase, hook_ask: bool) {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     std::fs::write(workspace.join("facts.txt"), "private fact").unwrap();
     let state = root.path().join("state");
     let state_root = StateRoot::admit(&state).unwrap();
+    let shell = std::fs::canonicalize("/bin/sh").unwrap();
+    let digest = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(std::fs::read(&shell).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let commands = if hook_ask {
+        json!([{"name":"sh","executable":shell,"sha256":digest,"interpreter":true,"inputs":[]}])
+    } else {
+        json!([])
+    };
     private_json(
         &state.join("tools.json"),
-        json!({"version":1,"workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]}),
+        json!({"version":1,"workspace_paths":["facts.txt"],"write":false,"commands":commands,"skills":[],"mcp":[]}),
     );
+    let ask =
+        json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}});
     private_json(
         &state.join("permissions.json"),
-        json!({"permissions":{"ask":["Read"]}}),
+        if hook_ask {
+            json!({"permissions":{"allow":["Read"]},"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":format!("printf '%s' '{ask}'")}]}]}})
+        } else {
+            json!({"permissions":{"ask":["Read"]}})
+        },
     );
     let engine = Engine::open(
         state_root,
         EngineConfig {
-            guard_executable: Some(std::env::current_exe().unwrap()),
+            guard_executable: Some(if hook_ask {
+                built_guard()
+            } else {
+                std::env::current_exe().unwrap()
+            }),
             ..Default::default()
         },
     )
@@ -1275,6 +1327,13 @@ async fn approval_scenario(case: ApprovalCase) {
     for tool in &tools {
         let verdict = tool.permission_verdict.as_ref().unwrap();
         assert_eq!(verdict.source, arany::permissions::PermissionSource::Human);
+        if hook_ask {
+            assert_eq!(verdict.basis, arany::permissions::PermissionSource::Hook);
+            assert_eq!(
+                (verdict.hook_restriction, verdict.hooks),
+                (Some(arany::permissions::Decision::Ask), 1)
+            );
+        }
         assert_eq!(
             verdict.approved,
             tool.observation.as_ref().unwrap().disposition == arany::ToolDisposition::Succeeded
