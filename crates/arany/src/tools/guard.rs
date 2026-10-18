@@ -13,7 +13,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 const CAPTURE_BYTES: usize = 48 * 1024;
-const TASK_BYTES_CAP: usize = 96 * 1024;
+// Room for the full pinned config plus one base64 agent definition file.
+const TASK_BYTES_CAP: usize = 96 * 1024 + (64 * 1024_usize).div_ceil(3) * 4;
 pub(super) const RUNTIME_ROOT: &str = "/usr";
 // Loaded CI hosts stall teardown for seconds; one shared bound only widens the wait for termination evidence.
 pub(super) const TEARDOWN_WAIT: Duration = Duration::from_secs(10);
@@ -1186,6 +1187,18 @@ pub(super) fn unit_main() -> ExitCode {
     macos::unit_main()
 }
 
+#[cfg(target_os = "linux")]
+fn parser_config(config: &Config) -> Config {
+    Config {
+        commands: Vec::new(),
+        skills: Vec::new(),
+        mcp: Vec::new(),
+        git: None,
+        runtime_grants: Vec::new(),
+        ..config.clone()
+    }
+}
+
 fn definition_bytes(task: &Task) -> Result<Option<Vec<u8>>, ToolError> {
     use base64::Engine as _;
     match (&task.intent.call, &task.definition) {
@@ -1381,6 +1394,32 @@ mod tests {
         assert!(definition_bytes(&task).is_err());
         task.intent.call = ToolCall::List { path: ".".into() };
         assert!(definition_bytes(&task).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agent_definition_task_fits_the_cap_with_a_large_pinned_config() {
+        use base64::Engine as _;
+        let raw = vec![b' '; 64 * 1024];
+        let call = ToolCall::ParseAgentDefinition {
+            index: 0,
+            raw_digest: digest(&raw),
+        };
+        let commands: Vec<_> = (0..200)
+            .map(|index| {
+                serde_json::json!({"name": format!("program{index}"), "executable": format!("/usr/bin/{}", "x".repeat(200)), "sha256": "0".repeat(64), "interpreter": false, "inputs": []})
+            })
+            .collect();
+        let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
+        let task = |config: Config| Task {
+            config,
+            intent: intent(call.clone()),
+            cache: None,
+            definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+            parent_namespaces: profile::Namespaces::read().unwrap(),
+        };
+        let encoded = encode_task(&task(config)).unwrap();
+        assert!(encoded.len() > 96 * 1024);
     }
 
     #[test]

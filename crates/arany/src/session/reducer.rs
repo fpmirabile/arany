@@ -213,6 +213,25 @@ pub struct RunView {
     pub steering_notes: Vec<String>,
 }
 
+impl RunView {
+    // Parse steps always lead the Run's tools and never reach the model.
+    pub(crate) fn parse_count(&self) -> usize {
+        self.tools
+            .iter()
+            .take_while(|tool| {
+                matches!(
+                    tool.intent.call,
+                    crate::tools::ToolCall::ParseAgentDefinition { .. }
+                )
+            })
+            .count()
+    }
+
+    pub(crate) fn model_tools(&self) -> &[ToolView] {
+        &self.tools[self.parse_count()..]
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolView {
     pub intent: crate::tools::EffectIntent,
@@ -764,12 +783,13 @@ fn active_run(view: &mut SessionView, id: RunId) -> Result<&mut RunView, ReplayE
     Ok(run)
 }
 
-fn definition_registry(
-    run: &RunView,
-) -> Result<
-    std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
-    ReplayError,
-> {
+type DefinitionMap = std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>;
+
+// Replay asks for the registry on every event of a delegated Run; one slot keyed by the exact inputs avoids re-parsing up to 1 MiB each time.
+static REGISTRY_CACHE: std::sync::Mutex<Option<(u64, std::sync::Arc<DefinitionMap>)>> =
+    std::sync::Mutex::new(None);
+
+fn definition_registry(run: &RunView) -> Result<std::sync::Arc<DefinitionMap>, ReplayError> {
     let Some(pin) = run
         .config
         .as_ref()
@@ -800,8 +820,6 @@ fn definition_registry(
     if outputs.len() != pin.files.len() {
         return Err(ReplayError::InvalidTransition);
     }
-    let registry = crate::tools::definitions::registry(pin, outputs.into_iter())
-        .map_err(|_| ReplayError::InvalidTransition)?;
     let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
     let child_model = config
         .providers
@@ -809,13 +827,24 @@ fn definition_registry(
         .map_or(config.model.as_str(), |routes| {
             routes.child[0].model.as_str()
         });
-    if registry.values().any(|definition| {
-        definition
-            .model
-            .as_ref()
-            .is_some_and(|model| model != child_model)
-    }) {
-        return Err(ReplayError::InvalidTransition);
+    let key = {
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (run.id, &pin.digest, child_model, &outputs).hash(&mut hasher);
+        hasher.finish()
+    };
+    if let Some((cached, registry)) = REGISTRY_CACHE.lock().ok().and_then(|slot| slot.clone())
+        && cached == key
+    {
+        return Ok(registry);
+    }
+    let registry = std::sync::Arc::new(
+        crate::tools::definitions::registry(pin, outputs.into_iter(), child_model)
+            .map_err(|_| ReplayError::InvalidTransition)?
+            .definitions,
+    );
+    if let Ok(mut slot) = REGISTRY_CACHE.lock() {
+        *slot = Some((key, registry.clone()));
     }
     Ok(registry)
 }

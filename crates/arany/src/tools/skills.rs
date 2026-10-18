@@ -405,6 +405,7 @@ fn check_yaml_tokens(yaml: &str) -> Result<(), ToolError> {
         }
         block_indent = None;
         let mut previous = b' ';
+        let mut significant = None;
         for byte in line.bytes() {
             if let Some(delimiter) = quote {
                 if escaped {
@@ -418,6 +419,8 @@ fn check_yaml_tokens(yaml: &str) -> Result<(), ToolError> {
                 break;
             } else if matches!(byte, b'\'' | b'"')
                 && (previous.is_ascii_whitespace() || matches!(previous, b'[' | b'{' | b':' | b','))
+                && significant
+                    .is_none_or(|last| matches!(last, b':' | b'-' | b'[' | b'{' | b',' | b'?'))
             {
                 quote = Some(byte);
             } else if matches!(byte, b'&' | b'*' | b'!')
@@ -429,6 +432,12 @@ fn check_yaml_tokens(yaml: &str) -> Result<(), ToolError> {
                 block_indent = Some(indent);
             }
             previous = byte;
+            if !byte.is_ascii_whitespace() {
+                significant = Some(byte);
+            }
+        }
+        if quote.is_some() {
+            return Err(ToolError::Configuration);
         }
     }
     Ok(())

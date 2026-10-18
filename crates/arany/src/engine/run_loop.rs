@@ -398,8 +398,11 @@ impl<'a> RunLoop<'a> {
         &self,
         mut root_request: ProviderRequest,
     ) -> Result<(), EngineError> {
-        if !self.initialize_definitions(&mut root_request).await? {
-            return self.fail_primary().await;
+        match self.initialize_definitions(&mut root_request).await {
+            Ok(true) => {}
+            Ok(false) => return self.settle_definition_stop().await,
+            Err(EngineError::GoalBudgetExhausted) => return self.settle_stopped_primary().await,
+            Err(error) => return Err(error),
         }
         self.drive_primary(&mut root_request).await
     }
@@ -820,6 +823,33 @@ impl<'a> RunLoop<'a> {
         })
         .await?;
         Ok(())
+    }
+
+    async fn settle_definition_stop(&self) -> Result<(), EngineError> {
+        let stopped = self.pause_requested()
+            || self.controls.cancellation.is_cancelled()
+            || self.ledger().active_time_exhausted()
+            || self.ledger().view(|view| {
+                view.runs.iter().any(|run| {
+                    run.id == self.run_id
+                        && run.tools.iter().any(|tool| {
+                            tool.observation.as_ref().is_some_and(|observation| {
+                                matches!(
+                                    observation.disposition,
+                                    crate::tools::ToolDisposition::Uncertain
+                                        | crate::tools::ToolDisposition::Cancelled
+                                )
+                            })
+                        })
+                })
+            })?;
+        if stopped {
+            self.settle_stopped_primary().await
+        } else if !self.ledger().can_start_provider_call() {
+            self.fail_for_budget().await
+        } else {
+            self.fail_primary().await
+        }
     }
 
     async fn fail_primary(&self) -> Result<(), EngineError> {

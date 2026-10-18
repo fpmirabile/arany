@@ -1338,20 +1338,15 @@ impl RunLoop<'_> {
             }
             outputs.push(observation.output);
         }
-        let registry =
-            match crate::tools::definitions::registry(&pin, outputs.iter().map(String::as_str)) {
-                Ok(registry) => registry,
-                Err(_) => return Ok(false),
-            };
         let child_model = &self.routing.providers.child[0].identity().model;
-        if registry.values().any(|definition| {
-            definition
-                .model
-                .as_ref()
-                .is_some_and(|model| model != child_model)
-        }) {
+        let Ok(registry) = crate::tools::definitions::registry(
+            &pin,
+            outputs.iter().map(String::as_str),
+            child_model,
+        ) else {
             return Ok(false);
-        }
+        };
+        let registry = registry.definitions;
         let tools = request
             .input
             .tools
@@ -1359,7 +1354,12 @@ impl RunLoop<'_> {
             .ok_or(EngineError::InvalidRequest)?;
         let mut catalog: serde_json::Value =
             serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
-        catalog["agents"] = serde_json::json!(registry.values().map(|definition| serde_json::json!({"name": definition.name, "description": definition.description, "supported": !definition.editor(), "unsupported_reason": definition.editor().then_some("editor_execution_unavailable")})).collect::<Vec<_>>());
+        catalog["agents"] = serde_json::json!(
+            registry
+                .values()
+                .map(crate::tools::definitions::AgentDefinition::catalog_entry)
+                .collect::<Vec<_>>()
+        );
         tools.catalog = serde_json::to_string(&catalog).map_err(|_| EngineError::InvalidRequest)?;
         if tools.catalog.len() > crate::tools::types::MAX_TOOL_CATALOG_BYTES
             || tools.rendered_len() > runtime.context_limit_bytes()

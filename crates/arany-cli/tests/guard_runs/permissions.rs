@@ -1068,21 +1068,25 @@ async fn agent_definition_guard_registry_research_selection_and_replay() {
 }
 
 #[tokio::test]
-async fn agent_definition_guard_refuses_invalid_registry_before_provider() {
-    for case in [
-        "tag",
-        "alias",
-        "duplicate-field",
-        "duplicate-name",
-        "model",
-        "oversized-body",
+async fn agent_definition_guard_skips_invalid_files_and_refuses_their_selection() {
+    for (case, listed) in [
+        ("tag", 0),
+        ("alias", 0),
+        ("quote-hidden-anchor", 0),
+        ("duplicate-field", 0),
+        ("oversized-body", 0),
+        ("duplicate-name", 1),
+        ("model-alias", 1),
+        ("unknown-field", 1),
     ] {
         let fixture = Fixture::new(None, false);
         let fields = match case {
             "tag" => "tools: !!seq [Read]\n",
             "alias" => "tools: &read [Read]\n",
+            "quote-hidden-anchor" => "x: Bob 's\ntools: &read [Read]\n",
             "duplicate-field" => "name: other\n",
-            "model" => "model: unadmitted-route\n",
+            "model-alias" => "model: sonnet\n",
+            "unknown-field" => "color: red\n",
             _ => "tools: Read\n",
         };
         let body = if case == "oversized-body" {
@@ -1094,36 +1098,25 @@ async fn agent_definition_guard_refuses_invalid_registry_before_provider() {
         if case == "duplicate-name" {
             agent_file(&fixture, "duplicate.md", "tools: Glob\n", "Other");
         }
-        let provider = Arc::new(ScriptedProvider::new(vec![finish(
-            "forbidden egress reached a valid response",
-        )]));
-        let mut input = request(&fixture.workspace, "Inspect facts");
-        input.include_paths.clear();
-        let result = run_with(
-            &fixture.engine,
-            &provider,
-            input,
-            RunControls {
-                tools: ToolGrant::Configured,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        let (result, requests, _) = fixture.run(vec![finish("answer")], None, true).await;
+        assert_eq!(result.run.status, RunStatus::Finished, "{case}");
+        let catalog: Value =
+            serde_json::from_str(&requests[0].input.tools.as_ref().unwrap().catalog).unwrap();
         assert_eq!(
-            result.run.status,
-            RunStatus::Failed,
-            "registry refusal: {case}"
+            catalog["agents"].as_array().map_or(0, Vec::len),
+            listed,
+            "{case}"
         );
+        let (_, view) = fixture.reopen(result.session_id).await;
+        let evidence = view.goals[0]
+            .report
+            .as_ref()
+            .map_or(Vec::new(), |report| report.evidence.clone());
         assert!(
-            provider.requests.lock().unwrap().is_empty(),
-            "no Provider egress: {case}"
-        );
-        let (events, view) = fixture.reopen(result.session_id).await;
-        assert!(
-            !events
+            evidence
                 .iter()
-                .any(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .any(|item| item.starts_with("Agent definition reader.md: ")),
+            "{case}: {evidence:?}"
         );
         assert!(
             view.runs[0]
@@ -1132,6 +1125,20 @@ async fn agent_definition_guard_refuses_invalid_registry_before_provider() {
                 .all(|tool| tool.observation.is_some())
         );
     }
+    let fixture = Fixture::new(None, false);
+    agent_file(&fixture, "reader.md", "tools: !!seq [Read]\n", "Body");
+    let (result, requests, _) = fixture
+        .run(
+            vec![ProviderOutcome::Delegate(Delegate {
+                agent: Some("reader".into()),
+                children: vec!["Inspect facts".into()],
+            })],
+            None,
+            true,
+        )
+        .await;
+    assert_eq!(result.run.status, RunStatus::Failed);
+    assert_eq!(requests.len(), 1, "selecting a skipped definition refuses");
 }
 
 #[tokio::test]
@@ -1174,15 +1181,41 @@ async fn agent_definition_guard_editor_turn_and_tool_limits_refuse_child_egress(
 }
 
 #[tokio::test]
-async fn agent_definition_guard_cancellation_keeps_committed_parser_receipt() {
+async fn agent_definition_guard_cancellation_during_parsing_stops_before_the_provider() {
     let fixture = Fixture::new(None, false);
     agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
     let cancellation = RunCancellation::new();
-    let mut scripted = ScriptedProvider::new(vec![finish("answer")]);
-    scripted.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
-    let provider = Arc::new(scripted);
+    let provider = Arc::new(ScriptedProvider::new(vec![finish("forbidden")]));
     let mut input = request(&fixture.workspace, "Inspect facts");
     input.include_paths.clear();
+    let database = fixture.state.join("events.sqlite3");
+    let watcher = {
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            loop {
+                let started = rusqlite::Connection::open_with_flags(
+                    &database,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .ok()
+                .and_then(|connection| {
+                    connection
+                        .query_row(
+                            "SELECT COUNT(*) FROM events WHERE kind = 'ToolStarted'",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .ok()
+                })
+                .is_some_and(|count| count > 0);
+                if started {
+                    cancellation.cancel();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+    };
     let result = run_with(
         &fixture.engine,
         &provider,
@@ -1195,16 +1228,120 @@ async fn agent_definition_guard_cancellation_keeps_committed_parser_receipt() {
     )
     .await
     .unwrap();
-    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    watcher.await.unwrap();
+    assert!(provider.requests.lock().unwrap().is_empty());
     assert_eq!(result.run.status, RunStatus::Cancelled);
-    let (_, view) = fixture.reopen(result.session_id).await;
-    let parse = view.runs[0].tools[0].observation.as_ref().unwrap();
-    assert_eq!(parse.disposition, arany::ToolDisposition::Succeeded);
-    assert!(matches!(
-        parse.attestation,
-        Some(arany::Attestation::Guard(_))
-    ));
+    let (events, view) = fixture.reopen(result.session_id).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, Event::RunFinished { .. }))
+    );
     assert_eq!(view.runs[0].agents.len(), 1);
+}
+
+#[tokio::test]
+async fn agent_definition_guard_active_time_exhaustion_during_parsing_closes_the_run() {
+    let fixture = Fixture::new(None, false);
+    agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
+    let (result, requests, _) = fixture
+        .run_budgeted(
+            Vec::new(),
+            None,
+            true,
+            arany::GoalBudget {
+                max_provider_calls: Some(16),
+                max_tokens: None,
+                max_active_ms: Some(1),
+                max_runs: 1,
+            },
+        )
+        .await;
+    assert!(requests.is_empty());
+    assert_ne!(result.run.status, RunStatus::Active);
+    fixture.engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&fixture.state).unwrap()).unwrap();
+    let events = store.load_session(result.session_id).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, Event::RunFinished { .. }))
+    );
+}
+
+#[tokio::test]
+async fn agent_definition_guard_goal_compacts_tool_history_with_definitions_present() {
+    let fixture = Fixture::new(None, false);
+    agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
+    const PAGE: usize = 4096;
+    const READS: usize = 104;
+    std::fs::write(
+        fixture.workspace.join("notes/data.txt"),
+        "x".repeat(PAGE * READS),
+    )
+    .unwrap();
+    let mut outcomes: Vec<_> = (0..READS)
+        .map(|page| {
+            tool_outcome(
+                arany::ToolCall::Read {
+                    path: "notes/data.txt".into(),
+                    offset: u32::try_from(page * PAGE).unwrap(),
+                    limit: u32::try_from(PAGE).unwrap(),
+                },
+                None,
+            )
+        })
+        .collect();
+    outcomes.push(finish("done"));
+    let compaction = || {
+        Ok(CompactionResponse {
+            summary: "Earlier pages were read; their exact results remain in the journal.".into(),
+            response_id: None,
+            usage: arany::Usage {
+                input_tokens: Some(32),
+                output_tokens: Some(12),
+                ..Default::default()
+            },
+            wire_provenance: None,
+        })
+    };
+    let provider = Arc::new(
+        ScriptedProvider::new(outcomes).with_compactions((0..8).map(|_| compaction()).collect()),
+    );
+    let mut input = request(&fixture.workspace, "Inspect the bounded file in pages");
+    input.include_paths.clear();
+    input.goal.budget = Some(arany::GoalBudget {
+        max_provider_calls: None,
+        max_tokens: None,
+        max_active_ms: Some(30 * 60 * 1000),
+        max_runs: 1,
+    });
+    let result = run_with(
+        &fixture.engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    let (events, view) = fixture.reopen(result.session_id).await;
+    let covered: Vec<u32> = events
+        .iter()
+        .filter_map(|event| match event.event {
+            Event::GoalContextCompacted {
+                covered_tool_count, ..
+            } => Some(covered_tool_count),
+            _ => None,
+        })
+        .collect();
+    assert!(!covered.is_empty(), "tool history compacted");
+    let run = &view.runs[0];
+    assert!(run.tool_compaction_covered_count > 0);
+    assert_eq!(run.tools.len(), READS + 1);
 }
 
 #[tokio::test]

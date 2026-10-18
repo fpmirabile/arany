@@ -326,9 +326,12 @@ impl SessionView {
         let run_status = run.status;
         let active_run_ready =
             run_status == RunStatus::Active
-                && !run.tools.is_empty()
-                && run.tools.iter().all(|tool| tool.observation.is_some())
-                && run.tools.last().is_some_and(|tool| {
+                && !run.model_tools().is_empty()
+                && run
+                    .model_tools()
+                    .iter()
+                    .all(|tool| tool.observation.is_some())
+                && run.model_tools().last().is_some_and(|tool| {
                     tool.observation
                         .as_ref()
                         .is_some_and(|observation| !observation.stops_run())
@@ -654,6 +657,7 @@ pub(super) fn apply(
                 || record.covered_run_id != *run_id
                 || run.status != RunStatus::Active
                 || run.tools.iter().any(|tool| tool.observation.is_none())
+                || covered_count <= run.parse_count()
                 || covered_count > run.tools.len()
                 || !ends_whole_step(run, covered_count)
                 || *covered_tool_count <= run.tool_compaction_covered_count
@@ -709,7 +713,7 @@ fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
     let Some(primary) = run.primary() else {
         return false;
     };
-    let covered = run.tools[..covered_count]
+    let covered = run.tools[run.parse_count()..covered_count]
         .iter()
         .filter(|tool| !is_integration_tool(tool))
         .count();

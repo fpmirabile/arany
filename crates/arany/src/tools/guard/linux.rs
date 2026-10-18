@@ -791,27 +791,24 @@ fn verify_ready(
     Ok(())
 }
 
+fn guard_config<'a>(
+    runtime: &'a ToolRuntime,
+    intent: &EffectIntent,
+) -> std::borrow::Cow<'a, super::Config> {
+    if matches!(intent.call, ToolCall::ParseAgentDefinition { .. }) {
+        std::borrow::Cow::Owned(super::parser_config(&runtime.config))
+    } else {
+        std::borrow::Cow::Borrowed(&runtime.config)
+    }
+}
+
 fn prepare_seed(
     permit: &super::admission::Permit,
     workspace: &cap_std::fs::Dir,
-    runtime: &ToolRuntime,
+    config: &super::Config,
     intent: &EffectIntent,
 ) -> Result<(std::path::PathBuf, cap_std::fs::Dir), ToolError> {
-    let parser_config;
-    let seed_config = if matches!(intent.call, ToolCall::ParseAgentDefinition { .. }) {
-        parser_config = super::Config {
-            commands: Vec::new(),
-            skills: Vec::new(),
-            mcp: Vec::new(),
-            git: None,
-            runtime_grants: Vec::new(),
-            ..runtime.config.clone()
-        };
-        &parser_config
-    } else {
-        &runtime.config
-    };
-    permit.prepare_seed(workspace, seed_config, intent.call.is_process())
+    permit.prepare_seed(workspace, config, intent.call.is_process())
 }
 
 pub(super) async fn execute_inner(
@@ -839,9 +836,10 @@ pub(super) async fn execute_inner(
         runtime_mounts(runtime_grants, intent.limits.cache_bytes > 0)?;
     let runtime_path = super::runtime_path(runtime_grants)?;
     let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
+    let task_config = guard_config(runtime, intent);
     let mut cache = super::build_cache_session(runtime, intent)?;
     let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
-    let (seed_path, seed_dir) = prepare_seed(&permit, &workspace, runtime, intent)?;
+    let (seed_path, seed_dir) = prepare_seed(&permit, &workspace, &task_config, intent)?;
     let mut unit = Unit {
         name: format!("arany-tool-{}.service", permit.id),
         invocation: None,

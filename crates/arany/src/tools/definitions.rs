@@ -369,55 +369,156 @@ fn supported_tool(name: &str) -> Option<Vec<&str>> {
     })
 }
 
-fn tool_list(value: serde_json::Value) -> Result<Vec<String>, ToolError> {
-    let names = match value {
+pub(crate) const MAX_AGENT_CATALOG_BYTES: usize = 8 * 1024;
+const MAX_DIAGNOSTICS: usize = 64;
+
+#[derive(Debug)]
+pub(super) struct Rejected {
+    field: &'static str,
+    reason: &'static str,
+}
+
+impl From<ToolError> for Rejected {
+    fn from(error: ToolError) -> Self {
+        match error {
+            ToolError::Limit => Rejected {
+                field: "file",
+                reason: "over a limit",
+            },
+            _ => Rejected {
+                field: "frontmatter",
+                reason: "invalid",
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+enum ParsedFile {
+    Definition {
+        definition: AgentDefinition,
+        notes: Vec<String>,
+    },
+    Skipped {
+        diagnostic: String,
+    },
+}
+
+fn tool_list(value: serde_json::Value, notes: &mut Vec<String>) -> Result<Vec<String>, Rejected> {
+    let names: Vec<String> = match value {
         serde_json::Value::String(value) => value
             .split(',')
             .map(|name| name.trim().to_owned())
             .collect(),
         serde_json::Value::Array(values) => values
             .into_iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or(ToolError::Configuration)
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => return Err(ToolError::Configuration),
+            .map(|value| value.as_str().map(str::to_owned))
+            .collect::<Option<_>>()
+            .ok_or(Rejected {
+                field: "tools",
+                reason: "entries must be strings",
+            })?,
+        _ => {
+            return Err(Rejected {
+                field: "tools",
+                reason: "must be a list or comma separated string",
+            });
+        }
     };
-    if names.len() > 32 {
-        return Err(ToolError::Limit);
+    if names.len() > 32 || names.iter().any(|name| name.len() > 128) {
+        return Err(Rejected {
+            field: "tools",
+            reason: "over a limit",
+        });
     }
     let mut result = BTreeSet::new();
+    let mut ignored = 0;
     for name in names {
-        if name.len() > 128 {
-            return Err(ToolError::Limit);
+        match supported_tool(&name) {
+            Some(operations) => result.extend(operations.into_iter().map(str::to_owned)),
+            None => ignored += 1,
         }
-        for operation in supported_tool(&name).ok_or(ToolError::Configuration)? {
-            result.insert(operation.to_owned());
-        }
+    }
+    if ignored > 0 {
+        notes.push("tools: unsupported names ignored".into());
     }
     Ok(result.into_iter().collect())
 }
 
-pub(super) fn parse(raw: &[u8]) -> Result<String, ToolError> {
+const KNOWN_FIELDS: [&str; 9] = [
+    "name",
+    "description",
+    "tools",
+    "disallowedTools",
+    "model",
+    "permissionMode",
+    "maxTurns",
+    "isolation",
+    "background",
+];
+
+fn known(key: &str) -> &'static str {
+    KNOWN_FIELDS
+        .iter()
+        .find(|field| **field == key)
+        .copied()
+        .unwrap_or("frontmatter")
+}
+
+pub(super) fn strict(raw: &[u8]) -> Result<(AgentDefinition, Vec<String>), Rejected> {
     let (value, body) = super::skills::definition_document(raw)?;
-    if value
-        .as_object()
-        .is_none_or(|map| map.values().any(serde_json::Value::is_null))
-    {
-        return Err(ToolError::Configuration);
+    let serde_json::Value::Object(mut map) = value else {
+        return Err(Rejected {
+            field: "frontmatter",
+            reason: "must be a mapping",
+        });
+    };
+    let mut notes = Vec::new();
+    let before = map.len();
+    map.retain(|key, _| KNOWN_FIELDS.contains(&key.as_str()));
+    if map.len() != before {
+        notes.push("frontmatter: unsupported fields ignored".into());
     }
-    let front: Frontmatter = serde_json::from_value(value).map_err(|_| ToolError::Configuration)?;
+    for field in ["name", "description"] {
+        if !map.contains_key(field) {
+            return Err(Rejected {
+                field: known(field),
+                reason: "is required",
+            });
+        }
+    }
+    for (key, value) in &map {
+        let valid = match key.as_str() {
+            "name" | "description" | "model" | "isolation" => value.is_string(),
+            "tools" | "disallowedTools" => value.is_string() || value.is_array(),
+            "permissionMode" => serde_json::from_value::<PermissionMode>(value.clone()).is_ok(),
+            "maxTurns" => serde_json::from_value::<u8>(value.clone()).is_ok(),
+            _ => value.is_boolean(),
+        };
+        if !valid {
+            return Err(Rejected {
+                field: known(key),
+                reason: "has an unsupported value",
+            });
+        }
+    }
+    let front: Frontmatter =
+        serde_json::from_value(serde_json::Value::Object(map)).map_err(|_| Rejected {
+            field: "frontmatter",
+            reason: "invalid",
+        })?;
     let definition = AgentDefinition {
         version: 1,
         name: front.name,
         description: front.description,
-        tools: front.tools.map(tool_list).transpose()?,
+        tools: front
+            .tools
+            .map(|value| tool_list(value, &mut notes))
+            .transpose()?,
         disallowed_tools: front
             .disallowed_tools
-            .map(tool_list)
+            .map(|value| tool_list(value, &mut notes))
             .transpose()?
             .unwrap_or_default(),
         model: front.model.filter(|value| value != "inherit"),
@@ -428,40 +529,108 @@ pub(super) fn parse(raw: &[u8]) -> Result<String, ToolError> {
         body: body.to_owned(),
     };
     if !definition.valid() {
-        return Err(ToolError::Configuration);
+        return Err(Rejected {
+            field: "definition",
+            reason: "over a limit or invalid",
+        });
     }
-    serde_json::to_string(&definition).map_err(|_| ToolError::Configuration)
+    Ok((definition, notes))
+}
+
+pub(super) fn parse(raw: &[u8]) -> Result<String, ToolError> {
+    let parsed = match strict(raw) {
+        Ok((definition, notes)) => ParsedFile::Definition { definition, notes },
+        Err(rejected) => ParsedFile::Skipped {
+            diagnostic: format!("{}: {}", rejected.field, rejected.reason),
+        },
+    };
+    serde_json::to_string(&parsed).map_err(|_| ToolError::Configuration)
+}
+
+pub(crate) struct Registry {
+    pub(crate) definitions: BTreeMap<String, AgentDefinition>,
+    pub(crate) diagnostics: Vec<String>,
+}
+
+fn diagnostic(file: &str, text: &str) -> String {
+    let safe = text.len() <= 120 && text.bytes().all(|byte| (b' '..=b'~').contains(&byte));
+    format!("{file}: {}", if safe { text } else { "invalid diagnostic" })
+}
+
+impl AgentDefinition {
+    pub(crate) fn catalog_entry(&self) -> serde_json::Value {
+        serde_json::json!({"name": self.name, "description": self.description, "supported": !self.editor(), "unsupported_reason": self.editor().then_some("editor_execution_unavailable")})
+    }
 }
 
 pub(crate) fn registry<'a>(
     pin: &DefinitionRegistryPin,
     mut outputs: impl Iterator<Item = &'a str>,
-) -> Result<BTreeMap<String, AgentDefinition>, ToolError> {
-    let mut registry = BTreeMap::new();
+    child_model: &str,
+) -> Result<Registry, ToolError> {
+    let mut definitions = BTreeMap::new();
+    let mut diagnostics = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut count = 0;
     let mut bytes = 0;
     for file in &pin.files {
         let output = outputs.next().ok_or(ToolError::Configuration)?;
-        count += 1;
         bytes += output.len();
         if bytes > MAX_RAW_BYTES {
             return Err(ToolError::Limit);
         }
-        let definition: AgentDefinition =
-            serde_json::from_str(output).map_err(|_| ToolError::Configuration)?;
-        if !definition.valid() || !seen.insert((file.private, definition.name.clone())) {
-            return Err(ToolError::Configuration);
-        }
-        registry.insert(definition.name.clone(), definition);
-        if registry.len() > MAX_DEFINITIONS {
-            return Err(ToolError::Limit);
+        match serde_json::from_str(output).map_err(|_| ToolError::Configuration)? {
+            ParsedFile::Skipped { diagnostic: text } => {
+                diagnostics.push(diagnostic(&file.filename, &text));
+            }
+            ParsedFile::Definition {
+                mut definition,
+                notes,
+            } => {
+                if !definition.valid() {
+                    return Err(ToolError::Configuration);
+                }
+                diagnostics.extend(notes.iter().map(|note| diagnostic(&file.filename, note)));
+                if definition
+                    .model
+                    .as_deref()
+                    .is_some_and(|m| m != child_model)
+                {
+                    definition.model = None;
+                    diagnostics.push(diagnostic(
+                        &file.filename,
+                        "model: not the admitted child model; treated as inherit",
+                    ));
+                }
+                if !seen.insert((file.private, definition.name.clone())) {
+                    diagnostics.push(diagnostic(&file.filename, "name: duplicate; skipped"));
+                    continue;
+                }
+                definitions.insert(definition.name.clone(), definition);
+            }
         }
     }
-    if count != pin.files.len() || outputs.next().is_some() {
+    if outputs.next().is_some() {
         return Err(ToolError::Configuration);
     }
-    Ok(registry)
+    let mut catalog_bytes: usize = definitions
+        .values()
+        .map(|definition| definition.catalog_entry().to_string().len() + 1)
+        .sum();
+    while catalog_bytes > MAX_AGENT_CATALOG_BYTES {
+        let Some((name, definition)) = definitions.pop_last() else {
+            break;
+        };
+        catalog_bytes -= definition.catalog_entry().to_string().len() + 1;
+        diagnostics.push(diagnostic(&name, "dropped by the catalog limit"));
+    }
+    if diagnostics.len() > MAX_DIAGNOSTICS {
+        diagnostics.truncate(MAX_DIAGNOSTICS - 1);
+        diagnostics.push("further diagnostics omitted".into());
+    }
+    Ok(Registry {
+        definitions,
+        diagnostics,
+    })
 }
 
 #[cfg(test)]
@@ -475,7 +644,7 @@ mod tests {
     }
 
     fn definition(fields: &str) -> AgentDefinition {
-        serde_json::from_str(&parse(&document(fields, "Guidance only")).unwrap()).unwrap()
+        strict(&document(fields, "Guidance only")).unwrap().0
     }
 
     #[test]
@@ -486,7 +655,7 @@ mod tests {
             "tools: [Read, Skill]\nmodel: inherit\npermissionMode: plan\nmaxTurns: 1\n",
             "description: useful\n",
         ] {
-            let result = parse(&document(fields, "Body"));
+            let result = strict(&document(fields, "Body"));
             assert_eq!(
                 result.is_ok(),
                 !fields.starts_with("description:"),
@@ -494,50 +663,73 @@ mod tests {
             );
         }
         let crlf = b"---\r\nname: reader\r\ndescription: >-\r\n  Inspect carefully\r\ntools: 'Read, Glob'\r\n---\r\nBody";
-        assert!(parse(crlf).is_ok());
+        assert!(strict(crlf).is_ok());
         for fields in [
             "name: shadow\n",
-            "hooks: {}\n",
-            "mcpServers: {}\n",
             "permissionMode: bypassPermissions\n",
             "permissionMode: manual\n",
             "model: null\n",
             "tools: null\n",
             "maxTurns: 0\n",
             "maxTurns: 18\n",
-            "tools: [Bash]\n",
-            "tools: [Agent]\n",
-            "tools: [Git]\n",
-            "tools: [mcp_call]\n",
-            "tools: ['Read*']\n",
             "isolation: other\n",
             "background: yes\n",
             "tools: &anchor [Read]\n",
             "tools: *anchor\n",
             "tools: !!seq [Read]\n",
             "tools: !execute [Read]\n",
-            "<<: {tools: Read}\n",
             "tools: [Read]\ntools: [Write]\n",
             "tools: {nested: [Read]}\n",
         ] {
             assert!(
-                parse(&document(fields, "Body")).is_err(),
+                strict(&document(fields, "Body")).is_err(),
                 "unsafe definition rejected"
             );
         }
+        for fields in [
+            "hooks: {}\n",
+            "mcpServers: {}\n",
+            "color: red\n",
+            "tools: [Bash]\n",
+            "tools: [Git, 'Read*']\n",
+        ] {
+            let (definition, notes) = strict(&document(fields, "Body")).unwrap();
+            assert_eq!(notes.len(), 1, "{fields}");
+            assert!(definition.tools.as_ref().is_none_or(Vec::is_empty));
+        }
+        for (fields, field) in [
+            ("tools: [Read]\ntools: [Write]\n", "frontmatter"),
+            ("maxTurns: 300\n", "maxTurns"),
+            ("permissionMode: bypassPermissions\n", "permissionMode"),
+            ("model: null\n", "model"),
+        ] {
+            let rejected = strict(&document(fields, "Body")).unwrap_err();
+            assert_eq!(rejected.field, field, "{fields}");
+            let skipped = parse(&document(fields, "Body")).unwrap();
+            assert!(skipped.contains("Skipped"), "{skipped}");
+        }
+        for fields in [
+            "tools: Bob 's\ntools: &a [Read]\n",
+            "color: Bob 's\ntools: &a [Read]\n",
+            "tools: *a\n",
+        ] {
+            assert!(strict(&document(fields, "Body")).is_err(), "{fields}");
+        }
+        let crafted = b"---\nname: reader\ndescription: Bob 's\ntools: &a [Read]\n---\nBody";
+        assert!(strict(crafted).is_err());
         for description in [
             "'literal &anchor *alias !tag'",
             "\"quoted !token\"",
             "|\n  Literal *alias &anchor !!tag",
         ] {
             assert!(
-                parse(
+                strict(
                     format!("---\nname: reader\ndescription: {description}\n---\nBody").as_bytes()
                 )
                 .is_ok()
             );
         }
-        assert!(parse(b"---\nname: reader\ndescription: x\n---\n---\nbody").is_ok());
+        assert!(strict(b"---\nname: reader\ndescription: x\n---\n---\nbody").is_ok());
     }
 
     #[test]
@@ -548,7 +740,7 @@ mod tests {
             "d".repeat(2048),
             "b".repeat(32 * 1024)
         );
-        assert!(parse(valid.as_bytes()).is_ok());
+        assert!(strict(valid.as_bytes()).is_ok());
         for (name, description, body) in [
             (65, 2048, 32 * 1024),
             (64, 2049, 32 * 1024),
@@ -560,7 +752,7 @@ mod tests {
                 "d".repeat(description),
                 "b".repeat(body)
             );
-            assert!(parse(raw.as_bytes()).is_err());
+            assert!(strict(raw.as_bytes()).is_err());
         }
         let mut raw = document("", "");
         let boundary = raw.len() - 4;
@@ -570,12 +762,12 @@ mod tests {
             std::iter::repeat_n(b' ', padding - 1).chain(std::iter::once(b'\n')),
         );
         assert_eq!(raw.len(), 64 * 1024);
-        assert!(parse(&raw).is_ok());
+        assert!(strict(&raw).is_ok());
         raw.insert(boundary, b' ');
-        assert!(matches!(parse(&raw), Err(ToolError::Limit)));
+        assert!(strict(&raw).is_err());
         assert!(definition(&format!("tools: [{}]\n", vec!["Read"; 32].join(","))).valid());
         assert!(
-            parse(&document(
+            strict(&document(
                 &format!("tools: [{}]\n", vec!["Read"; 33].join(",")),
                 ""
             ))
@@ -604,58 +796,113 @@ mod tests {
         }
     }
 
-    #[test]
-    fn agent_definition_registry_is_atomic_private_wins_and_collisions_refuse() {
-        let project = parse(&document("tools: Read\n", "Project")).unwrap();
-        let private = parse(&document("tools: Glob\n", "Private")).unwrap();
-        let files = vec![
-            DefinitionFilePin {
-                private: false,
-                filename: "a.md".into(),
+    fn output(definition: &AgentDefinition) -> String {
+        serde_json::to_string(&ParsedFile::Definition {
+            definition: definition.clone(),
+            notes: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    fn pin(names: &[(bool, String)]) -> DefinitionRegistryPin {
+        let files: Vec<_> = names
+            .iter()
+            .map(|(private, filename)| DefinitionFilePin {
+                private: *private,
+                filename: filename.clone(),
                 digest: [1; 32],
-            },
-            DefinitionFilePin {
-                private: true,
-                filename: "b.md".into(),
-                digest: [2; 32],
-            },
-        ];
-        let mut pin = DefinitionRegistryPin {
+            })
+            .collect();
+        DefinitionRegistryPin {
             digest: digest(&serde_json::to_vec(&files).unwrap()),
             files,
-        };
-        assert!(pin.valid());
-        let registry = registry(&pin, [project.as_str(), private.as_str()].into_iter()).unwrap();
-        assert_eq!(registry["reader"].body, "Private");
-        assert!(super::registry(&pin, [project.as_str()].into_iter()).is_err());
-        pin.files[1].private = false;
-        assert!(super::registry(&pin, [project.as_str(), private.as_str()].into_iter()).is_err());
-        pin.digest = [0; 32];
-        assert!(!pin.valid());
-        for count in [64, 65] {
-            let outputs: Vec<_> = (0..count)
-                .map(|index| {
-                    let mut definition = definition("tools: Read\n");
-                    definition.name = format!("reader{index:03}");
-                    serde_json::to_string(&definition).unwrap()
-                })
-                .collect();
-            let files: Vec<_> = (0..count)
-                .map(|index| DefinitionFilePin {
-                    private: false,
-                    filename: format!("reader{index:03}.md"),
-                    digest: [1; 32],
-                })
-                .collect();
-            let pin = DefinitionRegistryPin {
-                digest: digest(&serde_json::to_vec(&files).unwrap()),
-                files,
-            };
-            assert_eq!(
-                super::registry(&pin, outputs.iter().map(String::as_str)).is_ok(),
-                count == 64
-            );
         }
+    }
+
+    #[test]
+    fn agent_definition_registry_skips_invalid_files_and_private_wins() {
+        let project = parse(&document("tools: Read\n", "Project")).unwrap();
+        let private = parse(&document("tools: Glob\n", "Private")).unwrap();
+        let invalid = parse(&document("maxTurns: 300\n", "Invalid")).unwrap();
+        let aliased = parse(&document("model: sonnet\n", "Aliased")).unwrap();
+        let pinned = pin(&[(false, "a.md".into()), (true, "b.md".into())]);
+        assert!(pinned.valid());
+        let registry = registry(
+            &pinned,
+            [project.as_str(), private.as_str()].into_iter(),
+            "m",
+        )
+        .unwrap();
+        assert_eq!(registry.definitions["reader"].body, "Private");
+        assert!(super::registry(&pinned, [project.as_str()].into_iter(), "m").is_err());
+        let both_public = pin(&[(false, "a.md".into()), (false, "b.md".into())]);
+        let collided = super::registry(
+            &both_public,
+            [project.as_str(), private.as_str()].into_iter(),
+            "m",
+        )
+        .unwrap();
+        assert_eq!(collided.diagnostics, ["b.md: name: duplicate; skipped"]);
+        let skipped = super::registry(
+            &both_public,
+            [invalid.as_str(), aliased.as_str()].into_iter(),
+            "m",
+        )
+        .unwrap();
+        assert_eq!(
+            skipped.diagnostics,
+            [
+                "a.md: maxTurns: has an unsupported value",
+                "b.md: model: not the admitted child model; treated as inherit"
+            ]
+        );
+        assert!(skipped.definitions["reader"].model.is_none());
+        let exact = parse(&document("model: m\n", "Exact")).unwrap();
+        let kept = super::registry(
+            &both_public,
+            [exact.as_str(), exact.as_str()].into_iter(),
+            "m",
+        )
+        .unwrap();
+        assert_eq!(kept.definitions["reader"].model.as_deref(), Some("m"));
+        let hostile = r#"{"Skipped":{"diagnostic":"bad\u001b[31m"}}"#;
+        let escaped = super::registry(&both_public, [hostile, hostile].into_iter(), "m").unwrap();
+        assert_eq!(escaped.diagnostics[0], "a.md: invalid diagnostic");
+    }
+
+    #[test]
+    fn agent_definition_registry_drops_excess_definitions_at_the_catalog_limit() {
+        let count = 64;
+        let outputs: Vec<_> = (0..count)
+            .map(|index| {
+                let mut definition = definition("tools: Read\n");
+                definition.name = format!("reader{index:03}");
+                definition.description = "d".repeat(200);
+                output(&definition)
+            })
+            .collect();
+        let names: Vec<_> = (0..count)
+            .map(|index| (false, format!("reader{index:03}.md")))
+            .collect();
+        let registry =
+            super::registry(&pin(&names), outputs.iter().map(String::as_str), "m").unwrap();
+        let kept = registry.definitions.len();
+        assert!(kept < count);
+        assert_eq!(registry.diagnostics.len(), count - kept);
+        assert!(registry.diagnostics[0].ends_with("dropped by the catalog limit"));
+        assert!(registry.definitions.contains_key("reader000"));
+        assert!(
+            registry
+                .definitions
+                .values()
+                .map(|definition| definition.catalog_entry().to_string().len() + 1)
+                .sum::<usize>()
+                <= MAX_AGENT_CATALOG_BYTES
+        );
+    }
+
+    #[test]
+    fn agent_definition_registry_bounds_aggregate_output_bytes() {
         let mut definitions: Vec<_> = (0..32)
             .map(|index| {
                 let mut definition = definition("tools: Read\n");
@@ -666,7 +913,7 @@ mod tests {
             .collect();
         let overhead: usize = definitions
             .iter()
-            .map(|definition| serde_json::to_string(definition).unwrap().len())
+            .map(|definition| output(definition).len())
             .sum();
         let mut remaining = MAX_RAW_BYTES - overhead;
         for definition in &mut definitions {
@@ -675,33 +922,20 @@ mod tests {
             remaining -= bytes;
         }
         assert_eq!(remaining, 0);
-        let files: Vec<_> = definitions
+        let names: Vec<_> = definitions
             .iter()
-            .map(|definition| DefinitionFilePin {
-                private: false,
-                filename: format!("{}.md", definition.name),
-                digest: [1; 32],
-            })
+            .map(|definition| (false, format!("{}.md", definition.name)))
             .collect();
-        let pin = DefinitionRegistryPin {
-            digest: digest(&serde_json::to_vec(&files).unwrap()),
-            files,
-        };
-        let output = |definitions: &[AgentDefinition]| {
-            definitions
-                .iter()
-                .map(|definition| serde_json::to_string(definition).unwrap())
-                .collect::<Vec<_>>()
-        };
-        let boundary = output(&definitions);
+        let pin = pin(&names);
+        let boundary: Vec<_> = definitions.iter().map(output).collect();
         assert_eq!(
             boundary.iter().map(String::len).sum::<usize>(),
             MAX_RAW_BYTES
         );
-        assert!(super::registry(&pin, boundary.iter().map(String::as_str)).is_ok());
+        assert!(super::registry(&pin, boundary.iter().map(String::as_str), "m").is_ok());
         definitions.last_mut().unwrap().body.push('b');
-        let overflow = output(&definitions);
-        assert!(super::registry(&pin, overflow.iter().map(String::as_str)).is_err());
+        let overflow: Vec<_> = definitions.iter().map(output).collect();
+        assert!(super::registry(&pin, overflow.iter().map(String::as_str), "m").is_err());
     }
 
     #[test]

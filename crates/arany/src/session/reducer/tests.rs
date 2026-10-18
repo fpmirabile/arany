@@ -4068,7 +4068,7 @@ mod goal_replay_tests {
                 raw_digest: [3; 32],
             },
         );
-        let output = serde_json::json!({"version":1,"name":"reader","description":"Inspect","tools":["read"],"disallowed_tools":[],"model":model,"permission_mode":null,"max_turns":17,"isolation":null,"background":false,"body":"Untrusted guidance"}).to_string();
+        let output = serde_json::json!({"Definition":{"definition":{"version":1,"name":"reader","description":"Inspect","tools":["read"],"disallowed_tools":[],"model":model,"permission_mode":null,"max_turns":17,"isolation":null,"background":false,"body":"Untrusted guidance"},"notes":[]}}).to_string();
         let observation = ToolObservation {
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
@@ -4165,17 +4165,19 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn agent_definition_replay_rejects_unadmitted_model_and_noncurrent_normalization() {
-        for case in ["model", "missing-field", "unknown-field", "failed"] {
-            let (mut view, goal, intent, mut observation) =
-                definition_preparation((case == "model").then_some("unadmitted"));
+    fn agent_definition_replay_rejects_noncurrent_normalization() {
+        for case in ["missing-field", "unknown-field", "failed"] {
+            let (mut view, goal, intent, mut observation) = definition_preparation(None);
             let mut output: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
             match case {
                 "missing-field" => {
-                    output.as_object_mut().unwrap().remove("model");
+                    output["Definition"]["definition"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("model");
                 }
                 "unknown-field" => {
-                    output["hooks"] = serde_json::json!({});
+                    output["Definition"]["definition"]["hooks"] = serde_json::json!({});
                 }
                 "failed" => {
                     observation.disposition = ToolDisposition::Failed;
