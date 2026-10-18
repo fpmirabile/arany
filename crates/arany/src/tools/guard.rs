@@ -1078,21 +1078,19 @@ async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write + Send + 'sta
         remaining == 0 && !failed && writer.flush().is_ok() && finish(writer)
     });
     let mut remaining = length;
+    let mut read = Ok(());
     while remaining > 0 {
         let wanted = usize::try_from(remaining.min(32 * 1024)).unwrap_or(32 * 1024);
         let mut buffer = vec![0u8; wanted];
-        reader
-            .read_exact(&mut buffer)
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        chunks
-            .send(buffer)
-            .await
-            .map_err(|_| ToolError::Operation)?;
+        if reader.read_exact(&mut buffer).await.is_err() || chunks.send(buffer).await.is_err() {
+            read = Err(ToolError::Operation);
+            break;
+        }
         remaining -= wanted as u64;
     }
     drop(chunks);
-    writer.await.map_err(|_| ToolError::Operation)
+    let staged = writer.await.map_err(|_| ToolError::Operation)?;
+    read.map(|()| staged)
 }
 
 // Seatbelt blocks Tokio's signal wake socket, so macOS closes stdin and polls try_wait when reaping.
@@ -2818,6 +2816,87 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    #[tokio::test]
+    async fn candidate_read_error_waits_for_the_writer_to_stop() {
+        struct GatedWriter {
+            entered: Option<tokio::sync::oneshot::Sender<()>>,
+            release: std::sync::mpsc::Receiver<()>,
+            stopped: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+
+        impl Write for GatedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let _ = self.entered.take().unwrap().send(());
+                self.release
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(std::io::Error::other)?;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                panic!("truncated candidate reached flush");
+            }
+        }
+
+        impl Drop for GatedWriter {
+            fn drop(&mut self) {
+                let _ = self.stopped.take().unwrap().send(());
+            }
+        }
+
+        let (entered, writing) = tokio::sync::oneshot::channel();
+        let (release, gate) = std::sync::mpsc::sync_channel(1);
+        let (stopped, mut completion) = tokio::sync::oneshot::channel();
+        let archive = vec![b'A'; 32 * 1024];
+        let mut reader = archive.as_slice();
+        let mut receive = Box::pin(drain_candidate(
+            &mut reader,
+            archive.len() as u64 + 1,
+            Some(GatedWriter {
+                entered: Some(entered),
+                release: gate,
+                stopped: Some(stopped),
+            }),
+            |_| panic!("truncated candidate reached sync"),
+        ));
+        let early = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                biased;
+                result = &mut receive => Some(result),
+                result = writing => {
+                    result.unwrap();
+                    None
+                }
+            }
+        })
+        .await;
+        release.send(()).unwrap();
+        let early = early.unwrap();
+        let returned_early = early.is_some();
+        let result = match early {
+            Some(result) => result,
+            None => tokio::time::timeout(Duration::from_secs(5), receive)
+                .await
+                .unwrap(),
+        };
+        let stopped_before_return = completion.try_recv().is_ok();
+        if !stopped_before_return {
+            tokio::time::timeout(Duration::from_secs(5), completion)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(
+            !returned_early,
+            "read error returned while the writer was held"
+        );
+        assert!(
+            stopped_before_return,
+            "staging survived the read error return"
+        );
+        assert!(matches!(result, Err(ToolError::Operation)));
     }
 
     #[tokio::test]
