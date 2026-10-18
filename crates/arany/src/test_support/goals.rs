@@ -421,6 +421,7 @@ impl crate::Provider for ForegroundWorkerProvider {
             .filter(|r| r.phase == request.phase)
             .count();
         self.requests.lock().unwrap().push(request.clone());
+        let mut release_child = None;
         let outcome = match (request.phase, step) {
             (AgentPhase::RootPlan, 0) => super::scenario::tool_outcome(
                 ToolCall::Read {
@@ -432,7 +433,7 @@ impl crate::Provider for ForegroundWorkerProvider {
             ),
             (AgentPhase::RootPlan, 1) => self.delegation(&request),
             (AgentPhase::ChildWork, 0) if self.case == "headroom_race" => {
-                self.background_started.notify_one();
+                self.background_started.notified().await;
                 super::scenario::tool_outcome(
                     ToolCall::Read {
                         path: "notes/a".into(),
@@ -459,7 +460,21 @@ impl crate::Provider for ForegroundWorkerProvider {
             (AgentPhase::RootSynthesis, _)
                 if matches!(self.case, "headroom_background" | "headroom_race") =>
             {
-                if step == 0 {
+                if self.case == "headroom_race" && step == 0 {
+                    let (entered, release) = crate::FaultPlan::gate_goal_append_acknowledgment(
+                        request.session_id,
+                        |event| {
+                            matches!(event, Event::ProviderCallRecorded { record, .. }
+                            if record.phase == AgentPhase::ChildWork)
+                        },
+                    );
+                    self.background_started.notify_one();
+                    tokio::time::timeout(std::time::Duration::from_secs(30), entered)
+                        .await
+                        .expect("child response reaches the coordinator")
+                        .expect("child response commits");
+                    release_child = Some(release);
+                } else if step == 0 {
                     self.background_started.notified().await;
                 }
                 super::scenario::tool_outcome(
@@ -566,7 +581,7 @@ impl crate::Provider for ForegroundWorkerProvider {
                 })
             }
         };
-        Ok(crate::ProviderResponse {
+        let response = crate::ProviderResponse {
             turn: crate::ProviderTurn::scripted(),
             outcome,
             response_id: None,
@@ -576,6 +591,13 @@ impl crate::Provider for ForegroundWorkerProvider {
                 ..Default::default()
             },
             wire_provenance: None,
-        })
+        };
+        if let Some(release) = release_child {
+            // Complete this response in the same poll before the child continuation resumes.
+            release
+                .send(())
+                .expect("release the committed child response");
+        }
+        Ok(response)
     }
 }

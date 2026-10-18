@@ -286,6 +286,19 @@ pub(super) async fn worker_case(case: &'static str) {
             assert_ne!(*agent_run_id, run.agents[0].id, "{case}");
         } else if case == "headroom_race" {
             assert_eq!(child_calls, 1, "{case}");
+            assert_eq!(synthesis_calls, 1, "{case}");
+            assert_ne!(*agent_run_id, run.agents[0].id, "{case}");
+            assert!(
+                bundle.events[stopped + 1..].iter().any(|e| matches!(
+                    &e.event,
+                    Event::ProviderCallRecorded { agent_run_id, record, .. }
+                        if *agent_run_id == run.agents[0].id
+                            && record.phase == AgentPhase::RootSynthesis
+                            && record.disposition == ProviderCallDisposition::InvalidResponse
+                            && record.failure_reason == Some(arany::ProviderFailureReason::WorkerToolRefused)
+                )),
+                "{case}: the completed primary response is refused after the child stops"
+            );
         } else {
             assert_eq!(child_calls, 1, "{case}: drain the blocked worker call");
             assert!(synthesis_calls >= 1, "{case}: reach primary coordination");
@@ -421,16 +434,12 @@ async fn worker_call_capacity_stop_releases_the_lease_before_returning_the_store
 
 #[tokio::test]
 async fn background_primary_capacity_stop_drains_workers_before_returning_the_store_error() {
-    tokio::time::timeout(Duration::from_secs(30), worker_case("headroom_background"))
-        .await
-        .expect("capacity stop drains the pending worker call");
+    worker_case("headroom_background").await;
 }
 
 #[tokio::test]
 async fn child_capacity_stop_discards_a_completed_background_primary_response() {
-    tokio::time::timeout(Duration::from_secs(30), worker_case("headroom_race"))
-        .await
-        .expect("capacity stop settles the worker");
+    worker_case("headroom_race").await;
 }
 
 #[tokio::test]
