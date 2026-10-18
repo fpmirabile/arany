@@ -3,8 +3,8 @@ use arany::{
     CompactionItem, CompactionRequest, CompactionResponse, CompactionStatus, ContextUsage,
     Delegate, Effort, Engine, EngineConfig, EngineError, Event, Finish, ImageOrigin, PromptRole,
     Provider, ProviderCallDisposition, ProviderError, ProviderImage, ProviderOutcome,
-    ProviderRequest, ProviderResponse, RunCancellation, RunControls, RunId, RunInput, RunProgress,
-    RunStatus, RunSteering, SessionId, SessionView, StateRoot, Store, ToolGrant, continue_session,
+    ProviderRequest, ProviderResponse, RunCancellation, RunControls, RunId, RunInput, RunStatus,
+    RunSteering, SessionId, SessionView, StateRoot, Store, ToolGrant, continue_session,
     fork_session, list_sessions, rename_session, resume_session,
 };
 use sha2::{Digest, Sha256};
@@ -1135,10 +1135,10 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
         run_request.policy = CollaborationPolicy::Team {
             max_active_children: 3,
         };
-        let mut progress = RunProgress::new();
-        let run_progress = progress.clone();
+        let mut tapped = engine.subscribe();
+        let mut live = resumed.clone();
         let mut run_task = tokio::spawn(async move {
-            let outcome = run_with(&engine, &provider, run_request, RunControls { cancellation: RunCancellation::new(), progress: Some(run_progress), ..Default::default() })
+            let outcome = run_with(&engine, &provider, run_request, RunControls { cancellation: RunCancellation::new(), ..Default::default() })
                 .await;
             let close = engine.close().await;
             (outcome, close)
@@ -1149,24 +1149,16 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
                 let (objective, release) = started_rx.recv().await.expect("child started");
                 gates.insert(objective, release);
             }
-            let mut update = progress.changed().await;
-            assert_eq!(update.run.status, RunStatus::Active);
-            assert_eq!(update.run.agents.len(), 4);
-            assert!(
-                update
-                    .run
-                    .agents
-                    .iter()
-                    .all(|agent| agent.status == AgentStatus::Active)
-            );
-            let committed = observer
-                .load_session(session_id)
-                .await
-                .expect("committed progress");
-            assert_eq!(
-                committed.last().expect("last Event").sequence,
-                update.sequence
-            );
+            let committed = observer.load_session(session_id).await.expect("committed activity");
+            let sequence = committed.last().expect("last Event").sequence;
+            while live.last_sequence < sequence {
+                let Some(arany::Tapped::Committed(event)) = tapped.next().await else { panic!("committed activity"); };
+                arany::reduce_into(&mut live, &event).expect("valid activity");
+            }
+            let active = live.runs.last().unwrap();
+            assert_eq!(active.status, RunStatus::Active);
+            assert_eq!(active.agents.len(), 4);
+            assert!(active.agents.iter().all(|agent| agent.status == AgentStatus::Active));
             for objective in ["C", "B", "A"] {
                 gates
                     .remove(objective)
@@ -1175,9 +1167,9 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
                     .expect("live child");
                 wait_for_child_finish(&observer, session_id, objective).await;
                 loop {
-                    update = progress.changed().await;
-                    let child = update
-                        .run
+                    let Some(arany::Tapped::Committed(event)) = tapped.next().await else { panic!("committed child completion"); };
+                    arany::reduce_into(&mut live, &event).expect("valid child completion");
+                    let child = live.runs.last().unwrap()
                         .agents
                         .iter()
                         .find(|agent| agent.objective.as_deref() == Some(objective))
@@ -1187,11 +1179,10 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
                     }
                 }
             }
-            update
         })
         .await;
-        let observed_update = match controlled {
-            Ok(update) => update,
+        match controlled {
+            Ok(()) => (),
             Err(_) => {
                 run_task.abort();
                 let _ = run_task.await;
@@ -1215,18 +1206,12 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
         assert_eq!(team_config.provider, "gated");
         assert_ne!(team_config.provider, resumed.runs[0].config.as_ref().expect("seed config").provider);
         assert_eq!(team_config.compaction_event_sequence, Some(summary_sequence));
-        let final_update = if observed_update.run.status == RunStatus::Finished {
-            observed_update
-        } else {
-            tokio::time::timeout(Duration::from_secs(5), progress.changed())
-                .await
-                .expect("final progress deadline")
-        };
-        assert_eq!(final_update.run, outcome.run);
-        assert_eq!(
-            final_update.sequence,
-            outcome.run.finished_sequence.expect("terminal Event")
-        );
+        while live.runs.last().unwrap().status != RunStatus::Finished {
+            let Some(arany::Tapped::Committed(event)) = tapped.next().await else { panic!("committed Run completion"); };
+            arany::reduce_into(&mut live, &event).expect("valid Run completion");
+        }
+        assert_eq!(live.runs.last().unwrap(), &outcome.run);
+        assert_eq!(Some(live.last_sequence), outcome.run.finished_sequence);
         {
             let requests = requests.lock().expect("requests lock");
             assert_eq!(requests.len(), 5);

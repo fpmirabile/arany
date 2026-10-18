@@ -117,7 +117,7 @@ Unknown threads on all three methods return `threadNotLoaded`.
 
 All live facts come from committed Events on `RunHandle.events` or the single
 process-wide `Engine::subscribe()` tap for raw subscriptions, never
-Provider previews or `RunProgress`. Completion reloads the strict reduced view
+Provider previews or `RunHints`. Completion reloads the strict reduced view
 to include a following Goal receipt and recover a missing terminal tap. Each
 submission is driven independently of the bounded outbound follower, so a slow
 client cannot hold Journal appends. Notification opt-outs from initialize are

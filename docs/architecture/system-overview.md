@@ -63,7 +63,7 @@ Only the primary integrates changesets. The [execution contract](../specs/execut
 and [Goal contract](../specs/goals.md) own lifecycle, budgets and recovery.
 
 `Journal::append` publishes only committed Events to a bounded broadcast ring of
-256 envelopes. Progress, telemetry and diagnostics each subscribe to that tap;
+256 envelopes. Clients, telemetry and diagnostics each subscribe to that tap;
 a lagging receiver gets `Resync { missed }` and rebuilds from the committed view.
 Observers never block control flow or authorize work. Provider previews remain
 separate provisional data. The tap belongs to Journal rather than the Store
@@ -94,10 +94,9 @@ flowchart LR
         Views --> Ledger
         Views --> Presentation
         Journal -. committed Events .-> Tap[256-envelope broadcast ring + Resync]
-        Tap --> Progress[Progress]
+        Tap --> Terminal
         Tap --> OTLP[Telemetry]
         Tap --> Diagnostics[Diagnostics]
-        Progress --> Terminal
         Tools --> Reads[In-process List / Read / Search]
     end
 
@@ -315,7 +314,7 @@ The private attached model owner persists token-free `model-preferences.json` un
 
 The attached command owner persists token-free `ui-preferences.json` at the selected admitted state root through the existing private replacement lock and atomic file transport. Its closed version 3, 1 KiB record holds slash completion, chat view, Goal usage limits and Build/command resource settings; defaults and malformed-record recovery use tabs and fullscreen. Attached startup reads it read-only before terminal acquisition without creating State; `--classic` pins Classic for that process without changing the record. Engine snapshots only the selected execution values into a Goal before Workspace disclosure; they do not widen Tool grants. The saved record itself never enters Events, account authority or Provider context. The Composer owns tab/focus state and the frame places the bounded list below input, sharing history-capacity geometry with the lifecycle owner.
 
-The Engine publishes the latest acknowledged RunView and committed sequence through a one-slot coalescing progress handle. Skipped display intermediates never skip canonical Events. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay and typed CLI classification precede receipt/answer output. Linear output restores ownership first; visual modes retain their owned viewport while inserting classic transcript or emitting redirected confirmed stdout.
+The Engine publishes provisional display and capacity waits through a hints handle; committed facts come from the Engine’s Event stream, reduced into the attached terminal’s local SessionView. Before Engine admission, preparing feedback remains presentation-local; afterward activity derives solely from committed current-Run facts. Closed replay and typed CLI classification precede receipt/answer output. Linear output restores ownership first; visual modes retain their owned viewport while inserting classic transcript or emitting redirected confirmed stdout.
 
 Guard's shared capacity wait is a separate one-slot intent-ID hint, validated
 against the committed pending Tool before display. It cannot enter history or

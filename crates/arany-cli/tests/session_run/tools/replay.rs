@@ -1032,8 +1032,7 @@ pub(super) async fn native_command_changeset_corpus(
 ) {
     use arany::{
         ApprovalMode, Finish, Provider, ProviderError, ProviderOutcome, ProviderRequest,
-        ProviderResponse, RunCancellation, RunProgress, RunRequest, StateRoot, Store,
-        ToolApprovals,
+        ProviderResponse, RunCancellation, RunHints, RunRequest, StateRoot, Store, ToolApprovals,
     };
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
@@ -1414,7 +1413,7 @@ pub(super) async fn native_command_changeset_corpus(
                             tools: ToolGrant::Configured,
                             approvals: granted,
                             cancellation,
-                            progress: Some(RunProgress::new()),
+                            progress: Some(RunHints::new()),
                             ..Default::default()
                         },
                     )

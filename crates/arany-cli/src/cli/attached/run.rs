@@ -1,8 +1,8 @@
 use crate::cli::provider::routing::RoutingError;
 use crate::cli::provider::select::{Selection, SelectionError, select_provider};
 use arany::{
-    AdmittedProviders, CompactionRecord, Engine, RunCancellation, RunControls, RunId, RunOutcome,
-    RunProgress, RunRequest, RunResult, RunSteering, SessionId, ToolGrant,
+    AdmittedProviders, CompactionRecord, Engine, RunCancellation, RunControls, RunHandle, RunHints,
+    RunId, RunOutcome, RunRequest, RunResult, RunSteering, SessionId, ToolGrant,
     native_protection_supported,
 };
 use std::path::Path;
@@ -54,17 +54,17 @@ pub(super) async fn preflight_selected(
     clippy::too_many_arguments,
     reason = "run admission carries independent inputs"
 )]
-pub(super) async fn run_selected(
-    engine: &Engine,
+pub(super) async fn submit_selected<'a>(
+    engine: &'a Engine,
     state_dir: &Path,
     selection: Selection<'_>,
     request: RunRequest,
     cancellation: RunCancellation,
-    progress: RunProgress,
+    progress: RunHints,
     tools: ToolAccess<'_>,
     steering: RunSteering,
     roster: Option<crate::cli::provider::roster::SelectedRoster>,
-) -> Result<RunOutcome, RunAttemptError> {
+) -> Result<RunHandle<'a>, RunAttemptError> {
     let mut admission_cancellation = cancellation.clone();
     let admit = async {
         engine
@@ -95,7 +95,7 @@ pub(super) async fn run_selected(
         () = admission_cancellation.cancelled() => return Err(RunAttemptError::InterruptedBeforeRun),
         result = admit => result.map_err(RunAttemptError::Failed)?,
     };
-    run_with_providers(
+    submit_with_providers(
         engine,
         providers,
         request,
@@ -104,18 +104,17 @@ pub(super) async fn run_selected(
         tools,
         steering,
     )
-    .await
 }
 
-async fn run_with_providers(
-    engine: &Engine,
+fn submit_with_providers<'a>(
+    engine: &'a Engine,
     providers: AdmittedProviders,
     request: RunRequest,
     cancellation: RunCancellation,
-    progress: RunProgress,
+    progress: RunHints,
     tools: ToolAccess<'_>,
     steering: RunSteering,
-) -> Result<RunOutcome, RunAttemptError> {
+) -> Result<RunHandle<'a>, RunAttemptError> {
     // Each submission fails closed when the held State became unsafe or its path was swapped.
     engine
         .readmit_state()
@@ -155,7 +154,13 @@ async fn run_with_providers(
             }
             RunAttemptError::Failed(RunFailure::Engine(error))
         })?;
-    match handle.await {
+    Ok(handle)
+}
+
+pub(super) fn finish_run(
+    result: Result<RunResult, arany::EngineError>,
+) -> Result<RunOutcome, RunAttemptError> {
+    match result {
         Ok(RunResult {
             run,
             stopped: Some(reason),
@@ -1255,7 +1260,7 @@ mod tests {
             .unwrap();
             let mut session = None;
             for _ in 0..2 {
-                let outcome = run_with_providers(
+                let outcome = submit_with_providers(
                     &engine,
                     AdmittedProviders::single(Arc::new(Greeting::new(
                         profile,
@@ -1273,7 +1278,7 @@ mod tests {
                         goal: arany::GoalRequest::default(),
                     },
                     RunCancellation::new(),
-                    RunProgress::new(),
+                    RunHints::new(),
                     ToolAccess {
                         configured: false,
                         permissions,
@@ -1281,8 +1286,10 @@ mod tests {
                     },
                     RunSteering::new(),
                 )
+                .expect("ordinary greeting retains the admitted native file capability")
                 .await
-                .expect("ordinary greeting retains the admitted native file capability");
+                .map(|result| result.run)
+                .unwrap();
                 session = Some(outcome.session_id);
                 assert_eq!(outcome.run.status, RunStatus::Finished);
             }
@@ -1327,7 +1334,7 @@ mod tests {
             std::fs::write(&private, serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["."],"write":true,
                 "commands":[{"name":"sh","executable":"/bin/sh","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]})).unwrap()).unwrap();
             std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
-            let error = run_with_providers(
+            let submitted = submit_with_providers(
                 &engine,
                 AdmittedProviders::single(Arc::new(Greeting::new(
                     profile,
@@ -1345,16 +1352,19 @@ mod tests {
                     goal: arany::GoalRequest::default(),
                 },
                 RunCancellation::new(),
-                RunProgress::new(),
+                RunHints::new(),
                 ToolAccess {
                     configured: true,
                     permissions: None,
                     approvals: &approvals,
                 },
                 RunSteering::new(),
-            )
-            .await
-            .expect_err("explicit Tool admission must reject before inference");
+            );
+            let error = match submitted {
+                Ok(handle) => finish_run(handle.await)
+                    .expect_err("explicit Tool admission must reject before inference"),
+                Err(error) => error,
+            };
             #[cfg(debug_assertions)]
             assert!(
                 matches!(

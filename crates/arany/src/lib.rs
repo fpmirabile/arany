@@ -30,9 +30,9 @@ pub use diagnostics::{
 pub use engine::Action;
 pub use engine::{
     DisplayUpdate, Engine, EngineConfig, EngineError, GoalRequest, RunCancellation, RunControls,
-    RunFuture, RunHandle, RunOutcome, RunPreview, RunProgress, RunRequest, RunResult, RunSteering,
-    RunUpdate, SteeringRefused, ToolGrant, continue_session, create_session, fork_session,
-    list_sessions, rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
+    RunFuture, RunHandle, RunHints, RunOutcome, RunPreview, RunRequest, RunResult, RunSteering,
+    SteeringRefused, ToolGrant, continue_session, create_session, fork_session, list_sessions,
+    rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
 };
 #[cfg(feature = "test-support")]
 pub use fault::FaultPlan;
@@ -65,8 +65,9 @@ pub use session::{
     GoalId, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus,
     GoalSuccessCriterion, GoalView, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS,
     MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS,
-    ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunId, RunStatus,
-    RunView, SessionDefaults, SessionId, SessionListItem, SessionView, ToolView, WorkspaceIdentity,
+    ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition, RunId,
+    RunStatus, RunView, SessionDefaults, SessionId, SessionListItem, SessionView, ToolView,
+    WorkspaceIdentity,
 };
 pub use store::{HistoryReset, Record, RecordKind, StateRoot, Store, StoreError};
 pub use telemetry::{Telemetry, TelemetryConfigError};
@@ -86,3 +87,7 @@ pub use session::DISPLAY_LIMIT_TEXT;
 pub use tools::types::valid_name as valid_tool_name;
 
 pub use tools::catalog::Site;
+
+pub fn reduce_into(view: &mut SessionView, envelope: &EventEnvelope) -> Result<(), ReplayError> {
+    view.apply_committed(envelope)
+}

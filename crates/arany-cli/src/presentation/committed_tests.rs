@@ -6,7 +6,7 @@ use arany::test_support::{
 use arany::{
     AgentPhase, CollaborationPolicy, Delegate, Engine, EngineConfig, Finish,
     ProviderCallDisposition, ProviderError, ProviderOutcome, Providers, RunCancellation,
-    RunControls, RunProgress, StateRoot, Store,
+    RunControls, RunHints, StateRoot, Store,
 };
 use std::{
     collections::VecDeque,
@@ -198,8 +198,8 @@ async fn cancelled_preview_jsonl_includes_committed_checkpoints_and_commentary()
     });
     let cancellation = RunCancellation::new();
     let cancel = cancellation.clone();
-    let mut progress = RunProgress::with_previews();
-    let observed = progress.clone();
+    let mut events = engine.subscribe();
+    let observed = RunHints::with_previews();
     let task = tokio::spawn(async move {
         let run = run_with(
             &engine,
@@ -218,14 +218,8 @@ async fn cancelled_preview_jsonl_includes_committed_checkpoints_and_commentary()
     });
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if progress
-                .changed()
-                .await
-                .run
-                .display
-                .iter()
-                .any(|chunk| chunk.category == arany::DisplayCategory::Answer)
-            {
+            let Some(arany::Tapped::Committed(event)) = events.next().await else { panic!("committed checkpoint"); };
+            if matches!(&event.event, Event::AssistantDisplayRecorded { chunk, .. } if chunk.category == arany::DisplayCategory::Answer) {
                 break;
             }
         }

@@ -9,7 +9,7 @@ use crate::terminal::{
 };
 use arany::{
     CompactionFailure, CompactionRecord, CompactionStatus, ImageAttachment, RunCancellation,
-    RunOutcome, RunProgress, RunRequest, RunSteering, SessionView, SteeringRefused,
+    RunHints, RunOutcome, RunRequest, RunSteering, SessionView, SteeringRefused,
 };
 use std::time::Duration;
 
@@ -19,6 +19,11 @@ pub(super) enum RunSubmission {
     Completed(Box<RunOutcome>, bool, Option<String>),
     InterruptedBeforeRun,
     Shutdown(String),
+}
+
+enum RunStep<'a> {
+    Admitted(arany::RunHandle<'a>),
+    Completed(Result<Box<RunOutcome>, run::RunAttemptError>),
 }
 
 pub(super) enum CompactionOutcome {
@@ -379,10 +384,10 @@ pub(super) async fn submit_objective(
         GoalStart::Plain | GoalStart::Autonomous => goal == GoalStart::Autonomous,
     };
     let cancellation = RunCancellation::new();
-    let mut progress = if terminal.is_linear() {
-        RunProgress::new()
+    let progress = if terminal.is_linear() {
+        RunHints::new()
     } else {
-        RunProgress::with_previews()
+        RunHints::with_previews()
     };
     let mut previews = progress.previews();
     let mut waiting_progress = progress.clone();
@@ -417,7 +422,7 @@ pub(super) async fn submit_objective(
             .draw_busy_notice(view, composer, Some(TerminalNotice::History(manifest)))
             .map_err(|error| error.to_string())?;
     }
-    let future = run::run_selected(
+    let future = run::submit_selected(
         engine,
         &admission.state_dir,
         Selection {
@@ -439,6 +444,7 @@ pub(super) async fn submit_objective(
         roster,
     );
     tokio::pin!(future);
+    let mut handle: Option<arany::RunHandle<'_>> = None;
     let mut stop = ActiveStop::Running;
     let mut user_recorded = false;
     let mut offered: Option<String> = None;
@@ -451,6 +457,10 @@ pub(super) async fn submit_objective(
                 .map_err(|error| error.to_string())?,
             None => false,
         };
+        let (result, events) = handle
+            .as_mut()
+            .map(|handle| (&mut handle.result, &mut handle.events))
+            .unzip();
         tokio::select! {
             approval = inbox.next(), if pending.is_none() => {
                 pending = approval;
@@ -458,7 +468,22 @@ pub(super) async fn submit_objective(
                 approval_choice = 0;
                 approval_answer.clear();
             }
-            result = &mut future => {
+            step = async {
+                match result {
+                    Some(result) => RunStep::Completed(run::finish_run(result.await).map(Box::new)),
+                    None => match future.as_mut().await {
+                        Ok(handle) => RunStep::Admitted(handle),
+                        Err(error) => RunStep::Completed(Err(error)),
+                    },
+                }
+            } => {
+                let result = match step {
+                    RunStep::Admitted(admitted) => {
+                        handle = Some(admitted);
+                        continue;
+                    }
+                    RunStep::Completed(result) => result,
+                };
                 terminal.set_waiting_tool(None);
                 terminal.set_preview(None);
                 composer.set_file_candidates(None, Vec::new());
@@ -489,7 +514,7 @@ pub(super) async fn submit_objective(
                     return Ok(RunSubmission::Shutdown("terminal rendering failed".into()));
                 }
                 return match result {
-                    Ok(outcome) => Ok(RunSubmission::Completed(Box::new(outcome), user_recorded, None)),
+                    Ok(outcome) => Ok(RunSubmission::Completed(outcome, user_recorded, None)),
                     Err(run::RunAttemptError::Stopped { outcome, reason }) => {
                         Ok(RunSubmission::Completed(outcome, user_recorded, Some(reason)))
                     }
@@ -503,27 +528,31 @@ pub(super) async fn submit_objective(
                     break "terminal rendering failed".to_owned();
                 }
             }
-            update = progress.changed() => {
-                if update.sequence <= view.last_sequence {
-                    continue;
+            event = async {
+                match events {
+                    Some(events) => events.next().await,
+                    None => std::future::pending().await,
                 }
-                if !user_recorded {
-                    if terminal.record_user_run(&update.run).is_err() {
+            } => {
+                let applied = match event {
+                    Some(arany::Tapped::Committed(event)) => {
+                        if event.session_id != view.id || event.sequence <= view.last_sequence {
+                            continue;
+                        }
+                        arany::reduce_into(view, &event).map_err(|error| error.to_string())
+                    }
+                    Some(arany::Tapped::Resync { .. }) => catch_up(&admission.state_dir, view).await,
+                    None => break "Run event stream closed".to_owned(),
+                };
+                if applied.is_err() {
+                    break "Run history unavailable; check Session history".to_owned();
+                }
+                if !user_recorded && let Some(run) = view.runs.last().filter(|run| run.accepted_sequence > starting_sequence) {
+                    if terminal.record_user_run(run).is_err() {
                         break "terminal rendering failed".to_owned();
                     }
                     user_recorded = true;
                 }
-                if let Some(goal) = update.goal {
-                    upsert_goal(&mut view.goals, goal);
-                }
-                if let Some(last) = view.runs.last_mut()
-                    && last.id == update.run.id
-                {
-                    *last = update.run;
-                } else {
-                    view.runs.push(update.run);
-                }
-                view.last_sequence = update.sequence;
                 let sent = settle_recorded_note(steering.delivered_notes(), &mut seen_delivered, &mut offered, composer);
                 if sent && terminal.restore_draft_input(composer.text().len()).is_err() {
                     break "terminal input failed".to_owned();
@@ -862,7 +891,14 @@ pub(super) async fn submit_objective(
     };
     let restored = terminal.restore();
     let mut reason = shutdown_reason;
-    match tokio::time::timeout(SHUTDOWN_GRACE, future.as_mut()).await {
+    let finish = async {
+        let handle = match handle {
+            Some(handle) => handle,
+            None => future.await?,
+        };
+        run::finish_run(handle.await)
+    };
+    match tokio::time::timeout(SHUTDOWN_GRACE, finish).await {
         Ok(Ok(outcome)) if restored.is_ok() => {
             let emitted = match load_confirmed_outcome(&admission.state_dir, &outcome).await {
                 Ok(confirmed) => emit_outcome(&confirmed, &outcome, preview_printed, !linear, mode),
@@ -1143,87 +1179,31 @@ fn compaction_notice(record: &CompactionRecord) -> String {
     }
 }
 
-// Preserve Goal start order so goals.last() remains the newest Goal.
-fn upsert_goal(goals: &mut Vec<arany::GoalView>, goal: arany::GoalView) {
-    match goals.iter_mut().find(|known| known.id == goal.id) {
-        Some(known) => *known = goal,
-        None => goals.push(goal),
+async fn catch_up(state_dir: &std::path::Path, view: &mut SessionView) -> Result<(), String> {
+    let state = arany::StateRoot::open_existing(state_dir).map_err(|error| error.to_string())?;
+    let store = arany::Store::open_read_only(state).map_err(|error| error.to_string())?;
+    let events = store
+        .load_session(view.id)
+        .await
+        .map_err(|error| error.to_string());
+    store.close().await.map_err(|error| error.to_string())?;
+    for event in events? {
+        if event.sequence > view.last_sequence {
+            arany::reduce_into(view, &event).map_err(|error| error.to_string())?;
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arany::WorkspaceIdentity;
 
     #[test]
     fn switches_shown_before_a_stale_view_do_not_skip_or_panic() {
         assert_eq!(unshown(vec![1, 2, 3], Some(1)), vec![2, 3]);
         assert_eq!(unshown(vec![1], Some(2)), Vec::<i32>::new());
         assert_eq!(unshown(vec![1, 2], None), vec![1, 2]);
-    }
-
-    #[test]
-    fn goal_update_appends_new_goal_and_replaces_known_goal() {
-        let mut first = session_with_goal_view();
-        let mut second = first.clone();
-        second.id = arany::GoalId::new();
-        let mut goals = Vec::new();
-
-        upsert_goal(&mut goals, first.clone());
-        upsert_goal(&mut goals, second.clone());
-        assert_eq!(
-            goals.iter().map(|goal| goal.id).collect::<Vec<_>>(),
-            [first.id, second.id]
-        );
-
-        first.objective = "Replaced in place".into();
-        upsert_goal(&mut goals, first.clone());
-        assert_eq!(goals.len(), 2);
-        assert_eq!(goals[0], first);
-        assert_eq!(goals.last().map(|goal| goal.id), Some(second.id));
-    }
-
-    fn session_with_goal_view() -> arany::GoalView {
-        let session_id = arany::SessionId::new();
-        let events = [
-            arany::Event::SessionStarted {
-                title: "Goals".into(),
-                workspace_identity: WorkspaceIdentity {
-                    device: 1,
-                    inode: 2,
-                },
-            },
-            arany::Event::GoalStarted {
-                goal_id: arany::GoalId::new(),
-                objective: "Ship the parser".into(),
-                workspace_identity: WorkspaceIdentity {
-                    device: 1,
-                    inode: 2,
-                },
-                budget: arany::GoalBudget::default(),
-                phase: arany::GoalPhase::Implementation,
-                autonomous: false,
-                resource_settings: arany::ToolResourceSettings::default(),
-                continues: None,
-            },
-        ]
-        .into_iter()
-        .zip(1..)
-        .map(|(event, sequence)| arany::EventEnvelope {
-            sequence,
-            session_id,
-            run_id: None,
-            agent_run_id: None,
-            event,
-            created_at_ms: 0,
-        })
-        .collect::<Vec<_>>();
-        SessionView::replay(session_id, &events)
-            .expect("valid Goal history")
-            .expect("Session")
-            .goals
-            .remove(0)
     }
 
     #[test]

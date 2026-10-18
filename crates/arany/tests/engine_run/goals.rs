@@ -2410,7 +2410,7 @@ async fn plain_prompt_is_one_run_even_when_its_criterion_is_unsatisfied() {
     assert_eq!(goal.run_ids, [outcome.run.id]);
 }
 
-/// Action taken once a Run's Finish is committed and observed through progress.
+/// Action taken once a Run's Finish is committed and tapped.
 enum AfterFinish {
     Cancel(RunCancellation),
 }
@@ -2425,8 +2425,7 @@ async fn run_observing_finish(
     let cancellation = match &after {
         AfterFinish::Cancel(cancellation) => cancellation.clone(),
     };
-    let progress = RunProgress::new();
-    let mut observer = progress.clone();
+    let mut observer = engine.subscribe();
     let run = run_with(
         engine,
         provider,
@@ -2434,7 +2433,6 @@ async fn run_observing_finish(
         RunControls {
             tools: ToolGrant::Configured,
             cancellation,
-            progress: Some(progress),
             ..Default::default()
         },
     );
@@ -2443,8 +2441,8 @@ async fn run_observing_finish(
     loop {
         tokio::select! {
             result = &mut run => return result,
-            update = observer.changed() => {
-                if update.run.status == RunStatus::Finished && let Some(action) = after.take() {
+            event = observer.next() => {
+                if matches!(event, Some(arany::Tapped::Committed(event)) if matches!(event.event, Event::RunFinished { disposition: arany::RunDisposition::Finished, .. })) && let Some(action) = after.take() {
                     match action {
                         AfterFinish::Cancel(cancellation) => {
                             cancellation.cancel();
@@ -2727,55 +2725,68 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
 }
 
 #[tokio::test]
-async fn progress_snapshots_carry_the_goal_through_each_iteration() {
+async fn run_hints_carry_no_committed_facts() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
-    let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
-        finish_with("first pass"),
-        crate::tool_outcome(facts_read(), None),
-        finish_with("verified"),
-    ])
-    .with_before_call(2, write_facts(&workspace, "v2"));
-    let provider = Arc::new(provider);
-    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let progress = RunProgress::new();
-    let mut observer = progress.clone();
-    let mut observed_runs = Vec::new();
-    let outcome = {
-        let run = run_with(
-            &engine,
-            &provider,
-            autonomous_input(&workspace),
-            RunControls {
-                tools: ToolGrant::Configured,
-                cancellation: RunCancellation::new(),
-                progress: Some(progress),
-                ..Default::default()
-            },
-        );
-        tokio::pin!(run);
-        loop {
-            tokio::select! {
-                update = observer.changed() => {
-                    observed_runs.push(update.goal.as_ref().map(|goal| goal.run_ids.len()));
-                }
-                result = &mut run => break result.expect("autonomous Goal"),
-            }
-        }
+    let provider = Arc::new(ScriptedProvider::new(vec![finish_with("accepted answer")]));
+    let engine = engine_support::open(
+        StateRoot::admit(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("Engine");
+    let mut hints = RunHints::new();
+    let mut previews = hints.previews();
+    let mut input = request(&workspace, "Question");
+    input.include_paths.clear();
+    let (mut stream, outcome) = {
+        let handle = engine
+            .submit(
+                AdmittedProviders::single(provider),
+                input,
+                RunControls {
+                    progress: Some(hints.clone()),
+                    ..Default::default()
+                },
+            )
+            .expect("submission");
+        let arany::RunHandle {
+            events: stream,
+            result,
+            ..
+        } = handle;
+        let outcome = result.await.expect("committed Run").run;
+        (stream, outcome)
     };
-    assert_eq!(outcome.run.status, RunStatus::Finished);
-    assert!(
-        observed_runs.contains(&Some(1)),
-        "the first iteration's snapshots name one Run: {observed_runs:?}"
-    );
-    assert_eq!(
-        observed_runs.last(),
-        Some(&Some(2)),
-        "the final snapshot counts both iterations, not the first: {observed_runs:?}"
-    );
     engine.close().await.expect("engine shutdown");
+    let mut tapped = Vec::new();
+    while let Some(event) = stream.next().await {
+        let arany::Tapped::Committed(event) = event else {
+            panic!("bounded Run cannot lag");
+        };
+        tapped.push((*event).clone());
+    }
+    assert!(
+        tapped
+            .iter()
+            .any(|event| matches!(event.event, Event::RunFinished { .. }))
+    );
+    tokio::select! {
+        biased;
+        _ = previews.changed() => panic!("committed facts must not publish preview hints"),
+        _ = hints.waiting_changed() => panic!("committed facts must not publish capacity hints"),
+        () = std::future::ready(()) => {}
+    }
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(tapped, events);
+    let mut live = SessionView::replay(outcome.session_id, &tapped[..1])
+        .expect("Session creation")
+        .expect("Session");
+    for event in &tapped[1..] {
+        arany::reduce_into(&mut live, event).expect("incremental committed reduction");
+    }
+    assert_eq!(live, view);
+    assert_eq!(view.runs[0], outcome.run);
 }
 
 #[tokio::test]
@@ -4992,7 +5003,7 @@ async fn previews_chunk_a_finishing_call_within_its_bound() {
         input,
         RunControls {
             cancellation: RunCancellation::new(),
-            progress: Some(RunProgress::with_previews()),
+            progress: Some(RunHints::with_previews()),
             ..Default::default()
         },
     )
