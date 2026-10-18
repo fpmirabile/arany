@@ -82,6 +82,15 @@ enum Resolver<'a> {
     Human,
 }
 
+enum AskSite {
+    Primary {
+        unguarded_prompt: Option<UnguardedPrompt>,
+    },
+    Delegated {
+        deadline: Instant,
+    },
+}
+
 struct Resolution {
     approved: bool,
     source: PermissionSource,
@@ -838,26 +847,26 @@ impl RunLoop<'_> {
             && let Some(mode) = permission.approval
             && self.ledger().can_start_provider_call()
         {
-            let initial_mode = self.terminal_mode();
-            let resolvers = [
-                Resolver::AiReview {
-                    objective: &request.input.objective,
-                },
-                Resolver::Human,
-            ];
+            let resolvers;
             let chain = if mode == ApprovalMode::Auto && review_allowed {
+                resolvers = [
+                    Resolver::AiReview {
+                        objective: &request.input.objective,
+                    },
+                    Resolver::Human,
+                ];
                 &resolvers[..]
             } else {
-                &resolvers[1..]
+                &[Resolver::Human]
             };
             let resolution = self
                 .resolve_ask(
                     runtime,
                     &intent,
                     chain,
-                    None,
-                    unguarded_prompt.clone(),
-                    initial_mode,
+                    AskSite::Primary {
+                        unguarded_prompt: unguarded_prompt.clone(),
+                    },
                 )
                 .await?;
             approved = resolution.approved;
@@ -1125,7 +1134,6 @@ impl RunLoop<'_> {
         if !runtime.allows(&intent.call) || !self.ledger().can_start_provider_call() {
             return Ok((false, PermissionSource::UnavailableApproval));
         }
-        let initial_mode = self.terminal_mode();
         let objective = if mode == ApprovalMode::Auto && self.ledger().admits(Action::Review) {
             Some(
                 self.ledger()
@@ -1135,13 +1143,15 @@ impl RunLoop<'_> {
         } else {
             None
         };
-        let mut chain = Vec::with_capacity(2);
-        if let Some(objective) = &objective {
-            chain.push(Resolver::AiReview { objective });
-        }
-        chain.push(Resolver::Human);
+        let resolvers;
+        let chain = if let Some(objective) = &objective {
+            resolvers = [Resolver::AiReview { objective }, Resolver::Human];
+            &resolvers[..]
+        } else {
+            &[Resolver::Human]
+        };
         let resolution = self
-            .resolve_ask(runtime, intent, &chain, Some(deadline), None, initial_mode)
+            .resolve_ask(runtime, intent, chain, AskSite::Delegated { deadline })
             .await?;
         Ok((resolution.approved, resolution.source))
     }
@@ -1151,10 +1161,9 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: &EffectIntent,
         chain: &[Resolver<'_>],
-        delegation_deadline: Option<Instant>,
-        unguarded_prompt: Option<UnguardedPrompt>,
-        initial_mode: Option<ApprovalMode>,
+        site: AskSite,
     ) -> Result<Resolution, EngineError> {
+        let initial_mode = self.terminal_mode();
         let mut resolution = Resolution {
             approved: false,
             source: PermissionSource::UnavailableApproval,
@@ -1164,10 +1173,13 @@ impl RunLoop<'_> {
         for resolver in chain {
             match resolver {
                 Resolver::AiReview { objective } => {
-                    match self
-                        .review_tool(objective, intent, delegation_deadline)
-                        .await
-                    {
+                    let review = match &site {
+                        AskSite::Primary { .. } => self.review_tool(objective, intent, None).await,
+                        AskSite::Delegated { deadline } => {
+                            self.review_tool(objective, intent, Some(*deadline)).await
+                        }
+                    };
+                    match review {
                         Ok(review_approved) => {
                             resolution.approved =
                                 review_approved && self.terminal_mode() == initial_mode;
@@ -1176,19 +1188,22 @@ impl RunLoop<'_> {
                             } else {
                                 PermissionSource::UnavailableApproval
                             };
-                            if delegation_deadline.is_some() {
-                                if resolution.approved {
-                                    resolution.approved = !self.pause_requested()
-                                        && !self.controls.cancellation.is_cancelled();
-                                    return Ok(resolution);
+                            match &site {
+                                AskSite::Delegated { .. } => {
+                                    if resolution.approved {
+                                        resolution.approved = !self.pause_requested()
+                                            && !self.controls.cancellation.is_cancelled();
+                                        return Ok(resolution);
+                                    }
                                 }
-                            } else {
-                                resolution.active_time_exhausted =
-                                    self.ledger().active_time_exhausted();
+                                AskSite::Primary { .. } => {
+                                    resolution.active_time_exhausted =
+                                        self.ledger().active_time_exhausted();
+                                }
                             }
                         }
                         Err(EngineError::GoalBudgetExhausted)
-                            if delegation_deadline.is_none()
+                            if matches!(site, AskSite::Primary { .. })
                                 && self.ledger().active_time_exhausted() =>
                         {
                             resolution.active_time_exhausted = true;
@@ -1196,8 +1211,8 @@ impl RunLoop<'_> {
                         Err(error) => return Err(error),
                     }
                 }
-                Resolver::Human => {
-                    if let Some(deadline) = delegation_deadline {
+                Resolver::Human => match &site {
+                    AskSite::Delegated { deadline } => {
                         let Some(approvals) = self.controls.approvals else {
                             return Ok(resolution);
                         };
@@ -1211,7 +1226,7 @@ impl RunLoop<'_> {
                         let (approved, source) = tokio::select! {
                             biased;
                             () = cancellation.cancelled() => (false, PermissionSource::UnavailableApproval),
-                            result = tokio::time::timeout_at(deadline.min(Instant::now() + expires), approvals.ask(intent)) => {
+                            result = tokio::time::timeout_at((*deadline).min(Instant::now() + expires), approvals.ask(intent)) => {
                                 (result.unwrap_or(false), PermissionSource::Human)
                             }
                         };
@@ -1222,33 +1237,36 @@ impl RunLoop<'_> {
                             && !self.pause_requested()
                             && !self.controls.cancellation.is_cancelled();
                         resolution.source = source;
-                    } else if !resolution.active_time_exhausted
-                        && !self.pause_at_boundary()
-                        && let Some(approvals) = self.controls.approvals
-                    {
-                        match self.reserve_active_pause() {
-                            Ok(pause) => {
-                                let (reply, unsaved) = self
-                                    .human_reply(
-                                        runtime,
-                                        approvals,
-                                        intent,
-                                        unguarded_prompt.clone(),
-                                    )
-                                    .await;
-                                resolution.source = PermissionSource::Human;
-                                resolution.approved = reply != ApprovalReply::Deny && !unsaved;
-                                resolution.unsaved_rule = unsaved;
-                                let resume_at = resolution.approved.then(Instant::now);
-                                self.settle_active_pause(pause, resume_at)?;
+                    }
+                    AskSite::Primary { unguarded_prompt } => {
+                        if !resolution.active_time_exhausted
+                            && !self.pause_at_boundary()
+                            && let Some(approvals) = self.controls.approvals
+                        {
+                            match self.reserve_active_pause() {
+                                Ok(pause) => {
+                                    let (reply, unsaved) = self
+                                        .human_reply(
+                                            runtime,
+                                            approvals,
+                                            intent,
+                                            unguarded_prompt.clone(),
+                                        )
+                                        .await;
+                                    resolution.source = PermissionSource::Human;
+                                    resolution.approved = reply != ApprovalReply::Deny && !unsaved;
+                                    resolution.unsaved_rule = unsaved;
+                                    let resume_at = resolution.approved.then(Instant::now);
+                                    self.settle_active_pause(pause, resume_at)?;
+                                }
+                                Err(EngineError::GoalBudgetExhausted) => {
+                                    resolution.active_time_exhausted = true;
+                                }
+                                Err(error) => return Err(error),
                             }
-                            Err(EngineError::GoalBudgetExhausted) => {
-                                resolution.active_time_exhausted = true;
-                            }
-                            Err(error) => return Err(error),
                         }
                     }
-                }
+                },
             }
             if resolution.approved {
                 break;
