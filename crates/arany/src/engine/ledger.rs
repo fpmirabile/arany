@@ -41,7 +41,7 @@ impl Action {
                     .saturating_mul(2),
             ),
             Self::Tool | Self::Review => 8,
-            Self::Worker { chunks } => chunks.saturating_add(22),
+            Self::Worker { chunks } => chunks.saturating_add(12 + 4 * 8 + 6),
             Self::Compaction => 6,
             Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
             Self::Delegation { children, research } => {
@@ -95,7 +95,7 @@ impl Action {
                 }),
             Self::Tool | Self::Review => switches(ProviderRole::Review),
             Self::Worker { .. } => switches(ProviderRole::Review)
-                .saturating_add(switches(ProviderRole::Child))
+                .saturating_add(8 * switches(ProviderRole::Child))
                 .saturating_add(switches(ProviderRole::Primary)),
             Self::Compaction | Self::BoundaryCompaction { .. } => {
                 switches(ProviderRole::Compaction)
@@ -528,11 +528,19 @@ impl GoalLedger {
     }
 
     pub(super) fn exclude_idle_approval(&self, elapsed: Duration) -> Result<(), EngineError> {
+        if self.providers_active() {
+            return Ok(());
+        }
         self.in_flight(|in_flight| {
             in_flight.idle_approval_ms = in_flight
                 .idle_approval_ms
                 .saturating_add(duration_ms(elapsed));
         })
+    }
+
+    pub(super) fn providers_active(&self) -> bool {
+        self.read(|goal, _| !goal.unobserved_provider_calls.is_empty())
+            .unwrap_or(true)
     }
 
     pub(super) fn active_ceiling(&self, pending_ms: u64) -> Result<u64, EngineError> {

@@ -15,7 +15,7 @@ Read the section for the affected boundary:
 
 ## 1. What the beta must prove
 
-Arany is an interactive Session-oriented CLI, not a one-shot team demo. Bare `arany` opens a local conversation and creates its durable Session on the first task submission; every accepted user Message starts one bounded Run; each Run has one accountable primary AgentRun and may admit direct read-only children or one foreground EditOnly worker.
+Arany is an interactive Session-oriented CLI, not a one-shot team demo. Bare `arany` opens a local conversation and creates its durable Session on the first task submission; every accepted user Message starts one bounded Run; each Run has one accountable primary AgentRun and may admit a bounded mixed team of direct researchers and EditOnly workers.
 
 The full product contract is successful when it proves all of these together:
 

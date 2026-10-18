@@ -6,6 +6,8 @@ pub mod goals;
 pub mod process;
 pub mod routing;
 pub mod scenario;
+#[cfg(unix)]
+pub mod worker_teams;
 
 pub use crate::provider::test_image;
 

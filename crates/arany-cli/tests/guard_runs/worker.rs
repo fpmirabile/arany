@@ -175,12 +175,6 @@ async fn worker_case(case: &'static str) {
         .runs
         .first()
         .unwrap_or_else(|| panic!("{case}: no run in session view"));
-    if matches!(case, "background" | "mixed" | "wave") {
-        assert_eq!(run.status, RunStatus::Failed);
-        assert_eq!(calls.len(), 2, "{case}");
-        assert!(run.agents.iter().all(|a| a.assignment.is_none()));
-        return;
-    }
     let worker = run
         .agents
         .iter()
@@ -291,9 +285,6 @@ async fn foreground_worker_guard_journey_budgets_denials_and_private_vs_publicat
         "private_loss",
         "publication_loss",
         "headroom",
-        "background",
-        "mixed",
-        "wave",
     ] {
         worker_case(case).await;
     }
@@ -316,4 +307,59 @@ fn pad_worker_session(state: &Path, id: SessionId) {
     }
     drop(insert);
     transaction.commit().unwrap();
+}
+
+#[tokio::test]
+async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
+    for case in [
+        "order",
+        "fallback",
+        "failure",
+        "mixed",
+        "c1_failure",
+        "cap",
+        "hard_cap",
+        "tokens",
+        "leased_edit",
+        "background",
+        "defer_finish",
+        "budget_calls",
+        "command",
+        "waves",
+        "reassign",
+        "cancel_foreground",
+        "cancel_background",
+        "cancel_mixed",
+    ] {
+        tokio::time::timeout(
+            Duration::from_secs(180),
+            arany::test_support::worker_teams::run_case(
+                Path::new(env!("CARGO_BIN_EXE_arany")),
+                case,
+            ),
+        )
+        .await
+        .expect(case);
+    }
+}
+
+#[tokio::test]
+async fn worker_team_conflict_keeps_completion_order_in_closed_replay() {
+    let observation = tokio::time::timeout(
+        Duration::from_secs(180),
+        arany::test_support::worker_teams::run_case(
+            Path::new(env!("CARGO_BIN_EXE_arany")),
+            "conflict",
+        ),
+    )
+    .await
+    .expect("bounded conflict journey");
+    let bundle = closed_bundle(
+        &observation.directory.path().join("state"),
+        observation.session,
+        &observation.directory.path().join("workspace"),
+    )
+    .await;
+    assert_eq!(bundle.events, observation.events);
+    assert_eq!(bundle.view, observation.view);
 }
