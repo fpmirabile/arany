@@ -27,7 +27,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::Command;
 
 #[allow(unsafe_code)]
 mod ffi;
@@ -942,7 +941,7 @@ async fn execute_worker(
 ) -> Result<ToolObservation, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
     let task = super::encode_task(&Task::new(runtime, intent, None)?)?;
-    let mut child = Command::new(&runtime.guard_executable)
+    let mut child = super::launcher_command(&runtime.guard_executable)
         .arg("--internal-tool-guard")
         .env_clear()
         .current_dir(if intent.call.is_process() || intent.call.is_git_read() {

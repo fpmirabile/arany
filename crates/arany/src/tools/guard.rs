@@ -924,6 +924,14 @@ pub(super) async fn reap_owned_child(
     child.wait().await
 }
 
+// Orphaning a group with a stopped member sends SIGHUP to every member, so the supervisor never shares one with its payload.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn launcher_command(executable: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command.process_group(0);
+    command
+}
+
 pub(super) fn spawn_before(
     command: &mut Command,
     deadline: tokio::time::Instant,
@@ -1649,6 +1657,21 @@ mod tests {
                 > supervisor_go + runtime + PAYLOAD_KILL_WAIT
         );
         assert!(payload_report_deadline(supervisor_go, u32::MAX) > supervisor_go);
+    }
+
+    #[tokio::test]
+    async fn the_launcher_never_shares_the_supervisor_process_group() {
+        let mut launcher = launcher_command(Path::new("/bin/sh"))
+            .args(["-c", "sleep 30"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = rustix::process::Pid::from_raw(launcher.id().unwrap() as i32);
+        let group = rustix::process::getpgid(pid).unwrap();
+        assert_eq!(Some(group), pid);
+        assert_ne!(group, rustix::process::getpgrp());
+        launcher.start_kill().unwrap();
+        let _ = launcher.wait().await;
     }
 
     #[tokio::test]
