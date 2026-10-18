@@ -55,6 +55,10 @@ vocabulary at the binary edge. Each active submission has an owned task driving
 its RunHandle while the Server projects its committed Event subscription; bounded client backpressure
 cannot hold Journal appends. The library has no protocol or transport dependency.
 
+Production entry points poll the Engine on the process main thread's current-thread Tokio runtime.
+Any new production thread hosting the Engine, including a multi-thread runtime worker,
+must set an explicit stack size of at least 8 MiB.
+
 The Engine owns admission, scheduling, context, Goal accounting and Run
 transitions. `GoalLedger` admits, reserves and settles actions over the reducer's
 `GoalView`, with `Action::max_events` owning Event headroom. Primary, researcher and foreground editor Tool steps share `execute_step`: reservation, committed intent,
