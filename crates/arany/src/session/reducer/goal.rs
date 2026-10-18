@@ -1,5 +1,5 @@
 use super::{
-    AgentStatus, GoalView, RunStatus, RunView, SessionView, active_run, current_goal_mut,
+    AgentStatus, GoalView, RunStatus, RunView, SessionView, ToolView, active_run, current_goal_mut,
     current_run, is_integration_tool, pending_tool_requests,
 };
 use crate::provider::AgentPhase;
@@ -154,13 +154,10 @@ impl SessionView {
             .filter(|run| run.id == *run_id)
             .ok_or(ReplayError::InvalidTransition)?;
         let primary = run.primary().ok_or(ReplayError::InvalidTransition)?;
-        let valid_previous_tools = run.tools.iter().all(|tool| {
-            tool.intent.call.is_goal_plan_prelude()
-                && tool
-                    .observation
-                    .as_ref()
-                    .is_some_and(|observation| !observation.stops_run())
-        });
+        let valid_previous_tools = run
+            .tools
+            .iter()
+            .all(|tool| tool.intent.call.is_goal_plan_prelude() && tool.settled_without_stop());
         let valid_contract_call = run.status == RunStatus::Active
             && primary.role == AgentRole::Primary
             && primary.provider_calls.last().is_some_and(|call| {
@@ -307,11 +304,7 @@ impl SessionView {
             run_status == RunStatus::Active
                 && !run.tools.is_empty()
                 && run.tools.iter().all(|tool| tool.observation.is_some())
-                && run.tools.last().is_some_and(|tool| {
-                    tool.observation
-                        .as_ref()
-                        .is_some_and(|observation| !observation.stops_run())
-                })
+                && run.tools.last().is_some_and(ToolView::settled_without_stop)
                 && run.primary().is_some_and(|primary| {
                     let Some(request_index) = primary.provider_calls.iter().rposition(|call| {
                         call.disposition == ProviderCallDisposition::ToolRequested

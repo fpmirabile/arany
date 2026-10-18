@@ -852,6 +852,7 @@ pub(super) async fn execute_inner(
             config: runtime.config.clone(),
             intent: intent.clone(),
             cache: cache_transfer,
+            hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
             parent_namespaces: parent_namespaces.clone(),
         })?;
         let mut ready_bytes = tokio::time::timeout_at(preparation_deadline, async {

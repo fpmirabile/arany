@@ -55,6 +55,8 @@ event_kinds!(
     ToolStarted,
     ToolFinished,
     ToolPermissionDecided,
+    HookStarted,
+    HookFinished,
     AgentFinished,
     MessageCommitted,
     RunFinished,

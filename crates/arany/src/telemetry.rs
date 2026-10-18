@@ -959,6 +959,8 @@ impl From<&Event> for TraceEventKind {
             | Event::ProviderCallRecorded { .. }
             | Event::ToolStarted { .. }
             | Event::ToolPermissionDecided { .. }
+            | Event::HookStarted { .. }
+            | Event::HookFinished { .. }
             | Event::ToolFinished { .. }
             | Event::AgentFinished { .. }
             | Event::MessageCommitted { .. }

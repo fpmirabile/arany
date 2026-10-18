@@ -23,6 +23,10 @@ use crate::tools::{
 use std::time::Duration;
 use tokio::time::Instant;
 
+mod hooks;
+
+use hooks::HookFold;
+
 pub(super) enum Grant<'s> {
     Primary {
         request: &'s mut ProviderRequest,
@@ -78,6 +82,23 @@ struct Permission {
 }
 
 impl Permission {
+    fn narrow_hooks(mut self, restriction: Option<Decision>) -> Self {
+        match restriction {
+            Some(Decision::Deny) => {
+                self.decision = Decision::Deny;
+                self.basis = PermissionSource::Hook;
+                self.approval = None;
+            }
+            Some(Decision::Ask) if self.decision == Decision::Allow => {
+                self.decision = Decision::Ask;
+                self.basis = PermissionSource::Hook;
+                self.approval = Some(ApprovalMode::Request);
+            }
+            _ => {}
+        }
+        self
+    }
+
     fn narrow_terminal(mut self, mode: Option<ApprovalMode>, call: &ToolCall) -> Self {
         if self.decision != Decision::Deny
             && let Some(mode) = mode.filter(|mode| mode.asks(call))
@@ -201,6 +222,10 @@ impl RunLoop<'_> {
         let Some(mut intent) = intent else {
             return Ok(None);
         };
+        // The hooks run before dispatch, so the authorization outlives them.
+        intent.expires_at_ms = intent
+            .expires_at_ms
+            .saturating_add(self.hook_admission(grant, runtime, &intent.call).1);
         let integration =
             matches!(intent.call, ToolCall::Command { .. }).then(|| ToolCall::ApplyChangeset {
                 source_intent_digest: intent.digest(),
@@ -333,13 +358,17 @@ impl RunLoop<'_> {
         intent: EffectIntent,
     ) -> Result<Option<ToolObservation>, EngineError> {
         let permission = self.permission(grant, runtime, &intent.call);
-        if !self.admit_tool(grant, runtime, &intent, permission).await? {
+        let (hook_events, hook_ms) = self.hook_admission(grant, runtime, &intent.call);
+        if !self
+            .admit_tool(grant, runtime, &intent, permission, hook_events)
+            .await?
+        {
             return Ok(None);
         }
         let agent_run_id = intent.agent_run_id;
         // A researcher's Tool runs inside its delegation's reservation.
         let action_ms = match grant {
-            Grant::Primary { .. } => tool_action_ms(runtime, &intent),
+            Grant::Primary { .. } => tool_action_ms(runtime, &intent).saturating_add(hook_ms),
             Grant::Researcher { .. } => 0,
         };
         self.append(Event::ToolStarted {
@@ -392,6 +421,7 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: &EffectIntent,
         permission: Permission,
+        hook_events: usize,
     ) -> Result<bool, EngineError> {
         let (tail, observations) = match grant {
             Grant::Primary { review_allowed, .. } => {
@@ -406,8 +436,10 @@ impl RunLoop<'_> {
                     return Ok(false);
                 }
                 (
-                    Action::Tool.remaining(1, &self.routing.providers),
-                    Action::Tool.tool_observations(),
+                    Action::Tool
+                        .remaining(1, &self.routing.providers)
+                        .saturating_add(2 * hook_events),
+                    Action::Tool.tool_observations().saturating_add(hook_events),
                 )
             }
             Grant::Researcher { .. } => {
@@ -480,6 +512,22 @@ impl RunLoop<'_> {
     ) -> Result<Verdict, EngineError> {
         let config = runtime.permissions();
         let permission = permission.narrow_terminal(self.terminal_mode(), &intent.call);
+        let timeout_limit = match grant {
+            Grant::Primary { .. } => self.ledger().command_timeout_limit(&intent.call)?,
+            Grant::Researcher { .. } => None,
+        };
+        let hooks = match config {
+            Some(config)
+                if permission.decision != Decision::Deny
+                    && timeout_limit.is_none()
+                    && self.ledger().allows_tool(&intent.call) =>
+            {
+                // Boxed like the other Tool futures so the hook loop does not inflate every agent step.
+                Box::pin(self.pre_tool_use_hooks(grant, runtime, config, &intent)).await?
+            }
+            _ => HookFold::none(),
+        };
+        let permission = permission.narrow_hooks(hooks.restriction);
         let Permission {
             decision, basis, ..
         } = permission;
@@ -488,10 +536,6 @@ impl RunLoop<'_> {
             PermissionSource::UnavailableApproval
         } else {
             basis
-        };
-        let timeout_limit = match grant {
-            Grant::Primary { .. } => self.ledger().command_timeout_limit(&intent.call)?,
-            Grant::Researcher { .. } => None,
         };
         let (verdict, source) = if let Some((requested, maximum)) = timeout_limit {
             (
@@ -506,22 +550,26 @@ impl RunLoop<'_> {
                 }),
                 source,
             )
-        } else if decision == Decision::Deny {
+        } else if decision == Decision::Deny || hooks.exhausted() {
             (
-                Verdict::Deny(Answer {
-                    observation: not_dispatched(
-                        intent,
-                        ToolDisposition::Denied,
-                        match source {
-                            PermissionSource::Rule => "Permission deny rule blocked this Tool",
-                            PermissionSource::PinnedGrant => {
-                                "Tool operation is outside the pinned grant"
-                            }
-                            _ => "Permission mode denied this Tool",
-                        },
-                    ),
-                    refused: false,
-                    active_time: None,
+                Verdict::Deny(if hooks.exhausted() || source == PermissionSource::Hook {
+                    hooks.denial(intent)
+                } else {
+                    Answer {
+                        observation: not_dispatched(
+                            intent,
+                            ToolDisposition::Denied,
+                            match source {
+                                PermissionSource::Rule => "Permission deny rule blocked this Tool",
+                                PermissionSource::PinnedGrant => {
+                                    "Tool operation is outside the pinned grant"
+                                }
+                                _ => "Permission mode denied this Tool",
+                            },
+                        ),
+                        refused: false,
+                        active_time: None,
+                    }
                 }),
                 source,
             )
@@ -578,6 +626,8 @@ impl RunLoop<'_> {
                     basis,
                     source,
                     approved,
+                    hook_restriction: hooks.restriction,
+                    hooks: hooks.count,
                 },
             })
             .await?;

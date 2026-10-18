@@ -80,8 +80,22 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         summary.push_str(match verdict.source {
             arany::permissions::PermissionSource::Rule => " · permission deny rule",
             arany::permissions::PermissionSource::PinnedGrant => " · pinned grant denial",
+            arany::permissions::PermissionSource::Hook => " · hook denial",
             _ => " · permission mode denial",
         });
+    }
+    if tool.hooks.iter().any(|hook| {
+        matches!(
+            hook.outcome.as_ref().map(|outcome| &outcome.result),
+            Some(arany::permissions::HookResult::Ignored {
+                why: arany::permissions::HookIgnoreReason::NonZeroExit
+                    | arany::permissions::HookIgnoreReason::Limit
+                    | arany::permissions::HookIgnoreReason::InvalidJson
+                    | arany::permissions::HookIgnoreReason::NotCompleted
+            })
+        )
+    }) {
+        summary.push_str(" · hook failed (non-blocking)");
     }
     summary
 }
@@ -1357,6 +1371,7 @@ mod git_summary_tests {
                 observation: None,
                 review_call_index: None,
                 permission_verdict: None,
+                hooks: Vec::new(),
                 finished_sequence: None,
             };
             assert_eq!(tool_summary(&tool), expected);
@@ -1396,6 +1411,7 @@ mod enforcement_tests {
                 enforcement_cause: Some(arany::EnforcementCause::FilesystemDenied),
             }),
             permission_verdict: None,
+            hooks: Vec::new(),
             review_call_index: None,
             finished_sequence: Some(1),
         };

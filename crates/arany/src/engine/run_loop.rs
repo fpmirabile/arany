@@ -196,9 +196,14 @@ impl<'a> RunLoop<'a> {
                 agent.id == self.primary_id || agent.status != crate::session::AgentStatus::Active
             });
             let has_uncertain_tool = run.tools.iter().any(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.disposition == crate::tools::ToolDisposition::Uncertain
-                })
+                tool.observation
+                    .iter()
+                    .chain(tool.hooks.iter().filter_map(|hook| {
+                        hook.outcome.as_ref().map(|outcome| &outcome.observation)
+                    }))
+                    .any(|observation| {
+                        observation.disposition == crate::tools::ToolDisposition::Uncertain
+                    })
             });
             let action_cancelled = run.tools.iter().any(|tool| {
                 tool.observation.as_ref().is_some_and(|observation| {

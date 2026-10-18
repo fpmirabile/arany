@@ -1,6 +1,11 @@
 mod hooks;
 
-pub use hooks::{CommandHook, HookConfig, HookEvent, HookGroup};
+pub(crate) use hooks::pre_tool_use_input;
+pub use hooks::{
+    CommandHook, HOOK_RESULT_BYTES, HookConfig, HookEvent, HookGroup, HookIgnoreReason,
+    HookInvocation, HookOutcome, HookResult, MAX_HOOK_INPUT_BYTES, MAX_HOOK_REASON_BYTES,
+    MAX_HOOKS_PER_OCCURRENCE,
+};
 
 use super::catalog::Family;
 use super::{ApprovalMode, ToolCall};
@@ -41,6 +46,7 @@ pub enum PermissionSource {
     UnavailableApproval,
     PinnedGrant,
     ExactCommandRule,
+    Hook,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -53,6 +59,9 @@ pub struct PermissionVerdict {
     pub basis: PermissionSource,
     pub source: PermissionSource,
     pub approved: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub hook_restriction: Option<Decision>,
+    pub hooks: u8,
 }
 
 impl Decision {
@@ -148,6 +157,29 @@ impl PermissionConfig {
 
     pub fn hooks(&self) -> &HookConfig {
         &self.hooks
+    }
+
+    pub(crate) fn matched_pre_tool_use(
+        &self,
+        call: &ToolCall,
+    ) -> Result<Vec<(u8, u8, &CommandHook)>, ConfigError> {
+        let mut matched = Vec::new();
+        for (group_index, group) in self.hooks.groups(HookEvent::PreToolUse).iter().enumerate() {
+            if !group.matches_tool(call)? {
+                continue;
+            }
+            for (handler_index, hook) in group.commands().iter().enumerate() {
+                if matched.len() == MAX_HOOKS_PER_OCCURRENCE {
+                    return Err(ConfigError::Limit("8 matched hooks per occurrence"));
+                }
+                matched.push((
+                    u8::try_from(group_index).map_err(|_| ConfigError::Limit("hook groups"))?,
+                    u8::try_from(handler_index).map_err(|_| ConfigError::Limit("hooks"))?,
+                    hook,
+                ));
+            }
+        }
+        Ok(matched)
     }
 
     pub fn approval_mode(&self, call: &ToolCall) -> Option<ApprovalMode> {

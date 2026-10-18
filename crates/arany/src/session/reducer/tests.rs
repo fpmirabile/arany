@@ -28,6 +28,7 @@ mod goal_recovery_tests {
         };
         let tool = ToolView {
             permission_verdict: None,
+            hooks: Vec::new(),
             intent: intent.clone(),
             observation: disposition.map(|disposition| ToolObservation {
                 enforcement_cause: None,
@@ -595,6 +596,7 @@ mod goal_replay_tests {
             observation: None,
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: None,
         });
         apply(&mut elsewhere, reserve_child_call(goal, run, child)).expect("review reservation");
@@ -884,6 +886,7 @@ mod goal_replay_tests {
         };
         review.runs[0].tools.push(ToolView {
             permission_verdict: None,
+            hooks: Vec::new(),
             intent,
             observation: None,
             review_call_index: None,
@@ -1548,6 +1551,7 @@ mod goal_replay_tests {
                 }),
                 review_call_index: None,
                 permission_verdict: None,
+                hooks: Vec::new(),
                 finished_sequence: Some(2),
             });
             assert!(
@@ -1575,6 +1579,7 @@ mod goal_replay_tests {
             }),
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: Some(2),
         });
         newer.goals.push(newer_goal);
@@ -1598,6 +1603,7 @@ mod goal_replay_tests {
             }),
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: Some(2),
         });
         assert_eq!(
@@ -2871,6 +2877,7 @@ mod goal_replay_tests {
                 finished_sequence: None,
                 tools: vec![ToolView {
                     permission_verdict: None,
+                    hooks: Vec::new(),
                     intent: read_intent,
                     observation: Some(read),
                     review_call_index: None,
@@ -2988,6 +2995,7 @@ mod goal_replay_tests {
                     finished_sequence: Some(1),
                     tools: vec![ToolView {
                         permission_verdict: None,
+                        hooks: Vec::new(),
                         intent: write.intent.clone(),
                         observation: Some(write),
                         review_call_index: None,
@@ -3155,12 +3163,14 @@ mod goal_replay_tests {
                     basis: PermissionSource::Rule,
                     source: PermissionSource::Rule,
                     approved: false,
+                    hook_restriction: None,
+                    hooks: 0,
                 },
             };
             assert_eq!(
                 Event::decode(
                     "ToolPermissionDecided",
-                    2,
+                    3,
                     &verdict.payload().unwrap(),
                     Some(run),
                     Some(agent)
@@ -3210,6 +3220,203 @@ mod goal_replay_tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes() {
+        use crate::tools::permissions::{
+            Decision, HookEvent, HookIgnoreReason, HookInvocation, HookOutcome, HookResult,
+            PermissionMode, PermissionSource, PermissionVerdict,
+        };
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let intent = read_intent(run, agent, "src/lib.rs");
+        let hook_intent = child_intent(
+            run,
+            agent,
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 2".into()],
+                cwd: String::new(),
+            },
+        );
+        let started = |subject: [u8; 32], hook_intent: &EffectIntent| Event::HookStarted {
+            run_id: run,
+            agent_run_id: agent,
+            hook: HookInvocation {
+                event: HookEvent::PreToolUse,
+                group: 0,
+                handler: 0,
+                subject_digest: subject,
+                intent: hook_intent.clone(),
+                input_digest: [9; 32],
+            },
+        };
+        let finished = |observation: ToolObservation, result: HookResult| Event::HookFinished {
+            run_id: run,
+            agent_run_id: agent,
+            outcome: HookOutcome {
+                observation,
+                result,
+            },
+        };
+        let deny = HookResult::Restricted {
+            decision: Decision::Deny,
+            reason: Some("blocked".into()),
+        };
+        let verdict = |decision, restriction, hooks, basis| Event::ToolPermissionDecided {
+            run_id: run,
+            agent_run_id: agent,
+            verdict: PermissionVerdict {
+                intent_digest: intent.digest(),
+                decision,
+                mode: Some(PermissionMode::Default),
+                basis,
+                source: basis,
+                approved: false,
+                hook_restriction: restriction,
+                hooks,
+            },
+        };
+        assert!(rejected(&view, started(intent.digest(), &hook_intent)));
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        let hook_observation = observation_for(hook_intent.clone(), b"");
+        assert!(rejected(
+            &view,
+            finished(hook_observation.clone(), deny.clone())
+        ));
+        assert!(rejected(&view, started([4; 32], &hook_intent)));
+        let mut foreign = hook_intent.clone();
+        foreign.policy_digest = [8; 32];
+        assert!(rejected(&view, started(intent.digest(), &foreign)));
+        apply(&mut view, started(intent.digest(), &hook_intent)).unwrap();
+        let second = child_intent(run, agent, hook_intent.call.clone());
+        assert!(rejected(&view, started(intent.digest(), &second)));
+        assert!(rejected(
+            &view,
+            verdict(
+                Decision::Deny,
+                Some(Decision::Deny),
+                1,
+                PermissionSource::Hook
+            )
+        ));
+        let other = observation_for(second.clone(), b"");
+        assert!(rejected(&view, finished(other, deny.clone())));
+        apply(&mut view, finished(hook_observation.clone(), deny.clone())).unwrap();
+        assert!(rejected(&view, started(intent.digest(), &second)));
+        for (decision, restriction, hooks, basis) in [
+            (
+                Decision::Deny,
+                Some(Decision::Deny),
+                0,
+                PermissionSource::Hook,
+            ),
+            (
+                Decision::Deny,
+                Some(Decision::Deny),
+                2,
+                PermissionSource::Hook,
+            ),
+            (Decision::Allow, None, 1, PermissionSource::Mode),
+            (Decision::Deny, None, 1, PermissionSource::Mode),
+            (
+                Decision::Ask,
+                Some(Decision::Ask),
+                1,
+                PermissionSource::Hook,
+            ),
+        ] {
+            assert!(
+                rejected(&view, verdict(decision, restriction, hooks, basis)),
+                "{decision:?} {restriction:?} {hooks}"
+            );
+        }
+        let mut forged = view.clone();
+        forged.runs[0].tools[0].hooks[0].outcome = Some(HookOutcome {
+            observation: hook_observation.clone(),
+            result: HookResult::Passed,
+        });
+        assert!(rejected(
+            &forged,
+            verdict(
+                Decision::Ask,
+                Some(Decision::Ask),
+                1,
+                PermissionSource::Hook
+            )
+        ));
+        assert!(rejected(
+            &forged,
+            verdict(
+                Decision::Deny,
+                Some(Decision::Deny),
+                1,
+                PermissionSource::Hook
+            )
+        ));
+        let accepted = verdict(
+            Decision::Deny,
+            Some(Decision::Deny),
+            1,
+            PermissionSource::Hook,
+        );
+        apply(&mut view, accepted.clone()).unwrap();
+        assert!(rejected(&view, accepted));
+
+        let allow_restriction = finished(
+            hook_observation.clone(),
+            HookResult::Restricted {
+                decision: Decision::Allow,
+                reason: None,
+            },
+        );
+        assert!(allow_restriction.payload().is_err());
+        let started_event = started(intent.digest(), &hook_intent);
+        assert!(started_event.payload().is_ok());
+        assert!(
+            started(
+                intent.digest(),
+                &child_intent(run, agent, read_intent(run, agent, "a").call)
+            )
+            .payload()
+            .is_err()
+        );
+        let payload = verdict(
+            Decision::Deny,
+            Some(Decision::Deny),
+            1,
+            PermissionSource::Hook,
+        )
+        .payload()
+        .unwrap();
+        assert!(matches!(
+            Event::decode("ToolPermissionDecided", 2, &payload, Some(run), Some(agent)),
+            Err(ReplayError::UnknownEvent)
+        ));
+
+        // An unknown hook outcome stops the Run exactly like an uncertain Tool.
+        let mut uncertain = observation_for(hook_intent.clone(), b"");
+        uncertain.disposition = ToolDisposition::Uncertain;
+        uncertain.attestation = None;
+        let not_completed = HookResult::Ignored {
+            why: HookIgnoreReason::NotCompleted,
+        };
+        let mut stopped = view.clone();
+        stopped.runs[0].tools[0].hooks[0].outcome = Some(HookOutcome {
+            observation: uncertain,
+            result: not_completed,
+        });
+        assert!(!stopped.runs[0].tools[0].settled_without_stop());
     }
 
     #[test]
@@ -3278,6 +3485,8 @@ mod goal_replay_tests {
                 basis,
                 source,
                 approved,
+                hook_restriction: None,
+                hooks: 0,
             },
         };
         let exact = |approved| {

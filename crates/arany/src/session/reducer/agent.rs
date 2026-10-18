@@ -105,6 +105,7 @@ impl SessionView {
             observation: None,
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: None,
         });
         Ok(())

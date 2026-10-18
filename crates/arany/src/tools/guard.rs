@@ -64,6 +64,8 @@ struct Task {
     config: Config,
     intent: EffectIntent,
     cache: Option<BuildCacheTransfer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hook_stdin: Option<String>,
     #[cfg(target_os = "linux")]
     parent_namespaces: profile::Namespaces,
     #[cfg(target_os = "macos")]
@@ -898,6 +900,7 @@ pub(super) struct GuardContext<'a> {
     pub(super) root: &'a Path,
     pub(super) workspace: &'a Path,
     pub(super) skill: Option<Vec<u8>>,
+    pub(super) hook_stdin: Option<&'a str>,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
 }
@@ -922,6 +925,10 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         || !task.config.allows(&task.intent.call)
         || task.intent.enforcement_digest != task.enforcement_digest()?
         || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
+        || task.hook_stdin.as_ref().is_some_and(|stdin| {
+            stdin.len() > super::permissions::MAX_HOOK_INPUT_BYTES
+                || !matches!(task.intent.call, ToolCall::Command { .. })
+        })
     {
         return Err(ToolError::Configuration);
     }
@@ -1115,6 +1122,7 @@ pub(super) fn helper_main() -> ExitCode {
             root: &root,
             workspace,
             skill,
+            hook_stdin: task.hook_stdin.as_deref(),
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };

@@ -51,6 +51,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         enforcement_digest: [1; 32],
         queue_progress: None,
         active_action_gate: None,
+        hook_stdin: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
         process_enforcement_digest: [1; 32],
@@ -1962,6 +1963,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         enforcement_digest: [1; 32],
         queue_progress: None,
         active_action_gate: None,
+        hook_stdin: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
         process_enforcement_digest: [1; 32],
@@ -2069,6 +2071,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         enforcement_digest: [1; 32],
         queue_progress: None,
         active_action_gate: None,
+        hook_stdin: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
         process_enforcement_digest: [1; 32],
@@ -2125,6 +2128,7 @@ fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::Tool
         enforcement_digest: [1; 32],
         queue_progress: None,
         active_action_gate: None,
+        hook_stdin: None,
         #[cfg(target_os = "macos")]
         system_programs: None,
         process_enforcement_digest: [1; 32],

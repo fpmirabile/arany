@@ -235,6 +235,8 @@
             "ToolStarted",
             "ToolFinished",
             "ToolPermissionDecided",
+            "HookStarted",
+            "HookFinished",
             "AgentFinished",
             "MessageCommitted",
             "RunFinished"
@@ -836,6 +838,7 @@
         "goalUnavailable",
         "goalAdmissionUncertain",
         "goalBudgetExhausted",
+        "goalNotContinuable",
         "guardUnavailable",
         "sessionNotIdle",
         "forkNotAtRunBoundary",

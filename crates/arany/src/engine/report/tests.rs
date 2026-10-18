@@ -54,6 +54,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         observation: Some(command_observation),
         review_call_index: None,
         permission_verdict: None,
+        hooks: Vec::new(),
         finished_sequence: None,
     }];
     tools.extend((0..15).map(|index| {
@@ -90,6 +91,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             observation: Some(observation),
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: None,
         }
     }));
@@ -295,6 +297,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         observation: Some(uncertain_observation),
         review_call_index: None,
         permission_verdict: None,
+        hooks: Vec::new(),
         finished_sequence: None,
     });
     assert_eq!(late_run.tools.len(), 13);
@@ -380,6 +383,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         intent: failed_intent,
         review_call_index: None,
         permission_verdict: None,
+        hooks: Vec::new(),
         finished_sequence: None,
     });
     assert_eq!(byte_run.tools.len(), 14);
@@ -469,6 +473,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 intent,
                 review_call_index: None,
                 permission_verdict: None,
+                hooks: Vec::new(),
                 finished_sequence: None,
             });
         }
@@ -539,6 +544,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         observation: Some(timeout_observation),
         review_call_index: None,
         permission_verdict: None,
+        hooks: Vec::new(),
         finished_sequence: None,
     }];
     let mut timeout_goal = goal.clone();
