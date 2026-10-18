@@ -1467,6 +1467,7 @@ mod git_summary_tests {
                 review_call_index: None,
                 permission_verdict: None,
                 hooks: Vec::new(),
+                hook_sequence: None,
                 finished_sequence: None,
             };
             assert_eq!(tool_summary(&tool), expected);
@@ -1508,6 +1509,7 @@ mod enforcement_tests {
             }),
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             review_call_index: None,
             finished_sequence: Some(1),
         };
@@ -1606,6 +1608,7 @@ mod unguarded_tests {
             review_call_index: None,
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             finished_sequence: None,
         }
     }

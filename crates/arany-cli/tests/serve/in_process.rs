@@ -763,6 +763,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             review_call_index: None,
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             finished_sequence: None,
         }],
         tool_compaction_summary: None,

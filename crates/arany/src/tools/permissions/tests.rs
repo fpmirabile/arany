@@ -1231,7 +1231,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
     assert!(!deny_with(Some("no")).valid_for(&observation));
     observation.output = "not CommandResult JSON".into();
     assert_eq!(
-        HookResult::from_observation(&observation),
+        HookResult::for_event(HookEvent::PreToolUse, &observation),
         ignored(HookIgnoreReason::NotCompleted)
     );
     assert!(ignored(HookIgnoreReason::NotCompleted).valid_for(&observation));
@@ -1290,18 +1290,114 @@ fn hook_matching_is_bounded_ordered_and_fails_closed() {
         .unwrap()
     };
     let eight = handlers(8);
-    let matched = eight.matched_pre_tool_use(&read("a")).unwrap();
+    let matched = eight
+        .matched_tool_hooks(HookEvent::PreToolUse, &read("a"))
+        .unwrap();
     assert_eq!(matched.len(), 8);
     assert_eq!(matched[3].2.command(), "h3");
     assert_eq!((matched[3].0, matched[3].1), (0, 3));
     assert!(matches!(
-        handlers(9).matched_pre_tool_use(&read("a")),
+        handlers(9).matched_tool_hooks(HookEvent::PreToolUse, &read("a")),
         Err(ConfigError::Limit(_))
     ));
     assert!(
         handlers(9)
-            .matched_pre_tool_use(&write("a"))
+            .matched_tool_hooks(HookEvent::PreToolUse, &write("a"))
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn post_tool_use_output_becomes_bounded_feedback_and_never_replaces_the_result() {
+    use super::hooks::{parse_post_output, post_tool_use_input};
+    let lines = |lines: &[&str]| HookResult::Feedback {
+        lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+    };
+    let post = |value: serde_json::Value| json!({"hookSpecificOutput": value}).to_string();
+    for (exit, stdout, stderr, expected) in [
+        (Some(0), String::new(), "", HookResult::Passed),
+        (Some(2), String::new(), "bad\nfile", lines(&["badfile"])),
+        (Some(2), String::new(), "", lines(&["blocked without a reason"])),
+        (Some(1), String::new(), "x", ignored(HookIgnoreReason::NonZeroExit)),
+        (
+            Some(0),
+            json!({"decision": "block", "reason": "no"}).to_string(),
+            "",
+            lines(&["no"]),
+        ),
+        (
+            Some(0),
+            post(json!({"hookEventName": "PostToolUse", "additionalContext": "ctx", "updatedToolOutput": "x"})),
+            "",
+            lines(&["ctx"]),
+        ),
+        (
+            Some(0),
+            json!({"decision": "block", "reason": "no", "hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "ctx"}}).to_string(),
+            "",
+            lines(&["no", "ctx"]),
+        ),
+        (
+            Some(0),
+            post(json!({"hookEventName": "PostToolUse", "updatedToolOutput": "x"})),
+            "",
+            HookResult::Passed,
+        ),
+        (
+            Some(0),
+            post(json!({"hookEventName": "PreToolUse", "additionalContext": "ctx"})),
+            "",
+            ignored(HookIgnoreReason::InvalidJson),
+        ),
+        (
+            Some(0),
+            json!({"hookSpecificOutput": {"permissionDecision": "allow"}}).to_string(),
+            "",
+            ignored(HookIgnoreReason::InvalidJson),
+        ),
+    ] {
+        assert_eq!(parse_post_output(exit, &stdout, stderr), expected, "{stdout}");
+    }
+    let HookResult::Feedback { lines: long } = parse_post_output(Some(2), "", &"é".repeat(2000))
+    else {
+        panic!("exit 2 feeds back");
+    };
+    assert!(long[0].len() <= MAX_HOOK_REASON_BYTES);
+
+    let many = vec![
+        HookResult::Feedback {
+            lines: vec!["x".repeat(MAX_HOOK_REASON_BYTES)]
+        };
+        8
+    ];
+    let rendered = super::hooks::feedback_lines(&many);
+    assert!(rendered.iter().map(String::len).sum::<usize>() <= super::MAX_HOOK_FEEDBACK_BYTES);
+    assert!(
+        rendered
+            .iter()
+            .all(|line| line.starts_with("hook feedback: "))
+    );
+
+    let call = write("a");
+    let mode = PermissionMode::Default;
+    let id = uuid::Uuid::now_v7();
+    let small = post_tool_use_input(
+        "s",
+        mode,
+        &call,
+        id,
+        json!({"output": "ok"}),
+        MAX_HOOK_INPUT_BYTES,
+    )
+    .unwrap();
+    assert!(small.contains("\"hook_event_name\":\"PostToolUse\"") && !small.contains("truncated"));
+    let huge = json!({"output": "\"\n\\".repeat(MAX_HOOK_INPUT_BYTES)});
+    let cut =
+        post_tool_use_input("s", mode, &call, id, huge.clone(), MAX_HOOK_INPUT_BYTES).unwrap();
+    assert!(cut.len() <= MAX_HOOK_INPUT_BYTES);
+    let parsed: serde_json::Value = serde_json::from_str(&cut).unwrap();
+    assert_eq!(parsed["tool_response"]["truncated"], true);
+    let bare = post_tool_use_input("s", mode, &call, id, huge, 0).unwrap();
+    assert!(bare.len() < cut.len() && bare.contains("\"text\":\"\""));
 }

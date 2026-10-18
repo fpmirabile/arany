@@ -30,6 +30,7 @@ mod goal_recovery_tests {
         let tool = ToolView {
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             intent: intent.clone(),
             observation: disposition.map(|disposition| ToolObservation {
                 enforcement_cause: None,
@@ -953,6 +954,7 @@ mod goal_replay_tests {
             review_call_index: None,
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             finished_sequence: None,
         });
         apply(&mut elsewhere, reserve_child_call(goal, run, child)).expect("review reservation");
@@ -1248,6 +1250,7 @@ mod goal_replay_tests {
         review.runs[0].tools.push(ToolView {
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             intent,
             observation: None,
             review_call_index: None,
@@ -1914,6 +1917,7 @@ mod goal_replay_tests {
                 review_call_index: None,
                 permission_verdict: None,
                 hooks: Vec::new(),
+                hook_sequence: None,
                 finished_sequence: Some(2),
             });
             assert!(
@@ -1942,6 +1946,7 @@ mod goal_replay_tests {
             review_call_index: None,
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             finished_sequence: Some(2),
         });
         newer.goals.push(newer_goal);
@@ -1966,6 +1971,7 @@ mod goal_replay_tests {
             review_call_index: None,
             permission_verdict: None,
             hooks: Vec::new(),
+            hook_sequence: None,
             finished_sequence: Some(2),
         });
         assert_eq!(
@@ -3260,6 +3266,7 @@ mod goal_replay_tests {
                 tools: vec![ToolView {
                     permission_verdict: None,
                     hooks: Vec::new(),
+                    hook_sequence: None,
                     intent: read_intent,
                     observation: Some(read),
                     review_call_index: None,
@@ -3380,6 +3387,7 @@ mod goal_replay_tests {
                     tools: vec![ToolView {
                         permission_verdict: None,
                         hooks: Vec::new(),
+                        hook_sequence: None,
                         intent: write.intent.clone(),
                         observation: Some(write),
                         review_call_index: None,
@@ -3845,6 +3853,232 @@ mod goal_replay_tests {
             result: not_completed,
         });
         assert!(!stopped.runs[0].tools[0].settled_without_stop());
+    }
+
+    #[test]
+    fn post_tool_use_hooks_need_a_committed_observation_and_feed_back_only_their_result() {
+        use crate::tools::permissions::{
+            Decision, HookEvent, HookInvocation, HookOutcome, HookResult, PermissionMode,
+            PermissionSource, PermissionVerdict,
+        };
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let intent = read_intent(run, agent, "src/lib.rs");
+        let hook_intent = child_intent(
+            run,
+            agent,
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "exit 2".into()],
+                cwd: String::new(),
+            },
+        );
+        let started = |event, subject: [u8; 32]| Event::HookStarted {
+            run_id: run,
+            agent_run_id: agent,
+            hook: HookInvocation {
+                event,
+                group: 0,
+                handler: 0,
+                subject_digest: subject,
+                intent: hook_intent.clone(),
+                input_digest: [9; 32],
+            },
+        };
+        let finished = |observation: ToolObservation, result: HookResult| Event::HookFinished {
+            run_id: run,
+            agent_run_id: agent,
+            outcome: HookOutcome {
+                observation,
+                result,
+            },
+        };
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        assert!(rejected(
+            &view,
+            started(HookEvent::PostToolUse, intent.digest())
+        ));
+        apply(
+            &mut view,
+            Event::ToolPermissionDecided {
+                run_id: run,
+                agent_run_id: agent,
+                verdict: PermissionVerdict {
+                    intent_digest: intent.digest(),
+                    decision: Decision::Allow,
+                    mode: Some(PermissionMode::Default),
+                    basis: PermissionSource::Mode,
+                    source: PermissionSource::Mode,
+                    approved: true,
+                    hook_restriction: None,
+                    hooks: 0,
+                },
+            },
+        )
+        .unwrap();
+        apply(&mut view, tool_finished(run, agent, &intent, b"x")).unwrap();
+        let mut later = view.clone();
+        apply(&mut later, reserve_child_call(goal, run, agent)).unwrap();
+        assert!(
+            rejected(&later, started(HookEvent::PostToolUse, intent.digest())),
+            "a hook after a later Provider call is forged ordering"
+        );
+        assert!(rejected(
+            &view,
+            started(HookEvent::PreToolUse, intent.digest())
+        ));
+        assert!(rejected(&view, started(HookEvent::PostToolUse, [4; 32])));
+        apply(&mut view, started(HookEvent::PostToolUse, intent.digest())).unwrap();
+        assert!(rejected(
+            &view,
+            started(HookEvent::PostToolUse, intent.digest())
+        ));
+        let continuation = Event::ProviderCallRecorded {
+            run_id: run,
+            agent_run_id: agent,
+            record: record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::Finished,
+                Some(0),
+            ),
+        };
+        let mut open = view.clone();
+        apply(&mut open, reserve_child_call(goal, run, agent)).unwrap();
+        assert!(
+            rejected(&open, continuation.clone()),
+            "no continuation is recorded while a PostToolUse hook is open"
+        );
+        let mut hook_observation = observation_for(hook_intent.clone(), b"");
+        hook_observation.disposition = ToolDisposition::Failed;
+        hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "changeset": {"files": []}}).to_string();
+        for forged in [
+            HookResult::Passed,
+            HookResult::Restricted {
+                decision: Decision::Deny,
+                reason: Some("blocked".into()),
+            },
+            HookResult::Feedback {
+                lines: vec!["other".into()],
+            },
+        ] {
+            assert!(
+                rejected(&view, finished(hook_observation.clone(), forged.clone())),
+                "{forged:?}"
+            );
+        }
+        let feedback = HookResult::Feedback {
+            lines: vec!["blocked".into()],
+        };
+        assert!(
+            finished(hook_observation.clone(), feedback.clone())
+                .payload()
+                .is_ok()
+        );
+        let mut accepted = view.clone();
+        apply(
+            &mut accepted,
+            finished(hook_observation.clone(), feedback.clone()),
+        )
+        .unwrap();
+        let mut settled = accepted.clone();
+        apply(&mut settled, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut settled, continuation).unwrap();
+        let tool = &accepted.runs[0].tools[0];
+        assert_eq!(
+            tool.hook_feedback(),
+            vec!["hook feedback: blocked".to_owned()]
+        );
+        assert!(tool.settled_without_stop());
+
+        let mut uncertain = observation_for(hook_intent.clone(), b"");
+        uncertain.disposition = ToolDisposition::Uncertain;
+        uncertain.attestation = None;
+        uncertain.cache_update = CacheUpdate::NotAttempted;
+        let unknown = HookResult::Ignored {
+            why: crate::tools::permissions::HookIgnoreReason::NotCompleted,
+        };
+        apply(&mut view, finished(uncertain, unknown)).unwrap();
+        assert!(!view.runs[0].tools[0].settled_without_stop());
+        assert!(view.runs[0].tools[0].hook_feedback().is_empty());
+    }
+
+    #[test]
+    fn no_tool_starts_while_a_post_tool_use_hook_is_open() {
+        use crate::tools::permissions::{
+            Decision, HookEvent, HookInvocation, PermissionMode, PermissionSource,
+            PermissionVerdict,
+        };
+        let (mut view, goal, run, agent) = primary_tool_session(true);
+        view.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 2)).unwrap();
+        let (first, second) = (
+            read_intent(run, agent, "src/lib.rs"),
+            read_intent(run, agent, "src/lib.rs"),
+        );
+        apply(&mut view, tool_started(run, agent, &first)).unwrap();
+        apply(
+            &mut view,
+            Event::ToolPermissionDecided {
+                run_id: run,
+                agent_run_id: agent,
+                verdict: PermissionVerdict {
+                    intent_digest: first.digest(),
+                    decision: Decision::Allow,
+                    mode: Some(PermissionMode::Default),
+                    basis: PermissionSource::Mode,
+                    source: PermissionSource::Mode,
+                    approved: true,
+                    hook_restriction: None,
+                    hooks: 0,
+                },
+            },
+        )
+        .unwrap();
+        apply(&mut view, tool_finished(run, agent, &first, b"x")).unwrap();
+        let mut settled = view.clone();
+        apply(&mut settled, tool_started(run, agent, &second)).unwrap();
+        apply(
+            &mut view,
+            Event::HookStarted {
+                run_id: run,
+                agent_run_id: agent,
+                hook: HookInvocation {
+                    event: HookEvent::PostToolUse,
+                    group: 0,
+                    handler: 0,
+                    subject_digest: first.digest(),
+                    intent: child_intent(
+                        run,
+                        agent,
+                        ToolCall::Command {
+                            program: "sh".into(),
+                            args: vec!["-c".into(), "exit 0".into()],
+                            cwd: String::new(),
+                        },
+                    ),
+                    input_digest: [9; 32],
+                },
+            },
+        )
+        .unwrap();
+        assert!(rejected(&view, tool_started(run, agent, &second)));
     }
 
     struct Unguarded {

@@ -6,7 +6,7 @@ use super::{
     restrict_outcome_schema,
 };
 use crate::session::RunView;
-use crate::tools::types::{MAX_TOOL_CATALOG_BYTES, model_call, model_observation};
+use crate::tools::types::{MAX_TOOL_CATALOG_BYTES, model_call, model_observation, model_result};
 use crate::tools::{ToolCall, ToolContext, ToolDisposition, ToolStep};
 use serde_json::{Value, json};
 
@@ -192,7 +192,7 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
     let mut requests = step.requests.iter();
     let mut results = Vec::new();
     let mut integrations = Vec::new();
-    for observation in &step.observations {
+    for (index, observation) in step.observations.iter().enumerate() {
         if matches!(observation.intent.call, ToolCall::ApplyChangeset { .. }) {
             integrations.push(data_block(
                 "engine_integration (untrusted result data)",
@@ -201,7 +201,7 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
         } else {
             let tool_request = requests.next().ok_or(ProviderError::Rejected)?;
             // The replayed turn already carries the call; the result adds only what was observed.
-            let mut output = model_observation(observation);
+            let mut output = model_result(observation, step.feedback(index));
             if let Some(fields) = output.as_object_mut() {
                 fields.remove("call");
             }
@@ -239,7 +239,7 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
         .skip((run.tool_compaction_covered_count as usize).saturating_sub(run.parse_count()))
         .filter(|tool| !matches!(tool.intent.call, ToolCall::PrepareWorker { .. }))
         .map(|tool| match &tool.observation {
-            Some(observation) => model_observation(observation),
+            Some(observation) => model_result(observation, &tool.hook_feedback()),
             None => json!({"call": model_call(&tool.intent.call), "execution": "uncertain; never replay"}),
         })
         .collect();

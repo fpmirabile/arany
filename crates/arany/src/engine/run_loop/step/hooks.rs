@@ -5,14 +5,16 @@ use crate::engine::{EngineError, STORE_ACTION_OVERHEAD};
 use crate::session::Event;
 use crate::tools::permissions::{
     CommandHook, ConfigError, Decision, HOOK_RESULT_BYTES, HookEvent, HookInvocation, HookOutcome,
-    HookResult, PermissionConfig, pre_tool_use_input,
+    HookResult, MAX_HOOK_FEEDBACK_BYTES, MAX_HOOK_INPUT_BYTES, PermissionConfig, feedback_lines,
+    post_tool_use_input, pre_tool_use_input,
 };
-use crate::tools::{EffectIntent, ToolCall, ToolDisposition, ToolRuntime};
+use crate::tools::types::model_observation;
+use crate::tools::{EffectIntent, ToolCall, ToolDisposition, ToolObservation, ToolRuntime};
 
 const MIN_HOOK_RUNTIME_MS: u32 = 1_000;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum HookStop {
+pub(super) enum HookStop {
     None,
     Uncertain,
     ActiveTime,
@@ -23,6 +25,17 @@ pub(super) struct HookFold {
     pub(super) count: u8,
     reason: Option<String>,
     stop: HookStop,
+}
+
+pub(super) struct PostFold {
+    pub(super) feedback: Vec<String>,
+    pub(super) stop: HookStop,
+}
+
+struct HookRun {
+    result: HookResult,
+    stops: bool,
+    exhausted: bool,
 }
 
 struct HookPlan {
@@ -120,10 +133,11 @@ impl RunLoop<'_> {
         &self,
         runtime: &ToolRuntime,
         config: &PermissionConfig,
+        event: HookEvent,
         call: &ToolCall,
     ) -> Result<Vec<HookPlan>, &'static str> {
         let matched = config
-            .matched_pre_tool_use(call)
+            .matched_tool_hooks(event, call)
             .map_err(|error| match error {
                 ConfigError::Limit(_) => "hook limit",
                 _ => "hook configuration blocks this Tool",
@@ -142,36 +156,58 @@ impl RunLoop<'_> {
             .collect()
     }
 
-    // Upper bound of Events and active time the hooks of one primary Tool can add.
+    // Upper bound of Events and active time one step's hooks can add: its own PreToolUse set plus the
+    // PostToolUse set of the requested Tool, which runs after a Command's integration step.
     pub(super) fn hook_admission(
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
         call: &ToolCall,
-    ) -> (usize, u64) {
+        post_call: &ToolCall,
+    ) -> (usize, u64, u64) {
         let Some(config) = runtime.permissions() else {
-            return (0, 0);
+            return (0, 0, 0);
         };
         if matches!(grant, Grant::Researcher { .. }) || call.is_internal() {
-            return (0, 0);
+            return (0, 0, 0);
         }
-        let Ok(plans) = self.hook_plans(runtime, config, call) else {
-            return (0, 0);
+        let (Ok(pre), Ok(post)) = (
+            self.hook_plans(runtime, config, HookEvent::PreToolUse, call),
+            self.hook_plans(runtime, config, HookEvent::PostToolUse, post_call),
+        ) else {
+            return (0, 0, 0);
         };
-        let active_ms = plans
-            .iter()
-            .map(|plan| {
-                duration_ms(
-                    runtime
-                        .reservation_overhead(&plan.call)
-                        .saturating_add(TOOL_CLEANUP_OVERHEAD)
-                        .saturating_add(STORE_ACTION_OVERHEAD),
-                )
-                .saturating_add(u64::from(plan.timeout_ms))
-            })
-            .sum::<u64>()
-            .min(self.ledger().active_remaining_ms().unwrap_or(u64::MAX));
-        (plans.len(), active_ms)
+        let active_ms = |plans: &[HookPlan]| {
+            plans
+                .iter()
+                .map(|plan| {
+                    duration_ms(
+                        runtime
+                            .reservation_overhead(&plan.call)
+                            .saturating_add(TOOL_CLEANUP_OVERHEAD)
+                            .saturating_add(STORE_ACTION_OVERHEAD),
+                    )
+                    .saturating_add(u64::from(plan.timeout_ms))
+                })
+                .sum::<u64>()
+                .min(self.ledger().active_remaining_ms().unwrap_or(u64::MAX))
+        };
+        (pre.len() + post.len(), active_ms(&pre), active_ms(&post))
+    }
+
+    // Room the next request keeps for the feedback lines PostToolUse hooks may add.
+    pub(super) fn feedback_reserve(&self, runtime: &ToolRuntime, call: &ToolCall) -> usize {
+        let Some(config) = runtime.permissions() else {
+            return 0;
+        };
+        match self.hook_plans(runtime, config, HookEvent::PostToolUse, call) {
+            Ok(plans) if !plans.is_empty() =>
+            // JSON escaping can double a line of quotes or backslashes.
+            {
+                2 * MAX_HOOK_FEEDBACK_BYTES + 256
+            }
+            _ => 0,
+        }
     }
 
     pub(super) async fn pre_tool_use_hooks(
@@ -181,11 +217,16 @@ impl RunLoop<'_> {
         config: &PermissionConfig,
         intent: &EffectIntent,
     ) -> Result<HookFold, EngineError> {
-        let plans = match self.hook_plans(runtime, config, &intent.call) {
+        let plans = match self.hook_plans(runtime, config, HookEvent::PreToolUse, &intent.call) {
             Ok(plans) => plans,
             Err(reason) => return Ok(HookFold::deny(reason, 0)),
         };
-        if plans.is_empty() {
+        // A PostToolUse set that cannot run after the effect denies the Tool before it.
+        let post = match self.hook_plans(runtime, config, HookEvent::PostToolUse, &intent.call) {
+            Ok(plans) => plans,
+            Err(reason) => return Ok(HookFold::deny(reason, 0)),
+        };
+        if plans.is_empty() && post.is_empty() {
             return Ok(HookFold::none());
         }
         if matches!(grant, Grant::Researcher { .. }) {
@@ -193,6 +234,25 @@ impl RunLoop<'_> {
                 "hooks are unavailable to delegated research",
                 0,
             ));
+        }
+        if !post.is_empty() {
+            // The bare form is the smallest stdin a post hook can get, so it must fit the Guard task.
+            let Ok(bare) = post_tool_use_input(
+                self.session_id,
+                config.mode(),
+                &intent.call,
+                intent.id,
+                serde_json::json!("x".repeat(MAX_HOOK_INPUT_BYTES + 1)),
+                0,
+            ) else {
+                return Ok(HookFold::deny("hook input exceeds its limit", 0));
+            };
+            if !self.task_fits_all(&runtime.with_hook_stdin(&bare), intent.agent_run_id, &post) {
+                return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
+            }
+        }
+        if plans.is_empty() {
+            return Ok(HookFold::none());
         }
         let Ok(input) = pre_tool_use_input(self.session_id, config.mode(), &intent.call, intent.id)
         else {
@@ -202,79 +262,30 @@ impl RunLoop<'_> {
         let subject_digest = intent.digest();
         let runtime = runtime.with_hook_stdin(&input);
         // The complete Guard task must encode before any hook starts; a rejected task would strand it.
-        for plan in &plans {
-            let mut probe = runtime.intent(self.run_id, intent.agent_run_id, plan.call.clone());
-            probe.limits.runtime_ms = u32::MAX;
-            probe.expires_at_ms = u64::MAX;
-            if !runtime.hook_task_fits(&probe) {
-                return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
-            }
+        if !self.task_fits_all(&runtime, intent.agent_run_id, &plans) {
+            return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
         }
         let mut fold = HookFold::none();
         for plan in plans {
-            let fixed_ms = duration_ms(
-                runtime
-                    .reservation_overhead(&plan.call)
-                    .saturating_add(TOOL_CLEANUP_OVERHEAD)
-                    .saturating_add(STORE_ACTION_OVERHEAD),
-            );
-            // The Goal ledger refuses a start that does not fit, so a shortfall never runs the hook.
-            let active_ms = self
-                .ledger()
-                .active_remaining_ms()
-                .map_or(u64::MAX, |remaining| remaining.saturating_sub(fixed_ms))
-                .max(u64::from(MIN_HOOK_RUNTIME_MS));
-            let runtime_ms =
-                u32::try_from(active_ms.min(u64::from(plan.timeout_ms))).unwrap_or(u32::MAX);
-            let mut hook_intent =
-                runtime.intent(self.run_id, intent.agent_run_id, plan.call.clone());
-            let limits = &mut hook_intent.limits;
-            limits.result_bytes = HOOK_RESULT_BYTES;
-            limits.runtime_ms = runtime_ms;
-            limits.cache_requested_bytes = 0;
-            limits.cache_bytes = 0;
-            limits.cache_candidate_bytes = 0;
-            limits.cache_transfer_ms = 0;
-            hook_intent.expires_at_ms =
-                crate::tools::now_ms().saturating_add(u64::from(runtime_ms));
-            let pause = match self.reserve_active_pause() {
-                Ok(pause) => pause,
-                Err(EngineError::GoalBudgetExhausted) => {
-                    fold.stop = HookStop::ActiveTime;
-                    return Ok(fold);
-                }
-                Err(error) => return Err(error),
-            };
-            self.append(Event::HookStarted {
-                run_id: self.run_id,
-                agent_run_id: intent.agent_run_id,
-                hook: HookInvocation {
-                    event: HookEvent::PreToolUse,
-                    group: plan.group,
-                    handler: plan.handler,
+            let Some(run) = self
+                .run_hook(
+                    &runtime,
+                    intent.agent_run_id,
+                    HookEvent::PreToolUse,
+                    &plan,
                     subject_digest,
-                    intent: hook_intent.clone(),
                     input_digest,
-                },
-            })
-            .await?;
-            let (observation, segment, exhausted) =
-                self.dispatch_guard(&runtime, hook_intent, pause).await?;
-            self.clear_tool_queue();
-            if let Some(segment) = segment {
-                self.settle_active_segment(segment)?;
-            }
-            let stops = observation.stops_run();
-            let result = HookResult::from_observation(&observation);
-            self.append(Event::HookFinished {
-                run_id: self.run_id,
-                agent_run_id: intent.agent_run_id,
-                outcome: HookOutcome {
-                    observation,
-                    result: result.clone(),
-                },
-            })
-            .await?;
+                )
+                .await?
+            else {
+                fold.stop = HookStop::ActiveTime;
+                return Ok(fold);
+            };
+            let HookRun {
+                result,
+                stops,
+                exhausted,
+            } = run;
             fold.count += 1;
             if stops {
                 fold.stop = HookStop::Uncertain;
@@ -303,5 +314,169 @@ impl RunLoop<'_> {
             }
         }
         Ok(fold)
+    }
+
+    // Runs after the Tool's `ToolFinished`: feedback never changes what the Tool did.
+    pub(super) async fn post_tool_use_hooks(
+        &self,
+        runtime: &ToolRuntime,
+        config: &PermissionConfig,
+        observation: &ToolObservation,
+    ) -> Result<PostFold, EngineError> {
+        let mut fold = PostFold {
+            feedback: Vec::new(),
+            stop: HookStop::None,
+        };
+        let call = &observation.intent.call;
+        let Ok(plans) = self.hook_plans(runtime, config, HookEvent::PostToolUse, call) else {
+            return Ok(fold);
+        };
+        if plans.is_empty() {
+            return Ok(fold);
+        }
+        // Halve the response budget until every Guard task encodes; admission proved the bare form fits.
+        let response = model_observation(observation);
+        let mut budget = MAX_HOOK_INPUT_BYTES;
+        let (input, runtime) = loop {
+            let input = post_tool_use_input(
+                self.session_id,
+                config.mode(),
+                call,
+                observation.intent.id,
+                response.clone(),
+                budget,
+            )
+            .map_err(|_| EngineError::InvalidRequest)?;
+            let sized = runtime.with_hook_stdin(&input);
+            if self.task_fits_all(&sized, observation.intent.agent_run_id, &plans) {
+                break (input, sized);
+            }
+            if budget == 0 {
+                return Err(EngineError::InvalidRequest);
+            }
+            budget = if budget < 2048 { 0 } else { budget / 2 };
+        };
+        let input_digest = crate::tools::types::digest(input.as_bytes());
+        let subject_digest = observation.intent.digest();
+        let mut results = Vec::new();
+        for plan in plans {
+            let Some(run) = self
+                .run_hook(
+                    &runtime,
+                    observation.intent.agent_run_id,
+                    HookEvent::PostToolUse,
+                    &plan,
+                    subject_digest,
+                    input_digest,
+                )
+                .await?
+            else {
+                fold.stop = HookStop::ActiveTime;
+                break;
+            };
+            let stop = if run.stops {
+                HookStop::Uncertain
+            } else if run.exhausted {
+                HookStop::ActiveTime
+            } else {
+                HookStop::None
+            };
+            results.push(run.result);
+            if stop != HookStop::None {
+                fold.stop = stop;
+                break;
+            }
+        }
+        fold.feedback = feedback_lines(&results);
+        Ok(fold)
+    }
+
+    fn task_fits_all(
+        &self,
+        runtime: &ToolRuntime,
+        agent_run_id: crate::session::AgentRunId,
+        plans: &[HookPlan],
+    ) -> bool {
+        plans.iter().all(|plan| {
+            let mut probe = runtime.intent(self.run_id, agent_run_id, plan.call.clone());
+            probe.limits.runtime_ms = u32::MAX;
+            probe.expires_at_ms = u64::MAX;
+            runtime.hook_task_fits(&probe)
+        })
+    }
+
+    // `None` means the Goal had no active time left to start the hook.
+    async fn run_hook(
+        &self,
+        runtime: &ToolRuntime,
+        agent_run_id: crate::session::AgentRunId,
+        event: HookEvent,
+        plan: &HookPlan,
+        subject_digest: [u8; 32],
+        input_digest: [u8; 32],
+    ) -> Result<Option<HookRun>, EngineError> {
+        let fixed_ms = duration_ms(
+            runtime
+                .reservation_overhead(&plan.call)
+                .saturating_add(TOOL_CLEANUP_OVERHEAD)
+                .saturating_add(STORE_ACTION_OVERHEAD),
+        );
+        // The Goal ledger refuses a start that does not fit, so a shortfall never runs the hook.
+        let active_ms = self
+            .ledger()
+            .active_remaining_ms()
+            .map_or(u64::MAX, |remaining| remaining.saturating_sub(fixed_ms))
+            .max(u64::from(MIN_HOOK_RUNTIME_MS));
+        let runtime_ms =
+            u32::try_from(active_ms.min(u64::from(plan.timeout_ms))).unwrap_or(u32::MAX);
+        let mut hook_intent = runtime.intent(self.run_id, agent_run_id, plan.call.clone());
+        let limits = &mut hook_intent.limits;
+        limits.result_bytes = HOOK_RESULT_BYTES;
+        limits.runtime_ms = runtime_ms;
+        limits.cache_requested_bytes = 0;
+        limits.cache_bytes = 0;
+        limits.cache_candidate_bytes = 0;
+        limits.cache_transfer_ms = 0;
+        hook_intent.expires_at_ms = crate::tools::now_ms().saturating_add(u64::from(runtime_ms));
+        let pause = match self.reserve_active_pause() {
+            Ok(pause) => pause,
+            Err(EngineError::GoalBudgetExhausted) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        self.append(Event::HookStarted {
+            run_id: self.run_id,
+            agent_run_id,
+            hook: HookInvocation {
+                event,
+                group: plan.group,
+                handler: plan.handler,
+                subject_digest,
+                intent: hook_intent.clone(),
+                input_digest,
+            },
+        })
+        .await?;
+        let (observation, segment, exhausted) =
+            self.dispatch_guard(runtime, hook_intent, pause).await?;
+        self.clear_tool_queue();
+        if let Some(segment) = segment {
+            self.settle_active_segment(segment)?;
+        }
+        let stops = observation.stops_run();
+        let result = HookResult::for_event(event, &observation);
+        self.append(Event::HookFinished {
+            run_id: self.run_id,
+            agent_run_id,
+            outcome: HookOutcome {
+                observation,
+                result: result.clone(),
+            },
+        })
+        .await?;
+        Ok(Some(HookRun {
+            result,
+            stops,
+            exhausted,
+        }))
     }
 }

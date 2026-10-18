@@ -25,7 +25,7 @@ use tokio::time::Instant;
 
 mod hooks;
 
-use hooks::HookFold;
+use hooks::{HookFold, HookStop};
 
 pub(super) enum Grant<'s> {
     Primary {
@@ -188,7 +188,8 @@ impl RunLoop<'_> {
         turn: ProviderTurn,
     ) -> Result<bool, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        let mut call = request.call.clone();
+        let source_call = request.call.clone();
+        let mut call = source_call.clone();
         let calls_remaining = match &grant {
             Grant::Primary { .. } => None,
             Grant::Researcher { child, .. } => Some(child.tool_calls_remaining.saturating_sub(1)),
@@ -200,15 +201,18 @@ impl RunLoop<'_> {
             facts: None,
             steering_notes: Vec::new(),
             calls_remaining,
+            hook_feedback: Default::default(),
         };
         loop {
-            let Some(intent) = self.sized_intent(&grant, runtime, &step, call)? else {
+            let Some(intent) = self.sized_intent(&grant, runtime, &step, call, &source_call)?
+            else {
                 return Ok(false);
             };
             let command = matches!(intent.call, ToolCall::Command { .. });
             let source_intent_digest = intent.digest();
             // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
-            let Some(observation) = Box::pin(self.run_intent(&grant, runtime, intent)).await?
+            let Some(observation) =
+                Box::pin(self.run_intent(&grant, runtime, intent, &source_call)).await?
             else {
                 return Ok(false);
             };
@@ -248,6 +252,26 @@ impl RunLoop<'_> {
                 return Ok(false);
             }
         }
+        // The hooks see the published tree: a Command's changeset is integrated first.
+        if matches!(grant, Grant::Primary { .. })
+            && let Some(config) = runtime.permissions()
+            && let Some(source) = step.observations.first()
+            && source.disposition == ToolDisposition::Succeeded
+            && !source.intent.call.is_internal()
+            && step.observations[1..]
+                .iter()
+                .all(|integration| integration.disposition == ToolDisposition::Succeeded)
+        {
+            let post = Box::pin(self.post_tool_use_hooks(runtime, config, source)).await?;
+            match post.stop {
+                HookStop::None if !post.feedback.is_empty() => {
+                    step.hook_feedback.insert(0, post.feedback);
+                }
+                HookStop::None => {}
+                HookStop::Uncertain => return Ok(false),
+                HookStop::ActiveTime => return Err(EngineError::GoalBudgetExhausted),
+            }
+        }
         grant.context_mut()?.steps.push(step);
         if let Grant::Primary { request, .. } = &mut grant {
             self.compact_tool_context_if_needed(request).await?;
@@ -264,6 +288,7 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         step: &ToolStep,
         call: ToolCall,
+        post_call: &ToolCall,
     ) -> Result<Option<EffectIntent>, EngineError> {
         let intent = match grant {
             Grant::Primary { .. } => self.primary_intent(runtime, call)?,
@@ -274,10 +299,11 @@ impl RunLoop<'_> {
         let Some(mut intent) = intent else {
             return Ok(None);
         };
-        // The hooks run before dispatch, so the authorization outlives them.
-        intent.expires_at_ms = intent
-            .expires_at_ms
-            .saturating_add(self.hook_admission(grant, runtime, &intent.call).1);
+        // The PreToolUse hooks run before dispatch, so the authorization outlives them.
+        intent.expires_at_ms = intent.expires_at_ms.saturating_add(
+            self.hook_admission(grant, runtime, &intent.call, post_call)
+                .1,
+        );
         let integration =
             matches!(intent.call, ToolCall::Command { .. }).then(|| ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::CommandReceipt {
@@ -291,7 +317,7 @@ impl RunLoop<'_> {
             MAX_TOOL_ARGUMENT_BYTES + 128 * 6 + 512
         } else {
             0
-        };
+        } + self.feedback_reserve(runtime, post_call);
         let Some(capacity) = runtime.result_capacity(overhead, integration_capacity) else {
             return Ok(None);
         };
@@ -412,9 +438,11 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
         intent: EffectIntent,
+        post_call: &ToolCall,
     ) -> Result<Option<ToolObservation>, EngineError> {
         let permission = self.permission(grant, runtime, &intent.call);
-        let (hook_events, hook_ms) = self.hook_admission(grant, runtime, &intent.call);
+        let (hook_events, pre_ms, post_ms) =
+            self.hook_admission(grant, runtime, &intent.call, post_call);
         if !self
             .admit_tool(grant, runtime, &intent, permission, hook_events)
             .await?
@@ -424,7 +452,9 @@ impl RunLoop<'_> {
         let agent_run_id = intent.agent_run_id;
         // A researcher's Tool runs inside its delegation's reservation.
         let action_ms = match grant {
-            Grant::Primary { .. } => tool_action_ms(runtime, &intent).saturating_add(hook_ms),
+            Grant::Primary { .. } => tool_action_ms(runtime, &intent)
+                .saturating_add(pre_ms)
+                .saturating_add(post_ms),
             Grant::Researcher { .. } => 0,
         };
         self.append(Event::ToolStarted {
@@ -1402,7 +1432,9 @@ impl RunLoop<'_> {
                 request,
                 review_allowed: false,
             };
-            let Some(observation) = Box::pin(self.run_intent(&grant, runtime, intent)).await?
+            let post_call = intent.call.clone();
+            let Some(observation) =
+                Box::pin(self.run_intent(&grant, runtime, intent, &post_call)).await?
             else {
                 return Ok(false);
             };
