@@ -66,10 +66,10 @@ async fn closed_bundle(
 
 pub(super) async fn worker_case(case: &'static str) {
     let padding = match case {
-        "headroom" => Some(9_920),
-        "headroom_child" => Some(9_923),
-        "headroom_background" => Some(9_922),
-        "headroom_race" => Some(9_926),
+        "headroom" => Some(9_906),
+        "headroom_child" => Some(9_912),
+        "headroom_background" => Some(9_916),
+        "headroom_race" => Some(9_916),
         _ => None,
     };
     arany::test_support::isolate_account_root();

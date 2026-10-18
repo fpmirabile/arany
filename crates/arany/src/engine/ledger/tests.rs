@@ -317,6 +317,8 @@ fn default_provider_action_retains_its_original_event_admission() {
     );
     assert_eq!(Action::Tool.max_events(), 8);
     assert_eq!(Action::Review.max_events(), 8);
+    assert_eq!(Action::Tool.verdict_slots(), 2);
+    assert_eq!(Action::Compaction.verdict_slots(), 0);
     assert_eq!(Action::Compaction.max_events(), 6);
     assert_eq!(Action::BoundaryCompaction { goal: true }.max_events(), 2);
 }
