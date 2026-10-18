@@ -282,7 +282,7 @@ impl Store {
                     return;
                 }
                 let mut checkpoint_checked = None;
-                let mut swept: state::checkpoints::Pruned = if !read_only {
+                let mut pending_prunes: state::checkpoints::Pruned = if !read_only {
                     state::checkpoints::sweep(
                         &root,
                         i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
@@ -330,6 +330,20 @@ impl Store {
                             } else {
                                 append(&mut connection, &mut hot_session, session_id, *event)
                             };
+                            if let Ok(envelope) = &result
+                                && let Event::ToolFinished {
+                                    run_id,
+                                    checkpoint: Some(checkpoint),
+                                    ..
+                                } = &envelope.event
+                                && let Some(pruned) = checkpoint.pruned_before_run
+                            {
+                                let session = session_id.to_string();
+                                if pending_prunes.get(&session).is_some_and(|pending| pending <= &pruned.to_string()) {
+                                    pending_prunes.remove(&session);
+                                }
+                                pruning_notified_run = Some(*run_id);
+                            }
                             #[cfg(any(test, feature = "test-support"))]
                             let result = match result {
                                 Ok(envelope) => {
@@ -420,11 +434,13 @@ impl Store {
                                     i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
                                     &mut checkpoint_checked,
                                 );
-                                let earlier = swept.remove(&session).and_then(|run| run.parse::<crate::session::RunId>().ok());
-                                if let Some(pruned) = [checkpoint.pruned_before_run, earlier].into_iter().flatten().max_by_key(|run| run.to_string()) {
-                                    if pruning_notified_run == Some(run) { checkpoint.pruned_before_run = None; }
-                                    else { checkpoint.pruned_before_run = Some(pruned); pruning_notified_run = Some(run); }
+                                if let Some(pruned) = checkpoint.pruned_before_run {
+                                    let pending = pending_prunes.entry(session.clone()).or_insert_with(|| pruned.to_string());
+                                    *pending = std::cmp::max(pending.clone(), pruned.to_string());
                                 }
+                                checkpoint.pruned_before_run = pending_prunes.get(&session)
+                                    .filter(|_| pruning_notified_run != Some(run))
+                                    .and_then(|run| run.parse().ok());
                                 Ok(checkpoint)
                             };
                             let _ = reply.send(result);

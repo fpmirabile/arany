@@ -454,3 +454,187 @@ fn checkpoints_expiry_persists_even_when_the_capture_itself_fails() {
     assert!(capture_inner(&root, &failing, RETENTION_MS * 2, LIMITS).is_err());
     assert_eq!(count(&root, "SELECT COUNT(*) FROM refs"), 0);
 }
+
+#[tokio::test]
+async fn checkpoints_prune_notices_survive_discarded_captures_until_journal_commit() {
+    use crate::session::worker::{WorkerIntegrationOutcome, WorkerSettlementReason};
+    use crate::session::{Event, SessionView};
+    use crate::store::Store;
+    use crate::tools::{Attestation, ToolCall, ToolDisposition};
+
+    for startup in [false, true] {
+        let (_temp, root) = fixture();
+        let f = crate::session::worker_protocol_fixture();
+        let now = i64::try_from(crate::tools::now_ms()).unwrap();
+        for sequence in 1..=if startup { 1 } else { 32 } {
+            assert_eq!(
+                capture(
+                    &root,
+                    batch(f.session, f.goal, f.run, sequence, &[sequence as u8]),
+                    if startup { 0 } else { now },
+                )
+                .status,
+                CheckpointStatus::Captured
+            );
+        }
+        let store = Store::open(root.try_clone().unwrap()).unwrap();
+        let finished = f
+            .events
+            .iter()
+            .position(|event| {
+                matches!(event,
+                    Event::ToolFinished { observation, .. }
+                        if crate::session::checkpoint::publication(&observation.intent)
+                )
+            })
+            .unwrap();
+        for event in &f.events[..finished] {
+            store.append(f.session, event.clone()).await.unwrap();
+        }
+        let Event::ToolFinished { observation, .. } = &f.events[finished] else {
+            unreachable!()
+        };
+        let request = |intent_id, files| Capture {
+            session: f.session,
+            goal: f.goal,
+            run: f.run,
+            intent_id,
+            files,
+        };
+        let discarded = store
+            .capture_checkpoint(request(
+                observation.intent.id,
+                vec![("file".into(), b"incoming".to_vec())],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(discarded.pruned_before_run, Some(f.run));
+        let mut denied = observation.clone();
+        denied.disposition = ToolDisposition::Denied;
+        denied.attestation = None;
+        store
+            .append(
+                f.session,
+                Event::ToolFinished {
+                    run_id: f.run,
+                    agent_run_id: f.primary,
+                    observation: denied,
+                    checkpoint: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut integration = f.events[finished + 1].clone();
+        let Event::WorkerIntegrationRecorded { record, .. } = &mut integration else {
+            unreachable!()
+        };
+        record.outcome = WorkerIntegrationOutcome::Denied;
+        let integrated = store.append(f.session, integration).await.unwrap();
+        let Event::WorkerLeaseReleased { mut record, .. } = f.events[finished + 2].clone() else {
+            unreachable!()
+        };
+        record.reason = WorkerSettlementReason::Denied;
+        record.cause_sequence = integrated.sequence;
+        let discarded = store
+            .append(
+                f.session,
+                Event::WorkerHandoverDiscarded {
+                    run_id: f.run,
+                    agent_run_id: f.primary,
+                    record: record.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        record.cause_sequence = discarded.sequence;
+        store
+            .append(
+                f.session,
+                Event::WorkerLeaseReleased {
+                    run_id: f.run,
+                    agent_run_id: f.primary,
+                    record,
+                },
+            )
+            .await
+            .unwrap();
+
+        for index in 0..2 {
+            for event in &f.events[finished + 3..finished + 5] {
+                store.append(f.session, event.clone()).await.unwrap();
+            }
+            let mut intent = observation.intent.clone();
+            intent.id = uuid::Uuid::now_v7();
+            let path = format!("src/changed{index}");
+            intent.call = ToolCall::Write {
+                path: path.clone(),
+                expected_digest: Some(crate::tools::types::hex_digest(b"before")),
+                content: "new".into(),
+            };
+            store
+                .append(
+                    f.session,
+                    Event::ToolStarted {
+                        run_id: f.run,
+                        agent_run_id: f.primary,
+                        intent: intent.clone(),
+                        active_ceiling_ms: 0,
+                    },
+                )
+                .await
+                .unwrap();
+            let checkpoint = store
+                .capture_checkpoint(request(intent.id, vec![(path, b"before".to_vec())]))
+                .await
+                .unwrap();
+            assert_eq!(checkpoint.pruned_before_run, (index == 0).then_some(f.run));
+            assert_eq!(checkpoint.status, CheckpointStatus::Captured);
+            let mut observation = observation.clone();
+            observation.intent = intent.clone();
+            observation.attestation = Some(Attestation::for_site(&intent));
+            let finished = Event::ToolFinished {
+                run_id: f.run,
+                agent_run_id: f.primary,
+                observation,
+                checkpoint: Some(checkpoint),
+            };
+            if index == 0 {
+                let mut invalid = finished.clone();
+                let Event::ToolFinished {
+                    checkpoint: Some(checkpoint),
+                    ..
+                } = &mut invalid
+                else {
+                    unreachable!()
+                };
+                checkpoint.pruned_before_run = Some(RunId::new());
+                assert!(store.append(f.session, invalid).await.is_err());
+                assert_eq!(
+                    store
+                        .capture_checkpoint(request(intent.id, Vec::new()))
+                        .await
+                        .unwrap()
+                        .pruned_before_run,
+                    Some(f.run),
+                    "failed append must not consume the notice"
+                );
+            }
+            store.append(f.session, finished).await.unwrap();
+        }
+        store.close().await.unwrap();
+        let reopened = Store::open_read_only(root).unwrap();
+        let events = reopened.load_session(f.session).await.unwrap();
+        let view = SessionView::replay(f.session, &events).unwrap().unwrap();
+        let notices = view.runs[0]
+            .tools
+            .iter()
+            .filter(|tool| {
+                tool.checkpoint
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.pruned_before_run.is_some())
+            })
+            .count();
+        assert_eq!(notices, 1, "one committed notice after a pre-GO denial");
+        reopened.close().await.unwrap();
+    }
+}
