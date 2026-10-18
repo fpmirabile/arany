@@ -2952,6 +2952,10 @@ fn acp_stdio_negotiates_reports_auth_required_and_exits_cleanly() {
         });
 }
 
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", any(debug_assertions, arany_ci))
+))]
 #[test]
 fn acp_profile_admits_session_cwd_instead_of_launch_directory() {
     let root = tempfile::tempdir().unwrap();

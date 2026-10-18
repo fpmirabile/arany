@@ -111,10 +111,9 @@ outstanding, already sent request before the pinned expiry; unknown, duplicate,
 late and cancelled IDs change nothing. ACP request IDs are independent of both
 client request IDs and internal serve IDs. `allow_always` is never offered.
 Ordinary client decisions are user-configured verdicts; ACP cannot attest a
-human gesture. Consequently the Engine refuses unguarded commands (including
-exact-rule preapproval) and hook Asks before contacting ACP, journaling
-`unavailable_approval`. All normal Policy, one-use grant, journal and Guard
-checks still apply.
+human gesture, so human-only requests follow the
+[Tools contract](./tools.md#modes-and-approval-decisions). All normal Policy,
+one-use grant, journal and Guard checks still apply.
 
 Expiry, cancellation, Tool completion or serve withdrawal retire the pending
 permission and queue `$/cancel_request` for its ACP ID if it was sent. Serve
@@ -196,7 +195,7 @@ Shared bounds and their Engine behavior belong to [serve limits](./serve.md#limi
 | Pending translations | 64, with 62 available to client requests and two reserved for control/reconciliation; excess requests fail `busy`. Integer internal IDs are checked and never reused. |
 | Sessions / active prompt | Serve's 64 / 1, with `threadLimit` / `busy`, no eviction. Restart is needed after capacity is exhausted until session closure ships. |
 | Prompt blocks / aggregate text after rich-content conversion | 64 / 64 KiB UTF-8, including mention/context syntax; excess or empty/whitespace-only text without images fails `invalidParams`. |
-| Images | Serve and terminal limits: four PNGs, 192 KiB total decoded bytes; reject overflow without truncation. |
+| Images | [Serve](./serve.md#limits-and-compatibility) and [terminal](./terminal.md#paste-and-attachments) image limits; reject overflow without truncation. |
 | Tool content / title | 64 KiB / 256 bytes of escaped text plus a Session-history truncation marker. Fences are longer than every contained backtick run. If the full line still exceeds the cap, optional raw input/output and locations are omitted and content becomes a history marker. |
 | Pending permissions | One, with serve's immutable intent deadline; oversize denies unsent. |
 | Oversized answer projection | Cut at a UTF-8 boundary to at most 128 KiB text plus `[truncated; see arany show SESSION_ID]`; worst-case JSON escaping still fits the line cap. Other oversized projections fail closed. |
