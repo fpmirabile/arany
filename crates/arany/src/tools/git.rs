@@ -1337,6 +1337,12 @@ mod tests {
             std::fs::read(view.join("index")).unwrap(),
             std::fs::read(workspace.join(".git/index")).unwrap()
         );
+        let modified = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+        assert_eq!(
+            modified(&view.join("index")),
+            modified(&workspace.join(".git/index")),
+            "a fresh index mtime hides same-size edits from Git's racy-stat check"
+        );
         assert_eq!(
             std::fs::read_to_string(view.join("HEAD")).unwrap(),
             "ref: refs/heads/main\n"
