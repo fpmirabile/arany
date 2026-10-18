@@ -756,7 +756,7 @@ mod account_default_tests {
         let mut missing_roster = serde_json::to_value(ordinary).unwrap();
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(13));
+        assert_eq!(payload_version("RunStarted"), Some(14));
         assert_eq!(payload_version("ProviderCallRecorded"), Some(8));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
@@ -1290,7 +1290,12 @@ mod child_grant_tests {
                 Some(agent_run_id),
             )
         };
-        for grant in [ChildGrant::NoTools, ChildGrant::ReadOnly] {
+        for grant in [
+            ChildGrant::NoTools,
+            ChildGrant::ReadOnly {
+                unguarded: crate::tools::UnguardedGrant::Denied,
+            },
+        ] {
             let event = spawned(AgentRole::Child, 1, Some("inspect"), Some(grant));
             let payload = event.payload().expect("child payload");
             assert_eq!(decode(&event, &payload).expect("child replay"), event);
@@ -1303,9 +1308,11 @@ mod child_grant_tests {
             AgentRole::Child,
             1,
             Some("inspect"),
-            Some(ChildGrant::ReadOnly),
+            Some(ChildGrant::ReadOnly {
+                unguarded: crate::tools::UnguardedGrant::Denied,
+            }),
         );
-        assert_eq!(payload_version(child.kind()), Some(9));
+        assert_eq!(payload_version(child.kind()), Some(10));
         let payload = child.payload().expect("child payload");
         let mut named = child.clone();
         if let Event::AgentSpawned { profile, .. } = &mut named {
@@ -1339,6 +1346,15 @@ mod child_grant_tests {
         missing = value.clone();
         missing.as_object_mut().expect("object").remove("grant");
         assert!(decode(&child, &missing.to_string()).is_err());
+        for invalid in [
+            serde_json::json!("read_only"),
+            serde_json::json!({"read_only":{}}),
+            serde_json::json!({"read_only":{"unguarded":"human_only","automatic":true}}),
+        ] {
+            let mut forged = value.clone();
+            forged["grant"] = invalid;
+            assert!(decode(&child, &forged.to_string()).is_err());
+        }
         value["grant"] = serde_json::Value::Null;
         assert!(decode(&child, &value.to_string()).is_err());
         value["grant"] = "write".into();
@@ -1433,12 +1449,12 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(11));
+        assert_eq!(payload_version("ToolFinished"), Some(12));
         assert_eq!(
-            Event::decode("ToolFinished", 11, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 12, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
-        for previous in [10, 9, 8, 7] {
+        for previous in [11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1621,7 +1637,7 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 13,
+                Event::RunStarted { .. } => 14,
                 Event::ToolStarted { .. } => 10,
                 Event::RunFinished { .. } => 8,
                 _ => 7,

@@ -291,11 +291,24 @@ pub enum AgentRole {
 
 /// Authority a child AgentRun receives at spawn; `ReadOnly` children may only research the Workspace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub enum ChildGrant {
     NoTools,
-    ReadOnly,
-    EditOnly,
+    ReadOnly {
+        unguarded: crate::tools::UnguardedGrant,
+    },
+    EditOnly {
+        unguarded: crate::tools::UnguardedGrant,
+    },
+}
+
+impl ChildGrant {
+    pub const fn unguarded(self) -> crate::tools::UnguardedGrant {
+        match self {
+            Self::NoTools => crate::tools::UnguardedGrant::Denied,
+            Self::ReadOnly { unguarded } | Self::EditOnly { unguarded } => unguarded,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

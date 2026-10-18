@@ -532,7 +532,14 @@ impl RunLoop<'_> {
             definition: queue.definition.clone(),
             profile: assignment.profile.or_else(|| self.default_child_profile()),
             grant: Some(if research {
-                ChildGrant::ReadOnly
+                ChildGrant::ReadOnly {
+                    unguarded: self
+                        .controls
+                        .tools
+                        .ok_or(EngineError::InvalidRequest)?
+                        .receipt()
+                        .child_unguarded,
+                }
             } else {
                 ChildGrant::NoTools
             }),
@@ -1375,11 +1382,24 @@ impl RunLoop<'_> {
                 serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
             if let Some(fields) = catalog.as_object_mut() {
                 fields.remove("last_answer_refused");
+                fields.remove("hook_reruns");
             }
             catalog["pending_workers"] = serde_json::json!(pending);
             catalog["worker_coordination"] = serde_json::json!(
                 "While workers are pending, inspect or edit only paths outside their leases. Commands wait for lease quiescence. Finish or propose the next wave only after settlement and fresh primary verification."
             );
+            let proposals = self.ledger().view(|view| {
+                view.runs
+                    .last()
+                    .map_or_else(Vec::new, |run| run.hook_rerun_proposals(None))
+            })?;
+            if !proposals.is_empty() {
+                let mut offered = catalog.clone();
+                offered["hook_reruns"] = serde_json::json!(proposals);
+                if offered.to_string().len() <= crate::tools::types::MAX_TOOL_CATALOG_BYTES {
+                    catalog = offered;
+                }
+            }
             tools.catalog = catalog.to_string();
         }
         Ok(())

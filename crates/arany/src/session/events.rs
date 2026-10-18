@@ -144,7 +144,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "GoalSteeringNoteRecorded"
         | "AssistantDisplayRecorded"
         | "MessageCommitted" => Some(6),
-        "AgentSpawned" => Some(9),
+        "AgentSpawned" => Some(10),
         "AgentFinished" => Some(9),
         "ProviderCallRecorded" => Some(8),
         "WorkerDataChunk"
@@ -159,9 +159,9 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         "ProviderFallbackUsed" => Some(1),
         "ToolPermissionDecided" => Some(4),
         "HookStarted" => Some(2),
-        "HookFinished" => Some(4),
-        "ToolFinished" => Some(11),
-        "RunStarted" => Some(13),
+        "HookFinished" => Some(5),
+        "ToolFinished" => Some(12),
+        "RunStarted" => Some(14),
         "RunFinished" => Some(8),
         "GoalProviderCallReserved" => Some(7),
         "GoalCompactionCallReserved" => Some(7),

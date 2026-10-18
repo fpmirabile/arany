@@ -1666,6 +1666,7 @@ pub(super) fn unit_main() -> ExitCode {
 #[cfg(target_os = "linux")]
 fn parser_config(config: &Config) -> Config {
     Config {
+        child_unguarded: super::UnguardedGrant::Denied,
         commands: Vec::new(),
         skills: Vec::new(),
         mcp: Vec::new(),
@@ -1937,6 +1938,21 @@ mod tests {
             parse_observation(failure),
             Err(ToolError::GuardBootstrap(found)) if found.failure_stage() == "launcher reap"
         ));
+        let mut hook = intent(ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: String::new(),
+        });
+        hook.policy_digest = [1; 32];
+        hook.enforcement_digest = [2; 32];
+        let before = dispatch_result(&hook, false, parse_observation(failure)).unwrap();
+        assert_eq!(
+            before.enforcement_cause,
+            Some(super::super::EnforcementCause::GuardBootstrap)
+        );
+        assert!(before.valid());
+        assert!(!before.stops_run());
+        assert!(dispatch_result(&hook, true, parse_observation(failure)).is_err());
         assert!(matches!(
             parse_observation(br#"{"stage":"made_up"}"#),
             Err(ToolError::Operation)
@@ -2390,6 +2406,7 @@ mod tests {
             version: 1,
             workspace_paths: vec![".".into()],
             write: false,
+            child_unguarded: crate::tools::UnguardedGrant::Denied,
             commands: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),

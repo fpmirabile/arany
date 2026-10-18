@@ -68,6 +68,7 @@ struct Host {
     state: PathBuf,
     engine: Engine,
     restricted_approvals: bool,
+    policy: CollaborationPolicy,
 }
 
 struct Seen {
@@ -75,6 +76,8 @@ struct Seen {
     prompts: Vec<UnguardedPrompt>,
     requests: usize,
     unconsumed: usize,
+    calls: Vec<ProviderRequest>,
+    intents: Vec<arany::EffectIntent>,
 }
 
 impl Host {
@@ -114,6 +117,7 @@ impl Host {
             state,
             engine,
             restricted_approvals: false,
+            policy: CollaborationPolicy::Single,
         }
     }
 
@@ -144,10 +148,12 @@ impl Host {
         };
         let mut input = request(workspace, "Run the failing command");
         input.include_paths.clear();
+        input.policy = self.policy;
         input.goal.budget = Some(budget());
         let running = run_with(&self.engine, &provider, input, controls);
         tokio::pin!(running);
         let mut prompts = Vec::new();
+        let mut intents = Vec::new();
         replies.reverse();
         let outcome = loop {
             tokio::select! {
@@ -158,6 +164,7 @@ impl Host {
                     match approval.unguarded.clone() {
                         Some(prompt) => {
                             prompts.push(prompt);
+                            intents.push(approval.intent.clone());
                             approval.decide(replies.pop().expect("a scripted reply"));
                         }
                         None => approval.decide(ApprovalReply::AllowOnce),
@@ -172,6 +179,8 @@ impl Host {
             prompts,
             requests,
             unconsumed,
+            calls: provider.requests.lock().unwrap().clone(),
+            intents,
         };
         for tool in &seen.outcome.run.tools {
             let observation = tool.observation.as_ref();
@@ -627,4 +636,232 @@ async fn a_denied_prompt_dispatches_nothing() {
     denied(&seen, "Approval was not granted");
     assert!(!host.workspace.join("ran.txt").exists());
     assert_eq!(seen.outcome.run.unguarded_tools(), 0);
+}
+
+#[tokio::test]
+async fn hook_unguarded_rerun_requires_the_exact_command_and_a_fresh_human_ask_then_replays() {
+    const HOOK: &str =
+        "if [ -n \"$ARANY_UNGUARDED\" ]; then printf 'ran\\n' >> ran.txt; else mkdir .ssh; fi";
+    for event in ["PreToolUse", "PostToolUse"] {
+        for allow in [false, true] {
+            let settings = json!({"hooks": {event: [{"matcher": "Read", "hooks": [{"type": "command", "command": HOOK}]}]}});
+            let host = Host::new(Some(&settings));
+            let metadata = std::fs::metadata(&host.workspace).unwrap();
+            private_file(&host.state.join("unguarded-commands.json"), &serde_json::to_vec(&json!({
+                "version":1,"commands":[{"workspace":{"path":host.workspace,"device":metadata.dev(),"inode":metadata.ino()},
+                    "program":"sh","args":["-c",HOOK],"cwd":"","created_unix_ms":1}]
+            })).unwrap());
+            std::fs::write(host.workspace.join("notes/input"), "fact").unwrap();
+            let first = ToolCall::Read {
+                path: "notes/input".into(),
+                offset: 0,
+                limit: 64,
+            };
+            let exact = unguarded(HOOK);
+            let wrong = unguarded("echo different");
+            let seen = host
+                .run(
+                    &host.workspace,
+                    vec![
+                        tool_outcome(first, Some(Box::new(plan(&exact)))),
+                        tool_outcome(wrong, None),
+                        tool_outcome(exact.clone(), None),
+                        finish("answer"),
+                    ],
+                    Some(ApprovalMode::Auto),
+                    vec![if allow {
+                        ApprovalReply::AllowOnce
+                    } else {
+                        ApprovalReply::Deny
+                    }],
+                )
+                .await;
+            assert_eq!(seen.prompts.len(), 1);
+            assert_eq!(seen.intents[0].call, exact);
+            assert_eq!(
+                seen.prompts[0].attribution,
+                Some(arany::EnforcementCause::FilesystemDenied)
+            );
+            let hook = &seen.outcome.run.tools[0].hooks[0];
+            assert_eq!(
+                hook.outcome.as_ref().unwrap().result,
+                arany::permissions::HookResult::Ignored {
+                    why: arany::permissions::HookIgnoreReason::NotCompleted,
+                }
+            );
+            let next = seen.calls[1].input.tools.as_ref().unwrap();
+            let feedback = &next.steps[0].hook_feedback[&0];
+            assert!(
+                feedback
+                    .iter()
+                    .any(|line| line.contains("command_unguarded") && line.contains("mkdir .ssh"))
+            );
+            assert!(
+                !seen.outcome.run.tools[1]
+                    .permission_verdict
+                    .as_ref()
+                    .unwrap()
+                    .approved
+            );
+            let verdict = last_tool(&seen).permission_verdict.as_ref().unwrap();
+            assert_eq!(
+                (verdict.decision, verdict.source, verdict.approved),
+                (Decision::Ask, PermissionSource::Human, allow)
+            );
+            assert_eq!(host.workspace.join("ran.txt").exists(), allow);
+            let session = seen.outcome.session_id;
+            let workspace = host.workspace.clone();
+            private_file(
+                &host.state.join("permissions.json"),
+                br#"{"permissions":{"deny":["command_unguarded"]}}"#,
+            );
+            let (events, view) = host.reopen(session).await;
+            assert_eq!(view.runs[0].unguarded_tools(), usize::from(allow));
+            assert_eq!(workspace.join("ran.txt").exists(), allow);
+            if allow {
+                assert_eq!(
+                    std::fs::read_to_string(workspace.join("ran.txt")).unwrap(),
+                    "ran\n"
+                );
+                for remove in [true, false] {
+                    let mut forged = events.clone();
+                    if remove {
+                        forged.retain(|event| !matches!(event.event, Event::HookFinished { .. }));
+                    } else {
+                        for event in &mut forged {
+                            if let Event::HookFinished { outcome, .. } = &mut event.event {
+                                outcome.observation.enforcement_cause = None;
+                            }
+                        }
+                    }
+                    assert!(SessionView::replay(session, &forged).is_err());
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn hook_stop_unguarded_rerun_uses_a_bounded_continuation_and_human_approval() {
+    const HOOK: &str =
+        "if [ -n \"$ARANY_UNGUARDED\" ]; then echo ran >> ran.txt; else mkdir .ssh; fi";
+    for allow in [false, true] {
+        let host = Host::new(Some(
+            &json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":HOOK}]}]}}),
+        ));
+        std::fs::write(host.workspace.join("notes/input"), "fact").unwrap();
+        let call = unguarded(HOOK);
+        let seen = host
+            .run(
+                &host.workspace,
+                vec![
+                    tool_outcome(
+                        ToolCall::Read {
+                            path: "notes/input".into(),
+                            offset: 0,
+                            limit: 64,
+                        },
+                        Some(Box::new(plan(&call))),
+                    ),
+                    finish("candidate"),
+                    tool_outcome(call.clone(), None),
+                    finish("answer"),
+                ],
+                Some(ApprovalMode::Auto),
+                vec![if allow {
+                    ApprovalReply::AllowOnce
+                } else {
+                    ApprovalReply::Deny
+                }],
+            )
+            .await;
+        assert_eq!(seen.prompts.len(), 1);
+        assert_eq!(seen.intents[0].call, call);
+        assert_eq!(seen.calls.len(), 4);
+        assert!(
+            seen.calls[2].input.stop_hook_feedback[0]
+                .text
+                .contains("command_unguarded")
+        );
+        assert!(seen.outcome.run.lifecycle_hooks.iter().all(|hook| matches!(
+            hook.outcome.as_ref().unwrap().result,
+            arany::permissions::HookResult::Ignored { .. }
+        )));
+        assert_eq!(host.workspace.join("ran.txt").exists(), allow);
+        let session = seen.outcome.session_id;
+        let (_, view) = host.reopen(session).await;
+        assert_eq!(view.runs[0].unguarded_tools(), usize::from(allow));
+    }
+}
+
+#[tokio::test]
+async fn child_hook_unguarded_rerun_is_refused_without_explicit_inheritance() {
+    const HOOK: &str =
+        "if [ -n \"$ARANY_UNGUARDED\" ]; then echo ran >> ran.txt; else mkdir .ssh; fi";
+    for explicit in [false, true] {
+        let mut host = Host::new(Some(
+            &json!({"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":HOOK}]}]}}),
+        ));
+        host.policy = CollaborationPolicy::Auto {
+            max_active_children: 1,
+        };
+        if explicit {
+            let path = host.state.join("tools.json");
+            let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            config["child_unguarded"] = json!("human_only");
+            private_file(&path, &serde_json::to_vec(&config).unwrap());
+        }
+        std::fs::write(host.workspace.join("notes/input"), "fact").unwrap();
+        let call = unguarded(HOOK);
+        let seen = host
+            .run(
+                &host.workspace,
+                vec![
+                    ProviderOutcome::Delegate(Delegate {
+                        agent: None,
+                        children: vec![arany::ChildAssignment {
+                            editor: None,
+                            objective: "Inspect fact".into(),
+                            profile: None,
+                        }],
+                    }),
+                    tool_outcome(
+                        ToolCall::Read {
+                            path: "notes/input".into(),
+                            offset: 0,
+                            limit: 64,
+                        },
+                        None,
+                    ),
+                    finish("fact"),
+                    tool_outcome(call.clone(), Some(Box::new(plan(&call)))),
+                    finish("answer"),
+                ],
+                Some(ApprovalMode::Auto),
+                if explicit {
+                    vec![ApprovalReply::AllowOnce]
+                } else {
+                    vec![]
+                },
+            )
+            .await;
+        assert_eq!(seen.prompts.len(), usize::from(explicit));
+        assert_eq!(host.workspace.join("ran.txt").exists(), explicit);
+        assert_eq!(
+            seen.outcome.run.agents[1].grant,
+            Some(arany::ChildGrant::ReadOnly {
+                unguarded: if explicit {
+                    arany::UnguardedGrant::HumanOnly
+                } else {
+                    arany::UnguardedGrant::Denied
+                },
+            })
+        );
+        let primary_catalog: Value =
+            serde_json::from_str(&seen.calls[3].input.tools.as_ref().unwrap().catalog).unwrap();
+        assert_eq!(primary_catalog.get("hook_reruns").is_some(), explicit);
+        let session = seen.outcome.session_id;
+        let (_, view) = host.reopen(session).await;
+        assert_eq!(view.runs[0].unguarded_tools(), usize::from(explicit));
+    }
 }

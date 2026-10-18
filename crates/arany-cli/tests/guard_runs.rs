@@ -2643,7 +2643,12 @@ mod routing {
         let (events, view) = reopen(&state, result.session_id).await;
         let child = &view.runs[0].agents[1];
         assert_eq!(child.profile.as_deref(), Some("spare"));
-        assert_eq!(child.grant, Some(arany::ChildGrant::ReadOnly));
+        assert_eq!(
+            child.grant,
+            Some(arany::ChildGrant::ReadOnly {
+                unguarded: arany::UnguardedGrant::Denied
+            })
+        );
         assert_eq!(child.tools.len(), 1);
         assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
         assert_eq!(first.requests.lock().unwrap().len(), 2);

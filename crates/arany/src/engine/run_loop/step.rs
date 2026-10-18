@@ -318,6 +318,22 @@ impl RunLoop<'_> {
                 HookStop::ActiveTime => return Err(EngineError::GoalBudgetExhausted),
             }
         }
+        if matches!(grant, Grant::Primary { .. }) {
+            for (index, observation) in step.observations.iter().enumerate() {
+                let proposals = self.hook_rerun_feedback(observation.intent.digest())?;
+                if proposals.is_empty() {
+                    continue;
+                }
+                let feedback = step.hook_feedback.entry(index).or_default();
+                for proposal in proposals {
+                    if feedback.iter().map(String::len).sum::<usize>() + proposal.len()
+                        <= crate::tools::permissions::MAX_HOOK_FEEDBACK_BYTES
+                    {
+                        feedback.push(proposal);
+                    }
+                }
+            }
+        }
         grant.context_mut()?.steps.push(step);
         if let Grant::Primary { request, .. } = &mut grant {
             self.compact_tool_context_if_needed(request).await?;
@@ -533,7 +549,22 @@ impl RunLoop<'_> {
         post_call: &ToolCall,
         narrowable: bool,
     ) -> Result<Option<(ToolObservation, Option<ToolCall>)>, EngineError> {
-        let permission = self.permission(grant, runtime, &intent.call);
+        let mut permission = self.permission(grant, runtime, &intent.call);
+        if intent.call.is_unguarded()
+            && permission.decision != Decision::Deny
+            && self.ledger().view(|view| {
+                view.runs
+                    .last()
+                    .and_then(|run| run.unguarded_failure(&intent.call))
+                    .is_some_and(|(_, hook)| hook)
+            })?
+        {
+            permission.decision = Decision::Ask;
+            permission.approval = Some(ApprovalMode::Request);
+            if permission.basis == PermissionSource::ExactCommandRule {
+                permission.basis = PermissionSource::Mode;
+            }
+        }
         let (hook_events, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
         if !self
             .admit_tool(grant, runtime, &intent, permission, hook_events, narrowable)
@@ -1031,7 +1062,14 @@ impl RunLoop<'_> {
         };
         let mut unguarded_prompt = None;
         if intent.call.is_unguarded() {
-            match unguarded_gate(runtime, request, &intent) {
+            let hook_failure = self.ledger().view(|view| {
+                view.runs
+                    .last()
+                    .and_then(|run| run.unguarded_failure(&intent.call))
+                    .filter(|(_, hook)| *hook)
+                    .map(|(observation, _)| observation.clone())
+            })?;
+            match unguarded_gate(runtime, request, &intent, hook_failure.as_ref()) {
                 Ok(prompt) => unguarded_prompt = Some(prompt),
                 Err(message) => return Ok(self.not_offered(intent, message, source)),
             }
@@ -1746,6 +1784,7 @@ fn unguarded_gate(
     runtime: &ToolRuntime,
     request: &ProviderRequest,
     intent: &EffectIntent,
+    hook_failure: Option<&ToolObservation>,
 ) -> Result<UnguardedPrompt, &'static str> {
     let ToolCall::CommandUnguarded {
         program, args, cwd, ..
@@ -1764,9 +1803,9 @@ fn unguarded_gate(
             "Guard path aliases such as /workspace do not exist on the host; an unguarded re-run is not offered; no operation was dispatched",
         );
     }
-    let Some(prior) =
+    let Some(prior) = hook_failure.or_else(|| {
         crate::tools::types::qualifying_guard_failure(&intent.call, observed.iter().copied())
-    else {
+    }) else {
         let denied_path = observed.iter().rev().any(|observation| {
             observation.enforcement_cause == Some(crate::tools::EnforcementCause::FilesystemDenied)
                 && matches!(&observation.intent.call,

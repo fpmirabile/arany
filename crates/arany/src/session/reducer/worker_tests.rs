@@ -510,6 +510,8 @@ fn fixture_with_manifest(
             permissions_digest: None,
             max_context_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES as u32,
             unguarded_rules_digest: None,
+            unguarded: crate::tools::UnguardedGrant::HumanOnly,
+            child_unguarded: crate::tools::UnguardedGrant::Denied,
         }),
     };
     let mut f = Fixture {
@@ -704,7 +706,9 @@ fn fixture_with_manifest(
         role: AgentRole::Child,
         ordinal: 1,
         objective: Some(pins.request.mission.clone()),
-        grant: Some(ChildGrant::EditOnly),
+        grant: Some(ChildGrant::EditOnly {
+            unguarded: crate::tools::UnguardedGrant::Denied,
+        }),
         definition: Some("editor".into()),
         profile: None,
         assignment: Some(pins),
@@ -881,6 +885,13 @@ fn worker_protocol_refuses_widened_stale_and_unsettled_transitions() {
         }
         refused(&f, event, case);
     }
+    let mut widened = spawn.clone();
+    if let Event::AgentSpawned { grant, .. } = &mut widened {
+        *grant = Some(ChildGrant::EditOnly {
+            unguarded: crate::tools::UnguardedGrant::HumanOnly,
+        });
+    }
+    refused(&f, widened, "child unguarded grant");
     f.push(spawn);
     refused(
         &f,
@@ -1233,7 +1244,9 @@ fn worker_protocol_researcher_spawn_must_match_its_proposed_profile() {
                 ordinal: 2,
                 role: AgentRole::Child,
                 objective: Some("Research".into()),
-                grant: Some(ChildGrant::ReadOnly),
+                grant: Some(ChildGrant::ReadOnly {
+                    unguarded: crate::tools::UnguardedGrant::Denied,
+                }),
                 definition: None,
                 profile: spawned.map(str::to_owned),
                 assignment: None,
@@ -1264,7 +1277,9 @@ fn worker_protocol_private_loss_is_local_and_c1_failure_remains_fatal() {
             ordinal: 2,
             role: AgentRole::Child,
             objective: Some("Research".into()),
-            grant: Some(ChildGrant::ReadOnly),
+            grant: Some(ChildGrant::ReadOnly {
+                unguarded: crate::tools::UnguardedGrant::Denied,
+            }),
             definition: None,
             profile: None,
             assignment: None,
@@ -1425,12 +1440,12 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         },
     });
     let expected = [
-        ("RunStarted", 13),
-        ("AgentSpawned", 9),
+        ("RunStarted", 14),
+        ("AgentSpawned", 10),
         ("ProviderCallRecorded", 8),
         ("AgentFinished", 9),
         ("ToolStarted", 10),
-        ("ToolFinished", 11),
+        ("ToolFinished", 12),
         ("WorkerStopObserved", 1),
         ("WorkerHandoverDiscarded", 1),
         ("WorkerDataChunk", 1),
@@ -1732,7 +1747,9 @@ fn worker_protocol_nonoverlap_and_completion_order() {
         role: AgentRole::Child,
         ordinal: 2,
         objective: Some(pins.request.mission.clone()),
-        grant: Some(ChildGrant::EditOnly),
+        grant: Some(ChildGrant::EditOnly {
+            unguarded: crate::tools::UnguardedGrant::Denied,
+        }),
         definition: Some("editor".into()),
         profile: None,
         assignment: Some(pins),
@@ -2350,7 +2367,9 @@ fn worker_protocol_refused_base_capture_spends_its_slot_and_other_workers_procee
         role: AgentRole::Child,
         ordinal: 1,
         objective: Some(second.mission.clone()),
-        grant: Some(ChildGrant::EditOnly),
+        grant: Some(ChildGrant::EditOnly {
+            unguarded: crate::tools::UnguardedGrant::Denied,
+        }),
         definition: Some("editor".into()),
         profile: None,
         assignment: Some(WorkerAssignment {
@@ -2590,7 +2609,9 @@ fn worker_protocol_lineage_accepts_only_released_children_of_the_goal() {
             role: AgentRole::Child,
             ordinal: 2,
             objective: Some(request.mission.clone()),
-            grant: Some(ChildGrant::EditOnly),
+            grant: Some(ChildGrant::EditOnly {
+                unguarded: crate::tools::UnguardedGrant::Denied,
+            }),
             definition: Some("editor".into()),
             profile: None,
             assignment: Some(WorkerAssignment {
@@ -3276,7 +3297,9 @@ fn worker_protocol_researcher_only_run_rejects_a_call_after_an_invalid_synthesis
         ordinal: 1,
         role: AgentRole::Child,
         objective: Some("Research".into()),
-        grant: Some(ChildGrant::ReadOnly),
+        grant: Some(ChildGrant::ReadOnly {
+            unguarded: crate::tools::UnguardedGrant::Denied,
+        }),
         definition: None,
         profile: None,
         assignment: None,
@@ -3416,5 +3439,36 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
             view.runs[0].actor_stopped_by_hook(f.child),
             result == "stopped"
         );
+    }
+}
+
+#[test]
+fn worker_child_unguarded_grant_can_only_narrow_explicit_parent_permission() {
+    use crate::tools::UnguardedGrant::{Denied, HumanOnly};
+    for parent in [Denied, HumanOnly] {
+        for requested in [Denied, HumanOnly] {
+            let mut f = fixture();
+            for event in &mut f.events {
+                match event {
+                    Event::RunStarted { config, .. } => {
+                        config.tool_policy.as_mut().unwrap().child_unguarded = parent;
+                    }
+                    Event::AgentSpawned {
+                        role: AgentRole::Child,
+                        grant,
+                        ..
+                    } => {
+                        *grant = Some(ChildGrant::EditOnly {
+                            unguarded: requested,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                SessionView::replay_open(f.session, &f.envelopes()).is_ok(),
+                requested == Denied || parent == HumanOnly
+            );
+        }
     }
 }

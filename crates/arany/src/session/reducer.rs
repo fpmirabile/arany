@@ -180,7 +180,7 @@ impl GoalView {
                             agent.tools.iter().all(|t| {
                                 t.settled_without_stop()
                                     || agent.assignment.as_ref().is_some_and(|w| {
-                                        agent.grant == Some(super::ChildGrant::EditOnly)
+                                        matches!(agent.grant, Some(super::ChildGrant::EditOnly { .. }))
                                             && matches!(t.intent.target, super::worker::EffectTarget::WorkerView { assignment_id, base_digest, .. } if assignment_id == agent.id && base_digest == w.pins.base.sha256)
                                             && t.hooks.iter().all(|h| h.outcome.as_ref().is_some_and(|o| !o.observation.stops_run()))
                                     })
@@ -317,6 +317,11 @@ impl RunView {
 
     pub(crate) fn stop_blocked(&self, agent: AgentRunId) -> bool {
         self.stop_hooks(agent).any(|hook| {
+            if self.primary().is_some_and(|primary| primary.id == agent)
+                && self.hook_rerun_proposal(hook).is_some()
+            {
+                return true;
+            }
             hook.outcome.as_ref().is_some_and(|outcome| {
                 matches!(
                     outcome.result,
@@ -342,7 +347,8 @@ impl RunView {
                             matches!(
                                 outcome.result,
                                 crate::tools::permissions::HookResult::Blocked { .. }
-                            )
+                            ) || self.primary().is_some_and(|primary| primary.id == agent)
+                                && outcome.observation.enforcement_cause.is_some()
                         })
                 })
             })
@@ -367,6 +373,7 @@ pub struct ToolView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HookView {
+    pub(crate) sequence: u64,
     pub invocation: crate::tools::permissions::HookInvocation,
     pub outcome: Option<crate::tools::permissions::HookOutcome>,
     pub(crate) idle: bool,
@@ -528,6 +535,109 @@ fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCal
 }
 
 impl RunView {
+    fn hook_rerun_proposal(&self, hook: &HookView) -> Option<String> {
+        let crate::tools::ToolCall::Command { program, args, cwd } = &hook.invocation.intent.call
+        else {
+            return None;
+        };
+        let call = crate::tools::ToolCall::CommandUnguarded {
+            program: program.clone(),
+            args: args.clone(),
+            cwd: cwd.clone(),
+            justification: "Re-run the hook command after a Guard enforcement failure".into(),
+        };
+        if self
+            .unguarded_failure(&call)
+            .is_none_or(|(observation, is_hook)| {
+                !is_hook || observation.intent.id != hook.invocation.intent.id
+            })
+            || self.tools.iter().any(|tool| {
+                tool.observation.is_some()
+                    && crate::tools::types::guarded_command_matches(
+                        &tool.intent.call,
+                        &hook.invocation.intent.call,
+                    )
+            })
+        {
+            return None;
+        }
+        let proposal = format!(
+            "Hook ignored after a Guard enforcement failure. A human may approve this exact re-run outside the Guard: {}",
+            serde_json::to_string(&call).expect("typed command")
+        );
+        (proposal.len() <= crate::tools::permissions::MAX_HOOK_FEEDBACK_BYTES).then_some(proposal)
+    }
+
+    pub(crate) fn hook_rerun_proposals(&self, subject: Option<[u8; 32]>) -> Vec<String> {
+        let mut bytes = 0;
+        self.tools
+            .iter()
+            .chain(self.agents.iter().flat_map(|agent| agent.tools.iter()))
+            .flat_map(|tool| tool.hooks.iter())
+            .chain(self.lifecycle_hooks.iter())
+            .filter(|hook| subject.is_none_or(|subject| hook.invocation.subject_digest == subject))
+            .filter_map(|hook| self.hook_rerun_proposal(hook))
+            .filter(|proposal| {
+                bytes += proposal.len();
+                bytes <= crate::tools::permissions::MAX_HOOK_FEEDBACK_BYTES
+            })
+            .collect()
+    }
+
+    pub(crate) fn unguarded_failure(
+        &self,
+        call: &crate::tools::ToolCall,
+    ) -> Option<(&crate::tools::ToolObservation, bool)> {
+        let primary = self.primary()?;
+        let policy = self.config.as_ref()?.tool_policy.as_ref()?;
+        if policy.unguarded != crate::tools::UnguardedGrant::HumanOnly {
+            return None;
+        }
+        let allowed = |agent| {
+            agent == primary.id
+                || self.agents.iter().any(|child| {
+                    child.id == agent
+                        && child.grant.is_some_and(|grant| {
+                            grant.unguarded() == crate::tools::UnguardedGrant::HumanOnly
+                                && grant.unguarded().narrows(policy.child_unguarded)
+                        })
+                })
+        };
+        let hook = self
+            .tools
+            .iter()
+            .chain(self.agents.iter().flat_map(|agent| agent.tools.iter()))
+            .filter(|tool| tool.observation.is_some())
+            .flat_map(|tool| tool.hooks.iter())
+            .chain(self.lifecycle_hooks.iter())
+            .filter(|hook| allowed(hook.invocation.intent.agent_run_id))
+            .filter(|hook| {
+                hook.outcome.as_ref().is_some_and(|outcome| {
+                    crate::tools::types::guarded_command_matches(
+                        call,
+                        &outcome.observation.intent.call,
+                    )
+                })
+            })
+            .max_by_key(|hook| hook.sequence);
+        crate::tools::types::qualifying_hook_failure(
+            call,
+            hook.into_iter()
+                .filter_map(|hook| hook.outcome.as_ref().map(|outcome| &outcome.observation)),
+        )
+        .map(|observation| (observation, true))
+        .or_else(|| {
+            crate::tools::types::qualifying_guard_failure(
+                call,
+                self.tools
+                    .iter()
+                    .filter_map(|tool| tool.observation.as_ref())
+                    .filter(|observation| observation.intent.agent_run_id == primary.id),
+            )
+            .map(|observation| (observation, false))
+        })
+    }
+
     pub fn unguarded_tools(&self) -> usize {
         self.tools
             .iter()

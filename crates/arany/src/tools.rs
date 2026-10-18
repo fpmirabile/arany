@@ -92,7 +92,7 @@ pub use types::{
     Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause, FileChange,
     FileVersion, GuardReceipt, MAX_SKILLS, NetworkGrant, ToolCall, ToolContext, ToolDisposition,
     ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
-    ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedReceipt,
+    ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant, UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -1023,6 +1023,8 @@ fn record_failure(site: &'static str, intent: &EffectIntent, error: &ToolError) 
 }
 
 fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {
+    let enforcement_cause =
+        matches!(&error, ToolError::GuardBootstrap(_)).then_some(EnforcementCause::GuardBootstrap);
     let site = match intent.call.facts().site {
         Site::InProcess => "Read",
         Site::Guard => "Guard",
@@ -1030,7 +1032,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     };
     record_failure(site, &intent, &error);
     ToolObservation {
-        enforcement_cause: None,
+        enforcement_cause,
         output: match error {
             ToolError::QueueFull => format!("{error}. No operation was dispatched."),
             _ => format!(

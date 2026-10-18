@@ -13,6 +13,8 @@ pub(crate) struct Config {
     pub version: u32,
     pub workspace_paths: Vec<String>,
     pub write: bool,
+    #[serde(default, skip_serializing_if = "UnguardedGrant::is_denied")]
+    pub child_unguarded: UnguardedGrant,
     pub commands: Vec<Program>,
     pub skills: Vec<Skill>,
     pub mcp: Vec<Server>,
@@ -76,7 +78,8 @@ impl Config {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ToolError> {
-        if self.version != 1
+        if self.child_unguarded == UnguardedGrant::HumanOnly && self.commands.is_empty()
+            || self.version != 1
             || self.workspace_paths.is_empty()
             || self.workspace_paths.len() > 32
             || self.workspace_paths.iter().any(|path| {
@@ -213,6 +216,12 @@ impl Config {
             permissions_digest: None,
             max_context_bytes: MAX_TOOL_CONTEXT_BYTES as u32,
             unguarded_rules_digest: None,
+            unguarded: if self.commands.is_empty() {
+                UnguardedGrant::Denied
+            } else {
+                UnguardedGrant::HumanOnly
+            },
+            child_unguarded: self.child_unguarded,
         }
     }
 
