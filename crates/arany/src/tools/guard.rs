@@ -536,7 +536,13 @@ pub(super) async fn execute(
     #[cfg(target_os = "macos")]
     let result = macos::execute_inner(runtime, intent, cancellation, &mut dispatched).await;
     #[cfg(target_os = "linux")]
-    let result = linux::execute_inner(runtime, intent, cancellation, &mut dispatched).await;
+    let result = Box::pin(linux::execute_inner(
+        runtime,
+        intent,
+        cancellation,
+        &mut dispatched,
+    ))
+    .await;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let result = Err(ToolError::ProtectionUnavailable);
     match result {

@@ -502,7 +502,7 @@ impl<'a> RunLoop<'a> {
                         request: &mut *root_request,
                         review_allowed: planning && self.ledger().admits(Action::Review),
                     };
-                    match self.execute_step(grant, request, turn).await {
+                    match Box::pin(self.execute_step(grant, request, turn)).await {
                         Ok(true) => {}
                         Ok(false) if self.controls.cancellation.is_cancelled() => {
                             return self.settle_stopped_primary().await;

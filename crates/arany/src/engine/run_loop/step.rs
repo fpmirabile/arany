@@ -860,7 +860,7 @@ impl RunLoop<'_> {
                 let Some(queue_pause) = queue_pause else {
                     return Err(EngineError::CoordinatorFailed);
                 };
-                self.dispatch_guard(runtime, intent, queue_pause).await?
+                Box::pin(self.dispatch_guard(runtime, intent, queue_pause)).await?
             } else {
                 match self.reserve_active_segment(tool_action_bound(runtime, &intent)) {
                     Ok(segment) => (
@@ -899,8 +899,7 @@ impl RunLoop<'_> {
         let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
         let action_bound = tool_action_bound(&runtime, &intent);
         let runtime_ms = intent.limits.runtime_ms;
-        let execution = runtime.execute(intent, worker_cancellation.clone());
-        tokio::pin!(execution);
+        let mut execution = Box::pin(runtime.execute(intent, worker_cancellation.clone()));
         let mut active_segment = None;
         let mut observation = loop {
             tokio::select! {
