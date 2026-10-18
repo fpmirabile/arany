@@ -505,7 +505,16 @@ impl RunLoop<'_> {
         if event != HookEvent::PreCompact && continuations >= MAX_STOP_CONTINUATIONS {
             return Ok(None);
         }
-        if let Some(reused) = self.recorded_occurrence(event, digest)? {
+        let matched: Vec<(u8, u8)> = config
+            .matched_hooks(event, |group| group.matches(subject))
+            .map(|matched| {
+                matched
+                    .iter()
+                    .map(|(group, handler, _)| (*group, *handler))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(reused) = self.recorded_occurrence(event, digest, &matched)? {
             return Ok(reused);
         }
         let plans = config
@@ -624,6 +633,7 @@ impl RunLoop<'_> {
         &self,
         event: HookEvent,
         digest: [u8; 32],
+        matched: &[(u8, u8)],
     ) -> Result<Option<Option<String>>, EngineError> {
         let recorded = self.ledger().view(|view| {
             view.runs
@@ -636,24 +646,17 @@ impl RunLoop<'_> {
                             hook.invocation.event == event
                                 && hook.invocation.subject_digest == digest
                         })
-                        .map(|hook| hook.outcome.as_ref().map(|outcome| outcome.result.clone()))
+                        .map(|hook| {
+                            (
+                                (hook.invocation.group, hook.invocation.handler),
+                                hook.outcome.as_ref().map(|outcome| outcome.result.clone()),
+                            )
+                        })
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default()
         })?;
-        if recorded.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(recorded.iter().find_map(|result| match result {
-            Some(result @ HookResult::Blocked { .. }) => {
-                Some(crate::tools::permissions::stop_feedback([result]))
-            }
-            Some(HookResult::Ignored {
-                why: HookIgnoreReason::NotCompleted,
-            })
-            | None => Some("hook occurrence already attempted".into()),
-            Some(_) => None,
-        })))
+        Ok(occurrence_verdict(&recorded, matched))
     }
 
     // A SubagentStop shares the delegation's admission with its siblings, so it reserves a researcher's tail.
@@ -927,5 +930,54 @@ impl RunLoop<'_> {
             cancelled,
             exhausted,
         }))
+    }
+}
+
+type Recorded = ((u8, u8), Option<HookResult>);
+
+// `None` means the occurrence has not run; `Some(None)` reuses a complete pass.
+fn occurrence_verdict(recorded: &[Recorded], matched: &[(u8, u8)]) -> Option<Option<String>> {
+    if recorded.is_empty() {
+        return None;
+    }
+    let refused = || Some("hook occurrence already attempted".to_owned());
+    let verdict = recorded.iter().find_map(|(_, result)| match result {
+        Some(result @ HookResult::Blocked { .. }) => {
+            Some(crate::tools::permissions::stop_feedback([result]))
+        }
+        Some(HookResult::Ignored {
+            why: HookIgnoreReason::NotCompleted,
+        })
+        | None => refused(),
+        Some(_) => None,
+    });
+    // A pass is reusable only when every currently matched handler finished; a partial occurrence fails closed.
+    let complete = recorded.len() == matched.len()
+        && matched
+            .iter()
+            .all(|handler| recorded.iter().any(|(done, _)| done == handler));
+    Some(verdict.or_else(|| if complete { None } else { refused() }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_partial_pass_fails_closed_and_a_complete_one_is_reused() {
+        let passed = |handler| ((0, handler), Some(HookResult::Passed));
+        assert_eq!(occurrence_verdict(&[], &[(0, 0)]), None);
+        assert_eq!(
+            occurrence_verdict(&[passed(0), passed(1)], &[(0, 0), (0, 1)]),
+            Some(None)
+        );
+        assert!(matches!(
+            occurrence_verdict(&[passed(0)], &[(0, 0), (0, 1)]),
+            Some(Some(_))
+        ));
+        assert!(matches!(
+            occurrence_verdict(&[passed(0), ((0, 1), None)], &[(0, 0), (0, 1)]),
+            Some(Some(_))
+        ));
     }
 }
