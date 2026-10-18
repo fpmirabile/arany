@@ -364,7 +364,6 @@ impl Event {
                     && record.assignment_id == record.data.assignment_id
                     && record.data.valid()
                     && record.base_digest != [0; 32]
-                    && !record.criterion_evidence.is_empty()
                     && record.criterion_evidence.len() <= 8
                     && record.criterion_evidence.iter().enumerate().all(|(i, s)| {
                         *s > 0 && record.criterion_evidence[..i].iter().all(|p| p < s)

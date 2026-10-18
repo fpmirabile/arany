@@ -902,6 +902,8 @@ impl RunLoop<'_> {
                                 .and_then(|t| t.observation.as_ref())
                                 .is_some_and(|o| {
                                     o.disposition == crate::tools::ToolDisposition::Succeeded
+                                        || o.disposition == crate::tools::ToolDisposition::Denied
+                                            && matches!(o.intent.call, ToolCall::Command { .. })
                                 })
                         })?;
                         if continues && succeeded {

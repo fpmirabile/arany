@@ -1250,11 +1250,7 @@ mod tests {
         let observation = runtime.execute(intent, Cancellation::new()).await;
         assert_eq!(observation.disposition, ToolDisposition::Denied);
         assert!(observation.attestation.is_none());
-        assert!(
-            observation
-                .output
-                .contains("unavailable until C3-2 and C3-3")
-        );
+        assert!(observation.output == crate::tools::WORKER_COMMANDS_REFUSED);
         assert!(observation.valid());
     }
 

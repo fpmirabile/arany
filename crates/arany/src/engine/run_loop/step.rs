@@ -566,10 +566,14 @@ impl RunLoop<'_> {
         }
         let mut narrowed = None;
         let mut candidate = None;
-        let answer = match self
-            .before_dispatch(grant, runtime, intent, permission, narrowable)
-            .await?
-        {
+        let verdict = match refused_worker_command(grant, &intent) {
+            Some(answer) => Verdict::Deny(answer),
+            None => {
+                self.before_dispatch(grant, runtime, intent, permission, narrowable)
+                    .await?
+            }
+        };
+        let answer = match verdict {
             Verdict::Deny(answer) => answer,
             Verdict::Narrow(answer, call) => {
                 narrowed = Some(call);
@@ -1797,6 +1801,20 @@ fn unguarded_gate(
 
 const NO_PRIOR_FAILURE: &str =
     "No identical command failed under the Guard in this Run; no operation was dispatched";
+
+fn refused_worker_command(grant: &Grant<'_>, intent: &EffectIntent) -> Option<Answer> {
+    (matches!(grant, Grant::Researcher { child, .. } if child.editor)
+        && matches!(intent.call, ToolCall::Command { .. }))
+    .then(|| Answer {
+        observation: not_dispatched(
+            intent.clone(),
+            ToolDisposition::Denied,
+            crate::tools::WORKER_COMMANDS_REFUSED,
+        ),
+        refused: false,
+        active_time: None,
+    })
+}
 
 fn outside_plan(intent: EffectIntent) -> ToolObservation {
     not_dispatched(

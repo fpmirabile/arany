@@ -92,8 +92,11 @@ impl RunLoop<'_> {
                         == crate::tools::types::digest(
                             &serde_json::to_vec(definition).expect("normalized definition"),
                         )
-                    && a.commands.iter().all(|c| policy.parent_grant.commands.contains(c) && plan.commands.contains(c) && definition.allows_worker_tool(WorkerTool::Command))
-                    && !matches!(&a.criterion, crate::session::GoalSuccessCriterion::ToolCallSucceeded { call } if matches!(call.as_ref(), ToolCall::Command { program, .. } if !a.commands.contains(program)))
+                    && a.commands.iter().all(|c| {
+                        policy.parent_grant.commands.contains(c)
+                            && plan.commands.contains(c)
+                            && definition.allows_worker_tool(WorkerTool::Command)
+                    })
                     && a.max_turns <= definition.max_turns
                     && a.max_turns <= policy.max_turns
                     && a.lease.iter().all(|p| {
@@ -400,14 +403,17 @@ impl RunLoop<'_> {
         EngineError,
     > {
         if matches!(intent.call, ToolCall::Command { .. }) {
-            return Ok((ToolObservation {
-                enforcement_cause: None,
-                intent,
-                disposition: ToolDisposition::Denied,
-                output: "Worker commands are unavailable until C3-2 and C3-3; no runtime bypass is supported".into(),
-                attestation: None,
-                cache_update: CacheUpdate::NotApplicable,
-            }, None));
+            return Ok((
+                ToolObservation {
+                    enforcement_cause: None,
+                    intent,
+                    disposition: ToolDisposition::Denied,
+                    output: crate::tools::WORKER_COMMANDS_REFUSED.into(),
+                    attestation: None,
+                    cache_update: CacheUpdate::NotApplicable,
+                },
+                None,
+            ));
         }
         let mut slot = self.worker.lock().await;
         let view = slot
@@ -656,6 +662,14 @@ impl RunLoop<'_> {
         Box::pin(self.complete_worker_inner(child, finish, deadline, cancelled, failure))
     }
 
+    fn criterion_evidence(&self, id: AgentRunId) -> Result<Vec<u64>, EngineError> {
+        self.ledger()
+            .view(|v| {
+                crate::session::private_criterion_evidence(v.runs.last().expect("active Run"), id)
+            })?
+            .map_err(|_| EngineError::InvalidHistory)
+    }
+
     async fn complete_worker_inner(
         &self,
         child: &mut ChildWork,
@@ -728,13 +742,13 @@ impl RunLoop<'_> {
             .ok_or(EngineError::CoordinatorFailed)?
             .dispose()?;
         let no_change = bytes.as_ref().is_some_and(|b| matches!(decode_data(b, WorkerDataPurpose::Handover), Ok(WorkerDataFacts::Changes(files)) if files.is_empty()));
-        let criterion_evidence = self
-            .ledger()
-            .view(|v| {
-                crate::session::private_criterion_evidence(v.runs.last().expect("active Run"), id)
-            })?
-            .map_err(|_| EngineError::InvalidHistory)?;
-        let criterion_unverified = data.is_some() && criterion_evidence.is_empty();
+        let criterion_unverified = data.is_some()
+            && self
+                .ledger()
+                .view(|v| {
+                    crate::session::criterion_unmet_in_view(v.runs.last().expect("active Run"), id)
+                })?
+                .map_err(|_| EngineError::InvalidHistory)?;
         let data = data.filter(|_| !criterion_unverified);
         let success = data.is_some();
         let hook_stopped = self.actor_hook_requested_stop(id)?;
@@ -861,15 +875,7 @@ impl RunLoop<'_> {
                 run_id: self.run_id,
                 agent_run_id: id,
                 record: WorkerHandover {
-                    criterion_evidence: self
-                        .ledger()
-                        .view(|v| {
-                            crate::session::private_criterion_evidence(
-                                v.runs.last().expect("active Run"),
-                                id,
-                            )
-                        })?
-                        .map_err(|_| EngineError::InvalidHistory)?,
+                    criterion_evidence: self.criterion_evidence(id)?,
                     assignment_id: id,
                     base_digest: cleanup_base(self, id)?,
                     data: data.clone(),

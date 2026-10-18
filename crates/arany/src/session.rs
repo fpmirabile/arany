@@ -46,8 +46,8 @@ pub use reducer::{
     AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,
 };
 pub(crate) use reducer::{
-    ForkInheritance, coordination_ready, evidence_admitted, private_criterion_evidence,
-    verification_passed, wave_settled,
+    ForkInheritance, coordination_ready, criterion_unmet_in_view, evidence_admitted,
+    private_criterion_evidence, verification_passed, wave_settled,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

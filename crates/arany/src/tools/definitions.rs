@@ -423,7 +423,11 @@ enum ParsedFile {
     },
 }
 
-fn tool_list(value: serde_json::Value, notes: &mut Vec<String>) -> Result<Vec<String>, Rejected> {
+fn tool_list(
+    value: serde_json::Value,
+    deny: bool,
+    notes: &mut Vec<String>,
+) -> Result<Vec<String>, Rejected> {
     let names: Vec<String> = match value {
         serde_json::Value::String(value) => value
             .split(',')
@@ -453,6 +457,12 @@ fn tool_list(value: serde_json::Value, notes: &mut Vec<String>) -> Result<Vec<St
     let mut result = BTreeSet::new();
     let mut ignored = 0;
     for name in names {
+        // A denied command pattern cannot be matched per command, so it denies them all.
+        let name = if deny && name.starts_with("Bash(") {
+            "Bash".to_owned()
+        } else {
+            name
+        };
         match supported_tool(&name) {
             Some(operations) => result.extend(operations.into_iter().map(str::to_owned)),
             None => ignored += 1,
@@ -532,11 +542,11 @@ pub(super) fn strict(raw: &[u8]) -> Result<(AgentDefinition, Vec<String>), Rejec
         description: front.description,
         tools: front
             .tools
-            .map(|value| tool_list(value, &mut notes))
+            .map(|value| tool_list(value, false, &mut notes))
             .transpose()?,
         disallowed_tools: front
             .disallowed_tools
-            .map(|value| tool_list(value, &mut notes))
+            .map(|value| tool_list(value, true, &mut notes))
             .transpose()?
             .unwrap_or_default(),
         model: front.model.filter(|value| value != "inherit"),
@@ -688,6 +698,15 @@ mod tests {
             .unwrap();
             assert!(!denied.allows_worker(&call));
         }
+        let (patterned, _) = strict(&document(
+            "tools: [Write]\ndisallowedTools: ['Bash(rm:*)']\n",
+            "Body",
+        ))
+        .unwrap();
+        assert!(!patterned.allows_worker(&call));
+        let (inherited, _) =
+            strict(&document("disallowedTools: ['Bash(rm:*)']\n", "Body")).unwrap();
+        assert!(!inherited.allows_worker(&call));
     }
 
     #[test]

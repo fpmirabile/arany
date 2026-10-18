@@ -562,6 +562,7 @@ async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
         "defer_finish",
         "budget_calls",
         "command",
+        "command_refused",
         "waves",
         "reassign",
         "cancel_foreground",

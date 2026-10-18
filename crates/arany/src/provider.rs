@@ -568,7 +568,7 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
                         "definition":{"type":"string","enum":[agent["name"]]},
                         "definition_digest":{"type":"array","items":{"type":"integer"},"description":format!("Exact admitted digest: {}",agent["digest"])},
                         "mission":{"type":"string"}, "direction":{"type":"string"},
-                        "commands":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":64},"description":"Sorted unique admitted offline command names; runtime execution is unavailable until C3-2 and C3-3."},
+                        "commands":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":64},"description":"Sorted unique admitted offline command names; worker commands are not available yet."},
                         "lease":{"type":"array","items":{"type":"string"},"description":"Sorted nonoverlapping ASCII relative files or subtrees within the Goal plan and parent grant."},
                         "criterion":criterion,
                         "mode":{"type":"string","enum":modes},

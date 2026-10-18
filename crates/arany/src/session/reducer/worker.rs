@@ -8,7 +8,9 @@ pub struct WorkerState {
     pub stop: Option<(u64, WorkerStopReason)>,
     pub data: Vec<SealedWorkerData>,
     pending: Option<PendingData>,
+    capture: Option<CommandCapture>,
 }
+type CommandCapture = (AgentRunId, uuid::Uuid, WorkerDataRef);
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingData {
     actor: AgentRunId,
@@ -194,6 +196,7 @@ impl RunView {
 impl WorkerState {
     pub(super) fn clear_pending(&mut self) {
         self.pending = None;
+        self.capture = None;
     }
     fn sealed(&self, reference: &WorkerDataRef) -> Result<&SealedWorkerData, ReplayError> {
         self.data
@@ -236,22 +239,8 @@ fn quiescent(run: &RunView) -> bool {
         .chain(run.agents.iter().flat_map(|a| &a.tools))
         .all(|t| t.observation.is_some())
 }
-fn pending_command_capture(run: &RunView) -> Option<(AgentRunId, uuid::Uuid, WorkerDataRef)> {
-    run.agents.iter().flat_map(|a| &a.tools).find_map(|t| {
-        let o = t.observation.as_ref()?;
-        if !matches!(o.intent.call, ToolCall::Command { .. }) {
-            return None;
-        }
-        let result: WorkerCommandResult = serde_json::from_str(&o.output).ok()?;
-        let PrivateCapture::Sealed { data } = result.private_capture else {
-            return None;
-        };
-        (!run.workers.data.iter().any(|d| d.reference == data)).then_some((
-            t.intent.agent_run_id,
-            t.intent.id,
-            data,
-        ))
-    })
+fn pending_command_capture(run: &RunView) -> Option<CommandCapture> {
+    run.workers.capture.clone()
 }
 
 fn sealed_changes<'a>(
@@ -501,7 +490,6 @@ fn validate_request(
                 || !plan.commands.contains(c)
                 || !definition.allows_worker_tool(WorkerTool::Command)
         })
-        || matches!(&request.criterion, GoalSuccessCriterion::ToolCallSucceeded { call } if matches!(call.as_ref(), ToolCall::Command { program, .. } if !request.commands.contains(program)))
         || request
             .lease
             .iter()
@@ -969,7 +957,8 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                 .max_tools;
             if record.failure_reason
                 == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
-                && !private_criterion_evidence(run, *agent_run_id)?.is_empty()
+                && (!criterion_gated(&w_criterion(run, *agent_run_id)?)
+                    || !private_criterion_evidence(run, *agent_run_id)?.is_empty())
             {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -1201,7 +1190,9 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                     o.disposition,
                     WorkerDisposition::Ready | WorkerDisposition::NoChange
                 ) {
-                    if private_criterion_evidence(run, *agent_run_id)?.is_empty() {
+                    if criterion_gated(&w_criterion(run, *agent_run_id)?)
+                        && private_criterion_evidence(run, *agent_run_id)?.is_empty()
+                    {
                         return Err(ReplayError::InvalidTransition);
                     }
                     let data = o.data.as_ref().ok_or(ReplayError::InvalidTransition)?;
@@ -1338,6 +1329,14 @@ pub(super) fn after_event(
             }
             if o.disposition != ToolDisposition::Succeeded {
                 run.workers.pending = None;
+            }
+            if matches!(o.intent.call, ToolCall::Command { .. })
+                && let Ok(WorkerCommandResult {
+                    private_capture: PrivateCapture::Sealed { data },
+                    ..
+                }) = serde_json::from_str(&o.output)
+            {
+                run.workers.capture = Some((o.intent.agent_run_id, o.intent.id, data));
             }
             if let Some(Attestation::WorkerMutation { mutation, .. }) = &o.attestation {
                 let changes = sealed_changes(run, &mutation.data)?.to_vec();
@@ -1539,6 +1538,7 @@ pub(super) fn apply(
             });
             run.workers.pending = None;
             if command.is_some() {
+                run.workers.capture = None;
                 let changes = valid_delta(run, actor, &s.data, false)?;
                 if changes.is_empty() {
                     return Err(ReplayError::InvalidTransition);
@@ -1817,6 +1817,19 @@ fn private_failure(o: &crate::tools::ToolObservation) -> bool {
                 ToolDisposition::Uncertain | ToolDisposition::Cancelled
             )
             && o.cache_update != crate::tools::CacheUpdate::Uncertain)
+}
+
+// Command criteria are verified by the primary after integration until worker commands execute.
+pub(crate) fn criterion_gated(criterion: &GoalSuccessCriterion) -> bool {
+    !matches!(criterion, GoalSuccessCriterion::ToolCallSucceeded { call } if matches!(call.as_ref(), ToolCall::Command { .. }))
+}
+
+pub(crate) fn criterion_unmet_in_view(run: &RunView, id: AgentRunId) -> Result<bool, ReplayError> {
+    Ok(criterion_gated(&w_criterion(run, id)?) && private_criterion_evidence(run, id)?.is_empty())
+}
+
+fn w_criterion(run: &RunView, id: AgentRunId) -> Result<GoalSuccessCriterion, ReplayError> {
+    Ok(worker(run, id)?.pins.request.criterion.clone())
 }
 
 pub(crate) fn private_criterion_evidence(

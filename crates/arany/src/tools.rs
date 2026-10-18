@@ -784,7 +784,7 @@ impl ToolRuntime {
                 enforcement_cause: None,
                 intent,
                 disposition: ToolDisposition::Denied,
-                output: "Worker commands are unavailable until C3-2 and C3-3; no runtime bypass is supported".into(),
+                output: crate::tools::WORKER_COMMANDS_REFUSED.into(),
                 attestation: None,
                 cache_update: CacheUpdate::NotApplicable,
             };
@@ -972,6 +972,8 @@ struct InProcessReads {
     slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
+pub(crate) const WORKER_COMMANDS_REFUSED: &str =
+    "Worker commands are not available yet; no operation was dispatched";
 const MAX_IN_PROCESS_READS: usize = 16;
 static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| {
