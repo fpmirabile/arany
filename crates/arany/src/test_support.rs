@@ -50,7 +50,13 @@ pub(crate) fn account_root() -> Option<&'static std::path::Path> {
     ACCOUNT_ROOT.get().map(std::path::PathBuf::as_path)
 }
 
-type ToolFailure = (uuid::Uuid, &'static str, &'static str, Option<&'static str>);
+type ToolFailure = (
+    uuid::Uuid,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    Option<String>,
+);
 
 const MAX_TOOL_FAILURES: usize = 256;
 static TOOL_FAILURES: std::sync::Mutex<std::collections::VecDeque<ToolFailure>> =
@@ -62,6 +68,7 @@ pub(crate) fn record_tool_failure(
     site: &'static str,
     stage: &'static str,
     check: Option<&'static str>,
+    detail: Option<String>,
 ) {
     let mut failures = TOOL_FAILURES
         .lock()
@@ -69,7 +76,7 @@ pub(crate) fn record_tool_failure(
     if failures.len() == MAX_TOOL_FAILURES {
         failures.pop_front();
     }
-    failures.push_back((intent, site, stage, check));
+    failures.push_back((intent, site, stage, check, detail));
 }
 
 pub fn recorded_tool_failure(intent: uuid::Uuid) -> Option<String> {
@@ -79,9 +86,14 @@ pub fn recorded_tool_failure(intent: uuid::Uuid) -> Option<String> {
         .iter()
         .rev()
         .find(|failure| failure.0 == intent)
-        .map(|(_, site, stage, check)| {
+        .map(|(_, site, stage, check, detail)| {
             let check = check.map(|check| format!(" check={check}"));
-            format!("{site} stage={stage}{}", check.unwrap_or_default())
+            let detail = detail.as_ref().map(|detail| format!(" detail={detail}"));
+            format!(
+                "{site} stage={stage}{}{}",
+                check.unwrap_or_default(),
+                detail.unwrap_or_default()
+            )
         })
 }
 
