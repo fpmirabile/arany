@@ -66,7 +66,7 @@ impl CallRouter<'_> {
         Ok(Arc::clone(&chain[index]))
     }
 
-    fn chain(
+    pub(super) fn chain(
         &self,
         role: ProviderRole,
         actor: AgentRunId,

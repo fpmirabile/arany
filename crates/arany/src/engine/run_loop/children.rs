@@ -715,7 +715,15 @@ impl RunLoop<'_> {
                 0,
             )
             .await?;
-            let preview = Some(crate::provider::ResponsePreview::new().0);
+            let preview = (self
+                .routing
+                .chain(
+                    crate::provider::ProviderRole::Child,
+                    children[index].agent_run_id,
+                )?
+                .len()
+                > 1)
+            .then(|| crate::provider::ResponsePreview::new().0);
             let attempt_request = request.clone();
             let handle = queue.calls.spawn(async move {
                 crate::engine::routing::invoke_attempt(
