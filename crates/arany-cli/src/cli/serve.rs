@@ -155,7 +155,10 @@ async fn shutdown_grace(
     tokio::pin!(serving);
     tokio::select! { biased;
         result = &mut serving => result,
-        _ = shutdown.wait_for(|stopping| *stopping) => {
+        _ = async {
+            // Release the watch read guard before cleanup sends another shutdown notification.
+            let _ = shutdown.wait_for(|stopping| *stopping).await;
+        } => {
             tokio::time::timeout(super::exec::SHUTDOWN_GRACE, serving)
                 .await
                 .unwrap_or_else(|_| Err("shutdown timed out; Run may be interrupted; check Session history".into()))

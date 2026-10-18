@@ -9,6 +9,39 @@ use std::sync::{
 };
 use std::time::Duration;
 
+struct TestDeadline {
+    done: std::sync::mpsc::SyncSender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for TestDeadline {
+    fn drop(&mut self) {
+        let _ = self.done.send(());
+        self.worker.take().unwrap().join().unwrap();
+    }
+}
+
+pub(super) fn deadline() -> impl Drop {
+    let (done, receiver) = std::sync::mpsc::sync_channel(1);
+    let name = std::thread::current()
+        .name()
+        .unwrap_or("serve test")
+        .to_owned();
+    // A runtime timer cannot bound a synchronous watch-lock deadlock.
+    let worker = std::thread::spawn(move || {
+        if receiver.recv_timeout(Duration::from_secs(30))
+            == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        {
+            eprintln!("{name} exceeded its 30-second deadline");
+            std::process::abort();
+        }
+    });
+    TestDeadline {
+        done,
+        worker: Some(worker),
+    }
+}
+
 fn request(id: i64, method: &str, params: Value) -> ClientMessage {
     ClientMessage::Message(Message::Request(Request {
         jsonrpc: Default::default(),
@@ -169,6 +202,7 @@ async fn send_golden(
 
 #[tokio::test]
 async fn initialize_thread_start_turn_start_and_completion_golden() {
+    let _deadline = deadline();
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -258,6 +292,7 @@ async fn initialize_thread_start_turn_start_and_completion_golden() {
 
 #[tokio::test]
 async fn requests_before_initialize_and_second_initialize_are_refused() {
+    let _deadline = deadline();
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("state");
     let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
@@ -298,6 +333,7 @@ async fn requests_before_initialize_and_second_initialize_are_refused() {
 
 #[tokio::test]
 async fn oversized_and_malformed_lines_are_rejected_without_stopping_the_server() {
+    let _deadline = deadline();
     let (mut client, transport) = tokio::io::duplex(4096);
     let (input, mut inbound) = mpsc::channel(INBOUND_CAPACITY);
     let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
@@ -326,10 +362,12 @@ async fn oversized_and_malformed_lines_are_rejected_without_stopping_the_server(
 
 #[tokio::test]
 async fn turn_start_while_a_turn_is_active_is_busy_and_interrupt_ends_the_turn_interrupted() {
+    let _deadline = deadline();
     waiting_turn(TurnStop::Interrupt).await;
 }
 #[tokio::test]
 async fn eof_during_a_turn_cancels_and_closes_the_engine() {
+    let _deadline = deadline();
     waiting_turn(TurnStop::Eof).await;
 }
 
@@ -347,6 +385,7 @@ impl AsyncRead for FailingReader {
 
 #[tokio::test]
 async fn reader_failure_notifies_the_server_of_eof() {
+    let _deadline = deadline();
     let (input, mut inbound) = mpsc::channel(INBOUND_CAPACITY);
     let (outbound, _output) = mpsc::channel(OUTBOUND_CAPACITY);
     assert_eq!(
@@ -357,6 +396,7 @@ async fn reader_failure_notifies_the_server_of_eof() {
 }
 #[tokio::test]
 async fn reader_failure_during_a_turn_cancels_and_closes_the_engine() {
+    let _deadline = deadline();
     waiting_turn(TurnStop::ReaderFailure).await;
 }
 
@@ -501,6 +541,7 @@ fn thread_capacity_refuses_new_threads_and_preserves_loaded_threads() {
 
 #[tokio::test]
 async fn bounded_reader_backpressures_after_64_pending_requests() {
+    let _deadline = deadline();
     use std::{future::Future, task::Poll};
     let (input, mut inbound) = mpsc::channel(INBOUND_CAPACITY);
     let (outbound, _output) = mpsc::channel(OUTBOUND_CAPACITY);
@@ -522,6 +563,7 @@ async fn bounded_reader_backpressures_after_64_pending_requests() {
 
 #[tokio::test]
 async fn bounded_writer_preserves_messages_and_backpressures_at_256() {
+    let _deadline = deadline();
     use std::{future::Future, task::Poll};
     let (outbound, writer) = mpsc::channel(OUTBOUND_CAPACITY);
     let message = server::response(
@@ -730,6 +772,7 @@ fn private_json(path: &std::path::Path, value: Value) {
 #[cfg(unix)]
 #[tokio::test]
 async fn approval_required_by_private_settings_is_declined_without_a_server_request() {
+    let _deadline = deadline();
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -845,6 +888,7 @@ async fn approval_required_by_private_settings_is_declined_without_a_server_requ
 #[tokio::test]
 async fn thread_resume_lists_turns_and_tool_items_with_journaled_dispositions_including_uncertain()
 {
+    let _deadline = deadline();
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -955,6 +999,7 @@ async fn thread_resume_lists_turns_and_tool_items_with_journaled_dispositions_in
 
 #[tokio::test]
 async fn failed_accepted_turns_complete_with_error_guidance_instead_of_rpc_errors() {
+    let _deadline = deadline();
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -1063,6 +1108,7 @@ fn events_resync_reports_the_gap_and_last_committed_sequence() {
 
 #[tokio::test]
 async fn shutdown_grace_bounds_a_client_that_stops_reading() {
+    let _deadline = deadline();
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -1137,6 +1183,7 @@ async fn shutdown_grace_bounds_a_client_that_stops_reading() {
 
 #[tokio::test(start_paused = true)]
 async fn shutdown_grace_includes_output_drain_without_restarting_the_timer() {
+    let _deadline = deadline();
     let (shutdown, receiver) = watch::channel(false);
     let (outbound, output) = mpsc::channel(OUTBOUND_CAPACITY);
     outbound

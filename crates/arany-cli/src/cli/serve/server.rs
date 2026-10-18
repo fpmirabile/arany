@@ -689,6 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn lost_message_accepted_tap_answers_from_the_first_new_committed_run() {
+        let _deadline = super::super::tests::deadline();
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -712,6 +713,7 @@ mod tests {
             .unwrap();
         let mut input = request(&workspace, "Hi");
         input.session_id = Some(session);
+        input.title = None;
         input.include_paths.clear();
         engine
             .submit(providers.clone(), input, RunControls::default())
@@ -726,6 +728,7 @@ mod tests {
             + 1;
         let mut input = request(&workspace, "Again");
         input.session_id = Some(session);
+        input.title = None;
         input.include_paths.clear();
         let arany::RunHandle {
             result,

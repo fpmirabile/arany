@@ -4767,6 +4767,7 @@ async fn create_session_on_open_engine_commits_session_started_and_submit_append
     let mut input = request(&workspace, "Hi");
     input.include_paths.clear();
     input.session_id = Some(session);
+    input.title = None;
     let outcome = run_to_end(&engine, &provider, input).await.unwrap();
     assert_eq!(outcome.session_id, session);
     engine.close().await.unwrap();
