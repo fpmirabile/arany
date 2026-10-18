@@ -594,9 +594,15 @@ mod journey {
         let server = serve(listener, served.clone(), held_tx);
         super::super::loopback::check_profile(&workspace, &state);
 
+        #[cfg(target_os = "linux")]
         let (session_id, goal_id) = if attached {
             attached_leg(temp.path(), &workspace, &state, &held_rx, &served)
         } else {
+            exec_leg(&workspace, &state, &held_rx, &served)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let (session_id, goal_id) = {
+            assert!(!attached);
             exec_leg(&workspace, &state, &held_rx, &served)
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
