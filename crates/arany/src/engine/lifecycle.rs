@@ -1,4 +1,5 @@
 use super::EngineError;
+use crate::journal::Journal;
 use crate::session::input::WorkspaceInputs;
 use crate::session::{
     Event, RunStatus, SessionDefaults, SessionId, SessionListItem, SessionView, WorkspaceIdentity,
@@ -11,33 +12,64 @@ pub async fn create_session(
     workspace: PathBuf,
     title: Option<String>,
 ) -> Result<SessionId, EngineError> {
-    if title
-        .as_ref()
-        .is_some_and(|value| value.is_empty() || value.len() > 128)
-    {
-        return Err(EngineError::InvalidRequest);
-    }
+    let admitted = admit_new_session(&state, &workspace, title)?;
+    let journal = Journal::new(Store::open(state)?);
+    let result = start_admitted_session(&journal, admitted).await;
+    let closed = journal.close().await;
+    let session_id = result?;
+    closed?;
+    Ok(session_id)
+}
+
+pub(super) async fn create_with_journal(
+    state: &StateRoot,
+    journal: &Journal,
+    workspace: &Path,
+    title: Option<String>,
+) -> Result<SessionId, EngineError> {
+    start_admitted_session(journal, admit_new_session(state, workspace, title)?).await
+}
+
+struct AdmittedSession {
+    session_id: SessionId,
+    lock: SessionRunLock,
+    title: String,
+    workspace_identity: WorkspaceIdentity,
+}
+
+// Admission runs before the Store opens, so a refused Workspace never creates journal tables.
+fn admit_new_session(
+    state: &StateRoot,
+    workspace: &Path,
+    title: Option<String>,
+) -> Result<AdmittedSession, EngineError> {
+    validate_session_title(title.as_deref())?;
     let session_id = SessionId::new();
-    let mut session_lock = lock_session(&state, session_id)?;
-    let workspace_identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
-    let store = Store::open(state)?;
-    let appended = store
+    let lock = lock_session(state, session_id)?;
+    let workspace_identity = WorkspaceInputs::admit_identity(workspace, state)?;
+    Ok(AdmittedSession {
+        session_id,
+        lock,
+        title: title.unwrap_or_else(|| "New Session".into()),
+        workspace_identity,
+    })
+}
+
+async fn start_admitted_session(
+    journal: &Journal,
+    mut admitted: AdmittedSession,
+) -> Result<SessionId, EngineError> {
+    journal
         .append(
-            session_id,
+            admitted.session_id,
             Event::SessionStarted {
-                title: title.unwrap_or_else(|| "New Session".into()),
-                workspace_identity,
+                title: admitted.title,
+                workspace_identity: admitted.workspace_identity,
             },
         )
-        .await;
-    if appended.is_ok() {
-        session_lock.keep();
-    }
-    let closed = store.close().await;
-    appended?;
-    closed?;
-    drop(session_lock);
-    Ok(session_id)
+        .await?;
+    admitted.lock.keep();
+    Ok(admitted.session_id)
 }
 
 pub async fn set_session_defaults(
@@ -219,7 +251,7 @@ pub(super) async fn fork_with_store(
     forked
 }
 
-fn validate_session_title(title: Option<&str>) -> Result<(), EngineError> {
+pub(super) fn validate_session_title(title: Option<&str>) -> Result<(), EngineError> {
     if title.is_some_and(|value| value.is_empty() || value.len() > 128) {
         return Err(EngineError::InvalidRequest);
     }

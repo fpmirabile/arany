@@ -29,6 +29,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Exec(ExecArgs),
+    Serve(cli::serve::ServeArgs),
     Provider(ProviderArgs),
     GenerateSchema {
         #[arg(long)]
@@ -82,6 +83,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Some(Command::Serve(args)) = &cli.command
+        && let Err(error) = cli::serve::admit(args)
+    {
+        report_error(error);
+        return ExitCode::from(2);
+    }
     let telemetry = match Telemetry::from_process(cli.otlp_endpoint.as_deref()) {
         Ok(telemetry) => telemetry,
         Err(error) => {
@@ -116,7 +123,13 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
         report_error("attached options cannot be used with a subcommand");
         return ExitCode::FAILURE;
     }
-    match runtime.block_on(run(cli.command.expect("checked subcommand"), telemetry)) {
+    let serving = matches!(cli.command, Some(Command::Serve(_)));
+    let result = runtime.block_on(run(cli.command.expect("checked subcommand"), telemetry));
+    if serving {
+        // A cancelled stdio read may still occupy Tokio's blocking pool.
+        runtime.shutdown_timeout(std::time::Duration::ZERO);
+    }
+    match result {
         Ok(output) => {
             if std::io::stdout()
                 .write_all(output.stdout.as_bytes())
@@ -154,6 +167,7 @@ fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 
 async fn run(command: Command, telemetry: Telemetry) -> Result<CommandOutput, String> {
     match command {
+        Command::Serve(args) => cli::serve::run(args, telemetry).await,
         Command::Exec(args) => cli::exec::run(args, telemetry).await,
         Command::Provider(args) => cli::provider::run(args).await,
         Command::GenerateSchema { out } => cli::generate_schema::run(out.as_deref()),

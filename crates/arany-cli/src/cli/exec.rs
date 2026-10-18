@@ -406,10 +406,10 @@ async fn run_on_engine(
     })
 }
 
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+pub(super) const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StopSignal {
+pub(super) enum StopSignal {
     Interrupt,
     Hangup,
     Terminate,
@@ -437,7 +437,7 @@ fn resume_hint(session_id: SessionId, goal_id: GoalId) -> String {
 }
 
 #[cfg(unix)]
-struct StopSignals {
+pub(super) struct StopSignals {
     interrupt: tokio::signal::unix::Signal,
     hangup: tokio::signal::unix::Signal,
     terminate: tokio::signal::unix::Signal,
@@ -445,7 +445,7 @@ struct StopSignals {
 
 #[cfg(unix)]
 impl StopSignals {
-    fn install() -> std::io::Result<Self> {
+    pub(super) fn install() -> std::io::Result<Self> {
         // Tokio never restores default signal dispositions, so a SIGINT after the Run is absorbed.
         use tokio::signal::unix::{SignalKind, signal};
         Ok(Self {
@@ -455,7 +455,7 @@ impl StopSignals {
         })
     }
 
-    async fn next(&mut self) -> StopSignal {
+    pub(super) async fn next(&mut self) -> StopSignal {
         tokio::select! {
             _ = self.interrupt.recv() => StopSignal::Interrupt,
             _ = self.hangup.recv() => StopSignal::Hangup,
@@ -465,15 +465,15 @@ impl StopSignals {
 }
 
 #[cfg(not(unix))]
-struct StopSignals;
+pub(super) struct StopSignals;
 
 #[cfg(not(unix))]
 impl StopSignals {
-    fn install() -> std::io::Result<Self> {
+    pub(super) fn install() -> std::io::Result<Self> {
         Ok(Self)
     }
 
-    async fn next(&mut self) -> StopSignal {
+    pub(super) async fn next(&mut self) -> StopSignal {
         std::future::pending().await
     }
 }
