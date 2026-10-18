@@ -209,9 +209,8 @@ impl RunLoop<'_> {
             research,
             self.routing
                 .providers
-                .agent_chains()
+                .child_chains()
                 .into_iter()
-                .skip(1)
                 .flatten()
                 .map(|provider| provider.identity().limits.deadline)
                 .max()

@@ -2511,7 +2511,7 @@ mod routing {
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (approvals, _inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
         let mut bindings = routes(&primary);
-        bindings.review = vec![review.clone(), fallback.clone()];
+        bindings.roles.review = vec![review.clone(), fallback.clone()];
         let result = run_routed(
             &engine,
             bindings,
@@ -2602,7 +2602,7 @@ mod routing {
         std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut bindings = routes(&primary);
-        bindings.compaction = vec![first.clone(), second.clone()];
+        bindings.roles.compaction = vec![first.clone(), second.clone()];
         let outcome = run_routed(&engine, bindings.clone(), input(&workspace), configured())
             .await
             .unwrap();
@@ -2678,7 +2678,7 @@ mod routing {
         std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut bindings = routes(&primary);
-        bindings.compaction = vec![first.clone(), second.clone()];
+        bindings.roles.compaction = vec![first.clone(), second.clone()];
         let outcome = run_routed(&engine, bindings.clone(), input(&workspace), configured())
             .await
             .unwrap();

@@ -709,6 +709,47 @@ mod account_default_tests {
             }
             assert!(forged.validate().is_err());
         }
+        let mut other_identity = ordinary.identity().unwrap();
+        other_identity.model = "gpt-5.4-mini".into();
+        let mut two = roster_config.roster.as_deref().unwrap().clone();
+        two.profiles.push(crate::provider::NamedProviderRoutes {
+            name: "other".into(),
+            routes: vec![other_identity.clone()],
+        });
+        two.child_profiles.push("other".into());
+        two.selection_digest = two.digest().unwrap();
+        let mut pinned_config = roster_config.clone();
+        pinned_config.roster = Some(Box::new(two));
+        let main_routes = pinned_config
+            .roster
+            .as_ref()
+            .unwrap()
+            .role_routes()
+            .unwrap();
+        let mut pinned_base = pinned_config.clone();
+        let roster = pinned_base.roster.as_mut().unwrap();
+        roster.providers.review = "other".into();
+        roster.selection_digest = roster.digest().unwrap();
+        pinned_base.providers = Some(roster.role_routes().unwrap());
+        for base in [pinned_config.clone(), pinned_base] {
+            assert!(base.validate().is_ok());
+            for role in 0..3 {
+                let mut forged = base.clone();
+                let roster = forged.roster.as_mut().unwrap();
+                let name = match role {
+                    0 => &mut roster.providers.child,
+                    1 => &mut roster.providers.review,
+                    _ => &mut roster.providers.compaction,
+                };
+                *name = if name == "other" { "main" } else { "other" }.into();
+                roster.selection_digest = roster.digest().unwrap();
+                assert!(forged.validate().is_err(), "role {role}");
+            }
+        }
+        let mut forged = pinned_config.clone();
+        forged.providers = Some(main_routes);
+        forged.providers.as_mut().unwrap().review = vec![other_identity];
+        assert!(forged.validate().is_err());
         let mut missing_roster = serde_json::to_value(ordinary).unwrap();
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());

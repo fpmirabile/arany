@@ -187,9 +187,8 @@ pub(crate) fn load(
         .map_err(str::to_owned)?;
     if root
         .record(RecordKind::ProviderRouting)
-        .read()
+        .present()
         .map_err(|_| "Provider routing unavailable or unsafe")?
-        .is_some()
     {
         return Err(
             "--profile conflicts with provider-routing.json; choose one routing source".into(),
@@ -405,7 +404,7 @@ pub(crate) async fn pinned_compaction(
         );
     }
     let mut providers = AdmittedProviders::single(Arc::clone(&chain[0]));
-    providers.compaction = chain;
+    providers.roles.compaction = chain;
     Ok(providers)
 }
 

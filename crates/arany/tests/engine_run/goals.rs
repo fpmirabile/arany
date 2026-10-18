@@ -5356,7 +5356,7 @@ async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
     let primary =
         Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("scripted", "primary"));
     let mut bindings = AdmittedProviders::single(primary.clone());
-    bindings.compaction = vec![failing.clone(), fallback.clone()];
+    bindings.roles.compaction = vec![failing.clone(), fallback.clone()];
     let engine = facts_engine(
         StateRoot::admit(&state_path).expect("private state"),
         &state_path,

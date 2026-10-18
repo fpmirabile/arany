@@ -87,12 +87,6 @@ impl std::ops::Deref for AdmittedProviders {
     }
 }
 
-impl std::ops::DerefMut for AdmittedProviders {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.roles
-    }
-}
-
 impl AdmittedProviders {
     pub fn single(provider: Arc<dyn Provider>) -> Self {
         Self {
@@ -108,8 +102,8 @@ impl AdmittedProviders {
         }
     }
 
-    pub(crate) fn agent_chains(&self) -> Vec<&Vec<Arc<dyn Provider>>> {
-        let mut chains = vec![&self.primary, &self.child];
+    pub(crate) fn child_chains(&self) -> Vec<&Vec<Arc<dyn Provider>>> {
+        let mut chains = vec![&self.roles.child];
         if let Some(roster) = &self.roster {
             for name in &roster.snapshot.child_profiles {
                 if let Some((_, chain)) = roster
@@ -121,6 +115,12 @@ impl AdmittedProviders {
                 }
             }
         }
+        chains
+    }
+
+    pub(crate) fn agent_chains(&self) -> Vec<&Vec<Arc<dyn Provider>>> {
+        let mut chains = vec![&self.roles.primary];
+        chains.extend(self.child_chains());
         chains
     }
 

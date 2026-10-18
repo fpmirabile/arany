@@ -5,10 +5,10 @@ use arany::{ProviderRole, Providers};
 
 fn pin_roster(bindings: &mut arany::AdmittedProviders, spare: Option<Arc<dyn Provider>>) {
     let mut profiles = vec![
-        ("child".to_owned(), bindings.child.clone()),
-        ("compaction".to_owned(), bindings.compaction.clone()),
-        ("primary".to_owned(), bindings.primary.clone()),
-        ("review".to_owned(), bindings.review.clone()),
+        ("child".to_owned(), bindings.roles.child.clone()),
+        ("compaction".to_owned(), bindings.roles.compaction.clone()),
+        ("primary".to_owned(), bindings.roles.primary.clone()),
+        ("review".to_owned(), bindings.roles.review.clone()),
     ];
     let mut eligible = vec!["child".to_owned()];
     if let Some(spare) = spare {
@@ -72,8 +72,8 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
                 })]),
         );
         let mut bindings = routes(&primary);
-        bindings.child = vec![child.clone()];
-        bindings.compaction = vec![compact.clone()];
+        bindings.roles.child = vec![child.clone()];
+        bindings.roles.compaction = vec![compact.clone()];
         let spare = route(ScriptedProvider::new(vec![]).with_profile("scripted", "unused-model"));
         if named {
             pin_roster(&mut bindings, Some(spare.clone()));
@@ -176,7 +176,7 @@ async fn fallback_chain_is_ordered_and_call_and_unknown_token_budgets_stop_it() 
         let third =
             route(ScriptedProvider::new(vec![finish("third")]).with_profile("scripted", "third"));
         let mut bindings = routes(&primary);
-        bindings.primary.extend([
+        bindings.roles.primary.extend([
             second.clone() as Arc<dyn Provider>,
             third.clone() as Arc<dyn Provider>,
         ]);
@@ -256,8 +256,8 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
             })]),
     );
     let mut bindings = routes(&primary);
-    bindings.child = vec![child.clone(), fallback.clone()];
-    bindings.compaction = vec![compaction.clone(), compaction_fallback.clone()];
+    bindings.roles.child = vec![child.clone(), fallback.clone()];
+    bindings.roles.compaction = vec![compaction.clone(), compaction_fallback.clone()];
     let engine = open(&state);
     let mut request = input(&workspace);
     request.policy = CollaborationPolicy::Auto {
@@ -340,7 +340,7 @@ async fn exhausted_compaction_routes_settle_the_reservation_for_the_next_compact
             ]),
     );
     let mut bindings = routes(&primary);
-    bindings.compaction = vec![compaction.clone(), compaction_fallback.clone()];
+    bindings.roles.compaction = vec![compaction.clone(), compaction_fallback.clone()];
     let engine = open(&state);
     let result = run_routed(
         &engine,
@@ -407,7 +407,7 @@ async fn refused_fallback_admission_settles_the_known_compaction_failure() {
             .with_compactions(vec![summary_response()]),
     );
     let mut bindings = routes(&primary);
-    bindings.compaction = vec![compaction.clone(), compaction_fallback.clone()];
+    bindings.roles.compaction = vec![compaction.clone(), compaction_fallback.clone()];
     let engine = open(&state);
     let result = run_routed(
         &engine,
@@ -483,7 +483,7 @@ async fn tool_enabled_fallback_between_models_of_one_chatgpt_account_is_admitted
             .with_chatgpt_account(account, [2; 32]),
     );
     let mut bindings = routes(&first);
-    bindings.primary = vec![first.clone(), second.clone()];
+    bindings.roles.primary = vec![first.clone(), second.clone()];
     let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
     let result = run_routed(&engine, bindings, input(&workspace), configured())
         .await
@@ -517,7 +517,7 @@ async fn fallback_after_a_tool_observation_never_redispatches_the_tool() {
         route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "fallback"));
     let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
     let mut bindings = routes(&primary);
-    bindings.primary.push(fallback.clone());
+    bindings.roles.primary.push(fallback.clone());
     let result = run_routed(&engine, bindings, input(&workspace), configured())
         .await
         .unwrap();
@@ -560,7 +560,7 @@ async fn tool_enabled_chains_refuse_different_adapters_and_accounts_before_dispa
                 _ => ScriptedProvider::new(vec![]).with_chatgpt_account(Uuid::now_v7(), [4; 32]),
             });
             let mut bindings = routes(&primary);
-            bindings.get_mut(role).push(alternate.clone());
+            bindings.roles.get_mut(role).push(alternate.clone());
             let state = temp.path().join("state");
             let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
             assert!(matches!(
@@ -575,6 +575,26 @@ async fn tool_enabled_chains_refuse_different_adapters_and_accounts_before_dispa
 }
 
 #[tokio::test]
+async fn roster_disagreeing_with_role_chains_is_refused_before_any_call() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let first =
+        route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "first"));
+    let other = route(ScriptedProvider::new(vec![]).with_profile("scripted", "other"));
+    let mut bindings = routes(&first);
+    pin_roster(&mut bindings, None);
+    bindings.roles.child = vec![other];
+    let engine = open(&temp.path().join("state"));
+    assert!(matches!(
+        run_routed(&engine, bindings, input(&workspace), RunControls::default()).await,
+        Err(EngineError::InvalidRequest)
+    ));
+    assert!(first.requests.lock().unwrap().is_empty());
+    engine.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_route() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -585,7 +605,7 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
     let first = route(first);
     let next = route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "next"));
     let mut bindings = routes(&first);
-    bindings.primary.push(next.clone());
+    bindings.roles.primary.push(next.clone());
     pin_roster(&mut bindings, None);
     let engine = open(&state);
     let mut initial = input(&workspace);
@@ -647,7 +667,7 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
         route(ScriptedProvider::new(vec![finish("recovered")]).with_profile("scripted", "first"));
     let next = route(ScriptedProvider::new(vec![]).with_profile("scripted", "next"));
     let mut bindings = routes(&first);
-    bindings.primary.push(next.clone());
+    bindings.roles.primary.push(next.clone());
     pin_roster(&mut bindings, None);
     let engine = engine_support::open(
         StateRoot::open_existing(&recovered_state).unwrap(),
