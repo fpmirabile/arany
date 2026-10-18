@@ -2290,6 +2290,49 @@ async fn post_case(hook: Value) -> PostCase {
     post_run(hook, false).await
 }
 
+#[test]
+fn heavy_guard_journeys_fit_a_one_and_a_half_mebibyte_stack() {
+    std::thread::Builder::new()
+        .name("guard-stack-canary".into())
+        .stack_size(1536 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    super::worker::worker_case("success").await;
+                    let pre = hook_case(
+                        hook_settings(
+                            json!({"allow": ["Read"]}),
+                            vec![shell_hook(&hook_json("allow"))],
+                        ),
+                        None,
+                        false,
+                    )
+                    .await;
+                    assert!(pre.dispatched());
+                    assert_eq!(pre.started(), 1);
+                    assert_eq!(
+                        pre.tool.hooks[0].outcome.as_ref().unwrap().observation.disposition,
+                        arany::ToolDisposition::Succeeded
+                    );
+
+                    let post = post_case(shell_hook(
+                        r#"printf '%s' '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"checked"}}'"#,
+                    ))
+                    .await;
+                    assert_eq!(post.status, RunStatus::Finished);
+                    assert_eq!(post.host_file, "done");
+                    assert_eq!(post.tool.hooks.len(), 1);
+                    assert_eq!(post.live_feedback, Some(vec!["hook feedback: checked".into()]));
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 async fn post_run(hook: Value, stopped: bool) -> PostCase {
     let fixture = Fixture::new(Some(&post_settings(hook)), true);
     let write = call("edit");

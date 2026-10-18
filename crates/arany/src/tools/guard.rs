@@ -968,7 +968,7 @@ pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
         .await
         .map_err(|_| ToolError::Operation)?;
     let mut remaining = size;
-    let mut buffer = [0; 32 * 1024];
+    let mut buffer = vec![0u8; 32 * 1024];
     while remaining > 0 {
         let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
         let count = file
@@ -1035,7 +1035,7 @@ async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write>(
 ) -> Result<Option<W>, ToolError> {
     use tokio::io::AsyncReadExt;
 
-    let mut buffer = [0; 32 * 1024];
+    let mut buffer = vec![0u8; 32 * 1024];
     let mut remaining = length;
     while remaining > 0 {
         let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
