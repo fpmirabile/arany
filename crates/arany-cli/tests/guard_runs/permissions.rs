@@ -3142,6 +3142,155 @@ mod lifecycle_hooks {
     }
 
     #[tokio::test]
+    async fn in_run_auto_pre_compact_journals_before_reservation_or_skips_and_continues() {
+        use arany::permissions::{HookEvent, HookResult};
+
+        for (script, expected) in [
+            ("exit 0", HookResult::Passed),
+            (
+                "echo keep-context >&2; exit 2",
+                HookResult::Blocked {
+                    reason: Some("keep-context".into()),
+                },
+            ),
+            (
+                r#"printf '%s' '{"continue":false,"stopReason":"keep-context"}'"#,
+                HookResult::Blocked {
+                    reason: Some("keep-context".into()),
+                },
+            ),
+        ] {
+            let settings =
+                json!({"hooks":{"PreCompact":[{"matcher":"auto","hooks":[shell_hook(script)]}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            const READS: usize = 8;
+            const PAGE: usize = 64 * 1024;
+            std::fs::write(fixture.workspace.join("notes/data.txt"), "x".repeat(PAGE)).unwrap();
+            // Large bounded in-process reads reach the real threshold without a context-limit seam.
+            let mut outcomes: Vec<_> = (0..READS)
+                .map(|_| {
+                    tool_outcome(
+                        arany::ToolCall::Read {
+                            path: "notes/data.txt".into(),
+                            offset: 0,
+                            limit: PAGE as u32,
+                        },
+                        None,
+                    )
+                })
+                .collect();
+            outcomes.push(finish("done"));
+            let provider = Arc::new(
+                ScriptedProvider::new(outcomes).with_compactions(
+                    (0..READS)
+                        .map(|_| {
+                            Ok(CompactionResponse {
+                                summary: "Earlier reads remain recorded in the journal.".into(),
+                                response_id: None,
+                                usage: arany::Usage::default(),
+                                wire_provenance: None,
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+            let (result, requests, humans) = fixture
+                .run_provider(provider.clone(), None, false, budget())
+                .await;
+            assert_eq!(result.run.status, RunStatus::Finished, "{expected:?}");
+            assert_eq!(requests.len(), READS + 1);
+            assert_eq!(humans, 0);
+            let compactions = provider.compact_requests.lock().unwrap().len();
+            let passed = expected == HookResult::Passed;
+            let final_context = requests.last().unwrap().input.tools.as_ref().unwrap();
+            assert_eq!(final_context.history_summary.is_some(), passed);
+            if !passed {
+                assert_eq!(final_context.observation_count(), READS);
+            }
+            let (events, view) = fixture.reopen(result.session_id).await;
+            let run = &view.runs[0];
+            assert_eq!(run.status, RunStatus::Finished);
+            assert_eq!(run.tools.len(), READS);
+            assert!(run.tools.iter().all(|tool| {
+                tool.observation.as_ref().unwrap().disposition == arany::ToolDisposition::Succeeded
+            }));
+            assert!(!run.lifecycle_hooks.is_empty(), "automatic hook must run");
+            assert_eq!(
+                compactions,
+                if passed { run.lifecycle_hooks.len() } else { 0 }
+            );
+            assert_eq!(run.tool_compaction_covered_count > 0, passed);
+            let mut calls = 0_usize;
+            let mut subjects = std::collections::HashSet::new();
+            let mut starts = Vec::new();
+            let mut finishes = Vec::new();
+            let mut reservations = Vec::new();
+            let mut compacted = 0;
+            for (index, envelope) in events.iter().enumerate() {
+                match &envelope.event {
+                    Event::ProviderCallRecorded { .. } => calls += 1,
+                    Event::HookStarted {
+                        run_id,
+                        agent_run_id,
+                        hook,
+                    } => {
+                        assert_eq!(*run_id, run.id);
+                        assert_eq!(*agent_run_id, run.agents[0].id);
+                        assert_eq!(hook.event, HookEvent::PreCompact);
+                        assert!((1..=READS).contains(&calls), "hook is inside the Tool loop");
+                        let subject: [u8; 32] =
+                            Sha256::digest(serde_json::to_vec(&("auto", calls)).unwrap()).into();
+                        assert_eq!(hook.subject_digest, subject);
+                        assert!(
+                            subjects.insert(subject),
+                            "one execution per auto/call-count occurrence"
+                        );
+                        let input = json!({
+                            "session_id": result.session_id.to_string(), "cwd": "/workspace",
+                            "permission_mode": "default", "hook_event_name": "PreCompact",
+                            "trigger": "auto", "custom_instructions": "",
+                        })
+                        .to_string();
+                        assert_eq!(
+                            hook.input_digest,
+                            <[u8; 32]>::from(Sha256::digest(input.as_bytes()))
+                        );
+                        starts.push(index);
+                    }
+                    Event::HookFinished { outcome, .. } => {
+                        assert_eq!(outcome.result, expected);
+                        assert!(matches!(
+                            outcome.observation.attestation,
+                            Some(arany::Attestation::Guard(_))
+                        ));
+                        finishes.push(index);
+                    }
+                    Event::GoalCompactionCallReserved { .. } => reservations.push(index),
+                    Event::GoalContextCompacted { .. } => compacted += 1,
+                    Event::ContextCompacted { .. } => panic!("must compact the active Run"),
+                    _ => {}
+                }
+            }
+            assert_eq!(starts.len(), run.lifecycle_hooks.len());
+            assert_eq!(finishes.len(), starts.len());
+            assert_eq!(reservations.len(), compactions);
+            assert_eq!(compacted, compactions);
+            for (occurrence, (start, end)) in starts.iter().zip(&finishes).enumerate() {
+                assert!(start < end);
+                if passed {
+                    let reservation = reservations[occurrence];
+                    assert!(*end < reservation);
+                    assert!(
+                        starts
+                            .get(occurrence + 1)
+                            .is_none_or(|next| reservation < *next)
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn pre_compact_block_skips_compaction_once() {
         for trigger in ["manual", "auto"] {
             let settings = json!({"hooks":{"PreCompact":[{"matcher":trigger,"hooks":[shell_hook("echo keep-context >&2; exit 2")]}]}});
