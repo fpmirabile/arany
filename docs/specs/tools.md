@@ -171,9 +171,9 @@ The following parser scenario owners are unit tests in [permissions/tests.rs](..
 | Hook group/handler/command/argument/matcher and compiled-regex bounds reject excess. | `hook_limits_accept_boundaries_and_reject_aggregate_overflow` |
 | Hook exit codes and JSON output follow the peer with `deny > ask > allow`; allow is a no-op, a non-null `updatedInput` denies, wrong event names, hostile and oversized output never restrict beyond the parsed decision, and reasons are control-free and bounded. | `hook_output_parsing_copies_peer_exit_codes_and_json_precedence` |
 | A recorded hook result must equal the deterministic parse of its Guard observation (a forged `Passed` over exit 2 rejects) and can only narrow. | `hook_results_only_narrow_and_validate_against_their_observation` |
-| Hook stdin has a closed field set, `cwd` `/workspace` and no host path or settings bytes within 32 KiB. | `hook_stdin_is_closed_bounded_and_host_path_free` |
+| Hook stdin has a closed field set, `cwd` `/workspace`, no host path or settings bytes, and fits the hook stdin limit. | `hook_stdin_is_closed_bounded_and_host_path_free` |
 | The fit check encodes the full Guard task and rejects one over the ceiling. | `hook_task_fit_check_matches_the_encoded_task_ceiling` |
-| Matched hooks keep configuration order and fail closed beyond 8. | `hook_matching_is_bounded_ordered_and_fails_closed` |
+| Matched hooks keep configuration order and fail closed beyond the matched-handler limit. | `hook_matching_is_bounded_ordered_and_fails_closed` |
 | Hook Events replay in order, bind the verdict fold and reject forged outcomes, miscounts and unknown payload versions. | `hook_events_replay_in_order_and_bind_the_verdict_to_their_outcomes` |
 | A deterministic hostile punctuation/Unicode/control corpus parses or returns errors without panicking. | `hostile_rule_text_is_total_and_deterministic` |
 | Auto rules cannot skip mandatory AI review; explicit ask and deny still win. | `auto_allow_rules_never_bypass_execution_review` |
