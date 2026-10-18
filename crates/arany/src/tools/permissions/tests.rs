@@ -1379,11 +1379,22 @@ fn post_tool_use_output_becomes_bounded_feedback_and_never_replaces_the_result()
     let call = write("a");
     let mode = PermissionMode::Default;
     let id = uuid::Uuid::now_v7();
-    let small = post_tool_use_input("s", mode, &call, id, json!({"output": "ok"})).unwrap();
+    let small = post_tool_use_input(
+        "s",
+        mode,
+        &call,
+        id,
+        json!({"output": "ok"}),
+        MAX_HOOK_INPUT_BYTES,
+    )
+    .unwrap();
     assert!(small.contains("\"hook_event_name\":\"PostToolUse\"") && !small.contains("truncated"));
     let huge = json!({"output": "\"\n\\".repeat(MAX_HOOK_INPUT_BYTES)});
-    let cut = post_tool_use_input("s", mode, &call, id, huge).unwrap();
+    let cut =
+        post_tool_use_input("s", mode, &call, id, huge.clone(), MAX_HOOK_INPUT_BYTES).unwrap();
     assert!(cut.len() <= MAX_HOOK_INPUT_BYTES);
     let parsed: serde_json::Value = serde_json::from_str(&cut).unwrap();
     assert_eq!(parsed["tool_response"]["truncated"], true);
+    let bare = post_tool_use_input("s", mode, &call, id, huge, 0).unwrap();
+    assert!(bare.len() < cut.len() && bare.contains("\"text\":\"\""));
 }

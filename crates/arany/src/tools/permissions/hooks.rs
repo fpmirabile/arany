@@ -367,14 +367,16 @@ pub(crate) fn pre_tool_use_input(
     Ok(input)
 }
 
-// An oversize `tool_response` is cut to the room the rest of the input leaves and marked truncated.
+// A `tool_response` over `budget` bytes of input is cut to the room the rest leaves and marked truncated.
 pub(crate) fn post_tool_use_input(
     session_id: impl std::fmt::Display,
     mode: PermissionMode,
     call: &ToolCall,
     tool_use_id: uuid::Uuid,
     tool_response: Value,
+    budget: usize,
 ) -> Result<String, ConfigError> {
+    let budget = budget.min(MAX_HOOK_INPUT_BYTES);
     let build = |response: Value| {
         serde_json::json!({
             "session_id": session_id.to_string(),
@@ -389,11 +391,15 @@ pub(crate) fn post_tool_use_input(
         .to_string()
     };
     let input = build(tool_response.clone());
-    if input.len() <= MAX_HOOK_INPUT_BYTES {
+    if input.len() <= budget {
         return Ok(input);
     }
     let marker = |text: &str| serde_json::json!({"truncated": true, "text": text});
-    let room = MAX_HOOK_INPUT_BYTES.saturating_sub(build(marker("")).len());
+    let bare = build(marker("")).len();
+    if bare > MAX_HOOK_INPUT_BYTES {
+        return Err(ConfigError::Limit("32 KiB hook input"));
+    }
+    let room = budget.saturating_sub(bare);
     let text = tool_response.to_string();
     let mut used = 0;
     let mut end = 0;
@@ -405,11 +411,7 @@ pub(crate) fn post_tool_use_input(
         }
         end += ch.len_utf8();
     }
-    let input = build(marker(&text[..end]));
-    if input.len() > MAX_HOOK_INPUT_BYTES {
-        return Err(ConfigError::Limit("32 KiB hook input"));
-    }
-    Ok(input)
+    Ok(build(marker(&text[..end])))
 }
 
 pub(crate) fn feedback_lines<'a>(results: impl IntoIterator<Item = &'a HookResult>) -> Vec<String> {

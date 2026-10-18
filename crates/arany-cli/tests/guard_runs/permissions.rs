@@ -2291,7 +2291,33 @@ async fn post_case(hook: Value) -> PostCase {
                 .clone()
         })
         .unwrap_or_default();
-    let host_file = std::fs::read_to_string(fixture.workspace.join("notes/new.txt")).unwrap();
+    let report = || {
+        result
+            .run
+            .tools
+            .iter()
+            .map(|tool| {
+                let hooks: Vec<_> = tool
+                    .hooks
+                    .iter()
+                    .map(|hook| {
+                        hook.outcome
+                            .as_ref()
+                            .map(|o| tool_report(Some(&o.observation)))
+                    })
+                    .collect();
+                (tool_report(tool.observation.as_ref()), hooks)
+            })
+            .collect::<Vec<_>>()
+    };
+    let host_file = std::fs::read_to_string(fixture.workspace.join("notes/new.txt"))
+        .unwrap_or_else(|error| {
+            panic!(
+                "notes/new.txt: {error}; run {:?}; {:?}",
+                result.run.status,
+                report()
+            )
+        });
     let (events, view) = fixture.reopen(result.session_id).await;
     PostCase {
         host_file,
@@ -2433,7 +2459,33 @@ async fn hook_post_tool_use_uncertain_outcome_stops_the_run_after_the_effect() {
         "no Provider call follows an unknown hook"
     );
     assert_ne!(result.run.status, RunStatus::Finished);
-    let host_file = std::fs::read_to_string(fixture.workspace.join("notes/new.txt")).unwrap();
+    let report = || {
+        result
+            .run
+            .tools
+            .iter()
+            .map(|tool| {
+                let hooks: Vec<_> = tool
+                    .hooks
+                    .iter()
+                    .map(|hook| {
+                        hook.outcome
+                            .as_ref()
+                            .map(|o| tool_report(Some(&o.observation)))
+                    })
+                    .collect();
+                (tool_report(tool.observation.as_ref()), hooks)
+            })
+            .collect::<Vec<_>>()
+    };
+    let host_file = std::fs::read_to_string(fixture.workspace.join("notes/new.txt"))
+        .unwrap_or_else(|error| {
+            panic!(
+                "notes/new.txt: {error}; run {:?}; {:?}",
+                result.run.status,
+                report()
+            )
+        });
     assert_eq!(host_file, "done");
     let (_, view) = fixture.reopen(result.session_id).await;
     let tool = &view.runs[0].tools[0];
@@ -2473,7 +2525,26 @@ async fn hook_post_tool_use_on_a_command_sees_the_integrated_tree() {
             false,
         )
         .await;
-    assert_eq!(result.run.status, RunStatus::Finished);
+    let report = || {
+        result
+            .run
+            .tools
+            .iter()
+            .map(|tool| {
+                let hooks: Vec<_> = tool
+                    .hooks
+                    .iter()
+                    .map(|hook| {
+                        hook.outcome
+                            .as_ref()
+                            .map(|o| tool_report(Some(&o.observation)))
+                    })
+                    .collect();
+                (tool_report(tool.observation.as_ref()), hooks)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(result.run.status, RunStatus::Finished, "{:?}", report());
     let step = &requests[1].input.tools.as_ref().unwrap().steps[0];
     assert_eq!(step.observations.len(), 2, "command and integration");
     assert_eq!(

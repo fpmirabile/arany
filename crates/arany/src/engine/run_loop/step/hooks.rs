@@ -235,26 +235,21 @@ impl RunLoop<'_> {
                 0,
             ));
         }
-        let post_probe = runtime.with_hook_stdin(&"\"".repeat(MAX_HOOK_INPUT_BYTES));
-        if post.iter().any(|plan| {
-            let mut probe = post_probe.intent(self.run_id, intent.agent_run_id, plan.call.clone());
-            probe.limits.runtime_ms = u32::MAX;
-            probe.expires_at_ms = u64::MAX;
-            !post_probe.hook_task_fits(&probe)
-        }) {
-            return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
-        }
-        if !post.is_empty()
-            && post_tool_use_input(
+        if !post.is_empty() {
+            // The bare form is the smallest stdin a post hook can get, so it must fit the Guard task.
+            let Ok(bare) = post_tool_use_input(
                 self.session_id,
                 config.mode(),
                 &intent.call,
                 intent.id,
                 serde_json::json!("x".repeat(MAX_HOOK_INPUT_BYTES + 1)),
-            )
-            .is_err()
-        {
-            return Ok(HookFold::deny("hook input exceeds its limit", 0));
+                0,
+            ) else {
+                return Ok(HookFold::deny("hook input exceeds its limit", 0));
+            };
+            if !self.task_fits_all(&runtime.with_hook_stdin(&bare), intent.agent_run_id, &post) {
+                return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
+            }
         }
         if plans.is_empty() {
             return Ok(HookFold::none());
@@ -267,13 +262,8 @@ impl RunLoop<'_> {
         let subject_digest = intent.digest();
         let runtime = runtime.with_hook_stdin(&input);
         // The complete Guard task must encode before any hook starts; a rejected task would strand it.
-        for plan in &plans {
-            let mut probe = runtime.intent(self.run_id, intent.agent_run_id, plan.call.clone());
-            probe.limits.runtime_ms = u32::MAX;
-            probe.expires_at_ms = u64::MAX;
-            if !runtime.hook_task_fits(&probe) {
-                return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
-            }
+        if !self.task_fits_all(&runtime, intent.agent_run_id, &plans) {
+            return Ok(HookFold::deny("hook input exceeds the Guard task limit", 0));
         }
         let mut fold = HookFold::none();
         for plan in plans {
@@ -344,18 +334,30 @@ impl RunLoop<'_> {
         if plans.is_empty() {
             return Ok(fold);
         }
-        // Admission probed the worst case, so a build failure here is a broken invariant.
-        let input = post_tool_use_input(
-            self.session_id,
-            config.mode(),
-            call,
-            observation.intent.id,
-            model_observation(observation),
-        )
-        .map_err(|_| EngineError::InvalidRequest)?;
+        // Halve the response budget until every Guard task encodes; admission proved the bare form fits.
+        let response = model_observation(observation);
+        let mut budget = MAX_HOOK_INPUT_BYTES;
+        let (input, runtime) = loop {
+            let input = post_tool_use_input(
+                self.session_id,
+                config.mode(),
+                call,
+                observation.intent.id,
+                response.clone(),
+                budget,
+            )
+            .map_err(|_| EngineError::InvalidRequest)?;
+            let sized = runtime.with_hook_stdin(&input);
+            if self.task_fits_all(&sized, observation.intent.agent_run_id, &plans) {
+                break (input, sized);
+            }
+            if budget == 0 {
+                return Err(EngineError::InvalidRequest);
+            }
+            budget = if budget < 2048 { 0 } else { budget / 2 };
+        };
         let input_digest = crate::tools::types::digest(input.as_bytes());
         let subject_digest = observation.intent.digest();
-        let runtime = runtime.with_hook_stdin(&input);
         let mut results = Vec::new();
         for plan in plans {
             let Some(run) = self
@@ -387,6 +389,20 @@ impl RunLoop<'_> {
         }
         fold.feedback = feedback_lines(&results);
         Ok(fold)
+    }
+
+    fn task_fits_all(
+        &self,
+        runtime: &ToolRuntime,
+        agent_run_id: crate::session::AgentRunId,
+        plans: &[HookPlan],
+    ) -> bool {
+        plans.iter().all(|plan| {
+            let mut probe = runtime.intent(self.run_id, agent_run_id, plan.call.clone());
+            probe.limits.runtime_ms = u32::MAX;
+            probe.expires_at_ms = u64::MAX;
+            runtime.hook_task_fits(&probe)
+        })
     }
 
     // `None` means the Goal had no active time left to start the hook.
