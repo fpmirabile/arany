@@ -236,6 +236,7 @@ impl Event {
                         None | Some(Decision::Allow) => verdict.hook_restriction.is_none(),
                         Some(Decision::Ask) => {
                             verdict.hooks > 0
+                                && verdict.source != PermissionSource::AiReview
                                 && matches!(verdict.decision, Decision::Ask | Decision::Deny)
                         }
                         Some(Decision::Deny) => verdict.decision == Decision::Deny,

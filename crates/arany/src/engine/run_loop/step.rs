@@ -82,11 +82,24 @@ struct Permission {
 }
 
 impl Permission {
-    fn narrow_hooks(mut self, restriction: Option<Decision>) -> Self {
+    fn narrow_hooks(
+        mut self,
+        restriction: Option<Decision>,
+        mode: Option<crate::tools::permissions::PermissionMode>,
+    ) -> Self {
         match restriction {
             Some(Decision::Deny) => {
                 self.decision = Decision::Deny;
                 self.basis = PermissionSource::Hook;
+                self.approval = None;
+            }
+            // dontAsk has no human to ask, so a hook ask is the narrower deny.
+            Some(Decision::Ask)
+                if self.decision != Decision::Deny
+                    && mode == Some(crate::tools::permissions::PermissionMode::DontAsk) =>
+            {
+                self.decision = Decision::Deny;
+                self.basis = PermissionSource::Mode;
                 self.approval = None;
             }
             Some(Decision::Ask) if self.decision != Decision::Deny => {
@@ -595,7 +608,8 @@ impl RunLoop<'_> {
             }
             _ => HookFold::none(),
         };
-        let permission = permission.narrow_hooks(hooks.restriction);
+        let permission =
+            permission.narrow_hooks(hooks.restriction, config.map(|config| config.mode()));
         let Permission {
             decision, basis, ..
         } = permission;

@@ -3467,6 +3467,22 @@ mod goal_replay_tests {
         ));
         let other = observation_for(second.clone(), b"");
         assert!(rejected(&view, finished(other, deny.clone())));
+        let ask_verdict = |source| Event::ToolPermissionDecided {
+            run_id: run,
+            agent_run_id: agent,
+            verdict: PermissionVerdict {
+                intent_digest: intent.digest(),
+                decision: Decision::Ask,
+                mode: Some(PermissionMode::Auto),
+                basis: PermissionSource::Mode,
+                source,
+                approved: true,
+                hook_restriction: Some(Decision::Ask),
+                hooks: 1,
+            },
+        };
+        assert!(ask_verdict(PermissionSource::Human).payload().is_ok());
+        assert!(ask_verdict(PermissionSource::AiReview).payload().is_err());
         let forged_pass = finished(hook_observation.clone(), HookResult::Passed);
         assert!(forged_pass.payload().is_err());
         let mid = view.clone();

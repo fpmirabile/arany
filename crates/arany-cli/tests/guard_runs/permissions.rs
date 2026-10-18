@@ -1010,7 +1010,10 @@ async fn hook_case(
     fixture.deny_humans = deny_humans;
     let mut outcomes = vec![tool_outcome(call("read"), None)];
     // A refused Ask ends the Run before the model sees the result.
-    let continues = !(deny_humans || mode.is_none() && settings.to_string().contains("ask"));
+    let continues = !(deny_humans
+        || mode.is_none()
+            && settings.to_string().contains("ask")
+            && !settings.to_string().contains("dontAsk"));
     if continues {
         outcomes.push(finish("answer"));
     }
@@ -2152,4 +2155,36 @@ async fn deny_all_hook_leaves_definition_parsing_working_and_still_blocks_a_mode
         .filter(|event| matches!(event.event, Event::HookStarted { .. }))
         .count();
     assert_eq!(started, 1);
+}
+
+#[tokio::test]
+async fn hook_ask_under_dont_ask_denies() {
+    let case = hook_case(
+        hook_settings(
+            json!({"defaultMode": "dontAsk", "allow": ["Read"]}),
+            vec![shell_hook(&hook_json("ask"))],
+        ),
+        Some(arany::ApprovalMode::Request),
+        false,
+    )
+    .await;
+    assert_eq!(case.humans, 0);
+    let verdict = case.verdict();
+    assert_eq!(
+        (
+            verdict.decision,
+            verdict.basis,
+            verdict.approved,
+            verdict.hook_restriction,
+            verdict.hooks
+        ),
+        (
+            Decision::Deny,
+            PermissionSource::Mode,
+            false,
+            Some(Decision::Ask),
+            1
+        )
+    );
+    assert!(!case.dispatched());
 }
