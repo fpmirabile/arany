@@ -1011,7 +1011,7 @@ pub(super) async fn native_command_changeset_corpus(
     program: &str,
 ) {
     use arany::{
-        ApprovalMode, Engine, Finish, Provider, ProviderError, ProviderOutcome, ProviderRequest,
+        ApprovalMode, Finish, Provider, ProviderError, ProviderOutcome, ProviderRequest,
         ProviderResponse, RunCancellation, RunProgress, RunRequest, StateRoot, Store,
         ToolApprovals,
     };
@@ -1282,7 +1282,7 @@ pub(super) async fn native_command_changeset_corpus(
             #[cfg(target_os = "macos")]
             trace_root: root.to_path_buf(),
         });
-        let engine = Engine::open(
+        let engine = arany::test_support::engine::open(
             state,
             EngineConfig {
                 guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),

@@ -404,7 +404,8 @@ async fn selected_cache_canary_helper_inner() {
         stage: "seed",
         resource_class: arany::ToolResourceClass::Default,
     });
-    let seed_engine = Engine::open(
+    // This helper runs under a private passwd home and must use its real account root.
+    let seed_engine = arany::Engine::open(
         StateRoot::admit(&state_path).unwrap(),
         EngineConfig {
             guard_executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_arany"))),
@@ -549,7 +550,7 @@ async fn selected_cache_canary_helper_inner() {
         stage: "selected",
         resource_class: arany::ToolResourceClass::Build,
     });
-    let engine = Engine::open(
+    let engine = arany::Engine::open(
         state,
         EngineConfig {
             guard_executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_arany"))),
@@ -782,7 +783,7 @@ async fn selected_cache_canary_helper_inner() {
         stage: "verify",
         resource_class: arany::ToolResourceClass::Default,
     });
-    let verify_engine = Engine::open(
+    let verify_engine = arany::Engine::open(
         StateRoot::open_existing(&state_path).unwrap(),
         EngineConfig {
             guard_executable: Some(PathBuf::from(env!("CARGO_BIN_EXE_arany"))),

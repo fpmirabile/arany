@@ -166,15 +166,24 @@ impl Host {
             requests,
             unconsumed,
         };
+        for tool in &seen.outcome.run.tools {
+            let observation = tool.observation.as_ref();
+            assert!(
+                observation.is_none_or(|o| o.disposition != arany::ToolDisposition::Uncertain),
+                "no Tool ends Uncertain: {}",
+                tool_report(observation)
+            );
+        }
         assert!(
             replies.is_empty(),
-            "every scripted reply is consumed; first tool: {:?}",
-            seen.outcome
-                .run
-                .tools
-                .first()
-                .and_then(|tool| tool.observation.as_ref())
-                .map(|o| (o.disposition, &o.output))
+            "every scripted reply is consumed; first tool: {}",
+            tool_report(
+                seen.outcome
+                    .run
+                    .tools
+                    .first()
+                    .and_then(|tool| tool.observation.as_ref())
+            )
         );
         seen
     }
