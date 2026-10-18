@@ -37,6 +37,7 @@ fn finish(result: &str) -> arany::ProviderOutcome {
 fn delegate() -> arany::ProviderOutcome {
     arany::ProviderOutcome::Delegate(arany::Delegate {
         children: vec!["Inspect".into()],
+        agent: None,
     })
 }
 
