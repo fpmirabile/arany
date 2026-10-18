@@ -246,6 +246,19 @@ pub struct HookView {
 }
 
 impl ToolView {
+    // Model-facing PostToolUse lines, derived from the journaled hook results alone.
+    pub fn hook_feedback(&self) -> Vec<String> {
+        crate::tools::permissions::feedback_lines(
+            self.hooks
+                .iter()
+                .filter(|hook| {
+                    hook.invocation.event == crate::tools::permissions::HookEvent::PostToolUse
+                })
+                .filter_map(|hook| hook.outcome.as_ref())
+                .map(|outcome| &outcome.result),
+        )
+    }
+
     // A hook whose outcome is unknown stops the Run exactly like an uncertain Tool.
     pub(crate) fn settled_without_stop(&self) -> bool {
         self.observation

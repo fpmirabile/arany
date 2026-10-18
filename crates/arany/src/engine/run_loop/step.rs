@@ -25,7 +25,7 @@ use tokio::time::Instant;
 
 mod hooks;
 
-use hooks::HookFold;
+use hooks::{HookFold, HookStop};
 
 pub(super) enum Grant<'s> {
     Primary {
@@ -200,6 +200,7 @@ impl RunLoop<'_> {
             facts: None,
             steering_notes: Vec::new(),
             calls_remaining,
+            hook_feedback: Default::default(),
         };
         loop {
             let Some(intent) = self.sized_intent(&grant, runtime, &step, call)? else {
@@ -208,7 +209,8 @@ impl RunLoop<'_> {
             let command = matches!(intent.call, ToolCall::Command { .. });
             let source_intent_digest = intent.digest();
             // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
-            let Some(observation) = Box::pin(self.run_intent(&grant, runtime, intent)).await?
+            let Some((observation, feedback)) =
+                Box::pin(self.run_intent(&grant, runtime, intent)).await?
             else {
                 return Ok(false);
             };
@@ -229,6 +231,9 @@ impl RunLoop<'_> {
             } else {
                 None
             };
+            if !feedback.is_empty() {
+                step.hook_feedback.insert(step.observations.len(), feedback);
+            }
             step.observations.push(observation);
             let Some(changeset) = changeset.filter(|changeset| !changeset.files.is_empty()) else {
                 break;
@@ -287,7 +292,7 @@ impl RunLoop<'_> {
             MAX_TOOL_ARGUMENT_BYTES + 128 * 6 + 512
         } else {
             0
-        };
+        } + self.feedback_reserve(runtime, &intent.call);
         let Some(capacity) = runtime.result_capacity(overhead, integration_capacity) else {
             return Ok(None);
         };
@@ -408,7 +413,7 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
         intent: EffectIntent,
-    ) -> Result<Option<ToolObservation>, EngineError> {
+    ) -> Result<Option<(ToolObservation, Vec<String>)>, EngineError> {
         let permission = self.permission(grant, runtime, &intent.call);
         let (hook_events, hook_ms) = self.hook_admission(grant, runtime, &intent.call);
         if !self
@@ -430,25 +435,32 @@ impl RunLoop<'_> {
             active_ceiling_ms: self.ledger().active_ceiling(action_ms)?,
         })
         .await?;
-        let answer = match self
+        let (answer, dispatched) = match self
             .before_dispatch(grant, runtime, intent, permission)
             .await?
         {
-            Verdict::Deny(answer) => answer,
+            Verdict::Deny(answer) => (answer, false),
             Verdict::Dispatch {
                 intent,
                 queue_pause,
-            } => match grant {
-                Grant::Primary { .. } => {
-                    self.dispatch_primary(runtime, intent, queue_pause).await?
-                }
-                Grant::Researcher { .. } => Answer {
-                    observation: execute_cancellable(runtime, intent, &self.controls.cancellation)
+            } => (
+                match grant {
+                    Grant::Primary { .. } => {
+                        self.dispatch_primary(runtime, intent, queue_pause).await?
+                    }
+                    Grant::Researcher { .. } => Answer {
+                        observation: execute_cancellable(
+                            runtime,
+                            intent,
+                            &self.controls.cancellation,
+                        )
                         .await,
-                    refused: false,
-                    active_time: None,
+                        refused: false,
+                        active_time: None,
+                    },
                 },
-            },
+                true,
+            ),
         };
         self.append(Event::ToolFinished {
             run_id: self.run_id,
@@ -464,7 +476,22 @@ impl RunLoop<'_> {
                 return Err(EngineError::GoalBudgetExhausted);
             }
         }
-        Ok((!answer.refused).then_some(answer.observation))
+        let mut feedback = Vec::new();
+        if dispatched
+            && matches!(grant, Grant::Primary { .. })
+            && answer.observation.disposition == ToolDisposition::Succeeded
+            && !answer.observation.intent.call.is_internal()
+            && let Some(config) = runtime.permissions()
+        {
+            let post =
+                Box::pin(self.post_tool_use_hooks(runtime, config, &answer.observation)).await?;
+            match post.stop {
+                HookStop::None => feedback = post.feedback,
+                HookStop::Uncertain => return Ok(None),
+                HookStop::ActiveTime => return Err(EngineError::GoalBudgetExhausted),
+            }
+        }
+        Ok((!answer.refused).then_some((answer.observation, feedback)))
     }
 
     async fn admit_tool(
@@ -1398,7 +1425,7 @@ impl RunLoop<'_> {
                 request,
                 review_allowed: false,
             };
-            let Some(observation) = Box::pin(self.run_intent(&grant, runtime, intent)).await?
+            let Some((observation, _)) = Box::pin(self.run_intent(&grant, runtime, intent)).await?
             else {
                 return Ok(false);
             };

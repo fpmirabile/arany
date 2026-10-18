@@ -5,7 +5,7 @@ use super::{
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{Event, GoalPhase, ProviderCallDisposition, ReplayError};
-use crate::tools::permissions::{Decision, MAX_HOOKS_PER_OCCURRENCE};
+use crate::tools::permissions::{Decision, HookEvent, HookResult, MAX_HOOKS_PER_OCCURRENCE};
 
 pub(super) fn apply(
     current: &mut SessionView,
@@ -185,15 +185,27 @@ pub(super) fn apply(
                         || outcome.observation.stops_run()
                 })
             });
-            if tool.permission_verdict.is_some()
-                || tool.observation.is_some()
+            let post = hook.event == HookEvent::PostToolUse;
+            let state_allows = if post {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.disposition == crate::tools::ToolDisposition::Succeeded
+                })
+            } else {
+                tool.permission_verdict.is_none() && tool.observation.is_none()
+            };
+            let same_event = tool
+                .hooks
+                .iter()
+                .filter(|view| view.invocation.event == hook.event)
+                .count();
+            if !state_allows
                 || tool.intent.call.is_internal()
                 || hook.subject_digest != tool.intent.digest()
                 || hook.intent.policy_digest != tool.intent.policy_digest
                 || hook.intent.workspace_device != tool.intent.workspace_device
                 || hook.intent.workspace_inode != tool.intent.workspace_inode
                 || hook.intent.id == tool.intent.id
-                || tool.hooks.len() >= MAX_HOOKS_PER_OCCURRENCE
+                || same_event >= MAX_HOOKS_PER_OCCURRENCE
                 || finished_restriction
                 || tool
                     .hooks
@@ -219,14 +231,16 @@ pub(super) fn apply(
                 return Err(ReplayError::InvalidTransition);
             }
             let tool = pending_tool(run, *agent_run_id)?;
-            if tool.permission_verdict.is_some() || tool.observation.is_some() {
-                return Err(ReplayError::InvalidTransition);
-            }
+            let observed = tool.observation.is_some();
             let view = tool
                 .hooks
                 .last_mut()
                 .filter(|view| {
-                    view.outcome.is_none() && view.invocation.intent == outcome.observation.intent
+                    view.outcome.is_none()
+                        && view.invocation.intent == outcome.observation.intent
+                        && (view.invocation.event == HookEvent::PostToolUse) == observed
+                        && outcome.result
+                            == HookResult::for_event(view.invocation.event, &outcome.observation)
                 })
                 .ok_or(ReplayError::InvalidTransition)?;
             view.outcome = Some(outcome.clone());

@@ -1211,6 +1211,7 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
             facts: None,
             steering_notes: Vec::new(),
             calls_remaining: None,
+            hook_feedback: Default::default(),
         });
     coding.input.tools.as_mut().unwrap().steps[0]
         .observations
