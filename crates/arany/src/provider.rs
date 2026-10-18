@@ -493,10 +493,27 @@ pub(crate) fn restrict_outcome_schema(
     schema: serde_json::Value,
     request: &ProviderRequest,
 ) -> serde_json::Value {
+    let phases = if request.phase == AgentPhase::RootSynthesis
+        && request
+            .input
+            .tools
+            .as_ref()
+            .and_then(|t| serde_json::from_str::<Value>(&t.catalog).ok())
+            .is_some_and(|c| {
+                c["agents"].as_array().is_some_and(|agents| {
+                    agents
+                        .iter()
+                        .any(|a| a["editor"] == true && a["supported"] == true)
+                })
+            }) {
+        &[AgentPhase::RootPlan, AgentPhase::RootSynthesis][..]
+    } else {
+        std::slice::from_ref(&request.phase)
+    };
     outcome_schema_for_phases(
         assignment_schema(schema, request),
         request.collaboration,
-        &[request.phase],
+        phases,
     )
 }
 
@@ -538,6 +555,11 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
             .iter()
             .filter(|agent| agent["editor"] == true && agent["supported"] == true)
         {
+            let modes = if agent["background"] == true {
+                json!(["background"])
+            } else {
+                json!(["foreground", "background"])
+            };
             branches.push(json!({
                 "type":"object", "properties": {
                     "objective":{"type":"string", "description":"Repeat editor.mission exactly."},
@@ -548,10 +570,10 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
                         "mission":{"type":"string"}, "direction":{"type":"string"},
                         "lease":{"type":"array","items":{"type":"string"},"description":"Sorted nonoverlapping ASCII relative files or subtrees within the Goal plan and parent grant."},
                         "criterion":criterion,
-                        "mode":{"type":"string","enum":["foreground"]},
+                        "mode":{"type":"string","enum":modes},
                         "max_turns":{"type":"integer","description":format!("At most {}",agent["max_turns"])},
-                        "wave":{"type":"integer","enum":[1]},
-                        "resumes":{"type":"null"}, "supersedes":{"type":"null"}
+                        "wave":{"type":"integer","minimum":1,"maximum":8},
+                        "resumes":{"type":"null"}, "supersedes":{"type":["string", "null"]}
                     }, "required":["definition","definition_digest","mission","direction","lease","criterion","mode","max_turns","wave","resumes","supersedes"],"additionalProperties":false}
                 },"required":["objective","profile","editor"],"additionalProperties":false
             }));

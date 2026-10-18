@@ -1,20 +1,18 @@
 use super::children::ChildWork;
 use super::step::{BoxedStep, Grant};
-use super::{Action, CallResult, RunLoop, call_record, valid_finish};
+use super::{Action, RunLoop};
 use crate::engine::EngineError;
-use crate::provider::{
-    AgentPhase, ChildAssignment, ChildResult, PromptRole, ProviderOutcome, ProviderRequest,
-    ProviderResponse, ProviderTurn, RunInput,
-};
+use crate::provider::{ChildAssignment, ProviderRequest};
 use crate::session::worker::*;
 use crate::session::{AgentDisposition, AgentRole, AgentRunId, ChildGrant, Event, GoalPhase};
+use crate::session::{evidence_admitted, verification_passed};
 use crate::tools::{
     Attestation, CacheUpdate, EffectIntent, ToolCall, ToolDisposition, ToolObservation, ToolRuntime,
 };
 use base64::Engine as _;
 use std::time::Duration;
 
-struct CompletedWorker {
+pub(super) struct CompletedWorker {
     stopped: bool,
     disposition: WorkerDisposition,
     data: Option<WorkerDataRef>,
@@ -27,59 +25,119 @@ impl RunLoop<'_> {
         children: &[ChildAssignment],
         agent: Option<&str>,
     ) -> bool {
-        let [child] = children else { return false };
-        let Some(a) = &child.editor else { return false };
         let Some(runtime) = self.controls.tools else {
             return false;
         };
         let Some(policy) = runtime.worker_policy() else {
             return false;
         };
-        let Some(definition) = self.definitions.get().and_then(|d| d.get(&a.definition)) else {
-            return false;
-        };
         let Ok(Some(plan)) = self.ledger().plan_contract() else {
             return false;
         };
-        let unused = self
-            .ledger()
-            .view(|v| v.runs.last().is_some_and(|r| r.agents.len() == 1))
-            .unwrap_or(false);
-        self.controls.policy.max_children() > 0
-            && unused
-            && self.controls.goal_phase == GoalPhase::Implementation
+        let Ok((attempts, wave)) = self.ledger().view(|v| {
+            let r = v.runs.last().expect("active Run");
+            let proposals: Vec<_> = r
+                .primary()
+                .into_iter()
+                .flat_map(|a| &a.provider_calls)
+                .filter_map(|c| c.delegation.as_ref())
+                .collect();
+            (
+                proposals.iter().map(|p| p.len()).sum::<usize>(),
+                proposals.len() + 1,
+            )
+        }) else {
+            return false;
+        };
+        self.controls.goal_phase == GoalPhase::Implementation
             && crate::provider::valid_assignments(children, agent)
-            && agent.is_none_or(|name| name == a.definition)
-            && a.mode == WorkerMode::Foreground
-            && !definition.background
-            && a.wave == 1
-            && a.resumes.is_none()
-            && a.supersedes.is_none()
-            && definition.editor()
-            && a.definition_digest
-                == crate::tools::types::digest(
-                    &serde_json::to_vec(definition).expect("normalized definition"),
-                )
-            && a.max_turns <= definition.max_turns
-            && a.max_turns <= policy.max_turns
-            && a.lease
-                .iter()
-                .all(|p| within(p, &plan.paths) && within(p, &policy.parent_grant.write_paths))
-            && match &a.criterion {
-                crate::session::GoalSuccessCriterion::ToolCallSucceeded { call } => {
-                    !matches!(call.as_ref(), ToolCall::Mkdir { .. })
-                        && plan.allows_call(call)
-                        && runtime.allows(call)
-                }
-                crate::session::GoalSuccessCriterion::WorkspaceFileContent { path, .. }
-                | crate::session::GoalSuccessCriterion::WorkspaceFileDigest { path, .. } => {
-                    within(path, &plan.paths)
-                }
-            }
-            && self.editor_grant(a).is_ok_and(|g| g.valid())
+            && agent.is_none_or(|name| self.definitions.get().is_some_and(|r| r.contains_key(name)))
+            && attempts + children.len() <= usize::from(self.controls.policy.max_children())
+            && self.wave_settled().unwrap_or(false)
+            && children.iter().enumerate().all(|(index, child)| {
+                let Some(a) = &child.editor else {
+                    return self.valid_research_assignment(child, agent);
+                };
+                let Some(definition) = self.definitions.get().and_then(|d| d.get(&a.definition))
+                else {
+                    return false;
+                };
+                usize::from(a.wave) == wave
+                    && a.resumes.is_none()
+                    && a.supersedes.is_none_or(|id| {
+                        self.ledger()
+                            .view(|v| {
+                                v.runs.last().is_some_and(|r| {
+                                    r.agents.iter().any(|prior| {
+                                        prior.id == id
+                                            && prior.status != crate::session::AgentStatus::Active
+                                            && prior
+                                                .assignment
+                                                .as_ref()
+                                                .is_some_and(|w| w.released.is_some())
+                                    })
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                    && definition.editor()
+                    && (!definition.background || a.mode == WorkerMode::Background)
+                    && a.definition_digest
+                        == crate::tools::types::digest(
+                            &serde_json::to_vec(definition).expect("normalized definition"),
+                        )
+                    && a.max_turns <= definition.max_turns
+                    && a.max_turns <= policy.max_turns
+                    && a.lease.iter().all(|p| {
+                        within(p, &plan.paths) && within(p, &policy.parent_grant.write_paths)
+                    })
+                    && !children[..index]
+                        .iter()
+                        .filter_map(|c| c.editor.as_ref())
+                        .any(|b| {
+                            a.lease
+                                .iter()
+                                .any(|p| b.lease.iter().any(|q| overlaps(p, q)))
+                        })
+                    && match &a.criterion {
+                        crate::session::GoalSuccessCriterion::ToolCallSucceeded { call } => {
+                            !matches!(call.as_ref(), ToolCall::Mkdir { .. })
+                                && plan.allows_call(call)
+                                && runtime.allows(call)
+                        }
+                        crate::session::GoalSuccessCriterion::WorkspaceFileContent {
+                            path, ..
+                        }
+                        | crate::session::GoalSuccessCriterion::WorkspaceFileDigest {
+                            path, ..
+                        } => within(path, &plan.paths),
+                    }
+                    && self.editor_grant(a).is_ok_and(|g| g.valid())
+            })
     }
 
-    fn editor_grant(&self, a: &EditorAssignment) -> Result<WorkerGrant, EngineError> {
+    pub(super) fn wave_settled(&self) -> Result<bool, EngineError> {
+        self.ledger()
+            .view(|v| v.runs.last().is_some_and(crate::session::wave_settled))
+    }
+
+    pub(super) fn coordination_ready(&self) -> Result<bool, EngineError> {
+        self.ledger().view(|v| {
+            v.runs.last().is_some_and(|r| {
+                crate::session::coordination_ready(r)
+                    && r.agents.iter().any(|a| {
+                        a.status == crate::session::AgentStatus::Active && a.assignment.is_some()
+                    })
+            })
+        })
+    }
+
+    pub(super) fn worker_stopped(&self) -> Result<bool, EngineError> {
+        self.ledger()
+            .view(|v| v.runs.last().is_some_and(|r| r.workers.stop.is_some()))
+    }
+
+    pub(super) fn editor_grant(&self, a: &EditorAssignment) -> Result<WorkerGrant, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
         let mut grant = runtime
             .worker_policy()
@@ -102,49 +160,53 @@ impl RunLoop<'_> {
         Ok(grant)
     }
 
-    fn proposed_editor(&self) -> Result<EditorAssignment, EngineError> {
+    pub(super) fn proposed_editor(&self, id: AgentRunId) -> Result<EditorAssignment, EngineError> {
         self.ledger()
             .view(|v| {
                 v.runs
                     .last()?
-                    .primary()?
-                    .provider_calls
-                    .last()?
-                    .delegation
-                    .as_ref()?
+                    .agents
                     .iter()
-                    .find_map(|a| match a {
-                        crate::session::worker::ChildAssignment::Editor { assignment } => {
-                            Some(*assignment.clone())
-                        }
-                        _ => None,
-                    })
+                    .find(|a| a.id == id)?
+                    .assignment
+                    .as_ref()
+                    .map(|w| w.pins.request.clone())
             })?
             .ok_or(EngineError::InvalidHistory)
+    }
+
+    pub(super) fn worker_allowance(&self, id: AgentRunId) -> Result<u32, EngineError> {
+        self.worker_data_bytes
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .get(&id)
+            .copied()
+            .ok_or(EngineError::CoordinatorFailed)
     }
 
     fn sequence(&self) -> Result<u64, EngineError> {
         self.ledger().view(|v| v.last_sequence)
     }
 
-    pub(super) fn worker_target(&self) -> Result<EffectTarget, EngineError> {
+    pub(super) fn worker_target(&self, id: AgentRunId) -> Result<EffectTarget, EngineError> {
         self.worker
             .try_lock()
             .map_err(|_| EngineError::CoordinatorFailed)?
-            .as_ref()
+            .get(&id)
             .map(crate::tools::worker::View::target)
             .ok_or(EngineError::CoordinatorFailed)
     }
 
-    pub(super) fn worker_call_chunks(&self, call: &ToolCall) -> Result<usize, EngineError> {
+    pub(super) fn worker_call_chunks(
+        &self,
+        id: AgentRunId,
+        call: &ToolCall,
+    ) -> Result<usize, EngineError> {
         Ok(match call {
             ToolCall::PrepareWorker { preparation } => usize::from(preparation.max_chunks),
-            ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::Mkdir { .. } => (*self
-                .worker_data_bytes
-                .get()
-                .ok_or(EngineError::CoordinatorFailed)?
-                as usize)
-                .div_ceil(WORKER_CHUNK_BYTES),
+            ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::Mkdir { .. } => {
+                (self.worker_allowance(id)? as usize).div_ceil(WORKER_CHUNK_BYTES)
+            }
             _ => 0,
         })
     }
@@ -228,21 +290,37 @@ impl RunLoop<'_> {
         let ToolCall::PrepareWorker { preparation } = &intent.call else {
             return Err(EngineError::InvalidRequest);
         };
-        let a = self.proposed_editor()?;
+        let a = self
+            .worker_requests
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .get(&preparation.assignment_id)
+            .cloned()
+            .ok_or(EngineError::CoordinatorFailed)?;
         let capture_runtime = runtime.clone();
         let run_id = self.run_id;
         let id = preparation.assignment_id;
         let grant = self.editor_grant(&a)?;
-        let data_bytes = *self
-            .worker_data_bytes
-            .get()
-            .ok_or(EngineError::CoordinatorFailed)?;
+        let data_bytes = self.worker_allowance(id)?;
         let view = tokio::task::spawn_blocking(move || {
             crate::tools::worker::View::capture(&capture_runtime, run_id, id, grant, data_bytes)
         })
         .await
         .map_err(|_| EngineError::CoordinatorFailed)?;
-        let view = match view {
+        let retained_limit = self
+            .ledger()
+            .view(|v| {
+                v.runs
+                    .last()
+                    .and_then(|r| r.config.as_ref())
+                    .and_then(|c| c.worker_policy.as_ref())
+                    .map(WorkerPolicy::retained_bytes)
+            })?
+            .ok_or(EngineError::InvalidHistory)?;
+        let view = match view.and_then(|mut view| {
+            view.restrict_retained(retained_limit)?;
+            Ok(view)
+        }) {
             Ok(view) => view,
             Err(error) => {
                 return Ok(ToolObservation {
@@ -288,7 +366,7 @@ impl RunLoop<'_> {
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
         };
-        *self.worker.lock().await = Some(view);
+        self.worker.lock().await.insert(id, view);
         Ok(observation)
     }
 
@@ -304,7 +382,9 @@ impl RunLoop<'_> {
         EngineError,
     > {
         let mut slot = self.worker.lock().await;
-        let view = slot.as_mut().ok_or(EngineError::CoordinatorFailed)?;
+        let view = slot
+            .get_mut(&intent.agent_run_id)
+            .ok_or(EngineError::CoordinatorFailed)?;
         view.note_intent(&intent);
         if matches!(
             intent.call,
@@ -316,8 +396,10 @@ impl RunLoop<'_> {
         let result = view
             .edit(&runtime, intent.clone(), self.controls.cancellation.clone())
             .await;
-        self.ledger()
-            .exclude_idle_approval(runtime.queued_duration()?)?;
+        if self.ledger().in_flight_children() == 0 {
+            self.ledger()
+                .exclude_idle_approval(runtime.queued_duration()?)?;
+        }
         let candidate = match result {
             Ok(candidate) => candidate,
             Err(observation) => return Ok((*observation, None)),
@@ -344,52 +426,15 @@ impl RunLoop<'_> {
         Ok((observation, Some((candidate, data))))
     }
 
-    pub(super) async fn run_foreground_worker(
-        &self,
-        root: &mut ProviderRequest,
-        children: Vec<ChildAssignment>,
-        turn: ProviderTurn,
-    ) -> Result<(), EngineError> {
-        let assignment = children
-            .into_iter()
-            .next()
-            .and_then(|c| c.editor)
-            .ok_or(EngineError::InvalidRequest)?;
-        let Some(mut child) = self.begin_foreground_worker(root, assignment).await? else {
-            return Ok(());
-        };
-        let result = match self.reserve_active_segment(Duration::from_secs(20 * 60)) {
-            Ok(segment) => {
-                let result = self
-                    .drive_foreground_worker(&mut child, root, segment.deadline())
-                    .await;
-                self.settle_active_segment(segment)?;
-                result
-            }
-            Err(error) => Err(error),
-        };
-        let finish = match result {
-            Ok(finish) => finish,
-            Err(
-                EngineError::Tool(crate::tools::ToolError::Limit)
-                | EngineError::GoalBudgetExhausted,
-            ) => None,
-            Err(error) => return Err(error),
-        };
-        let (finish, completed) = self.complete_foreground_worker(&mut child, finish).await?;
-        self.settle_worker_handover(root, turn, &child, finish, completed)
-            .await
-    }
-
-    fn begin_foreground_worker<'a>(
+    pub(super) fn begin_worker<'a>(
         &'a self,
         root: &'a mut ProviderRequest,
         assignment: Box<EditorAssignment>,
     ) -> BoxedStep<'a, Option<ChildWork>> {
-        Box::pin(self.begin_foreground_worker_inner(root, assignment))
+        Box::pin(self.begin_worker_inner(root, assignment))
     }
 
-    async fn begin_foreground_worker_inner(
+    async fn begin_worker_inner(
         &self,
         root: &mut ProviderRequest,
         assignment: Box<EditorAssignment>,
@@ -399,13 +444,8 @@ impl RunLoop<'_> {
             children: 1,
             research: true,
         }) {
-            if self.ledger().remaining_calls() == Some(0) {
-                self.observe_worker_stop().await?;
-                self.settle_stopped_primary().await?;
-                return Ok(None);
-            }
-            self.fail_primary().await?;
-            return Ok(None);
+            self.record_capacity_stop().await?;
+            return Err(EngineError::GoalBudgetExhausted);
         }
         let mut allowance = WORKER_DATA_BYTES;
         loop {
@@ -428,49 +468,53 @@ impl RunLoop<'_> {
                 Err(
                     crate::store::StoreError::StorageFull | crate::store::StoreError::ReplayLimit,
                 ) => {
-                    self.fail_primary().await?;
-                    return Ok(None);
+                    return Err(EngineError::GoalBudgetExhausted);
                 }
                 Err(error) => return Err(error.into()),
             }
         }
         let allowance = u32::try_from(allowance).map_err(|_| EngineError::CoordinatorFailed)?;
-        self.worker_data_bytes
-            .set(allowance)
-            .map_err(|_| EngineError::CoordinatorFailed)?;
         let id = AgentRunId::new();
+        self.worker_data_bytes
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .insert(id, allowance);
+        self.worker_requests
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .insert(id, (*assignment).clone());
         let observation = match self.prepare_worker_base(root, id, allowance).await {
             Ok(observation) => observation,
             Err(EngineError::GoalBudgetExhausted) => {
-                self.settle_stopped_primary().await?;
-                return Ok(None);
+                return Err(EngineError::GoalBudgetExhausted);
             }
             Err(error) => return Err(error),
         };
         let Some(observation) = observation else {
-            self.fail_primary().await?;
             return Ok(None);
         };
         let Some(Attestation::WorkerData { data: base, .. }) = observation.attestation else {
-            self.fail_primary().await?;
             return Ok(None);
         };
         if self.observe_worker_stop().await? {
             self.worker
                 .lock()
                 .await
-                .take()
+                .remove(&id)
                 .ok_or(EngineError::CoordinatorFailed)?
                 .dispose()?;
-            self.settle_stopped_primary().await?;
-            return Ok(None);
+            return Err(EngineError::GoalBudgetExhausted);
         }
         let grant = self.editor_grant(&assignment)?;
         self.append(Event::AgentSpawned {
             run_id: self.run_id,
             agent_run_id: id,
             role: AgentRole::Child,
-            ordinal: 1,
+            ordinal: self
+                .ledger()
+                .view(|v| v.runs.last().expect("Run").agents.len())?
+                .try_into()
+                .map_err(|_| EngineError::CoordinatorFailed)?,
             objective: Some(assignment.mission.clone()),
             definition: Some(assignment.definition.clone()),
             profile: None,
@@ -547,47 +591,37 @@ impl RunLoop<'_> {
         Ok(observation.map(|(observation, _)| observation))
     }
 
-    fn complete_foreground_worker<'a>(
+    pub(super) fn complete_worker<'a>(
         &'a self,
         child: &'a mut ChildWork,
         finish: Option<crate::provider::Finish>,
-    ) -> BoxedStep<'a, (Option<crate::provider::Finish>, CompletedWorker)> {
-        Box::pin(self.complete_foreground_worker_inner(child, finish))
+        deadline: tokio::time::Instant,
+        cancelled: bool,
+    ) -> BoxedStep<'a, CompletedWorker> {
+        Box::pin(self.complete_worker_inner(child, finish, deadline, cancelled))
     }
 
-    async fn complete_foreground_worker_inner(
+    async fn complete_worker_inner(
         &self,
         child: &mut ChildWork,
         finish: Option<crate::provider::Finish>,
-    ) -> Result<(Option<crate::provider::Finish>, CompletedWorker), EngineError> {
+        deadline: tokio::time::Instant,
+        cancelled: bool,
+    ) -> Result<CompletedWorker, EngineError> {
         let id = child.agent_run_id;
         let mut stopped = self.observe_worker_stop().await?;
         let data = if finish.is_some() && !stopped {
+            let allowance = self.worker_allowance(id)?;
             let call = ToolCall::PrepareWorker {
                 preparation: WorkerPreparation {
                     assignment_id: id,
                     purpose: WorkerDataPurpose::Handover,
-                    max_chunks: (*self
-                        .worker_data_bytes
-                        .get()
-                        .ok_or(EngineError::CoordinatorFailed)?
-                        as usize)
-                        .div_ceil(WORKER_CHUNK_BYTES) as u16,
-                    max_bytes: *self
-                        .worker_data_bytes
-                        .get()
-                        .ok_or(EngineError::CoordinatorFailed)?,
+                    max_chunks: u16::try_from((allowance as usize).div_ceil(WORKER_CHUNK_BYTES))
+                        .map_err(|_| EngineError::CoordinatorFailed)?,
+                    max_bytes: allowance,
                 },
             };
-            // Handover capture has its own active reservation; the worker's Provider segment is settled.
-            let captured = match self.reserve_active_segment(Duration::from_secs(140)) {
-                Ok(segment) => {
-                    let captured = self.capture_handover(child, call, segment.deadline()).await;
-                    self.settle_active_segment(segment)?;
-                    captured
-                }
-                Err(error) => Err(error),
-            };
+            let captured = self.capture_handover(child, call, deadline).await;
             match captured {
                 Ok(data) => data,
                 Err(
@@ -603,7 +637,7 @@ impl RunLoop<'_> {
         let latest = self.ledger().view(|v| {
             v.runs
                 .last()
-                .and_then(|r| r.agents.last())
+                .and_then(|r| r.agents.iter().find(|a| a.id == id))
                 .and_then(|a| a.tools.last())
                 .and_then(|t| t.observation.clone())
         })?;
@@ -615,7 +649,7 @@ impl RunLoop<'_> {
                 self.worker
                     .lock()
                     .await
-                    .as_ref()
+                    .get(&id)
                     .ok_or(EngineError::CoordinatorFailed)?
                     .handover()?,
             )
@@ -626,7 +660,7 @@ impl RunLoop<'_> {
             self.worker
                 .lock()
                 .await
-                .as_mut()
+                .get_mut(&id)
                 .ok_or(EngineError::CoordinatorFailed)?
                 .note_intent(&observation.intent);
         }
@@ -634,7 +668,7 @@ impl RunLoop<'_> {
             .worker
             .lock()
             .await
-            .take()
+            .remove(&id)
             .ok_or(EngineError::CoordinatorFailed)?
             .dispose()?;
         let no_change = bytes.as_ref().is_some_and(|b| matches!(decode_data(b, WorkerDataPurpose::Handover), Ok(WorkerDataFacts::Changes(files)) if files.is_empty()));
@@ -653,7 +687,7 @@ impl RunLoop<'_> {
                 },
                 WorkerCause::Finished,
             )
-        } else if self.controls.cancellation.is_cancelled() {
+        } else if cancelled || self.controls.cancellation.is_cancelled() || self.pause_requested() {
             (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
         } else {
             (
@@ -693,34 +727,18 @@ impl RunLoop<'_> {
             }),
         })
         .await?;
-        Ok((
-            finish,
-            CompletedWorker {
-                stopped,
-                disposition,
-                data,
-                bytes,
-            },
-        ))
+        Ok(CompletedWorker {
+            stopped,
+            disposition,
+            data,
+            bytes,
+        })
     }
 
-    fn settle_worker_handover<'a>(
-        &'a self,
-        root: &'a mut ProviderRequest,
-        turn: ProviderTurn,
-        child: &'a ChildWork,
-        finish: Option<crate::provider::Finish>,
-        completed: CompletedWorker,
-    ) -> BoxedStep<'a, ()> {
-        Box::pin(self.settle_worker_handover_inner(root, turn, child, finish, completed))
-    }
-
-    async fn settle_worker_handover_inner(
+    pub(super) async fn settle_worker_handover(
         &self,
         root: &mut ProviderRequest,
-        turn: ProviderTurn,
         child: &ChildWork,
-        finish: Option<crate::provider::Finish>,
         completed: CompletedWorker,
     ) -> Result<(), EngineError> {
         let CompletedWorker {
@@ -756,8 +774,9 @@ impl RunLoop<'_> {
         } else {
             let data = data.ok_or(EngineError::CoordinatorFailed)?;
             self.handover
-                .set(bytes.ok_or(EngineError::CoordinatorFailed)?.into())
-                .map_err(|_| EngineError::CoordinatorFailed)?;
+                .lock()
+                .map_err(|_| EngineError::CoordinatorFailed)?
+                .insert(id, bytes.ok_or(EngineError::CoordinatorFailed)?.into());
             self.append(Event::WorkerHandoverRecorded {
                 run_id: self.run_id,
                 agent_run_id: id,
@@ -770,199 +789,18 @@ impl RunLoop<'_> {
             .await?;
             let sequence = self.sequence()?;
             if !Box::pin(self.integrate_worker(root, id, sequence, data)).await? {
-                if self.observe_worker_stop().await? {
-                    return self.settle_stopped_primary().await;
-                }
-                let outcome = self.ledger().view(|v| {
-                    v.runs
-                        .last()
-                        .and_then(|r| r.agents.iter().find(|a| a.id == id))
-                        .and_then(|a| a.assignment.as_ref())
-                        .and_then(|w| w.integration.as_ref().map(|(_, i)| i.outcome))
-                })?;
-                let Some(outcome) = outcome else {
-                    return self.fail_primary().await;
-                };
-                return Box::pin(self.synthesize(
-                    root,
-                    vec![Some(ChildResult {
-                        objective: child.objective.clone(),
-                        summary: "Worker handover was not published".into(),
-                        result: format!(
-                            "Integration {outcome:?}; the Workspace is unchanged by this worker"
-                        ),
-                    })],
-                    turn,
-                ))
-                .await;
+                self.handover
+                    .lock()
+                    .map_err(|_| EngineError::CoordinatorFailed)?
+                    .remove(&id);
+                return Ok(());
             }
         }
-        if stopped || self.observe_worker_stop().await? {
-            return self.settle_stopped_primary().await;
-        }
-        let report = finish.filter(|_| success).map_or_else(
-            || ChildResult {
-                objective: child.objective.clone(),
-                summary: "Worker private work was discarded".into(),
-                result: format!("Worker disposition: {disposition:?}; no Workspace publication"),
-            },
-            |f| ChildResult {
-                objective: child.objective.clone(),
-                summary: f.summary,
-                result: f.result,
-            },
-        );
-        Box::pin(self.synthesize(root, vec![Some(report)], turn)).await
-    }
-
-    fn drive_foreground_worker<'a>(
-        &'a self,
-        child: &'a mut ChildWork,
-        root: &'a ProviderRequest,
-        deadline: tokio::time::Instant,
-    ) -> BoxedStep<'a, Option<crate::provider::Finish>> {
-        Box::pin(self.drive_foreground_worker_inner(child, root, deadline))
-    }
-
-    async fn drive_foreground_worker_inner(
-        &self,
-        child: &mut ChildWork,
-        root: &ProviderRequest,
-        deadline: tokio::time::Instant,
-    ) -> Result<Option<crate::provider::Finish>, EngineError> {
-        while child.turns_remaining > 0
-            && !self.controls.cancellation.is_cancelled()
-            && !self.pause_requested()
-            && self.ledger().can_start_provider_call()
-        {
-            if child.turns_remaining == 1 {
-                child.tool_calls_remaining = 0;
-            }
-            if let Some(tools) = child.tools.as_mut() {
-                if !self
-                    .controls
-                    .tools
-                    .ok_or(EngineError::InvalidRequest)?
-                    .result_capacity(tools.rendered_len() + 4096, 0)
-                    .is_some_and(|room| room >= 4608)
-                {
-                    child.tool_calls_remaining = 0;
-                }
-                if let Some(step) = tools.steps.last_mut() {
-                    step.calls_remaining = Some(child.tool_calls_remaining);
-                } else {
-                    let mut catalog: serde_json::Value = serde_json::from_str(&tools.catalog)
-                        .map_err(|_| EngineError::InvalidRequest)?;
-                    catalog["tool_calls_remaining"] = serde_json::json!(child.tool_calls_remaining);
-                    tools.catalog = catalog.to_string();
-                }
-            }
-            let mut request = ProviderRequest {
-                session_id: self.session_id,
-                run_id: self.run_id,
-                agent_run_id: child.agent_run_id,
-                phase: AgentPhase::ChildWork,
-                collaboration: crate::session::CollaborationPolicy::Single,
-                model: String::new(),
-                max_output_tokens: crate::engine::CHILD_OUTPUT_TOKEN_CAP,
-                input: RunInput {
-                    tools: child.tools.clone(),
-                    goal_budget: Some(self.ledger().effective_budget()?),
-                    goal_plan_contract: self.ledger().plan_contract()?,
-                    workspace_guidance: Some(format!(
-                        "{}\n\nUntrusted worker assignment: {}\n{}",
-                        root.input.workspace_guidance.as_deref().unwrap_or_default(),
-                        serde_json::to_string(&self.proposed_editor()?)
-                            .map_err(|_| EngineError::InvalidRequest)?,
-                        child.definition.as_ref().map_or("", |d| d.body.as_str())
-                    )),
-                    ..RunInput::new(PromptRole::Editor, child.objective.clone())
-                },
-            };
-            self.routing.bind(
-                crate::provider::ProviderRole::Child,
-                child.agent_run_id,
-                &mut request.model,
-                &mut request.max_output_tokens,
-            )?;
-            self.admit_worker_action(0).await?;
-            self.reserve_provider_call(
-                child.agent_run_id,
-                Action::Child {
-                    in_flight: 0,
-                    research: true,
-                },
-                0,
-            )
-            .await?;
-            let result = self
-                .routing
-                .invoke(request, deadline, self.controls.cancellation.clone(), None)
-                .await?;
-            self.settle_result(&result)?;
-            child.turns_remaining -= 1;
-            let valid = self.ledger().tokens_within_limit()
-                && match &result {
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Finish(f),
-                        ..
-                    }) => valid_finish(f, 16 * 1024),
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Tools(requests),
-                        ..
-                    }) => {
-                        matches!(requests.as_slice(), [request] if request.plan_contract.is_none() && request.call.valid() && child.tool_calls_remaining > 0 && child.turns_remaining > 0 && self.editor_grant(&self.proposed_editor()?)?.allows(&request.call))
-                    }
-                    _ => false,
-                };
-            self.append(Event::ProviderCallRecorded {
-                run_id: self.run_id,
-                agent_run_id: child.agent_run_id,
-                record: call_record(AgentPhase::ChildWork, &result, valid, None),
-            })
-            .await?;
-            self.ledger().child_call_finished()?;
-            if !valid {
-                return Ok(None);
-            }
-            match result {
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Finish(f),
-                    ..
-                }) => return Ok(Some(f)),
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Tools(mut requests),
-                    turn,
-                    ..
-                }) => {
-                    if self.observe_worker_stop().await?
-                        || self.ledger().remaining_calls().is_some_and(|n| n < 2)
-                    {
-                        return Ok(None);
-                    }
-                    let continues = Box::pin(self.execute_step(
-                        Grant::Researcher { child, deadline },
-                        requests.pop().ok_or(EngineError::CoordinatorFailed)?,
-                        turn,
-                    ))
-                    .await?;
-                    child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
-                    let succeeded = self.ledger().view(|v| {
-                        v.runs
-                            .last()
-                            .and_then(|r| r.agents.last())
-                            .and_then(|a| a.tools.last())
-                            .and_then(|t| t.observation.as_ref())
-                            .is_some_and(|o| o.disposition == ToolDisposition::Succeeded)
-                    })?;
-                    if !continues || !succeeded {
-                        return Ok(None);
-                    }
-                }
-                _ => return Ok(None),
-            }
-        }
-        Ok(None)
+        self.handover
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .remove(&id);
+        Ok(())
     }
 
     async fn capture_handover(
@@ -989,7 +827,7 @@ impl RunLoop<'_> {
         }
         intent.expires_at_ms =
             crate::tools::now_ms().saturating_add(u64::from(intent.limits.runtime_ms));
-        intent.target = self.worker_target()?;
+        intent.target = self.worker_target(child.agent_run_id)?;
         intent.limits.cache_requested_bytes = 0;
         intent.limits.cache_bytes = 0;
         intent.limits.cache_candidate_bytes = 0;
@@ -1213,16 +1051,14 @@ impl RunLoop<'_> {
         } else if !self.ledger().can_start_provider_call()
             || self.ledger().remaining_calls() == Some(0)
             || self.ledger().spent_active_time_exhausted()
-            || self
-                .ledger()
-                .active_remaining_ms()
-                .is_some_and(|remaining| remaining <= 5_000)
         {
             Some(WorkerStopReason::Budget)
         } else {
             None
         };
         if let Some(reason) = reason {
+            // The stop fact is one Event; a refused admission must not relabel a cancel, pause or budget stop.
+            let _ = self.admit_worker_action(0).await;
             self.append(Event::WorkerStopObserved {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
@@ -1269,37 +1105,36 @@ impl RunLoop<'_> {
                     }
                     let mut contract = plan.clone();
                     contract.success_criterion = w.pins.request.criterion.clone();
-                    let mut state = contract.initial_success_state();
-                    let mut evidence = Vec::new();
-                    let recent: Vec<_> = run
+                    let mut evidence: Vec<u64> = run
                         .tools
                         .iter()
-                        .filter(|t| t.finished_sequence.is_some_and(|seq| seq > released))
-                        .rev()
-                        .take(8)
+                        .filter_map(|t| {
+                            let seq = t.finished_sequence.filter(|seq| *seq > released)?;
+                            t.observation
+                                .as_ref()
+                                .is_some_and(|o| evidence_admitted(&contract, o))
+                                .then_some(seq)
+                        })
                         .collect();
-                    for t in recent.into_iter().rev() {
-                        if let Some(seq) = t.finished_sequence.filter(|seq| *seq > released)
-                            && let Some(o) = &t.observation
-                        {
-                            contract.observe_success(&mut state, o);
-                            evidence.push(seq);
-                        }
-                    }
-                    if evidence.is_empty() || evidence.len() > 8 {
+                    evidence.drain(..evidence.len().saturating_sub(8));
+                    if evidence.is_empty() {
                         return None;
                     }
+                    let passed = verification_passed(&contract, run, released, &evidence).ok()?;
                     Some(WorkerVerification {
                         assignment_id: a.id,
                         criterion_digest: crate::tools::types::digest(
                             &serde_json::to_vec(&contract.success_criterion).expect("criterion"),
                         ),
-                        passed: contract.success_state_satisfied(&state),
+                        passed,
                         evidence,
                     })
                 })
                 .collect::<Vec<_>>()
         })?;
+        if !records.is_empty() && self.admit_worker_action(0).await.is_err() {
+            return self.record_capacity_stop().await;
+        }
         for record in records {
             self.append(Event::WorkerVerificationRecorded {
                 run_id: self.run_id,

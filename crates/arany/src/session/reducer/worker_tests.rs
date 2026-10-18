@@ -1623,6 +1623,29 @@ fn worker_protocol_nonoverlap_and_completion_order() {
         }
         refused(&prefix, invalid, "overlapping proposal");
     }
+    pins.request.mode = WorkerMode::Background;
+    for event in &mut f.events {
+        match event {
+            Event::ProviderCallRecorded { record, .. } => {
+                for proposal in record.delegation.iter_mut().flatten() {
+                    if let ChildAssignment::Editor { assignment } = proposal {
+                        assignment.mode = WorkerMode::Background;
+                    }
+                }
+            }
+            Event::AgentSpawned {
+                assignment: Some(pins),
+                ..
+            } => pins.request.mode = WorkerMode::Background,
+            _ => {}
+        }
+    }
+    f.call(
+        f.primary,
+        AgentPhase::RootSynthesis,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
     let first_base = f.base.clone();
     let first_changes = f.changes.clone();
     f.child = AgentRunId::new();
@@ -2301,6 +2324,14 @@ fn worker_protocol_refused_base_capture_spends_its_slot_and_other_workers_procee
     });
     let view = f.view();
     assert_eq!(view.runs[0].agents.len(), 2);
+    for event in &mut f.events {
+        if let Event::ToolFinished { observation, .. } = event
+            && observation.intent.id == refused.id
+        {
+            observation.disposition = ToolDisposition::Failed;
+        }
+    }
+    assert_eq!(f.view().runs[0].agents.len(), 2);
 }
 
 #[test]
@@ -2912,4 +2943,68 @@ fn worker_protocol_unverified_synthesis_is_recorded_but_cannot_finish() {
         },
         "finish without fresh verification",
     );
+}
+
+#[test]
+fn worker_protocol_researcher_only_run_rejects_a_call_after_an_invalid_synthesis() {
+    let mut f = fixture();
+    let delegated = f
+        .events
+        .iter()
+        .position(|e| matches!(e, Event::ProviderCallRecorded { record, .. } if record.delegation.is_some()))
+        .unwrap();
+    f.events.truncate(delegated + 1);
+    let Event::ProviderCallRecorded { record, .. } = &mut f.events[delegated] else {
+        unreachable!()
+    };
+    record.delegation = Some(vec![ChildAssignment::Researcher {
+        objective: "Research".into(),
+        definition: None,
+        profile: None,
+    }]);
+    let researcher = AgentRunId::new();
+    f.push(Event::AgentSpawned {
+        run_id: f.run,
+        agent_run_id: researcher,
+        ordinal: 1,
+        role: AgentRole::Child,
+        objective: Some("Research".into()),
+        grant: Some(ChildGrant::ReadOnly),
+        definition: None,
+        profile: None,
+        assignment: None,
+    });
+    f.call(
+        researcher,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        None,
+    );
+    f.push(Event::AgentFinished {
+        run_id: f.run,
+        agent_run_id: researcher,
+        disposition: AgentDisposition::Finished,
+        summary: Some("done".into()),
+        result: Some("done".into()),
+        worker: None,
+    });
+    f.call(
+        f.primary,
+        AgentPhase::RootSynthesis,
+        ProviderCallDisposition::InvalidResponse,
+        None,
+    );
+    f.view();
+    let mut again = Fixture {
+        events: f.events.clone(),
+        ..f
+    };
+    again.call(
+        again.primary,
+        AgentPhase::RootSynthesis,
+        ProviderCallDisposition::Finished,
+        None,
+    );
+    let recorded = again.events.pop().unwrap();
+    refused(&again, recorded, "synthesis after an invalid synthesis");
 }

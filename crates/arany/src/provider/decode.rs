@@ -243,6 +243,10 @@ mod tests {
         let validator = jsonschema::validator_for(&schema).unwrap();
         assert!(validator.is_valid(&value));
         value["outcome"]["children"][0]["editor"]["mode"] = json!("background");
+        assert!(validator.is_valid(&value));
+        value["outcome"]["children"][0]["editor"]["wave"] = json!(8);
+        assert!(validator.is_valid(&value));
+        value["outcome"]["children"][0]["editor"]["wave"] = json!(9);
         assert!(!validator.is_valid(&value));
         request.input.role = crate::provider::PromptRole::Editor;
         request.phase = crate::provider::AgentPhase::ChildWork;

@@ -222,6 +222,7 @@ pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<Comm
         let engine = Engine::open(
             state,
             EngineConfig {
+                worker_concurrency: None,
                 telemetry,
                 guard_executable: std::env::current_exe().ok(),
             },
@@ -271,6 +272,7 @@ async fn run_with_provider(
     let engine = Engine::open(
         state,
         EngineConfig {
+            worker_concurrency: None,
             telemetry,
             guard_executable: std::env::current_exe().ok(),
         },

@@ -352,6 +352,7 @@ fn action_bounds_reserve_only_the_selected_roles_switches() {
             },
             5,
         ),
+        (Action::Worker { chunks: 1093 }, 12),
         (Action::Tool, 2),
         (Action::Review, 2),
         (Action::Compaction, 0),

@@ -879,7 +879,9 @@ impl ToolObservation {
         matches!(
             self.disposition,
             ToolDisposition::Uncertain | ToolDisposition::Cancelled
-        ) || (self.disposition == ToolDisposition::Failed && self.attestation.is_none())
+        ) || (self.disposition == ToolDisposition::Failed
+            && self.attestation.is_none()
+            && !matches!(&self.intent.call, ToolCall::PrepareWorker { preparation } if preparation.purpose == crate::session::worker::WorkerDataPurpose::Base))
             || self.cache_update == CacheUpdate::Uncertain
     }
 

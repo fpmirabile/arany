@@ -6,8 +6,15 @@ pub mod goals;
 pub mod process;
 pub mod routing;
 pub mod scenario;
+#[cfg(unix)]
+pub mod worker_teams;
 
 pub use crate::provider::test_image;
+pub use crate::tools::types::MAX_TOOL_CONTEXT_BYTES;
+
+pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
+    context.rendered_len()
+}
 
 static ACCOUNT_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 #[cfg(unix)]

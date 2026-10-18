@@ -9,6 +9,7 @@ use crate::provider::AgentPhase;
 mod agent;
 mod worker;
 pub use worker::{WorkerState, WorkerView};
+pub(crate) use worker::{coordination_ready, evidence_admitted, verification_passed, wave_settled};
 mod goal;
 mod run;
 mod session;
@@ -494,10 +495,14 @@ fn is_tool_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallR
 
 fn is_delegated_synthesis(run: &RunView, agent: &AgentView, record: &ProviderCallRecord) -> bool {
     agent.role == AgentRole::Primary
-        && agent
-            .provider_calls
-            .last()
-            .is_some_and(|call| call.disposition == ProviderCallDisposition::Delegated)
+        && agent.provider_calls.last().is_some_and(|call| {
+            call.disposition == ProviderCallDisposition::Delegated
+                || call.phase == AgentPhase::RootSynthesis
+                    && call.disposition == ProviderCallDisposition::InvalidResponse
+                    && agent.provider_calls.len() > 1
+                    && run.workers.stop.is_none()
+                    && run.agents.iter().any(|a| a.assignment.is_some())
+        })
         && record.phase == AgentPhase::RootSynthesis
         && (all_children_finished(run)
             || record.disposition != ProviderCallDisposition::Delegated
