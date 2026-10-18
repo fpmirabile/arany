@@ -536,9 +536,10 @@ async fn cleanup_storage_once(root: &Path, check: &Cell<CleanupCheck>) -> Result
         let current = disk_command(root, &["info", "-plist"]).await?;
         let current = attachments(&current, root)?;
         check.set(CleanupCheck::DeviceUnlisted);
-        if !current.iter().any(|attachment| attachment.device == device) {
-            return Err(ToolError::ChangedInput);
-        }
+        super::super::require_listed(
+            current.iter().map(|attachment| attachment.device.as_path()),
+            device.as_path(),
+        )?;
         check.set(CleanupCheck::DetachFailed);
         disk_command(
             root,

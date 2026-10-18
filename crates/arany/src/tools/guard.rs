@@ -587,6 +587,19 @@ pub(super) async fn retry_transient<T, Fut: std::future::Future<Output = Result<
     }
 }
 
+// A device gone at the re-check may still be detaching; never detach it, and let a fresh attempt confirm.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn require_listed<T: PartialEq>(
+    mut listed: impl Iterator<Item = T>,
+    device: T,
+) -> Result<(), ToolError> {
+    if listed.any(|candidate| candidate == device) {
+        Ok(())
+    } else {
+        Err(ToolError::ProtectionUnavailable)
+    }
+}
+
 pub(super) fn bootstrap_failure(stderr: &[u8]) -> Option<ToolError> {
     serde_json::from_slice::<BootstrapFailure>(stderr)
         .ok()
@@ -1309,6 +1322,76 @@ mod tests {
             parse_observation(br#"{"stage":"made_up"}"#),
             Err(ToolError::Operation)
         ));
+    }
+
+    type Listing = &'static [&'static str];
+
+    // Each attempt sees an initial inventory, a per-device re-check and a final confirming inventory.
+    async fn cleanup_with_listings(
+        attempts: &[(Listing, Listing, Listing)],
+        deadline: tokio::time::Instant,
+    ) -> (Result<(), ToolError>, Vec<&'static str>) {
+        let attempt = std::cell::Cell::new(0);
+        let detached = std::cell::RefCell::new(Vec::new());
+        let result = retry_transient(8, Duration::ZERO, deadline, || {
+            let (initial, recheck, confirm) = attempts[attempt.get().min(attempts.len() - 1)];
+            attempt.set(attempt.get() + 1);
+            let detached = &detached;
+            async move {
+                for device in initial {
+                    require_listed(recheck.iter(), device)?;
+                    detached.borrow_mut().push(*device);
+                }
+                if confirm.is_empty() {
+                    Ok(())
+                } else {
+                    Err(ToolError::ProtectionUnavailable)
+                }
+            }
+        })
+        .await;
+        (result, detached.into_inner())
+    }
+
+    #[tokio::test]
+    async fn a_device_unlisted_before_detach_is_retried_and_accepted_only_by_a_fresh_listing() {
+        let far = tokio::time::Instant::now() + Duration::from_secs(60);
+        let (vanished, detached) =
+            cleanup_with_listings(&[(&["disk4"], &[], &[]), (&[], &[], &[])], far).await;
+        assert!(
+            vanished.is_ok(),
+            "a fresh empty inventory confirms detachment"
+        );
+        assert!(detached.is_empty(), "an unlisted device is never detached");
+
+        let (reappeared, detached) = cleanup_with_listings(
+            &[(&["disk4"], &[], &[]), (&["disk4"], &["disk4"], &[])],
+            far,
+        )
+        .await;
+        assert!(reappeared.is_ok());
+        assert_eq!(detached, ["disk4"], "only a re-listed device is detached");
+
+        let (still_attached, detached) =
+            cleanup_with_listings(&[(&["disk4"], &[], &[]), (&[], &[], &["disk4"])], far).await;
+        assert!(
+            matches!(still_attached, Err(ToolError::ProtectionUnavailable)),
+            "a vanished device never counts as detached while an inventory still lists it"
+        );
+        assert!(detached.is_empty());
+
+        let (never_settles, _) = cleanup_with_listings(&[(&["disk4"], &[], &[])], far).await;
+        assert!(matches!(
+            never_settles,
+            Err(ToolError::ProtectionUnavailable)
+        ));
+
+        let (lapsed, _) =
+            cleanup_with_listings(&[(&["disk4"], &[], &[])], tokio::time::Instant::now()).await;
+        assert!(
+            matches!(lapsed, Err(ToolError::ProtectionUnavailable)),
+            "an unconfirmed device stays unconfirmed at the deadline"
+        );
     }
 
     #[tokio::test]
