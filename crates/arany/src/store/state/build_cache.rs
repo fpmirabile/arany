@@ -2362,6 +2362,7 @@ mod tests {
         let occupied = inventory(&dir).expect("current aggregate inventory");
         let token = format!("{:064x}", MAX_IDENTITIES - 1);
         let (lock, _) = open_lock_file(&dir, &identity_lock_name(&token)).expect("other lock");
+        lock_exclusive(&lock, true).expect("active cache owner");
         let mut reservation =
             create_private_file(&dir, &reservation_name(&token)).expect("other reservation");
         let reserved = AGGREGATE_BYTES
