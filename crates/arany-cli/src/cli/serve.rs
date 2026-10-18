@@ -9,6 +9,7 @@ use tokio::{
 };
 
 mod approvals;
+mod history;
 mod items;
 mod server;
 mod threads;

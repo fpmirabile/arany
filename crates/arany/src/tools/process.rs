@@ -1,9 +1,8 @@
 use super::ToolError;
 use super::catalog::string;
-use super::guard::{GuardContext, capture, payload};
+use super::guard::{GuardContext, capture, payload, spawn_before};
 use super::types::{CommandResult, ToolCall, valid_name, valid_relative};
 use serde_json::{Value, json};
-use std::time::Duration;
 
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
@@ -65,10 +64,12 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         &site.config.runtime_grants,
         site.intent.limits.cache_bytes > 0,
     )?;
+    let deadline = tokio::time::Instant::now() + site.remaining_runtime();
+    let child = spawn_before(&mut command, deadline)?;
     let (status, out, err) = capture(
-        command.spawn().map_err(|_| ToolError::Operation)?,
+        child,
         (site.intent.limits.result_bytes as usize / 2).saturating_sub(128),
-        Duration::from_millis(u64::from(site.intent.limits.runtime_ms)),
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
     )
     .await?;
     #[cfg(target_os = "linux")]

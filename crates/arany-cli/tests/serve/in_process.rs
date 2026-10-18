@@ -1735,3 +1735,5 @@ async fn oversized_resume_does_not_load_the_thread() {
 
 #[path = "goal_controls.rs"]
 mod goal_controls;
+#[path = "history.rs"]
+mod history_tests;
