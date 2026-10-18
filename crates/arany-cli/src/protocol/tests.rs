@@ -105,6 +105,9 @@ fn every_conformance_message_validates_against_the_schema() {
         ("events/subscribe", json!({"threadId": thread_id, "since": 0}), json!({"events": [], "nextSince": null})),
         ("receipt/get", json!({"threadId": thread_id, "goalId": goal_id}), json!({"goal": {"id": goal_id, "status": "completed", "objective": "Hello", "budget": {"maxProviderCalls": 64, "maxTokens": null, "maxActiveMs": 1800000, "maxRuns": 16}, "usage": {"runs": 1, "providerCalls": 1, "activeMs": 1, "uncertainActiveMs": 0, "knownTokens": 0, "knownCachedTokens": 0, "tokenUsageUnknown": true}, "report": {"summary": "Done", "changes": [], "evidence": [], "unresolved": [], "cachedInputTokens": 0}}})),
         ("turn/interrupt", json!({"threadId": thread_id, "turnId": run_id}), json!({})),
+        ("turn/steer", json!({"threadId": thread_id, "turnId": run_id, "input": [{"type": "text", "text": "Use the smaller fixture"}]}), json!({"turnId": run_id})),
+        ("goal/pause", json!({"threadId": thread_id, "goalId": goal_id}), json!({})),
+        ("goal/resume", json!({"threadId": thread_id, "goalId": goal_id, "input": [{"type": "text", "text": "Continue"}]}), json!({"turn": turn})),
     ].into_iter().enumerate() {
         let request = json!({"jsonrpc": "2.0", "id": index, "method": name, "params": params});
         assert!(validator.is_valid(&request), "request {name}");
@@ -117,6 +120,9 @@ fn every_conformance_message_validates_against_the_schema() {
             "thread/resume" => {serde_json::from_value::<ThreadResumeParams>(params).unwrap();}
             "turn/start" => {serde_json::from_value::<TurnStartParams>(params).unwrap();}
             "turn/interrupt" => {serde_json::from_value::<TurnInterruptParams>(params).unwrap();}
+            "turn/steer" => {serde_json::from_value::<TurnSteerParams>(params).unwrap();}
+            "goal/pause" => {serde_json::from_value::<GoalPauseParams>(params).unwrap();}
+            "goal/resume" => {serde_json::from_value::<GoalResumeParams>(params).unwrap();}
             "thread/fork" => {serde_json::from_value::<ThreadForkParams>(params).unwrap();}
             "events/subscribe" => {serde_json::from_value::<EventsSubscribeParams>(params).unwrap();}
             "receipt/get" => {serde_json::from_value::<ReceiptGetParams>(params).unwrap();}
@@ -292,6 +298,71 @@ fn protocol_params_reject_unknown_fields_unsupported_modes_and_input_overflow() 
     assert!(
         serde_json::from_value::<ThreadForkParams>(json!({"threadId":thread,"cwd":"relative"}))
             .is_err()
+    );
+}
+
+#[test]
+fn steering_and_resume_input_is_exactly_one_bounded_text() {
+    let ids = json!({"threadId": "019a0011-2233-7444-8555-667788990000", "turnId": "019a0011-2233-7444-8555-667788990001", "goalId": "019a0011-2233-7444-8555-667788990002"});
+    let text = |text: String| json!([{"type": "text", "text": text}]);
+    let image = json!({"type": "image", "mediaType": "image/png", "data": "eA=="});
+    let with = |name: &str, input: Value| match name {
+        "steer" => serde_json::from_value::<TurnSteerParams>(
+            json!({"threadId": ids["threadId"], "turnId": ids["turnId"], "input": input}),
+        )
+        .is_ok(),
+        _ => serde_json::from_value::<GoalResumeParams>(
+            json!({"threadId": ids["threadId"], "goalId": ids["goalId"], "input": input}),
+        )
+        .is_ok(),
+    };
+    let schema = protocol_schema();
+    let accepts = |method: &str, ids: Value, input: &Value| {
+        let mut params = ids;
+        params["input"] = input.clone();
+        let mut reference = schema["methods"][method]["params"].clone();
+        reference["$schema"] = schema["$schema"].clone();
+        reference["$defs"] = schema["$defs"].clone();
+        jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .offline()
+            .build(&reference)
+            .unwrap()
+            .is_valid(&params)
+    };
+    for (name, method) in [("steer", "turn/steer"), ("resume", "goal/resume")] {
+        let wire_ids = if name == "steer" {
+            json!({"threadId": ids["threadId"], "turnId": ids["turnId"]})
+        } else {
+            json!({"threadId": ids["threadId"], "goalId": ids["goalId"]})
+        };
+        assert!(accepts(method, wire_ids.clone(), &text("hello".into())));
+        assert!(
+            !accepts(method, wire_ids, &json!([image.clone()])),
+            "{method}"
+        );
+        assert!(with(name, text("x".repeat(64 * 1024))), "{name}");
+        for input in [
+            json!([]),
+            text("x".repeat(64 * 1024 + 1)),
+            json!([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]),
+            json!([image.clone()]),
+            json!([{"type": "text", "text": "a"}, image.clone()]),
+        ] {
+            assert!(!with(name, input.clone()), "{name} {input}");
+        }
+    }
+    assert!(
+        serde_json::from_value::<TurnSteerParams>(
+            json!({"threadId": ids["threadId"], "turnId": ids["turnId"]})
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<GoalResumeParams>(
+            json!({"threadId": ids["threadId"], "goalId": ids["goalId"]})
+        )
+        .is_ok()
     );
 }
 

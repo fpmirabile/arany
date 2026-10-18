@@ -17,6 +17,9 @@ pub fn protocol_schema() -> Value {
         "receipt/get": method::<ReceiptGetParams, ReceiptGetResult>(&mut generator),
         "turn/start": method::<TurnStartParams, TurnResult>(&mut generator),
         "turn/interrupt": method::<TurnInterruptParams, Empty>(&mut generator),
+        "turn/steer": method::<TurnSteerParams, TurnSteerResult>(&mut generator),
+        "goal/pause": method::<GoalPauseParams, Empty>(&mut generator),
+        "goal/resume": method::<GoalResumeParams, TurnResult>(&mut generator),
     });
     let notifications = json!({
         "initialized": {"params": generator.subschema_for::<Empty>()},
