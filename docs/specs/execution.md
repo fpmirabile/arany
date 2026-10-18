@@ -84,8 +84,8 @@ Every Tool intent has `target: Workspace | WorkerView { assignment_id, base_dige
 
 Internal `PrepareWorker` admits only base or handover capture with an exact assignment ID, maximum bytes and chunk count. Base capture follows its open proposal before spawn; another capture cannot replace an unspawned preparation. Handover capture follows observed child Finish before AgentFinished. Preparation is excluded from model Tool counts and historical Tool bodies; there is no general blob/script API. One Tool remains pending per Run; only correlated data and seal records can complete its data production. Unsealed interrupted prefixes remain valid history and authorize nothing.
 
-| Worker data bound | Rejection behavior |
-|---|---|
+| Worker data bound | Limit | Rejection behavior |
+|---|---|---|
 | Changeset | 2,048 sorted regular files; 32 MiB decoded before plus after content combined; 1 MiB/file version; 48 MiB canonical serialized JSON | Reject the whole record at the first exceeded bound; no split publication |
 | Base manifest metadata | 2,048 entries, 32 MiB declared file content, 3 MiB canonical serialized metadata | Reject unsupported entry kinds, protected paths, invalid digests, ordering or capacity |
 | Chunk | 45 KiB raw, canonical base64, hash/length/ordinal, assignment, purpose and producing Tool ID; complete envelope ≤64 KiB | Reject changed, duplicate, oversized, trailing or out-of-order data |

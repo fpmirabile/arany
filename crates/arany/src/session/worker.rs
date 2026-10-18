@@ -655,13 +655,23 @@ pub(crate) fn decode_data(
     }
     let mut total = 0usize;
     let mut facts = Vec::with_capacity(changeset.files.len());
+    let lowered: Vec<String> = changeset
+        .files
+        .iter()
+        .map(|file| file.path.to_ascii_lowercase())
+        .collect();
     for (i, file) in changeset.files.iter().enumerate() {
         if !writable_path(&file.path)
             || matches!((&file.before, &file.after), (None, None))
             || matches!((&file.before, &file.after), (Some(a),Some(b)) if a.sha256 == b.sha256 && a.executable == b.executable)
             || changeset.files[..i]
                 .iter()
-                .any(|f| f.path >= file.path || overlaps(&f.path, &file.path))
+                .zip(&lowered)
+                .any(|(f, earlier)| {
+                    f.path >= file.path
+                        || contains(earlier, &lowered[i])
+                        || contains(&lowered[i], earlier)
+                })
         {
             return Err(ReplayError::InvalidPayload);
         }

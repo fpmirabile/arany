@@ -539,7 +539,7 @@ impl RunLoop<'_> {
     }
 
     fn permission(&self, grant: &Grant<'_>, runtime: &ToolRuntime, call: &ToolCall) -> Permission {
-        // Definition parsing is an internal Engine step, never a model Tool; it runs only in the fixed Guard grant.
+        // Engine-owned definition parsing and worker preparation are never model Tools, so rules and modes do not apply; each runs only in its fixed grant.
         if call.is_internal() {
             return Permission {
                 decision: Decision::Allow,
