@@ -265,7 +265,11 @@ fn worker_protocol_store_cold_prefixes_and_old_versions_preserve_data() {
     ] {
         let current = payload_version(kind).unwrap();
         // A version-1 kind has no previous version; a foreign version must reject just the same.
-        let stale = if current > 1 { current - 1 } else { current + 1 };
+        let stale = if current > 1 {
+            current - 1
+        } else {
+            current + 1
+        };
         connection
             .execute(
                 "UPDATE events SET event_version=?1 WHERE kind=?2",
