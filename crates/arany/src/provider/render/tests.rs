@@ -73,6 +73,7 @@ fn request(steps: Vec<ToolStep>) -> ProviderRequest {
             }],
             goal_budget: Some(GoalBudget::default()),
             tools: Some(ToolContext {
+                stop_bytes: 0,
                 catalog: catalog(),
                 history_summary: None,
                 steps,
@@ -357,6 +358,9 @@ fn history_tool_block_projects_calls_without_intent_internals() {
         definitions: Default::default(),
         display: Vec::new(),
         steering_notes: Vec::new(),
+        lifecycle_hooks: Vec::new(),
+        lifecycle_hook_sequence: None,
+        provider_sequences: Default::default(),
         provider_fallbacks: Vec::new(),
     };
     let block = history_tool_block(&run);
@@ -420,6 +424,9 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
         definitions: Default::default(),
         display: Vec::new(),
         steering_notes: Vec::new(),
+        lifecycle_hooks: Vec::new(),
+        lifecycle_hook_sequence: None,
+        provider_sequences: Default::default(),
         provider_fallbacks: Vec::new(),
     };
     assert!(run.model_tools().is_empty());
@@ -473,4 +480,65 @@ fn a_hook_narrowed_denial_renders_as_data_beside_the_one_tool_result() {
         let text = format!("{block:?}");
         text.contains("hook_narrowing") && text.contains("Hook narrowed this Tool to: Read")
     }));
+}
+
+#[test]
+fn stop_hook_feedback_is_user_data_and_keeps_prior_conversation_prefix() {
+    let mut request = request(vec![step("first", "src/lib.rs")]);
+    let original = conversation(&request).unwrap();
+    request
+        .input
+        .stop_hook_feedback
+        .push(crate::provider::StopHookFeedback {
+            after_step: 1,
+            turn: ProviderTurn::scripted(),
+            text: "verify the result".into(),
+            facts: None,
+            steering_notes: Vec::new(),
+        });
+    let continued = conversation(&request).unwrap();
+    assert_eq!(
+        original.messages,
+        continued.messages[..original.messages.len()]
+    );
+    assert_eq!(original.system, continued.system);
+    let last = continued.messages.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    assert_eq!(
+        last.blocks,
+        vec![data_block("stop_hook_feedback", json!("verify the result"))]
+    );
+    request
+        .input
+        .tools
+        .as_mut()
+        .unwrap()
+        .steps
+        .push(step("second", "src/main.rs"));
+    let later = conversation(&request).unwrap();
+    assert_eq!(
+        continued.messages,
+        later.messages[..continued.messages.len()]
+    );
+}
+
+#[test]
+fn continuation_notes_follow_the_stop_feedback_without_touching_the_prefix() {
+    let mut request = request(vec![step("first", "src/lib.rs")]);
+    request
+        .input
+        .stop_hook_feedback
+        .push(crate::provider::StopHookFeedback {
+            after_step: 1,
+            turn: ProviderTurn::scripted(),
+            text: "verify the result".into(),
+            facts: None,
+            steering_notes: Vec::new(),
+        });
+    let before = conversation(&request).unwrap();
+    request.input.stop_hook_feedback[0].steering_notes = vec!["later note".into()];
+    let after = conversation(&request).unwrap();
+    let kept = before.messages.len() - 1;
+    assert_eq!(before.messages[..kept], after.messages[..kept]);
+    assert!(after.messages.last().unwrap().blocks.len() > 1);
 }

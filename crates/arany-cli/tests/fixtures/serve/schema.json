@@ -967,6 +967,7 @@
         "contextTooLarge",
         "imagesNotAdmitted",
         "compactionInputEmpty",
+        "compactionBlockedByHook",
         "compactionInputTooLarge",
         "compactionNotIdle",
         "cancellationDrainTimeout",

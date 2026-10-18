@@ -126,6 +126,16 @@ impl Fixture {
         goal_budget: arany::GoalBudget,
     ) -> (arany::RunOutcome, Vec<ProviderRequest>, usize) {
         let provider = Arc::new(ScriptedProvider::new(outcomes));
+        self.run_provider(provider, mode, team, goal_budget).await
+    }
+
+    async fn run_provider(
+        &self,
+        provider: Arc<ScriptedProvider>,
+        mode: Option<arany::ApprovalMode>,
+        team: bool,
+        goal_budget: arany::GoalBudget,
+    ) -> (arany::RunOutcome, Vec<ProviderRequest>, usize) {
         let (approvals, mut inbox) = arany::ToolApprovals::new(mode.unwrap_or_default());
         let controls = RunControls {
             tools: ToolGrant::Configured,
@@ -2834,4 +2844,378 @@ async fn hook_identity_update_proceeds_unchanged() {
     );
     assert!(SessionView::replay(case.session, &case.events).is_ok());
     assert!(SessionView::replay(case.session, &case.events).is_ok());
+}
+
+mod lifecycle_hooks {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_hook_blocks_at_most_eight_times_and_is_journaled() {
+        for calls in [3_u32, 16] {
+            let settings = json!({"hooks":{"Stop":[{"hooks":[shell_hook("echo finish-the-check >&2; exit 2")]}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            let expected = usize::try_from(calls.min(9)).unwrap();
+            let (result, requests, _) = fixture
+                .run_budgeted(
+                    (0..expected).map(|_| finish("candidate")).collect(),
+                    None,
+                    false,
+                    arany::GoalBudget {
+                        max_provider_calls: Some(calls),
+                        ..budget()
+                    },
+                )
+                .await;
+            assert_eq!(requests.len(), expected);
+            assert!(requests[0].input.stop_hook_feedback.is_empty());
+            for (index, request) in requests.iter().enumerate().skip(1) {
+                assert_eq!(
+                    request.input.goal_context_facts,
+                    requests[0].input.goal_context_facts
+                );
+                assert!(request.input.stop_hook_feedback[index - 1].facts.is_some());
+                assert_eq!(request.input.stop_hook_feedback.len(), index);
+                assert_eq!(
+                    request.input.stop_hook_feedback.last().unwrap().text,
+                    "finish-the-check"
+                );
+            }
+            private_file(&fixture.state.join("permissions.json"), b"{}");
+            let (events, view) = fixture.reopen(result.session_id).await;
+            assert_eq!(
+                view.runs[0].lifecycle_hooks.len(),
+                if calls == 3 { 3 } else { 8 }
+            );
+            assert_eq!(
+                view.runs[0].status,
+                if calls == 3 {
+                    RunStatus::Failed
+                } else {
+                    RunStatus::Finished
+                }
+            );
+            for hook in &view.runs[0].lifecycle_hooks {
+                assert_eq!(hook.invocation.event, arany::permissions::HookEvent::Stop);
+                assert!(
+                    hook.outcome
+                        .as_ref()
+                        .unwrap()
+                        .observation
+                        .attestation
+                        .is_some()
+                );
+                assert!(matches!(
+                    hook.outcome.as_ref().unwrap().result,
+                    arany::permissions::HookResult::Blocked { .. }
+                ));
+            }
+            assert_eq!(
+                SessionView::replay(result.session_id, &events)
+                    .unwrap()
+                    .unwrap(),
+                view
+            );
+            assert_action_bounds(&events, false, false);
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_stop_reprompts_child_within_deadline() {
+        let settings = json!({"hooks":{"SubagentStop":[{"matcher":"researcher","hooks":[shell_hook("echo verify-child >&2; exit 2")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let mut outcomes = vec![ProviderOutcome::Delegate(arany::Delegate {
+            children: vec![arany::ChildAssignment {
+                objective: "Research the task".into(),
+                profile: None,
+            }],
+            agent: None,
+        })];
+        outcomes.extend((0..9).map(|_| finish("child candidate")));
+        outcomes.push(finish("synthesis"));
+        let (result, requests, _) = fixture.run(outcomes, None, true).await;
+        assert_eq!(result.run.status, RunStatus::Finished);
+        let child: Vec<_> = requests
+            .iter()
+            .filter(|request| request.phase == AgentPhase::ChildWork)
+            .collect();
+        assert_eq!(child.len(), 9);
+        assert!(child[0].input.stop_hook_feedback.is_empty());
+        assert_eq!(child[8].input.stop_hook_feedback.len(), 8);
+        let (events, view) = fixture.reopen(result.session_id).await;
+        assert_eq!(view.runs[0].lifecycle_hooks.len(), 8);
+        assert!(
+            view.runs[0]
+                .lifecycle_hooks
+                .iter()
+                .all(|hook| hook.invocation.event == arany::permissions::HookEvent::SubagentStop)
+        );
+        assert_action_bounds(&events, false, false);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_admission_overflow_and_unpinned_program_block_without_execution() {
+        for hooks in [
+            vec![shell_hook("printf forbidden > notes/x"); 9],
+            vec![json!({"type":"command","command":"unconfigured","args":[]})],
+        ] {
+            let settings = json!({"hooks":{"Stop":[{"hooks":hooks}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            let (result, requests, _) = fixture
+                .run_budgeted(
+                    vec![finish("candidate")],
+                    None,
+                    false,
+                    arany::GoalBudget {
+                        max_provider_calls: Some(1),
+                        ..budget()
+                    },
+                )
+                .await;
+            assert_eq!(requests.len(), 1);
+            assert!(!fixture.workspace.join("notes/x").exists());
+            let (_, view) = fixture.reopen(result.session_id).await;
+            let hook = &view.runs[0].lifecycle_hooks[0];
+            assert!(
+                hook.outcome
+                    .as_ref()
+                    .unwrap()
+                    .observation
+                    .attestation
+                    .is_none()
+            );
+            assert!(matches!(
+                hook.outcome.as_ref().unwrap().result,
+                arany::permissions::HookResult::Blocked { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_compact_block_skips_compaction_once() {
+        for trigger in ["manual", "auto"] {
+            let settings = json!({"hooks":{"PreCompact":[{"matcher":trigger,"hooks":[shell_hook("echo keep-context >&2; exit 2")]}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            let (result, _, _) = fixture.run(vec![finish("done")], None, false).await;
+            let provider = Arc::new(ScriptedProvider::new(vec![]));
+            let providers = arany::AdmittedProviders::single(provider);
+            for _ in 0..2 {
+                if trigger == "manual" {
+                    assert!(matches!(
+                        fixture
+                            .engine
+                            .compact_session(
+                                &providers,
+                                result.session_id,
+                                fixture.workspace.clone()
+                            )
+                            .await,
+                        Err(arany::EngineError::CompactionBlockedByHook)
+                    ));
+                } else {
+                    assert!(
+                        fixture
+                            .engine
+                            .auto_compact_session(
+                                &providers,
+                                result.session_id,
+                                fixture.workspace.clone(),
+                                result.run.id
+                            )
+                            .await
+                            .unwrap()
+                            .is_none()
+                    );
+                }
+            }
+            let (events, view) = fixture.reopen(result.session_id).await;
+            assert_eq!(view.runs[0].lifecycle_hooks.len(), 1);
+            assert!(!events.iter().any(|event| matches!(
+                event.event,
+                Event::ContextCompacted { .. } | Event::GoalCompactionCallReserved { .. }
+            )));
+        }
+    }
+
+    fn delegate(children: usize) -> ProviderOutcome {
+        ProviderOutcome::Delegate(arany::Delegate {
+            children: (0..children)
+                .map(|index| arany::ChildAssignment {
+                    objective: format!("Research part {index}"),
+                    profile: None,
+                })
+                .collect(),
+            agent: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn interleaved_tool_call_does_not_reset_the_stop_cap() {
+        let settings = json!({"hooks":{"Stop":[{"hooks":[shell_hook("echo again >&2; exit 2")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let mut outcomes = vec![finish("c0"), tool_outcome(call("read"), None)];
+        outcomes.extend((1..9).map(|index| finish(&format!("c{index}"))));
+        let (result, requests, _) = fixture.run(outcomes, None, false).await;
+        assert_eq!(result.run.status, RunStatus::Finished);
+        assert_eq!(requests.len(), 10);
+        assert_eq!(requests.last().unwrap().input.stop_hook_feedback.len(), 8);
+        let (_, view) = fixture.reopen(result.session_id).await;
+        assert_eq!(view.runs[0].lifecycle_hooks.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_subagent_stop_cancels_the_child_not_the_budget() {
+        let settings =
+            json!({"hooks":{"SubagentStop":[{"hooks":[shell_hook("sleep 30; exit 2")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let cancellation = RunCancellation::new();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            delegate(1),
+            finish("child candidate"),
+            finish("synthesis"),
+        ]));
+        let mut input = request(&fixture.workspace, "Inspect and complete the task");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: 1,
+        };
+        let mut events = fixture.engine.subscribe();
+        let watcher = {
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                let started = async {
+                    while let Some(tapped) = events.next().await {
+                        if matches!(
+                            tapped,
+                            arany::Tapped::Committed(ref envelope)
+                                if matches!(envelope.event, Event::HookStarted { .. })
+                        ) {
+                            cancellation.cancel();
+                            return;
+                        }
+                    }
+                };
+                let _ = tokio::time::timeout(Duration::from_secs(60), started).await;
+            })
+        };
+        let outcome = run_with(
+            &fixture.engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                cancellation,
+                ..Default::default()
+            },
+        )
+        .await;
+        watcher.abort();
+        let _ = watcher.await;
+        assert!(
+            matches!(
+                outcome,
+                Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+            ),
+            "a killed hook is unknown, never a budget stop: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_stop_without_time_before_the_deadline_fails_only_that_child() {
+        let settings = json!({"hooks":{"SubagentStop":[{"hooks":[shell_hook("exit 2")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let (result, _, _) = fixture
+            .run_budgeted(
+                vec![delegate(1), finish("child")],
+                None,
+                true,
+                arany::GoalBudget {
+                    max_active_ms: Some(20_000),
+                    ..budget()
+                },
+            )
+            .await;
+        let (events, view) = fixture.reopen(result.session_id).await;
+        assert!(view.runs[0].lifecycle_hooks.is_empty());
+        assert!(
+            view.runs[0]
+                .agents
+                .iter()
+                .skip(1)
+                .all(|agent| agent.status == arany::AgentStatus::Failed)
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.event, Event::RunFinished { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_compact_runs_at_a_fork_boundary_without_goals() {
+        let settings = json!({"hooks":{"PreCompact":[{"hooks":[shell_hook("echo keep-context >&2; exit 2")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let (result, _, _) = fixture.run(vec![finish("done")], None, false).await;
+        let fork = fixture
+            .engine
+            .fork_session(result.session_id, fixture.workspace.clone(), None)
+            .await
+            .unwrap();
+        let providers = arany::AdmittedProviders::single(Arc::new(ScriptedProvider::new(vec![])));
+        assert!(matches!(
+            fixture
+                .engine
+                .compact_session(&providers, fork, fixture.workspace.clone())
+                .await,
+            Err(arany::EngineError::CompactionBlockedByHook)
+        ));
+        fixture.engine.close().await.unwrap();
+        let store =
+            Store::open_read_only(StateRoot::open_existing(&fixture.state).unwrap()).unwrap();
+        let view = store.load_open_view(fork).await.unwrap().unwrap();
+        assert_eq!(view.runs[0].lifecycle_hooks.len(), 1);
+        assert!(view.goals.is_empty());
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_passed_pre_compact_occurrence_is_reused_not_reported_as_blocked() {
+        let settings = json!({"hooks":{"PreCompact":[{"hooks":[shell_hook("exit 0")]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let (result, _, _) = fixture.run(vec![finish("done")], None, false).await;
+        let scripted = ScriptedProvider::new(vec![]);
+        scripted.compact_responses.lock().unwrap().extend([
+            Err(arany::ProviderError::Unavailable),
+            Err(arany::ProviderError::Unavailable),
+        ]);
+        let providers = arany::AdmittedProviders::single(Arc::new(scripted));
+        for _ in 0..2 {
+            let attempt = fixture
+                .engine
+                .compact_session(&providers, result.session_id, fixture.workspace.clone())
+                .await;
+            assert!(
+                !matches!(attempt, Err(arany::EngineError::CompactionBlockedByHook)),
+                "{attempt:?}"
+            );
+        }
+        let (_, view) = fixture.reopen(result.session_id).await;
+        assert_eq!(view.runs[0].lifecycle_hooks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pre_compact_continue_false_skips_compaction() {
+        let settings = json!({"hooks":{"PreCompact":[{"hooks":[shell_hook(
+            r#"printf '{"continue":false,"stopReason":"halt"}'"#
+        )]}]}});
+        let fixture = Fixture::new(Some(&settings), false);
+        let (result, _, _) = fixture.run(vec![finish("done")], None, false).await;
+        let providers = arany::AdmittedProviders::single(Arc::new(ScriptedProvider::new(vec![])));
+        assert!(matches!(
+            fixture
+                .engine
+                .compact_session(&providers, result.session_id, fixture.workspace.clone())
+                .await,
+            Err(arany::EngineError::CompactionBlockedByHook)
+        ));
+    }
 }

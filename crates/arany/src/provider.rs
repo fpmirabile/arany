@@ -34,7 +34,9 @@ pub use catalog::{
     ModelEntry, list_native_models, list_native_models_with_api_key,
     list_native_models_with_credentials,
 };
-pub use conversation::{PromptRole, ProviderRequest, ProviderTurn, RunInput, ToolUseId};
+pub use conversation::{
+    PromptRole, ProviderRequest, ProviderTurn, RunInput, StopHookFeedback, ToolUseId,
+};
 pub use custom::{
     CustomProfile, CustomProfileCheck, CustomProfileError, CustomProvider, check_custom_profile,
 };
@@ -450,6 +452,20 @@ impl ProviderRequest {
             PromptRole::ReadOnly => self.phase != AgentPhase::ToolReview && input.tools.is_none(),
             PromptRole::ToolReview => self.phase == AgentPhase::ToolReview && input.tools.is_none(),
         };
+        if !input.stop_hook_feedback.is_empty()
+            && (self.phase == AgentPhase::ToolReview
+                || input
+                    .stop_hook_feedback
+                    .iter()
+                    .map(|feedback| feedback.text.len())
+                    .sum::<usize>()
+                    > crate::tools::permissions::MAX_STOP_FEEDBACK_BYTES
+                || input.stop_hook_feedback.iter().any(|feedback| {
+                    feedback.after_step > input.tools.as_ref().map_or(0, |tools| tools.steps.len())
+                }))
+        {
+            return Err(ProviderError::Rejected);
+        }
         if !role_fits
             || self.phase == AgentPhase::ChildWork
                 && (self.collaboration != CollaborationPolicy::Single
@@ -973,6 +989,7 @@ mod tests {
 
     fn context() -> crate::tools::ToolContext {
         crate::tools::ToolContext {
+stop_bytes: 0,
             catalog: json!({"write": false, "commands": [], "skills": [], "mcp_servers": [], "tool_calls_remaining": 2}).to_string(),
             history_summary: None,
             steps: Vec::new(),

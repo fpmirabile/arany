@@ -16,6 +16,7 @@ pub(crate) fn catalog() -> Value {
 
 pub(crate) fn tool_context(catalog: Value) -> ToolContext {
     ToolContext {
+        stop_bytes: 0,
         catalog: catalog.to_string(),
         history_summary: None,
         steps: Vec::new(),

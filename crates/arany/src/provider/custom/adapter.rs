@@ -191,6 +191,7 @@ mod tests {
                 AgentPhase::RootPlan,
                 CollaborationPolicy::Single,
                 Some(crate::tools::ToolContext {
+                    stop_bytes: 0,
                     catalog: "NO_DISCLOSURE".into(),
                     history_summary: None,
                     steps: Vec::new(),

@@ -41,6 +41,7 @@ pub struct RunInput {
     pub images: Vec<ProviderImage>,
     /// Notes recorded before the first step; later ones live in their `ToolStep`.
     pub steering_notes: Vec<String>,
+    pub stop_hook_feedback: Vec<StopHookFeedback>,
     pub goal_budget: Option<GoalBudget>,
     pub goal_plan_contract: Option<GoalPlanContract>,
     /// Facts of the first call, or of a call whose steps were all compacted away.
@@ -54,6 +55,16 @@ pub struct RunInput {
     pub tools: Option<ToolContext>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StopHookFeedback {
+    pub after_step: usize,
+    pub turn: ProviderTurn,
+    pub text: String,
+    /// Newer facts and notes of the continuation that follows, kept here so the earlier request prefix stays byte-stable.
+    pub facts: Option<GoalContextFacts>,
+    pub steering_notes: Vec<String>,
+}
+
 impl RunInput {
     pub fn new(role: PromptRole, objective: String) -> Self {
         Self {
@@ -62,6 +73,7 @@ impl RunInput {
             objective,
             images: Vec::new(),
             steering_notes: Vec::new(),
+            stop_hook_feedback: Vec::new(),
             goal_budget: None,
             goal_plan_contract: None,
             goal_context_facts: None,

@@ -128,6 +128,8 @@ pub enum EngineError {
     ImagesNotAdmitted,
     #[error("Session has no new successful conversation to compact")]
     CompactionInputEmpty,
+    #[error("a PreCompact hook blocked compaction")]
+    CompactionBlockedByHook,
     #[error("compaction input exceeds its limit")]
     CompactionInputTooLarge,
     #[error("Session is not idle at a committed Run boundary")]
@@ -1229,7 +1231,7 @@ impl Engine {
                 RunIdentity {
                     session_id: request.session_id,
                     run_id: request.run_id,
-                    goal_id,
+                    goal_id: Some(goal_id),
                     primary_id: request.agent_run_id,
                 },
                 controls,
@@ -1557,18 +1559,18 @@ impl Engine {
             ensure_session_workspace(view, root_identity)?;
         }
         let context_started = SystemTime::now();
-        let steering_reserved = if submission.steering.is_some() {
-            MAX_STEERING_CONTEXT_BYTES
-        } else {
-            0
-        };
+        let feedback_reserved = usize::from(submission.steering.is_some())
+            * MAX_STEERING_CONTEXT_BYTES
+            + tools
+                .as_ref()
+                .map_or(0, crate::tools::ToolRuntime::stop_feedback_reserve);
         let goal_metadata_reserved = goal_context_metadata_reservation(
             goal.plan_contract
                 .as_ref()
                 .map_or(&goal.budget, |plan| &plan.budget),
             goal.plan_contract.as_ref(),
         )?
-        .checked_add(steering_reserved)
+        .checked_add(feedback_reserved)
         .ok_or(EngineError::ContextTooLarge)?;
         let context = CompiledContext::compile(
             history.as_ref(),

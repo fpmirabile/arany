@@ -29,6 +29,7 @@ pub(super) struct ChildWork {
     objective: String,
     pub(super) definition: Option<crate::tools::definitions::AgentDefinition>,
     turns_remaining: u8,
+    stop_hook_feedback: Vec<crate::provider::StopHookFeedback>,
     pub(super) tools: Option<ToolContext>,
     pub(super) tool_calls_remaining: usize,
 }
@@ -275,6 +276,7 @@ impl RunLoop<'_> {
             children.push(ChildWork {
                 agent_run_id,
                 objective,
+                stop_hook_feedback: Vec::new(),
                 turns_remaining: definition
                     .as_ref()
                     .map_or(MAX_CHILD_TURNS, |definition| definition.max_turns),
@@ -483,8 +485,22 @@ impl RunLoop<'_> {
         let disposition = match result {
             CallResult::Response(ProviderResponse {
                 outcome: ProviderOutcome::Finish(finish),
+                turn,
                 ..
             }) if valid_response => {
+                if child.tools.is_some()
+                    && !self.controls.cancellation.is_cancelled()
+                    && abort_reason.is_none()
+                {
+                    match self
+                        .subagent_stop(child, &finish, turn, abort_reason, deadline)
+                        .await?
+                    {
+                        ChildStop::Proceed => {}
+                        ChildStop::Reprompt => return Ok(None),
+                        ChildStop::End(disposition) => return Ok(Some(disposition)),
+                    }
+                }
                 self.finish_child(
                     agent_run_id,
                     AgentDisposition::Finished,
@@ -554,6 +570,85 @@ impl RunLoop<'_> {
             }
         };
         Ok(Some(disposition))
+    }
+
+    async fn subagent_stop(
+        &self,
+        child: &mut ChildWork,
+        finish: &Finish,
+        turn: ProviderTurn,
+        abort_reason: &mut Option<AbortReason>,
+        deadline: Instant,
+    ) -> Result<ChildStop, EngineError> {
+        let agent_run_id = child.agent_run_id;
+        let subject = child
+            .definition
+            .as_ref()
+            .map_or("researcher", |definition| definition.name.as_str());
+        let fits = self
+            .controls
+            .tools
+            .zip(child.tools.as_ref())
+            .is_none_or(|(runtime, tools)| {
+                tools.has_stop_room(&turn, runtime.context_limit_bytes())
+            });
+        let stop = self
+            .lifecycle_hooks(
+                agent_run_id,
+                crate::tools::permissions::HookEvent::SubagentStop,
+                subject,
+                &finish.result,
+                Some(deadline),
+                fits,
+            )
+            .await;
+        let feedback = match stop {
+            Ok(Some(feedback)) => feedback,
+            Ok(None) => return Ok(ChildStop::Proceed),
+            // A cut-off or cancelled hook ends this child only, unless its outcome stops the Run.
+            Err(EngineError::GoalBudgetExhausted | EngineError::ContextTooLarge) => {
+                let settled = self.ledger().view(|view| {
+                    view.runs
+                        .iter()
+                        .find(|run| run.id == self.run_id)
+                        .is_some_and(crate::session::RunView::hooks_settled)
+                })?;
+                if !settled && abort_reason.is_none() {
+                    *abort_reason = Some(AbortReason::Budget);
+                }
+                let disposition = if self.controls.cancellation.is_cancelled() {
+                    AgentDisposition::Cancelled
+                } else {
+                    AgentDisposition::Failed
+                };
+                self.finish_child(agent_run_id, disposition, None, true)
+                    .await?;
+                return Ok(ChildStop::End(disposition));
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(tools) = child.tools.as_mut() {
+            tools.add_stop_feedback(&turn, &feedback);
+        }
+        child
+            .stop_hook_feedback
+            .push(crate::provider::StopHookFeedback {
+                after_step: child.tools.as_ref().map_or(0, |tools| tools.steps.len()),
+                turn,
+                text: feedback,
+                facts: None,
+                steering_notes: Vec::new(),
+            });
+        self.ledger().child_call_finished()?;
+        if child.turns_remaining > 0
+            && tokio::time::Instant::now() < deadline
+            && self.ledger().can_start_provider_call()
+        {
+            return Ok(ChildStop::Reprompt);
+        }
+        self.finish_child(agent_run_id, AgentDisposition::Failed, None, false)
+            .await?;
+        Ok(ChildStop::End(AgentDisposition::Failed))
     }
 
     async fn synthesize(
@@ -660,12 +755,12 @@ impl RunLoop<'_> {
                 }
             }
             let cancellation = self.controls.cancellation.clone();
-            let researcher = children[index].tools.is_some();
+            let researcher = child.tools.is_some();
             let root = &root_request.input;
             let mut request = ProviderRequest {
                 session_id: self.session_id,
                 run_id: self.run_id,
-                agent_run_id: children[index].agent_run_id,
+                agent_run_id: child.agent_run_id,
                 phase: AgentPhase::ChildWork,
                 collaboration: CollaborationPolicy::Single,
                 model: String::new(),
@@ -683,27 +778,28 @@ impl RunLoop<'_> {
                     } else {
                         None
                     },
+                    stop_hook_feedback: child.stop_hook_feedback.clone(),
                     workspace_guidance: guidance,
                     includes: root.includes.clone(),
-                    tools: children[index].tools.clone(),
+                    tools: child.tools.clone(),
                     ..RunInput::new(
                         if researcher {
                             PromptRole::Researcher
                         } else {
                             PromptRole::ReadOnly
                         },
-                        children[index].objective.clone(),
+                        child.objective.clone(),
                     )
                 },
             };
             let provider = self.routing.bind(
                 crate::provider::ProviderRole::Child,
-                children[index].agent_run_id,
+                child.agent_run_id,
                 &mut request.model,
                 &mut request.max_output_tokens,
             )?;
             self.reserve_provider_call(
-                children[index].agent_run_id,
+                child.agent_run_id,
                 Action::Child {
                     in_flight: self.ledger().in_flight_children(),
                     research: researcher,
@@ -713,10 +809,7 @@ impl RunLoop<'_> {
             .await?;
             let preview = (self
                 .routing
-                .chain(
-                    crate::provider::ProviderRole::Child,
-                    children[index].agent_run_id,
-                )?
+                .chain(crate::provider::ProviderRole::Child, child.agent_run_id)?
                 .len()
                 > 1)
             .then(|| crate::provider::ResponsePreview::new().0);
@@ -769,6 +862,12 @@ impl RunLoop<'_> {
         }
         Ok(())
     }
+}
+
+enum ChildStop {
+    Proceed,
+    Reprompt,
+    End(AgentDisposition),
 }
 
 fn classify_join(

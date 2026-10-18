@@ -337,6 +337,61 @@ impl ToolRuntime {
             .transpose()
     }
 
+    pub(crate) fn readmit_compaction_hooks(
+        state: &StateRoot,
+        workspace: &Path,
+        guard: Option<PathBuf>,
+        pin: &ToolPolicyReceipt,
+    ) -> Result<Option<Self>, ToolError> {
+        let Some(digest) = pin.permissions_digest else {
+            return Ok(None);
+        };
+        let snapshot = Self::load_permissions(state)?.ok_or(ToolError::ChangedInput)?;
+        if snapshot.digest != digest {
+            return Err(ToolError::ChangedInput);
+        }
+        if snapshot
+            .config
+            .hooks()
+            .groups(permissions::HookEvent::PreCompact)
+            .is_empty()
+        {
+            return Ok(None);
+        }
+        let mut config = match Config::load(state) {
+            Ok(mut config) => {
+                config.discover_skills(workspace)?;
+                if config.digest() == pin.config_digest {
+                    config
+                } else {
+                    WorkspacePermissions::open(workspace)
+                        .map_err(|_| ToolError::ChangedInput)?
+                        .config(workspace)?
+                }
+            }
+            Err(ToolError::MissingConfiguration) => WorkspacePermissions::open(workspace)
+                .map_err(|_| ToolError::ChangedInput)?
+                .config(workspace)?,
+            Err(error) => return Err(error),
+        };
+        config.discover_skills(workspace)?;
+        if config.digest() != pin.config_digest {
+            return Err(ToolError::ChangedInput);
+        }
+        let runtime = Self::admit(
+            config,
+            Some(snapshot),
+            Self::load_exact_command_rules(state)?,
+            workspace,
+            state,
+            guard.ok_or(ToolError::ProtectionUnavailable)?,
+        )?;
+        if runtime.receipt().config_digest != pin.config_digest {
+            return Err(ToolError::ChangedInput);
+        }
+        Ok(Some(runtime))
+    }
+
     pub(crate) fn load_exact_command_rules(
         state: &StateRoot,
     ) -> Result<Option<unguarded_rules::ExactCommandRules>, ToolError> {
@@ -435,6 +490,19 @@ impl ToolRuntime {
         })
     }
 
+    pub(crate) fn stop_feedback_reserve(&self) -> usize {
+        if self.permissions().is_some_and(|config| {
+            !config
+                .hooks()
+                .groups(permissions::HookEvent::Stop)
+                .is_empty()
+        }) {
+            2 * permissions::MAX_STOP_FEEDBACK_BYTES + 256
+        } else {
+            0
+        }
+    }
+
     pub(crate) fn receipt(&self) -> ToolPolicyReceipt {
         let mut receipt = self.config.receipt();
         receipt.max_context_bytes = self.context_limit_bytes as u32;
@@ -504,6 +572,7 @@ impl ToolRuntime {
             return Err(ToolError::Limit);
         }
         Ok(ToolContext {
+            stop_bytes: 0,
             catalog,
             history_summary: None,
             steps: Vec::new(),
@@ -529,6 +598,7 @@ impl ToolRuntime {
             return Err(ToolError::Limit);
         }
         Ok(ToolContext {
+            stop_bytes: 0,
             catalog,
             history_summary: None,
             steps: Vec::new(),
