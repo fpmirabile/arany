@@ -763,7 +763,7 @@ mod account_default_tests {
         let mut missing_roster = serde_json::to_value(ordinary).unwrap();
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(14));
+        assert_eq!(payload_version("RunStarted"), Some(15));
         assert_eq!(payload_version("ProviderCallRecorded"), Some(8));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
@@ -1297,7 +1297,12 @@ mod child_grant_tests {
                 Some(agent_run_id),
             )
         };
-        for grant in [ChildGrant::NoTools, ChildGrant::ReadOnly] {
+        for grant in [
+            ChildGrant::NoTools,
+            ChildGrant::ReadOnly {
+                unguarded: crate::tools::UnguardedGrant::Denied,
+            },
+        ] {
             let event = spawned(AgentRole::Child, 1, Some("inspect"), Some(grant));
             let payload = event.payload().expect("child payload");
             assert_eq!(decode(&event, &payload).expect("child replay"), event);
@@ -1310,9 +1315,11 @@ mod child_grant_tests {
             AgentRole::Child,
             1,
             Some("inspect"),
-            Some(ChildGrant::ReadOnly),
+            Some(ChildGrant::ReadOnly {
+                unguarded: crate::tools::UnguardedGrant::Denied,
+            }),
         );
-        assert_eq!(payload_version(child.kind()), Some(9));
+        assert_eq!(payload_version(child.kind()), Some(10));
         let payload = child.payload().expect("child payload");
         let mut named = child.clone();
         if let Event::AgentSpawned { profile, .. } = &mut named {
@@ -1346,6 +1353,15 @@ mod child_grant_tests {
         missing = value.clone();
         missing.as_object_mut().expect("object").remove("grant");
         assert!(decode(&child, &missing.to_string()).is_err());
+        for invalid in [
+            serde_json::json!("read_only"),
+            serde_json::json!({"read_only":{}}),
+            serde_json::json!({"read_only":{"unguarded":"human_only","automatic":true}}),
+        ] {
+            let mut forged = value.clone();
+            forged["grant"] = invalid;
+            assert!(decode(&child, &forged.to_string()).is_err());
+        }
         value["grant"] = serde_json::Value::Null;
         assert!(decode(&child, &value.to_string()).is_err());
         value["grant"] = "write".into();
@@ -1441,9 +1457,9 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(12));
+        assert_eq!(payload_version("ToolFinished"), Some(13));
         assert_eq!(
-            Event::decode("ToolFinished", 12, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 13, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1451,7 +1467,7 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                12,
+                13,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1463,9 +1479,9 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 12, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", 13, &invalid, Some(run), Some(agent)).is_err());
         }
-        for previous in [11, 10, 9, 8, 7] {
+        for previous in [12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1650,7 +1666,7 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 14,
+                Event::RunStarted { .. } => 15,
                 Event::ToolStarted { .. } => 10,
                 Event::RunFinished { .. } => 8,
                 _ => 7,
@@ -1838,5 +1854,5 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         Event::decode(event.kind(), 1, &padded, run, actor),
         Err(ReplayError::InvalidPayload)
     ));
-    assert_eq!(payload_version("RunStarted"), Some(14));
+    assert_eq!(payload_version("RunStarted"), Some(15));
 }

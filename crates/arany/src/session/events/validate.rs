@@ -149,7 +149,9 @@ impl Event {
                                 name.len() <= 64 && crate::tools::types::valid_name(name)
                             }) =>
                     {
-                        if (*grant == Some(ChildGrant::EditOnly)) != assignment.is_some() {
+                        if (matches!(*grant, Some(ChildGrant::EditOnly { .. })))
+                            != assignment.is_some()
+                        {
                             return Err(ReplayError::InvalidPayload);
                         }
                         if let Some(p) = assignment

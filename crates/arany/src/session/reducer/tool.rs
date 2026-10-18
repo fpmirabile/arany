@@ -106,13 +106,13 @@ pub(super) fn apply(
                         | crate::tools::permissions::PermissionSource::ExactCommandRule
                 ) || verdict.decision == crate::tools::permissions::Decision::Deny
                     || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
-                    || crate::tools::types::qualifying_guard_failure(
-                        &pending_call,
-                        run.tools
-                            .iter()
-                            .filter_map(|tool| tool.observation.as_ref()),
-                    )
-                    .is_none())
+                    || run
+                        .unguarded_failure(&pending_call)
+                        .is_none_or(|(_, hook)| {
+                            hook && (verdict.source
+                                != crate::tools::permissions::PermissionSource::Human
+                                || verdict.decision != Decision::Ask)
+                        }))
             {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -245,6 +245,7 @@ pub(super) fn apply(
                 return Err(ReplayError::InvalidTransition);
             }
             tool.hooks.push(HookView {
+                sequence: prior,
                 invocation: hook.clone(),
                 outcome: None,
                 idle: false,
@@ -813,7 +814,8 @@ fn start_lifecycle(
                 agent.role == AgentRole::Child
                     && matches!(
                         (agent.grant, agent.assignment.is_some()),
-                        (Some(ChildGrant::ReadOnly), false) | (Some(ChildGrant::EditOnly), true)
+                        (Some(ChildGrant::ReadOnly { .. }), false)
+                            | (Some(ChildGrant::EditOnly { .. }), true)
                     )
             };
             if run.status != RunStatus::Active
@@ -877,6 +879,7 @@ fn start_lifecycle(
         super::goal::record_active_ceiling(goal, ceiling);
     }
     run.lifecycle_hooks.push(HookView {
+        sequence,
         invocation: hook.clone(),
         outcome: None,
         idle: boundary,

@@ -123,6 +123,25 @@ pub(super) struct NewSession {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct LoadSession {
+    pub session_id: SessionId,
+    #[serde(flatten)]
+    pub session: NewSession,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ResumeSession {
+    pub session_id: SessionId,
+    pub cwd: String,
+    #[serde(default)]
+    pub mcp_servers: Vec<Value>,
+    #[serde(default)]
+    pub additional_directories: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct Prompt {
     pub session_id: SessionId,
     #[serde(deserialize_with = "blocks")]
@@ -246,10 +265,10 @@ pub(super) fn initialized() -> Value {
     json!({
         "protocolVersion": 1,
         "agentCapabilities": {
-            "loadSession": false,
+            "loadSession": true,
             "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true},
             "mcpCapabilities": {"http": false, "sse": false},
-            "sessionCapabilities": {}
+            "sessionCapabilities": {"resume": {}}
         },
         "agentInfo": {"name": "arany", "title": "Arany", "version": env!("CARGO_PKG_VERSION")},
         "authMethods": [{"id": "arany-setup", "type": "agent", "name": "Set up Arany",

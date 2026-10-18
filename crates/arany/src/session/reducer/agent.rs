@@ -64,7 +64,7 @@ fn child_tool_is_admissible(
         return super::worker::child_tool_admissible(run, agent_run_id, intent);
     }
     child.status == AgentStatus::Active
-        && child.grant == Some(ChildGrant::ReadOnly)
+        && matches!(child.grant, Some(ChildGrant::ReadOnly { .. }))
         && child
             .provider_calls
             .last()
@@ -339,8 +339,20 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             if !valid_profile {
                 return Err(ReplayError::InvalidTransition);
             }
+            let parent_unguarded = config
+                .tool_policy
+                .as_ref()
+                .map_or(crate::tools::UnguardedGrant::Denied, |policy| {
+                    policy.child_unguarded
+                });
+            if grant.is_some_and(|grant| !grant.unguarded().narrows(parent_unguarded)) {
+                return Err(ReplayError::InvalidTransition);
+            }
             let child_grant = if config.tool_policy.is_some() {
-                ChildGrant::ReadOnly
+                ChildGrant::ReadOnly {
+                    unguarded: grant
+                        .map_or(crate::tools::UnguardedGrant::Denied, ChildGrant::unguarded),
+                }
             } else {
                 ChildGrant::NoTools
             };
@@ -351,7 +363,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                         && *ordinal as usize == run.agents.len()
                         && *ordinal <= config.policy.max_children()
                         && (*grant == Some(child_grant)
-                            || assignment.is_some() && *grant == Some(ChildGrant::EditOnly)) => {}
+                            || assignment.is_some()
+                                && matches!(*grant, Some(ChildGrant::EditOnly { .. }))) => {}
                 _ => return Err(ReplayError::InvalidTransition),
             }
             if run.agents.iter().any(|agent| agent.id == *agent_run_id) {
@@ -497,7 +510,10 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                                 record.phase == AgentPhase::ChildWork
                                     && matches!(
                                         agent.grant,
-                                        Some(ChildGrant::ReadOnly | ChildGrant::EditOnly)
+                                        Some(
+                                            ChildGrant::ReadOnly { .. }
+                                                | ChildGrant::EditOnly { .. }
+                                        )
                                     )
                                     && record.requested_tools == 1
                                     && agent.definition.as_ref().is_none_or(|name| {
@@ -714,7 +730,7 @@ fn is_tool_review(run: &RunView, agent: &AgentView, record: &ProviderCallRecord)
         return record.phase == AgentPhase::ToolReview
             && matches!(
                 agent.grant,
-                Some(ChildGrant::ReadOnly | ChildGrant::EditOnly)
+                Some(ChildGrant::ReadOnly { .. } | ChildGrant::EditOnly { .. })
             )
             && agent
                 .provider_calls

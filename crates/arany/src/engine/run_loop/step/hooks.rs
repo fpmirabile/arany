@@ -199,6 +199,17 @@ fn occurrence_digest(
 }
 
 impl RunLoop<'_> {
+    pub(super) fn hook_rerun_feedback(
+        &self,
+        subject: [u8; 32],
+    ) -> Result<Vec<String>, EngineError> {
+        self.ledger().view(|view| {
+            view.runs
+                .last()
+                .map_or_else(Vec::new, |run| run.hook_rerun_proposals(Some(subject)))
+        })
+    }
+
     fn hook_plans(
         &self,
         runtime: &ToolRuntime,
@@ -279,8 +290,11 @@ impl RunLoop<'_> {
         let Some(config) = runtime.permissions() else {
             return 0;
         };
-        match self.hook_plans(runtime, config, HookEvent::PostToolUse, call) {
-            Ok(plans) if !plans.is_empty() =>
+        match (
+            self.hook_plans(runtime, config, HookEvent::PreToolUse, call),
+            self.hook_plans(runtime, config, HookEvent::PostToolUse, call),
+        ) {
+            (Ok(pre), Ok(post)) if !pre.is_empty() || !post.is_empty() =>
             // JSON escaping can double a line of quotes or backslashes.
             {
                 2 * MAX_HOOK_FEEDBACK_BYTES + 256
@@ -551,8 +565,8 @@ impl RunLoop<'_> {
             .matched_hooks(event, |group| group.matches(subject))
             .map(|matched| {
                 matched
-                    .iter()
-                    .map(|(group, handler, _)| (*group, *handler))
+                    .into_iter()
+                    .map(|(group, handler, _)| (group, handler))
                     .collect()
             })
             .unwrap_or_default();
@@ -670,7 +684,8 @@ impl RunLoop<'_> {
                 return Ok(Some(stop_feedback([&run.result])));
             }
         }
-        Ok(None)
+        let proposals = self.hook_rerun_feedback(digest)?;
+        Ok((agent == self.primary_id && !proposals.is_empty()).then(|| proposals.join("\n")))
     }
 
     fn idle_compact_stop(

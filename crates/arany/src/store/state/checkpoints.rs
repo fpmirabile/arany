@@ -7,7 +7,8 @@ use rusqlite::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 const FILE: &str = "checkpoints.sqlite";
 const FILES: [&str; 4] = [
@@ -153,10 +154,12 @@ fn lock(root: &StateRoot) -> Result<Lock, StoreError> {
     let file = private_file(root, "checkpoints.lock", true, 0)?
         .ok_or(StoreError::InvalidStateDirectory)?;
     let deadline = Instant::now() + BUSY;
+    // The blocking retry sleeps the thread, so a paused Tokio clock would never expire it.
+    let lock_deadline = std::time::Instant::now() + BUSY;
     loop {
         match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => break,
-            Err(rustix::io::Errno::WOULDBLOCK) if Instant::now() < deadline => {
+            Err(rustix::io::Errno::WOULDBLOCK) if std::time::Instant::now() < lock_deadline => {
                 std::thread::sleep(Duration::from_millis(10))
             }
             Err(rustix::io::Errno::WOULDBLOCK) => return Err(StoreError::CheckpointUnavailable),

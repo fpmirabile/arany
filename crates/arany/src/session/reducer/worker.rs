@@ -559,7 +559,7 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
         ) if objective.as_ref() == Some(expected)
             && definition == selected
             && profile == selected_profile
-            && grant != Some(ChildGrant::EditOnly) =>
+            && !matches!(grant, Some(ChildGrant::EditOnly { .. })) =>
         {
             Ok(())
         }
@@ -568,7 +568,7 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
                 && objective.as_ref() == Some(&p.request.mission)
                 && definition.as_ref() == Some(&p.request.definition)
                 && profile.is_none()
-                && grant == Some(ChildGrant::EditOnly) =>
+                && matches!(grant, Some(ChildGrant::EditOnly { .. })) =>
         {
             let goal = active_run_goal(view, run_id).ok_or(ReplayError::InvalidTransition)?;
             let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
