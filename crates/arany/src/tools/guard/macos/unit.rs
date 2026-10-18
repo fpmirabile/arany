@@ -1995,7 +1995,6 @@ done
         ));
     }
 
-    /// Compiles the native actor and returns its entitlement-signed and plain copies.
     fn native_actors(directory: &Path) -> (PathBuf, PathBuf) {
         use crate::test_process::BoundedOutput;
 
@@ -2541,7 +2540,6 @@ done
         source
     }
 
-    /// Starts the helper as a launchd job in its own coalition and accepts its attestation.
     async fn launch_helper(
         unit: &mut Unit,
         phase: &str,

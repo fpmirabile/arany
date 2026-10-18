@@ -136,7 +136,6 @@ dependencies = [
  "cap-std",
  "core-foundation",
  "directories",
- "getrandom 0.4.3",
  "jsonschema",
  "nix",
  "opentelemetry",

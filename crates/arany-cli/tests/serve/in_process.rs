@@ -21,7 +21,7 @@ impl Drop for TestDeadline {
     }
 }
 
-pub(super) fn deadline() -> impl Drop {
+pub(in crate::cli) fn deadline() -> impl Drop {
     let (done, receiver) = std::sync::mpsc::sync_channel(1);
     let name = std::thread::current()
         .name()

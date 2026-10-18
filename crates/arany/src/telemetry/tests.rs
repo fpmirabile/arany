@@ -478,7 +478,6 @@ fn assert_trace_call(actual: &ProviderRequest, phase: AgentPhase, objective: &st
     assert_eq!(actual.max_output_tokens, 4096, "trace call output cap");
 }
 
-/// A Goal segment fed synthetic committed Events; Event `n` commits at `1_000 + 10 n` ms.
 struct Segment {
     trace: RunTrace,
     session_id: SessionId,
@@ -492,7 +491,6 @@ impl Segment {
         Self::routed(telemetry, context, None)
     }
 
-    /// Commits the segment's opening Events; `routes` pins per-role Providers in `RunStarted`.
     fn routed(
         telemetry: &Telemetry,
         context: (SystemTime, SystemTime),
@@ -611,7 +609,6 @@ fn identity(profile: &str, model: &str) -> ProviderIdentity {
     ProviderIdentity::new(profile, model, Provenance::native())
 }
 
-/// Primary, review and compaction stay on the default route; children use another Provider.
 fn child_routes() -> ProviderRoutes {
     let mut routes = Providers::all(vec![identity("other", "model-1")]);
     routes.child = vec![identity("anthropic", "child-model")];
