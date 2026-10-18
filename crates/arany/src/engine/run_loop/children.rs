@@ -4,7 +4,7 @@ use super::{
 use crate::engine::routing::CallScope;
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
 use crate::provider::{
-    AgentPhase, ChildResult, Finish, PromptRole, ProviderOutcome, ProviderRequest,
+    AgentPhase, ChildAssignment, ChildResult, Finish, PromptRole, ProviderOutcome, ProviderRequest,
     ProviderResponse, ProviderTurn, RunInput,
 };
 use crate::session::{
@@ -17,7 +17,6 @@ use std::time::Duration;
 use tokio::task::{Id, JoinError, JoinSet};
 use tokio::time::Instant;
 
-const MAX_CHILD_OBJECTIVE_BYTES: usize = 2 * 1024;
 const MAX_CHILD_RESULT_BYTES: usize = 16 * 1024;
 const CANCELLATION_DRAIN: Duration = Duration::from_secs(2);
 const MAX_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
@@ -99,24 +98,34 @@ impl ChildQueue {
 }
 
 impl RunLoop<'_> {
-    pub(super) fn well_formed_delegation(&self, children: &[String], agent: Option<&str>) -> bool {
+    pub(super) fn well_formed_delegation(
+        &self,
+        children: &[ChildAssignment],
+        agent: Option<&str>,
+    ) -> bool {
         agent.is_none_or(|name| {
             self.definitions
                 .get()
                 .and_then(|registry| registry.get(name))
                 .is_some_and(|definition| !definition.editor())
         }) && !matches!(self.controls.policy, CollaborationPolicy::Single)
-            && !children.is_empty()
+            && crate::provider::valid_assignments(children, agent)
             && children.len() <= usize::from(self.controls.policy.max_children())
-            && children.iter().all(|objective| {
-                !objective.trim().is_empty() && objective.len() <= MAX_CHILD_OBJECTIVE_BYTES
+            && children.iter().all(|assignment| {
+                assignment.profile.as_ref().is_none_or(|name| {
+                    self.routing
+                        .providers
+                        .roster
+                        .as_ref()
+                        .is_some_and(|roster| roster.snapshot.child_profiles.contains(name))
+                })
             })
     }
 
     pub(super) async fn run_children(
         &self,
         root_request: &mut ProviderRequest,
-        objectives: Vec<String>,
+        objectives: Vec<ChildAssignment>,
         agent: Option<String>,
         delegate_turn: ProviderTurn,
     ) -> Result<(), EngineError> {
@@ -175,7 +184,7 @@ impl RunLoop<'_> {
 
     async fn spawn_children(
         &self,
-        objectives: Vec<String>,
+        objectives: Vec<ChildAssignment>,
         agent: Option<String>,
     ) -> Result<Option<Spawned>, EngineError> {
         let definition = agent
@@ -234,7 +243,7 @@ impl RunLoop<'_> {
         self.journal
             .admit(
                 self.session_id,
-                delegation.max_events_for(&self.routing.providers),
+                delegation.max_events_for_admitted(&self.routing.providers),
                 delegation.tool_observations(),
             )
             .await?;
@@ -244,12 +253,21 @@ impl RunLoop<'_> {
             Err(error) => return Err(error),
         };
         let mut children = Vec::with_capacity(objectives.len());
-        for (index, objective) in objectives.into_iter().enumerate() {
+        for (index, assignment) in objectives.into_iter().enumerate() {
+            let objective = assignment.objective;
+            let profile = assignment.profile.or_else(|| {
+                self.routing
+                    .providers
+                    .roster
+                    .as_ref()
+                    .map(|roster| roster.snapshot.providers.child.clone())
+            });
             if self.controls.cancellation.is_cancelled() {
                 break;
             }
             let agent_run_id = AgentRunId::new();
             self.append(Event::AgentSpawned {
+                profile,
                 definition: agent.clone(),
                 run_id: self.run_id,
                 agent_run_id,
@@ -697,8 +715,15 @@ impl RunLoop<'_> {
                 0,
             )
             .await?;
-            let preview = (self.routing.providers.child.len() > 1)
-                .then(|| crate::provider::ResponsePreview::new().0);
+            let preview = (self
+                .routing
+                .chain(
+                    crate::provider::ProviderRole::Child,
+                    children[index].agent_run_id,
+                )?
+                .len()
+                > 1)
+            .then(|| crate::provider::ResponsePreview::new().0);
             let attempt_request = request.clone();
             let handle = queue.calls.spawn(async move {
                 crate::engine::routing::invoke_attempt(

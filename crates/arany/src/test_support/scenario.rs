@@ -272,7 +272,20 @@ impl Provider for GatedProvider {
             AgentPhase::ToolReview => return Err(ProviderError::InvalidOutcome),
             AgentPhase::RootPlan => ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["A".into(), "B".into(), "C".into()],
+                children: vec![
+                    crate::ChildAssignment {
+                        objective: "A".into(),
+                        profile: None,
+                    },
+                    crate::ChildAssignment {
+                        objective: "B".into(),
+                        profile: None,
+                    },
+                    crate::ChildAssignment {
+                        objective: "C".into(),
+                        profile: None,
+                    },
+                ],
             }),
             AgentPhase::ChildWork => {
                 let (release, gate) = oneshot::channel();

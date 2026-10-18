@@ -1758,6 +1758,7 @@ mod tests {
                         active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
                     },
                     Event::AgentSpawned {
+                        profile: None,
                         definition: None,
                         run_id,
                         agent_run_id,

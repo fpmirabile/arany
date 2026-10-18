@@ -1478,7 +1478,10 @@ impl Provider for BoundedLoop {
             match requests.len() {
                 0 => ProviderOutcome::Delegate(arany::Delegate {
                     agent: None,
-                    children: vec!["Review the stated task without effects".into()],
+                    children: vec![arany::ChildAssignment {
+                        objective: "Review the stated task without effects".into(),
+                        profile: None,
+                    }],
                 }),
                 1 => ProviderOutcome::Finish(Finish {
                     summary: "Child reasoning".into(),

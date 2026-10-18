@@ -145,7 +145,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "AssistantDisplayRecorded"
         | "AgentFinished"
         | "MessageCommitted" => Some(6),
-        "AgentSpawned" => Some(7),
+        "AgentSpawned" => Some(8),
         "GoalStarted" | "GoalFinished" => Some(7),
         "ProviderFallbackUsed" => Some(1),
         "ToolPermissionDecided" => Some(3),
@@ -271,6 +271,7 @@ pub enum Event {
         objective: Option<String>,
         grant: Option<ChildGrant>,
         definition: Option<String>,
+        profile: Option<String>,
     },
     ProviderFallbackUsed {
         run_id: RunId,
@@ -492,6 +493,8 @@ struct GoalSteeringNotePayload {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnPayload {
+    #[serde(deserialize_with = "Option::deserialize")]
+    profile: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     definition: Option<String>,
     role: AgentRole,
@@ -751,8 +754,10 @@ impl Event {
                 objective,
                 grant,
                 definition,
+                profile,
                 ..
             } => serialize(&SpawnPayload {
+                profile: profile.clone(),
                 definition: definition.clone(),
                 role: *role,
                 ordinal: *ordinal,
@@ -943,6 +948,7 @@ impl Event {
                     objective: data.objective,
                     grant: data.grant,
                     definition: data.definition,
+                    profile: data.profile,
                 }
             }
             "AgentFinished" if run_id.is_some() && agent_run_id.is_some() => {

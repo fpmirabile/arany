@@ -116,7 +116,9 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
         }
         let outcome = match index {
             3 | 8 => json!({"summary": "scoped compacted"}),
-            7 => json!({"outcome": {"type": "delegate", "children": ["Explain two"]}}),
+            7 => {
+                json!({"outcome": {"type": "delegate", "children":[{"objective":"Explain two","profile":null}]}})
+            }
             _ => {
                 json!({"outcome": {"type": "finish", "summary": "scoped summary", "result": "scoped answer"}})
             }

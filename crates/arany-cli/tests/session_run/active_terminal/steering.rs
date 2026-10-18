@@ -3,7 +3,7 @@ use super::*;
 use arany::{Event, GoalStatus};
 
 const NOTE: &str = "use the smaller fixture";
-const DELEGATE: &str = r#"{"outcome":{"type":"delegate","children":["synthetic child"]}}"#;
+const DELEGATE: &str = r#"{"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}}"#;
 
 struct Attached {
     process: ChildGuard,

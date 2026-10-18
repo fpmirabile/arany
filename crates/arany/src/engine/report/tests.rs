@@ -101,6 +101,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         images: Vec::new(),
         config: None,
         agents: vec![AgentView {
+            profile: None,
             definition: None,
             id: AgentRunId::new(),
             role: AgentRole::Primary,

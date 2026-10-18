@@ -111,7 +111,7 @@ fn run_broken_stderr_case(compaction: bool) {
             let text = match index {
                 0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
                 1 => {
-                    serde_json::json!({"outcome":{"type":"delegate","children":["synthetic child"]}})
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
                 2 => serde_json::json!({"summary":"synthetic summary"}),
                 _ => {

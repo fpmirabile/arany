@@ -112,7 +112,16 @@ impl Provider for GatedFailureProvider {
         let outcome = match request.phase {
             AgentPhase::RootPlan => ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["A".into(), "B".into()],
+                children: vec![
+                    crate::ChildAssignment {
+                        objective: "A".into(),
+                        profile: None,
+                    },
+                    crate::ChildAssignment {
+                        objective: "B".into(),
+                        profile: None,
+                    },
+                ],
             }),
             AgentPhase::ChildWork => {
                 let (release, gate) = oneshot::channel();
@@ -128,7 +137,10 @@ impl Provider for GatedFailureProvider {
                                 turn: crate::provider::ProviderTurn::scripted(),
                                 outcome: ProviderOutcome::Delegate(Delegate {
                                     agent: None,
-                                    children: vec!["not permitted".into()],
+                                    children: vec![crate::ChildAssignment {
+                                        objective: "not permitted".into(),
+                                        profile: None,
+                                    }],
                                 }),
                                 response_id: None,
                                 usage: crate::provider::Usage {
@@ -531,8 +543,13 @@ impl Segment {
     }
 
     fn spawn(&mut self, role: AgentRole) -> AgentRunId {
+        self.spawn_as(role, None)
+    }
+
+    fn spawn_as(&mut self, role: AgentRole, profile: Option<&str>) -> AgentRunId {
         let agent_run_id = AgentRunId::new();
         self.commit(Event::AgentSpawned {
+            profile: profile.map(str::to_owned),
             definition: None,
             run_id: self.run_id,
             agent_run_id,
@@ -1938,4 +1955,92 @@ fn unsupported_ambient_configuration_is_rejected_by_name_only() {
             .expect("disabled")
             .is_none()
     );
+}
+
+#[test]
+fn assigned_child_telemetry_uses_its_pinned_profile_instead_of_the_child_default() {
+    let (telemetry, exporter) = in_memory();
+    let routes = child_routes();
+    let mut config = run_config(Some(routes.clone()));
+    config.policy = CollaborationPolicy::Team {
+        max_active_children: 2,
+    };
+    let mut roster = crate::RosterSnapshot {
+        preset: "coding".into(),
+        selection_digest: [0; 32],
+        profiles: vec![
+            crate::NamedProviderRoutes {
+                name: "child".into(),
+                routes: routes.child.clone(),
+            },
+            crate::NamedProviderRoutes {
+                name: "main".into(),
+                routes: routes.primary.clone(),
+            },
+            crate::NamedProviderRoutes {
+                name: "spare".into(),
+                routes: vec![identity("openai", "assigned-model")],
+            },
+        ],
+        providers: Providers {
+            primary: "main".into(),
+            child: "child".into(),
+            review: "main".into(),
+            compaction: "main".into(),
+        },
+        child_profiles: vec!["child".into(), "spare".into()],
+    };
+    roster.selection_digest = roster.digest().unwrap();
+    config.roster = Some(Box::new(roster));
+    let mut segment = Segment::opened(&telemetry, unit_context());
+    segment.commit(Event::RunStarted {
+        run_id: segment.run_id,
+        config,
+        active_deadline_ms: None,
+    });
+    let primary = segment.spawn_as(AgentRole::Primary, Some("main"));
+    segment.call(
+        primary,
+        AgentPhase::RootPlan,
+        ProviderCallDisposition::Finished,
+        (None, None),
+    );
+    let child = AgentRunId::new();
+    segment.commit(Event::AgentSpawned {
+        run_id: segment.run_id,
+        agent_run_id: child,
+        role: AgentRole::Child,
+        ordinal: 1,
+        objective: Some("Inspect".into()),
+        grant: Some(crate::ChildGrant::NoTools),
+        definition: None,
+        profile: Some("spare".into()),
+    });
+    let sibling = segment.spawn_as(AgentRole::Child, Some("child"));
+    let (selected, _) = segment.call(
+        child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        (None, None),
+    );
+    let (default, _) = segment.call(
+        sibling,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        (None, None),
+    );
+    for actor in [child, sibling, primary] {
+        segment.finish_agent(actor, AgentDisposition::Finished);
+    }
+    segment.finish(RunDisposition::Finished, None);
+    let spans = finished_spans(&telemetry, &exporter);
+    for (sequence, model) in [(selected, "assigned-model"), (default, "child-model")] {
+        let span = spans
+            .iter()
+            .find(|span| {
+                span.name == "chat arany.provider" && span.start_time == committed_at(sequence)
+            })
+            .unwrap();
+        assert!(has_attribute(span, "gen_ai.request.model", model.into()));
+    }
 }

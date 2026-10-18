@@ -687,7 +687,10 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
         let mut outcomes = vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Inspect the facts".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect the facts".into(),
+                    profile: None,
+                }],
             }),
             tool_outcome(call(kind), None),
         ];
@@ -740,7 +743,10 @@ async fn researcher_review_approval_dispatches_within_a_short_goal_budget() {
             vec![
                 ProviderOutcome::Delegate(Delegate {
                     agent: None,
-                    children: vec!["Inspect the facts".into()],
+                    children: vec![arany::ChildAssignment {
+                        objective: "Inspect the facts".into(),
+                        profile: None,
+                    }],
                 }),
                 tool_outcome(call("catalog"), None),
                 finish("approve"),
@@ -793,7 +799,10 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
         ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Inspect the facts".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect the facts".into(),
+                    profile: None,
+                }],
             }),
             finish("answer"),
         ])
@@ -925,7 +934,10 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
         let mut outcomes = vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: None,
-                children: vec!["Inspect the task".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect the task".into(),
+                    profile: None,
+                }],
             }),
             finish("report"),
             tool_outcome(call.clone(), Some(Box::new(plan(&call)))),
@@ -1628,7 +1640,10 @@ async fn agent_definition_guard_registry_research_selection_and_replay() {
             vec![
                 ProviderOutcome::Delegate(Delegate {
                     agent: Some("reader".into()),
-                    children: vec!["Inspect facts".into()],
+                    children: vec![arany::ChildAssignment {
+                        objective: "Inspect facts".into(),
+                        profile: None,
+                    }],
                 }),
                 tool_outcome(call("read"), None),
                 finish("report"),
@@ -1778,7 +1793,10 @@ async fn agent_definition_guard_skips_invalid_files_and_refuses_their_selection(
         .run(
             vec![ProviderOutcome::Delegate(Delegate {
                 agent: Some("reader".into()),
-                children: vec!["Inspect facts".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect facts".into(),
+                    profile: None,
+                }],
             })],
             None,
             true,
@@ -1810,7 +1828,10 @@ async fn agent_definition_guard_editor_turn_and_tool_limits_refuse_child_egress(
         );
         let mut responses = vec![ProviderOutcome::Delegate(Delegate {
             agent: Some("reader".into()),
-            children: vec!["Inspect facts".into()],
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
         })];
         responses.extend(response);
         let (result, requests, _) = fixture.run(responses, None, true).await;
@@ -2016,7 +2037,10 @@ async fn agent_definition_guard_modes_preserve_parent_asks_and_add_review() {
         let mut responses = vec![
             ProviderOutcome::Delegate(Delegate {
                 agent: Some("reader".into()),
-                children: vec!["Inspect".into()],
+                children: vec![arany::ChildAssignment {
+                    objective: "Inspect".into(),
+                    profile: None,
+                }],
             }),
             tool_outcome(call(if review { "catalog" } else { "read" }), None),
         ];
