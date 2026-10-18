@@ -309,6 +309,7 @@ struct Ready {
 pub(super) enum CleanupCheck {
     Inspection,
     ListingUnavailable,
+    DeviceUnlisted,
     DetachFailed,
     ImageStillListed,
     MountStillPresent,
@@ -319,6 +320,7 @@ impl CleanupCheck {
         match self {
             Self::Inspection => "inspection",
             Self::ListingUnavailable => "listing unavailable",
+            Self::DeviceUnlisted => "device unlisted before detach",
             Self::DetachFailed => "detach failed",
             Self::ImageStillListed => "image still listed",
             Self::MountStillPresent => "mount still present",
@@ -1681,6 +1683,10 @@ mod tests {
             serde_json::to_string(&failure).unwrap(),
             r#"{"stage":"storage_cleanup","check":"detach_failed"}"#
         );
+        let unlisted: BootstrapFailure =
+            serde_json::from_str(r#"{"stage":"storage_cleanup","check":"device_unlisted"}"#)
+                .unwrap();
+        assert_eq!(unlisted.check(), Some("device unlisted before detach"));
         let bare: BootstrapFailure = serde_json::from_str(r#"{"stage":"payload"}"#).unwrap();
         assert_eq!(bare.check(), None);
         assert_eq!(

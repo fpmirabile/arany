@@ -1537,6 +1537,57 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
 }
 
 #[test]
+fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_build() {
+    let intent = |call| EffectIntent {
+        id: uuid::Uuid::now_v7(),
+        run_id: crate::session::RunId::new(),
+        agent_run_id: crate::session::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call,
+        limits: ToolLimits::default(),
+        expires_at_ms: 1,
+        use_count: 1,
+    };
+    let command = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![],
+        cwd: String::new(),
+    };
+    let cleanup = intent(command.clone());
+    let failure = serde_json::from_str(r#"{"stage":"storage_cleanup","check":"detach_failed"}"#)
+        .expect("closed storage cleanup failure");
+    let observation = super::uncertain_observation(
+        cleanup.clone(),
+        super::ToolError::GuardBootstrap(failure),
+        CacheUpdate::NotApplicable,
+    );
+    assert_eq!(
+        observation.output,
+        "Guard storage cleanup unconfirmed; effects may have occurred. Do not retry automatically."
+    );
+    assert_eq!(
+        crate::test_support::recorded_tool_failure(cleanup.id).as_deref(),
+        Some("Guard stage=storage cleanup check=detach failed")
+    );
+    let unstarted = intent(command);
+    super::unstarted_observation(
+        unstarted.clone(),
+        super::ToolError::GuardRejected(super::guard::GuardStage::ConnectionDeadline),
+    );
+    assert_eq!(
+        crate::test_support::recorded_tool_failure(unstarted.id).as_deref(),
+        Some("Guard stage=connection deadline")
+    );
+    assert_eq!(
+        crate::test_support::recorded_tool_failure(uuid::Uuid::now_v7()),
+        None
+    );
+}
+
+#[test]
 fn goal_success_criterion_offers_only_admitted_calls() {
     let calls = catalog_call_schemas(&json!({
         "write": false,
