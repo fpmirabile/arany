@@ -844,7 +844,9 @@ impl RunLoop<'_> {
         let permission =
             permission.narrow_hooks(hooks.restriction, config.map(|config| config.mode()));
         let Permission {
-            decision, basis, ..
+            mut decision,
+            basis,
+            ..
         } = permission;
         let digest = intent.digest();
         let source = if decision == Decision::Ask {
@@ -892,6 +894,11 @@ impl RunLoop<'_> {
                 },
                 source,
             )
+        } else if self.controls.approvals.is_some_and(|approvals| {
+            !approvals.admits_human_only(&intent.call, hooks.restriction == Some(Decision::Ask))
+        }) {
+            decision = Decision::Ask;
+            unavailable_human_approval(intent)
         } else {
             match grant {
                 Grant::Primary {
@@ -1675,6 +1682,21 @@ fn not_dispatched(
         attestation: None,
         cache_update: CacheUpdate::NotApplicable,
     }
+}
+
+fn unavailable_human_approval(intent: EffectIntent) -> (Verdict, PermissionSource) {
+    (
+        Verdict::Deny(Answer {
+            observation: not_dispatched(
+                intent,
+                ToolDisposition::Denied,
+                "Human-only approval is unavailable on this channel; no operation was dispatched",
+            ),
+            refused: true,
+            active_time: None,
+        }),
+        PermissionSource::UnavailableApproval,
+    )
 }
 
 fn unguarded_gate(

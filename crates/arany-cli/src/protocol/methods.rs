@@ -412,6 +412,19 @@ pub enum Item {
     },
 }
 
+impl Item {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::UserMessage { id, .. }
+            | Self::AgentMessage { id, .. }
+            | Self::CommandExecution { id, .. }
+            | Self::FileChange { id, .. }
+            | Self::McpToolCall { id, .. }
+            | Self::ToolCall { id, .. } => id,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImageMetadata {

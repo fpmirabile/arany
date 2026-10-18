@@ -56,6 +56,7 @@ struct Fixture {
     state: std::path::PathBuf,
     engine: Engine,
     deny_humans: bool,
+    restricted_approvals: bool,
     command_maximum: Option<u32>,
     max_children: u8,
     settings: Option<Value>,
@@ -105,6 +106,7 @@ impl Fixture {
             state,
             engine,
             deny_humans: false,
+            restricted_approvals: false,
             command_maximum: None,
             max_children: 1,
             settings: settings.cloned(),
@@ -139,6 +141,11 @@ impl Fixture {
         goal_budget: arany::GoalBudget,
     ) -> (arany::RunOutcome, Vec<ProviderRequest>, usize) {
         let (approvals, mut inbox) = arany::ToolApprovals::new(mode.unwrap_or_default());
+        let approvals = if self.restricted_approvals {
+            approvals.without_human_only()
+        } else {
+            approvals
+        };
         let controls = RunControls {
             tools: ToolGrant::Configured,
             approvals: mode.map(|_| approvals),
@@ -1610,34 +1617,57 @@ async fn hook_output_overflow_cannot_switch_off_a_deny_hook() {
 
 #[tokio::test]
 async fn hook_ask_over_an_auto_review_ask_goes_to_the_human() {
-    let call = call("mcp");
-    let settings = json!({
-        "permissions": {"defaultMode": "auto", "allow": ["mcp__server__echo"]},
-        "hooks": {"PreToolUse": [{"matcher": "mcp__server__echo", "hooks": [shell_hook(&hook_json("ask"))]}]},
-    });
-    let fixture = Fixture::new(Some(&settings), true);
-    let (result, requests, humans) = fixture
-        .run(
-            vec![
-                tool_outcome(call.clone(), Some(Box::new(plan(&call)))),
-                finish("answer"),
-            ],
-            Some(arany::ApprovalMode::Auto),
-            false,
-        )
-        .await;
-    assert_eq!(humans, 1);
-    assert!(
-        !requests
-            .iter()
-            .any(|request| request.phase == AgentPhase::ToolReview)
-    );
-    let (_, view) = fixture.reopen(result.session_id).await;
-    let verdict = view.runs[0].tools[0].permission_verdict.as_ref().unwrap();
-    assert_eq!(
-        (verdict.decision, verdict.source, verdict.hook_restriction),
-        (Decision::Ask, PermissionSource::Human, Some(Decision::Ask))
-    );
+    for restricted in [false, true] {
+        let call = call("mcp");
+        let settings = json!({
+            "permissions": {"defaultMode": "auto", "allow": ["mcp__server__echo"]},
+            "hooks": {"PreToolUse": [{"matcher": "mcp__server__echo", "hooks": [shell_hook(&hook_json("ask"))]}]},
+        });
+        let mut fixture = Fixture::new(Some(&settings), true);
+        fixture.restricted_approvals = restricted;
+        let mut outcomes = vec![tool_outcome(call.clone(), Some(Box::new(plan(&call))))];
+        if !restricted {
+            outcomes.push(finish("answer"));
+        }
+        let (result, requests, humans) = fixture
+            .run(outcomes, Some(arany::ApprovalMode::Auto), false)
+            .await;
+        assert_eq!(humans, usize::from(!restricted));
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.phase == AgentPhase::ToolReview)
+        );
+        let (_, view) = fixture.reopen(result.session_id).await;
+        let tool = &view.runs[0].tools[0];
+        let verdict = tool.permission_verdict.as_ref().unwrap();
+        assert_eq!(
+            (
+                verdict.decision,
+                verdict.source,
+                verdict.hook_restriction,
+                verdict.approved
+            ),
+            (
+                Decision::Ask,
+                if restricted {
+                    PermissionSource::UnavailableApproval
+                } else {
+                    PermissionSource::Human
+                },
+                Some(Decision::Ask),
+                !restricted
+            )
+        );
+        assert_eq!(
+            tool.observation.as_ref().unwrap().disposition,
+            if restricted {
+                arany::ToolDisposition::Denied
+            } else {
+                arany::ToolDisposition::Succeeded
+            }
+        );
+    }
 }
 
 fn agent_file(fixture: &Fixture, filename: &str, fields: &str, body: &str) {

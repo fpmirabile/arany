@@ -120,7 +120,10 @@ fn hash(bytes: &[u8]) -> String {
         .collect()
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", any(debug_assertions, arany_ci))
+))]
 fn private_file(path: &std::path::Path, bytes: &[u8]) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, bytes).unwrap();
@@ -3022,32 +3025,9 @@ fn acp_profile_admits_session_cwd_instead_of_launch_directory() {
 }
 
 #[test]
-fn acp_refuses_tools_and_terminal_input_before_state_admission() {
+fn acp_refuses_terminal_input_before_state_admission() {
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("state");
-    let output = process::file_output(
-        Command::new(env!("CARGO_BIN_EXE_arany"))
-            .env_clear()
-            .current_dir(root.path())
-            .args([
-                "acp",
-                "--provider",
-                "openai",
-                "--model",
-                "gpt-5.4",
-                "--tools",
-                "--state-dir",
-            ])
-            .arg(&state),
-        None,
-    );
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        output.stderr,
-        b"error: invalid arguments; run arany --help\n"
-    );
-    assert!(!state.exists());
     let (_master, slave) = process::cloexec_pty(None);
     let output = Command::new(env!("CARGO_BIN_EXE_arany"))
         .env_clear()
@@ -3058,6 +3038,7 @@ fn acp_refuses_tools_and_terminal_input_before_state_admission() {
             "openai",
             "--model",
             "gpt-5.4",
+            "--tools",
             "--state-dir",
         ])
         .arg(&state)
