@@ -164,7 +164,6 @@ impl Provider for FastProvider {
     }
 }
 
-/// A segment whose Run span holds its cap of committed markers.
 fn marked_segment(telemetry: &Telemetry) -> Segment {
     let mut segment = Segment::begin(telemetry, unit_context());
     for _ in 3..MAX_EVENTS_PER_SPAN {

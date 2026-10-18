@@ -11,7 +11,10 @@ use tokio::{
 mod approvals;
 mod history;
 mod items;
-mod server;
+pub(in crate::cli) mod server;
+#[cfg(test)]
+pub(in crate::cli) mod threads;
+#[cfg(not(test))]
 mod threads;
 
 pub(super) const INBOUND_CAPACITY: usize = 64;
@@ -99,11 +102,11 @@ pub(crate) async fn run(
     })
 }
 
-async fn serve_transport(
+pub(in crate::cli) async fn serve_transport<T>(
     serving: impl std::future::Future<Output = Result<(), String>>,
     stop: impl std::future::Future<Output = ()>,
     inbound: mpsc::Sender<ClientMessage>,
-    outbound: mpsc::Sender<ServerMessage>,
+    outbound: mpsc::Sender<T>,
     mut reader_task: tokio::task::JoinHandle<Result<(), String>>,
     mut writer_task: tokio::task::JoinHandle<Result<(), String>>,
     shutdown: watch::Sender<bool>,
@@ -178,7 +181,7 @@ async fn serve_transport(
     result
 }
 
-async fn shutdown_grace(
+pub(in crate::cli) async fn shutdown_grace(
     mut shutdown: watch::Receiver<bool>,
     serving: impl std::future::Future<Output = Result<(), String>>,
 ) -> Result<(), String> {
@@ -240,7 +243,7 @@ async fn read_messages(
     result
 }
 
-async fn read_bounded_line(
+pub(in crate::cli) async fn read_bounded_line(
     input: &mut (impl AsyncBufRead + Unpin),
 ) -> std::io::Result<Option<Result<Vec<u8>, CodecError>>> {
     let mut line = Vec::new();
@@ -277,9 +280,9 @@ async fn read_bounded_line(
     }
 }
 
-async fn write_messages(
+pub(in crate::cli) async fn write_messages<T: serde::Serialize>(
     mut output: impl AsyncWrite + Unpin,
-    mut outbound: mpsc::Receiver<ServerMessage>,
+    mut outbound: mpsc::Receiver<T>,
 ) -> Result<(), String> {
     while let Some(message) = outbound.recv().await {
         let line =
@@ -298,4 +301,4 @@ async fn write_messages(
 
 #[cfg(test)]
 #[path = "../../tests/serve/in_process.rs"]
-mod tests;
+pub(in crate::cli) mod tests;

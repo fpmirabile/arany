@@ -22,7 +22,6 @@ pub(super) fn tail(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Replays cursor addressing, erasure and printable cells so differential frames read as displayed.
 pub(super) fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
     let mut grid = vec![vec![' '; columns]; rows];
     let (mut row, mut column) = (0, 0);

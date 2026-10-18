@@ -696,7 +696,7 @@ fn diff_output(numstat: &Captured, patch: &Captured, budget: usize) -> Result<Va
     let mut hidden = false;
     for line in String::from_utf8_lossy(&patch.stdout).split_inclusive('\n') {
         if let Some(header) = line.strip_prefix("diff --git ") {
-            // The new-side path follows the last " b/"; an unparseable header hides its hunk (fail closed).
+            // The new-side path follows the last " b/"; an unparsable header hides its hunk (fail closed).
             hidden = header
                 .rfind(" b/")
                 .is_none_or(|at| excluded(header[at + 3..].trim_end()));
@@ -802,7 +802,6 @@ mod tests {
         );
     }
 
-    /// Two commits, then a worktree with a modified file, a modified secret, a rewritten large file and a new file.
     fn fixture(temp: &Path) -> PathBuf {
         let workspace = temp.join("workspace");
         let home = temp.join("home");
@@ -833,7 +832,6 @@ mod tests {
         workspace
     }
 
-    /// Writes repository configuration and hooks that would run user code if Git ever read them.
     fn arm_hostile(temp: &Path, workspace: &Path) -> PathBuf {
         let markers = temp.join("markers");
         let scripts = temp.join("scripts");
@@ -910,7 +908,6 @@ mod tests {
         markers
     }
 
-    /// A sorted recursive snapshot of regular files, symlink targets and directories.
     fn tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         fn walk(root: &Path, path: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
             let mut entries: Vec<PathBuf> = std::fs::read_dir(path)

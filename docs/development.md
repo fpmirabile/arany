@@ -75,6 +75,21 @@ cargo test --workspace --locked --offline
 cargo test --workspace --locked --offline --release
 ```
 
+The Linux hygiene job also checks unused dependencies with `cargo-machete 0.9.1`,
+spelling with `typos-cli 1.35.8` and TOML formatting with `taplo-cli 0.10.0`.
+Install those pinned versions with `cargo install --locked --version <version> <package>`
+and run:
+
+```sh
+cargo machete
+typos
+taplo fmt --check
+```
+
+Use `taplo fmt` to apply TOML formatting. Keep spelling exceptions narrow in
+`.typos.toml`; unused-dependency ignores require a reviewed reason in the manifest.
+Hygiene runs on documentation changes too, independently of the Rust change detector.
+
 CI marks the Rust jobs `skipped` without allocating their runners only when every
 changed path is on the [detector's non-code allowlist](../scripts/ci-changes.py).
 Code, tests, fixtures, embedded assets, dependencies, build settings, scripts and

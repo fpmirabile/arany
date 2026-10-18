@@ -2674,7 +2674,6 @@ mod tests {
         assert_eq!(committed_archive(&state, &identity), prior);
     }
 
-    /// Accepts `remaining` bytes, then reports zero-length writes so `write_all` fails.
     struct FailAfter {
         remaining: usize,
     }
