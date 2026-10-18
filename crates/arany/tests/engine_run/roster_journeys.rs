@@ -368,10 +368,6 @@ async fn slow_heterogeneous_routes_obey_the_lowest_admitted_ceiling() {
         let mut order = Vec::new();
         for _ in 0..3 {
             let (objective, release) = starts.recv().await.unwrap();
-            for _ in 0..16 {
-                tokio::task::yield_now().await;
-            }
-            assert!(starts.try_recv().is_err(), "a second call overlapped");
             order.push(objective);
             release.send(()).unwrap();
         }
@@ -386,7 +382,23 @@ async fn slow_heterogeneous_routes_obey_the_lowest_admitted_ceiling() {
     assert_eq!(wide.requests.lock().unwrap().len(), 2);
     assert_eq!(narrow.requests.lock().unwrap().len(), 1);
     engine.close().await.unwrap();
-    let (_, view) = reopen(&state, result.session_id).await;
+    let (events, view) = reopen(&state, result.session_id).await;
+    let children: Vec<_> = view.runs[0].agents.iter().skip(1).map(|a| a.id).collect();
+    let position = |wanted: &dyn Fn(&Event) -> bool| events.iter().position(|e| wanted(&e.event));
+    for pair in children.windows(2) {
+        let recorded = position(&|event| {
+            matches!(event, Event::ProviderCallRecorded { agent_run_id, .. } if *agent_run_id == pair[0])
+        })
+        .unwrap();
+        let reserved = position(&|event| {
+            matches!(event, Event::GoalProviderCallReserved { agent_run_id, .. } if *agent_run_id == pair[1])
+        })
+        .unwrap();
+        assert!(
+            recorded < reserved,
+            "a child call started before the previous one was recorded"
+        );
+    }
     assert_eq!(
         view.runs[0]
             .agents

@@ -558,9 +558,17 @@ mod journey {
             }
             input.write_all(send).unwrap();
         }
-        while child.child().try_wait().unwrap().is_none() {
+        let status = loop {
+            if let Some(status) = child.child().try_wait().unwrap() {
+                break status;
+            }
             pump(&mut input, &mut transcript);
-        }
+        };
+        assert!(
+            status.success(),
+            "attached exit: {status:?}: {}",
+            super::super::session_picker::tail(&transcript)
+        );
         assert_eq!(served.load(Ordering::SeqCst), 5);
         let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
         let session: String = connection
