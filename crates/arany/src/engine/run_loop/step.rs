@@ -334,7 +334,7 @@ impl RunLoop<'_> {
                 if child.editor
                     && let Some(intent) = &mut intent
                 {
-                    intent.target = self.worker_target()?;
+                    intent.target = self.worker_target(child.agent_run_id)?;
                     intent.limits.cache_requested_bytes = 0;
                     intent.limits.cache_bytes = 0;
                     intent.limits.cache_candidate_bytes = 0;
@@ -548,7 +548,7 @@ impl RunLoop<'_> {
             self.worker
                 .lock()
                 .await
-                .as_mut()
+                .get_mut(&agent_run_id)
                 .ok_or(EngineError::CoordinatorFailed)?
                 .note_intent(&intent);
         }
@@ -593,7 +593,7 @@ impl RunLoop<'_> {
             self.worker
                 .lock()
                 .await
-                .as_mut()
+                .get_mut(&agent_run_id)
                 .ok_or(EngineError::CoordinatorFailed)?
                 .acknowledge(candidate, data)?;
         }
@@ -627,7 +627,7 @@ impl RunLoop<'_> {
                     source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
                 }
         ) {
-            self.admit_worker_action(self.worker_call_chunks(&intent.call)?)
+            self.admit_worker_action(self.worker_call_chunks(intent.agent_run_id, &intent.call)?)
                 .await?;
         }
         let (tail, observations) = match grant {
@@ -676,12 +676,40 @@ impl RunLoop<'_> {
     }
 
     fn plan_allows(&self, call: &ToolCall) -> bool {
-        matches!(
-            call,
-            ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-            }
-        ) || self.ledger().allows_tool(call)
+        self.primary_lease_allows(call)
+            && (matches!(
+                call,
+                ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                }
+            ) || self.ledger().allows_tool(call))
+    }
+
+    pub(super) fn primary_lease_allows(&self, call: &ToolCall) -> bool {
+        self.ledger()
+            .view(|v| {
+                v.runs.last().is_some_and(|r| {
+                    let leases = r
+                        .agents
+                        .iter()
+                        .filter_map(|a| a.assignment.as_ref())
+                        .filter(|w| w.released.is_none())
+                        .flat_map(|w| &w.pins.request.lease)
+                        .collect::<Vec<_>>();
+                    match call {
+                        ToolCall::ApplyChangeset {
+                            source: crate::worker::ChangesetSource::WorkerHandover { .. },
+                        } => true,
+                        ToolCall::Write { path, .. }
+                        | ToolCall::Edit { path, .. }
+                        | ToolCall::Mkdir { path } => {
+                            !leases.iter().any(|l| crate::worker::overlaps(l, path))
+                        }
+                        _ => !call.is_process() || leases.is_empty(),
+                    }
+                })
+            })
+            .unwrap_or(false)
     }
 
     fn review_will_run(
@@ -1150,14 +1178,20 @@ impl RunLoop<'_> {
                 }),
             });
         }
-        let runtime = match (&intent.call, self.handover.get()) {
-            (
-                ToolCall::ApplyChangeset {
-                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
-                },
-                Some(bytes),
-            ) => runtime.with_handover(bytes.clone()),
-            _ => runtime.clone(),
+        let runtime = if let ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::WorkerHandover { assignment_id, .. },
+        } = &intent.call
+        {
+            let bytes = self
+                .handover
+                .lock()
+                .map_err(|_| EngineError::CoordinatorFailed)?
+                .get(assignment_id)
+                .cloned()
+                .ok_or(EngineError::CoordinatorFailed)?;
+            runtime.with_handover(bytes)
+        } else {
+            runtime.clone()
         };
         let runtime = &runtime;
         let (observation, segment, exhausted) =
@@ -1776,19 +1810,17 @@ impl RunLoop<'_> {
                 .map(|definition| {
                     let mut entry = definition.catalog_entry();
                     if definition.editor() {
-                        let supported = !definition.background
-                            && runtime.worker_policy().is_some()
+                        let supported = runtime.worker_policy().is_some()
                             && self.controls.goal_phase
                                 == crate::session::GoalPhase::Implementation;
                         entry["supported"] = serde_json::json!(supported);
-                        entry["unsupported_reason"] = serde_json::json!(if definition.background {
-                            Some("background_execution_unavailable")
-                        } else if !supported {
+                        entry["unsupported_reason"] = serde_json::json!(if !supported {
                             Some("editor_parent_grant_unavailable")
                         } else {
                             None
                         });
                         entry["editor"] = serde_json::json!(true);
+                        entry["background"] = serde_json::json!(definition.background);
                         entry["digest"] = serde_json::json!(crate::tools::types::digest(
                             &serde_json::to_vec(definition).expect("normalized definition")
                         ));

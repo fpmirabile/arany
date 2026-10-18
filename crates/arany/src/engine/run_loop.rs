@@ -111,9 +111,9 @@ pub(super) struct RunLoop<'a> {
     controls: LoopControls<'a>,
     ledger: &'a GoalLedger,
     hints: Option<&'a HintPublisher>,
-    worker_data_bytes: std::sync::OnceLock<u32>,
-    worker: tokio::sync::Mutex<Option<crate::tools::worker::View>>,
-    handover: std::sync::OnceLock<std::sync::Arc<[u8]>>,
+    worker_data_bytes: std::sync::Mutex<std::collections::HashMap<AgentRunId, u32>>,
+    worker: tokio::sync::Mutex<std::collections::HashMap<AgentRunId, crate::tools::worker::View>>,
+    handover: std::sync::Mutex<std::collections::HashMap<AgentRunId, std::sync::Arc<[u8]>>>,
     definitions: std::sync::OnceLock<
         std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
     >,
@@ -152,9 +152,9 @@ impl<'a> RunLoop<'a> {
                 ledger,
                 publisher: hints,
             },
-            worker_data_bytes: std::sync::OnceLock::new(),
-            worker: tokio::sync::Mutex::new(None),
-            handover: std::sync::OnceLock::new(),
+            worker_data_bytes: Default::default(),
+            worker: Default::default(),
+            handover: Default::default(),
             definitions: std::sync::OnceLock::new(),
             journal,
             session_id: identity.session_id,
@@ -314,7 +314,12 @@ impl<'a> RunLoop<'a> {
         pause: ActivePause,
         resume_at: Option<Instant>,
     ) -> Result<(), EngineError> {
-        self.settle_active_segment_at(pause.segment, pause.paused_at, resume_at)
+        let sampled_at = if self.ledger().providers_active() {
+            Instant::now()
+        } else {
+            pause.paused_at
+        };
+        self.settle_active_segment_at(pause.segment, sampled_at, resume_at)
     }
 
     async fn reserve_provider_call(
@@ -476,7 +481,7 @@ impl<'a> RunLoop<'a> {
                     outcome: ProviderOutcome::Delegate(delegation),
                     ..
                 }) => (
-                    planning
+                    (planning || self.wave_settled()?)
                         && self.well_formed_delegation(
                             &delegation.children,
                             delegation.agent.as_deref(),
@@ -487,7 +492,8 @@ impl<'a> RunLoop<'a> {
                     outcome: ProviderOutcome::Tools(requests),
                     ..
                 }) => (
-                    self.well_formed_tools(requests),
+                    self.well_formed_tools(requests)
+                        && requests.iter().all(|r| self.primary_lease_allows(&r.call)),
                     self.ledger().admits(Action::Tool),
                 ),
                 _ => (false, true),
@@ -619,6 +625,25 @@ impl<'a> RunLoop<'a> {
         Ok(true)
     }
 
+    async fn primary_context(&self, root: &mut ProviderRequest) -> Result<(), EngineError> {
+        self.record_steering_note(root).await?;
+        let facts = self.ledger().context_facts()?;
+        if let Some(feedback) = continuation_feedback(&mut root.input) {
+            feedback.facts = Some(facts);
+        } else {
+            match root
+                .input
+                .tools
+                .as_mut()
+                .and_then(|tools| tools.steps.last_mut())
+            {
+                Some(step) => step.facts = Some(facts),
+                None => root.input.goal_context_facts = Some(facts),
+            }
+        }
+        Ok(())
+    }
+
     async fn invoke_primary(
         &self,
         root: &mut ProviderRequest,
@@ -643,21 +668,7 @@ impl<'a> RunLoop<'a> {
             }
             return Err(error);
         }
-        self.record_steering_note(root).await?;
-        let facts = self.ledger().context_facts()?;
-        if let Some(feedback) = continuation_feedback(&mut root.input) {
-            feedback.facts = Some(facts);
-        } else {
-            match root
-                .input
-                .tools
-                .as_mut()
-                .and_then(|tools| tools.steps.last_mut())
-            {
-                Some(step) => step.facts = Some(facts),
-                None => root.input.goal_context_facts = Some(facts),
-            }
-        }
+        self.primary_context(root).await?;
         let request = root.clone();
         let context = self
             .hints

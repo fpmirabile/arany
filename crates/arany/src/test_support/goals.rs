@@ -357,7 +357,7 @@ impl ForegroundWorkerProvider {
             .map(|a| a["digest"].clone())
             .and_then(|d| serde_json::from_value(d).ok())
             .unwrap_or([1; 32]);
-        let mut children = vec![crate::ChildAssignment {
+        let children = vec![crate::ChildAssignment {
             objective: "Edit the leased notes".into(),
             profile: None,
             editor: Some(Box::new(crate::worker::EditorAssignment {
@@ -374,19 +374,6 @@ impl ForegroundWorkerProvider {
                 supersedes: None,
             })),
         }];
-        if self.case == "background" {
-            children[0].editor.as_mut().unwrap().mode = crate::worker::WorkerMode::Background;
-        }
-        if self.case == "wave" {
-            children[0].editor.as_mut().unwrap().wave = 2;
-        }
-        if self.case == "mixed" {
-            children.push(crate::ChildAssignment {
-                editor: None,
-                objective: "Research".into(),
-                profile: None,
-            });
-        }
         crate::ProviderOutcome::Delegate(crate::Delegate {
             agent: None,
             children,

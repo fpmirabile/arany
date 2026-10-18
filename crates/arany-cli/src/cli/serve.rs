@@ -48,6 +48,7 @@ pub(crate) async fn run(
     let engine = Engine::open(
         state,
         EngineConfig {
+            worker_concurrency: None,
             telemetry,
             guard_executable: std::env::current_exe().ok(),
         },

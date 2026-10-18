@@ -546,6 +546,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             Engine::open(
                 root,
                 arany::EngineConfig {
+                    worker_concurrency: None,
                     telemetry: admission.telemetry.clone(),
                     guard_executable: std::env::current_exe().ok(),
                 },

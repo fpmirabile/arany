@@ -123,6 +123,13 @@ fn bounded_entries<'de, D: serde::Deserializer<'de>>(
 }
 
 impl Image {
+    fn retained_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|(path, entry)| path.len() + 128 + entry.bytes())
+            .sum()
+    }
+
     pub(super) fn validate(&self, grant: &WorkerGrant) -> Result<(), ToolError> {
         if self.entries.len() > WORKER_FILES {
             return Err(ToolError::Limit);
@@ -241,6 +248,7 @@ pub(crate) struct View {
     pending: Option<uuid::Uuid>,
     contained: bool,
     remaining_data: usize,
+    retained_limit: usize,
     enforcement_digest: [u8; 32],
     last_intent_digest: Option<[u8; 32]>,
     sealed: Option<WorkerDataRef>,
@@ -309,10 +317,19 @@ impl View {
             enforcement_digest: runtime.enforcement_digest,
             last_intent_digest: None,
             sealed: None,
+            retained_limit: 64 * 1024 * 1024,
             remaining_data: (data_bytes as usize)
                 .checked_sub(manifest.len())
                 .ok_or(ToolError::Limit)?,
         })
+    }
+
+    pub(crate) fn restrict_retained(&mut self, limit: usize) -> Result<(), ToolError> {
+        if self.base.retained_bytes() + self.current.retained_bytes() > limit {
+            return Err(ToolError::Limit);
+        }
+        self.retained_limit = self.retained_limit.min(limit);
+        Ok(())
     }
 
     pub(crate) fn note_intent(&mut self, intent: &EffectIntent) {
@@ -411,6 +428,9 @@ impl View {
         let proposed = (|| {
             let image = edited_image(&self.current, &intent.call)?;
             image.validate(&self.grant)?;
+            if self.base.retained_bytes() + image.retained_bytes() > self.retained_limit {
+                return Err(ToolError::Limit);
+            }
             let data = self.data_for(&image, &intent.call)?;
             if data.len() > self.remaining_data
                 && !(handover_call(&intent.call, self.assignment)

@@ -144,6 +144,27 @@ fn base_version(entries: &[WorkerManifestEntry], path: &str) -> Option<WorkerBas
                 .then_some(WorkerBaseVersion::Absent)
         })
 }
+fn retained_image(entries: &[WorkerManifestEntry], changes: &[WorkerFileFact]) -> usize {
+    let mut files: std::collections::BTreeMap<&str, &WorkerBaseVersion> = entries
+        .iter()
+        .map(|e| (e.path.as_str(), &e.version))
+        .collect();
+    for change in changes {
+        files.insert(&change.path, &change.after);
+    }
+    files
+        .into_iter()
+        .map(|(path, version)| {
+            path.len()
+                + 128
+                + match version {
+                    WorkerBaseVersion::File { bytes, .. } => *bytes as usize,
+                    _ => 0,
+                }
+        })
+        .sum()
+}
+
 fn valid_delta(
     run: &RunView,
     id: AgentRunId,
@@ -176,6 +197,26 @@ fn valid_delta(
             return Err(ReplayError::InvalidTransition);
         }
     }
+    let mut overlay = if cumulative {
+        Vec::new()
+    } else {
+        w.overlay.clone()
+    };
+    for change in changes {
+        if let Some(old) = overlay.iter_mut().find(|f| f.path == change.path) {
+            old.after = change.after.clone();
+        } else {
+            overlay.push(change.clone());
+        }
+    }
+    let policy = run
+        .config
+        .as_ref()
+        .and_then(|c| c.worker_policy.as_ref())
+        .ok_or(ReplayError::InvalidTransition)?;
+    if retained_image(entries, &[]) + retained_image(entries, &overlay) > policy.retained_bytes() {
+        return Err(ReplayError::InvalidTransition);
+    }
     if cumulative {
         let nonempty: Vec<_> = w
             .overlay
@@ -191,7 +232,10 @@ fn valid_delta(
 }
 
 pub(super) fn coordination_ready(run: &RunView) -> bool {
-    run.agents.iter().skip(1).all(|a| {
+    let admitted = run.agents.len().saturating_sub(1)
+        + run.tools.iter().filter(|t| refused_capture(run, t)).count();
+    run.primary().into_iter().flat_map(|a| &a.provider_calls).filter_map(|r| r.delegation.as_ref()).flatten().skip(admitted).all(|p| matches!(p, ChildAssignment::Editor { assignment } if assignment.mode == WorkerMode::Background))
+    && run.agents.iter().skip(1).all(|a| {
         a.assignment
             .as_ref()
             .map_or(a.status == AgentStatus::Finished, |w| {
@@ -202,13 +246,23 @@ pub(super) fn coordination_ready(run: &RunView) -> bool {
 }
 
 pub(super) fn wave_settled(run: &RunView) -> bool {
-    run.agents.iter().skip(1).all(|a| {
-        a.assignment
-            .as_ref()
-            .map_or(a.status == AgentStatus::Finished, |w| {
-                a.status != AgentStatus::Active && w.settled()
-            })
-    })
+    let proposed: usize = run
+        .primary()
+        .into_iter()
+        .flat_map(|a| &a.provider_calls)
+        .filter_map(|r| r.delegation.as_ref())
+        .map(Vec::len)
+        .sum();
+    proposed
+        == run.agents.len().saturating_sub(1)
+            + run.tools.iter().filter(|t| refused_capture(run, t)).count()
+        && run.agents.iter().skip(1).all(|a| {
+            a.assignment
+                .as_ref()
+                .map_or(a.status == AgentStatus::Finished, |w| {
+                    a.status != AgentStatus::Active && w.settled()
+                })
+        })
 }
 pub(super) fn child_terminal(a: &AgentView) -> bool {
     a.assignment
@@ -234,7 +288,12 @@ fn refused_capture(run: &RunView, tool: &ToolView) -> bool {
 fn proposal(run: &RunView, ordinal: u8) -> Result<&ChildAssignment, ReplayError> {
     let plan = run
         .primary()
-        .and_then(|a| a.provider_calls.last())
+        .and_then(|a| {
+            a.provider_calls
+                .iter()
+                .rev()
+                .find(|c| c.delegation.is_some())
+        })
         .and_then(|r| r.delegation.as_ref())
         .ok_or(ReplayError::InvalidTransition)?;
     let before = run
@@ -247,8 +306,9 @@ fn proposal(run: &RunView, ordinal: u8) -> Result<&ChildAssignment, ReplayError>
     let earlier: usize = run
         .primary()
         .into_iter()
-        .flat_map(|a| a.provider_calls.iter().rev().skip(1))
+        .flat_map(|a| a.provider_calls.iter().rev())
         .filter_map(|r| r.delegation.as_ref())
+        .skip(1)
         .map(Vec::len)
         .sum();
     plan.get(
@@ -283,6 +343,7 @@ fn validate_request(
     if goal.phase != GoalPhase::Implementation
         || goal.awaiting_plan_contract
         || !definition.editor()
+        || definition.background && request.mode != WorkerMode::Background
         || request.definition_digest
             != crate::tools::types::digest(
                 &serde_json::to_vec(definition).map_err(|_| ReplayError::InvalidPayload)?,
@@ -440,6 +501,9 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
             }
             let sealed = run.workers.sealed(&p.base)?;
             if let WorkerDataFacts::Manifest(entries) = &sealed.facts {
+                if retained_image(entries, &[]) * 2 > policy.retained_bytes() {
+                    return Err(ReplayError::InvalidTransition);
+                }
                 if entries
                     .iter()
                     .any(|e| !within(&e.path, &p.grant.read_paths))
@@ -930,7 +994,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
             ..
         } if primary(run, *agent_run_id) => {
             if record.disposition == ProviderCallDisposition::Delegated {
-                if run.agents.len() > 1 && !wave_settled(run) {
+                if !wave_settled(run) {
                     return Err(ReplayError::InvalidTransition);
                 }
                 let config = run.config.as_ref().ok_or(ReplayError::InvalidTransition)?;
@@ -938,7 +1002,14 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                     .delegation
                     .as_ref()
                     .ok_or(ReplayError::InvalidTransition)?;
-                if assignments.len() + run.agents.len().saturating_sub(1)
+                if assignments.len()
+                    + run
+                        .primary()
+                        .into_iter()
+                        .flat_map(|a| &a.provider_calls)
+                        .filter_map(|c| c.delegation.as_ref())
+                        .map(Vec::len)
+                        .sum::<usize>()
                     > usize::from(config.policy.max_children())
                 {
                     return Err(ReplayError::InvalidTransition);

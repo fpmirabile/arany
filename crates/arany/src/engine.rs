@@ -268,6 +268,7 @@ pub struct EngineConfig {
     pub telemetry: Telemetry,
     /// Launched by every Tool grant; a grant without one is refused at submission.
     pub guard_executable: Option<PathBuf>,
+    pub worker_concurrency: Option<u8>,
 }
 
 /// The Tools one submission may use.
@@ -838,6 +839,12 @@ impl Engine {
     }
 
     pub fn open(state: StateRoot, config: EngineConfig) -> Result<Self, EngineError> {
+        if config
+            .worker_concurrency
+            .is_some_and(|n| !(1..=8).contains(&n))
+        {
+            return Err(EngineError::InvalidRequest);
+        }
         let journal = Journal::new(Store::open(state.try_clone()?)?);
         Ok(Self {
             state,
@@ -1500,6 +1507,25 @@ impl Engine {
         })
     }
 
+    fn worker_policy(
+        &self,
+        runtime: Option<&crate::tools::ToolRuntime>,
+        policy: CollaborationPolicy,
+        concurrency: u8,
+    ) -> Option<crate::session::worker::WorkerPolicy> {
+        runtime
+            .and_then(crate::tools::ToolRuntime::worker_policy)
+            .map(|mut p| {
+                p.concurrency = self
+                    .config
+                    .worker_concurrency
+                    .unwrap_or(4)
+                    .min(policy.max_children().max(1))
+                    .min(concurrency);
+                p
+            })
+    }
+
     fn prepare_turn(
         &self,
         submission: &AdmittedSubmission,
@@ -1608,7 +1634,7 @@ impl Engine {
             .iter()
             .all(|chain| chain.len() == 1 && chain[0] == *identity);
         let config = RunConfig {
-            worker_policy: tools.as_ref().and_then(|tools| tools.worker_policy()),
+            worker_policy: self.worker_policy(tools.as_ref(), request.policy, provider_concurrency),
             agent_definitions: tools.as_ref().and_then(|tools| tools.definitions.pin()),
             roster: submission
                 .providers

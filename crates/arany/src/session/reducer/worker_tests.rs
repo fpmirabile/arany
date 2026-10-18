@@ -1623,6 +1623,29 @@ fn worker_protocol_nonoverlap_and_completion_order() {
         }
         refused(&prefix, invalid, "overlapping proposal");
     }
+    pins.request.mode = WorkerMode::Background;
+    for event in &mut f.events {
+        match event {
+            Event::ProviderCallRecorded { record, .. } => {
+                for proposal in record.delegation.iter_mut().flatten() {
+                    if let ChildAssignment::Editor { assignment } = proposal {
+                        assignment.mode = WorkerMode::Background;
+                    }
+                }
+            }
+            Event::AgentSpawned {
+                assignment: Some(pins),
+                ..
+            } => pins.request.mode = WorkerMode::Background,
+            _ => {}
+        }
+    }
+    f.call(
+        f.primary,
+        AgentPhase::RootSynthesis,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
     let first_base = f.base.clone();
     let first_changes = f.changes.clone();
     f.child = AgentRunId::new();
@@ -2301,6 +2324,14 @@ fn worker_protocol_refused_base_capture_spends_its_slot_and_other_workers_procee
     });
     let view = f.view();
     assert_eq!(view.runs[0].agents.len(), 2);
+    for event in &mut f.events {
+        if let Event::ToolFinished { observation, .. } = event
+            && observation.intent.id == refused.id
+        {
+            observation.disposition = ToolDisposition::Failed;
+        }
+    }
+    assert_eq!(f.view().runs[0].agents.len(), 2);
 }
 
 #[test]

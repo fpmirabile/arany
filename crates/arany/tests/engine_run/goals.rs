@@ -1899,6 +1899,7 @@ fn facts_engine_with_telemetry(
     let engine = engine_support::open(
         state,
         EngineConfig {
+            worker_concurrency: None,
             telemetry,
             guard_executable: Some(std::env::current_exe().expect("test executable")),
         },
