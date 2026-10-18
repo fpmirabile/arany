@@ -286,6 +286,19 @@ pub(super) fn verify_storage(
     Ok(())
 }
 
+pub(super) async fn prepare_worker_storage(
+    root: &Path,
+    limits: &crate::tools::types::ToolLimits,
+) -> Result<Vec<cap_std::fs::Dir>, ToolError> {
+    if limits.project_bytes != STORAGE_BYTES_CAP
+        || limits.scratch_bytes != STORAGE_BYTES_CAP
+        || limits.cache_bytes != 0
+    {
+        return Err(ToolError::Configuration);
+    }
+    prepare_storage_with_sizes(root, &command_volume_sizes(limits)).await
+}
+
 pub(super) async fn prepare_command_storage(
     root: &Path,
     runtime: &ToolRuntime,

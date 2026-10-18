@@ -101,11 +101,24 @@ pub(super) fn command_snapshot(workspace: &Path) -> Result<CommandSnapshot, Tool
     let mut entries = BTreeMap::new();
     let mut budget = ScanBudget::default();
     let mut retained = 0usize;
-    command_collect(&root, "", &mut entries, &mut budget, &mut retained)?;
+    command_collect(
+        &root,
+        "",
+        &mut entries,
+        &mut budget,
+        &mut retained,
+        SnapshotKind::Command,
+    )?;
     Ok(CommandSnapshot {
         root_identity: workspace_identity(&root)?,
         entries,
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnapshotKind {
+    Command,
+    Worker,
 }
 
 fn command_collect(
@@ -114,6 +127,7 @@ fn command_collect(
     entries: &mut BTreeMap<String, Entry>,
     budget: &mut ScanBudget,
     retained: &mut usize,
+    kind: SnapshotKind,
 ) -> Result<(), ToolError> {
     let directory = if path.is_empty() {
         root.try_clone().map_err(|_| ToolError::Path)?
@@ -123,6 +137,9 @@ fn command_collect(
     let mut names = Vec::new();
     for entry in directory.entries().map_err(|_| ToolError::Path)? {
         budget.entry()?;
+        if kind == SnapshotKind::Worker && budget.entries > crate::session::worker::WORKER_FILES {
+            return Err(ToolError::Limit);
+        }
         let name = entry
             .map_err(|_| ToolError::Path)?
             .file_name()
@@ -160,7 +177,7 @@ fn command_collect(
             }
         }
         let entry = if metadata.is_dir() {
-            command_collect(root, &selected, entries, budget, retained)?;
+            command_collect(root, &selected, entries, budget, retained, kind)?;
             Entry {
                 path: selected.clone(),
                 content: None,
@@ -174,7 +191,12 @@ fn command_collect(
             };
             #[cfg(not(unix))]
             let executable = false;
-            let content = read_regular(file, MAX_FILE_BYTES)?;
+            let cap = if kind == SnapshotKind::Worker {
+                MAX_FILE_BYTES.min(MAX_SNAPSHOT_BYTES.saturating_sub(budget.bytes))
+            } else {
+                MAX_FILE_BYTES
+            };
+            let content = read_regular(file, cap)?;
             budget.bytes = budget
                 .bytes
                 .checked_add(content.len())
@@ -431,7 +453,7 @@ fn create_parents(root: &Dir, path: &str) -> Result<(Dir, String), ToolError> {
     Ok((dir, leaf))
 }
 
-fn put(root: &Dir, path: &str, bytes: &[u8], executable: bool) -> Result<(), ToolError> {
+pub(super) fn put(root: &Dir, path: &str, bytes: &[u8], executable: bool) -> Result<(), ToolError> {
     let (parent, leaf) = create_parents(root, path)?;
     let mut options = OpenOptions::new();
     options
@@ -900,6 +922,47 @@ pub(super) fn copy_seed() -> Result<(), ToolError> {
     Ok(())
 }
 
+pub(super) fn read_page(
+    bytes: &[u8],
+    offset: u32,
+    limit: u32,
+    result_bytes: usize,
+) -> Result<String, ToolError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| ToolError::Operation)?;
+    let start = offset as usize;
+    if start > text.len() || !text.is_char_boundary(start) {
+        return Err(ToolError::Path);
+    }
+    let sha256 = hex_digest(bytes);
+    let page = |end: usize| {
+        json!({"sha256":sha256,"offset":start,"next_offset":end,"truncated":end<bytes.len(),"text":&text[start..end]}).to_string()
+    };
+    // The longest envelope: the largest next offset, `false` and no text.
+    let envelope = json!({"sha256":sha256,"offset":start,"next_offset":text.len(),"truncated":false,"text":""}).to_string().len();
+    let budget = result_bytes.checked_sub(envelope).ok_or(ToolError::Limit)?;
+    let mut end = start;
+    let mut escaped = 0;
+    for (index, character) in text[start..].char_indices() {
+        let next = index + character.len_utf8();
+        if next > limit as usize {
+            break;
+        }
+        escaped += escaped_len(character);
+        if escaped > budget {
+            if end == start {
+                return Err(ToolError::Limit);
+            }
+            break;
+        }
+        end = start + next;
+    }
+    let output = page(end);
+    if output.len() > result_bytes {
+        return Err(ToolError::Limit);
+    }
+    Ok(output)
+}
+
 pub(super) fn inspect(
     root: &Dir,
     call: &ToolCall,
@@ -913,39 +976,7 @@ pub(super) fn inspect(
             limit,
         } => {
             let bytes = read_regular(open_file(root, path)?, MAX_FILE_BYTES)?;
-            let text = std::str::from_utf8(&bytes).map_err(|_| ToolError::Operation)?;
-            let start = *offset as usize;
-            if start > text.len() || !text.is_char_boundary(start) {
-                return Err(ToolError::Path);
-            }
-            let sha256 = hex_digest(&bytes);
-            let page = |end: usize| {
-                json!({"sha256":sha256,"offset":start,"next_offset":end,"truncated":end<bytes.len(),"text":&text[start..end]}).to_string()
-            };
-            // The longest envelope: the largest next offset, `false` and no text.
-            let envelope = json!({"sha256":sha256,"offset":start,"next_offset":text.len(),"truncated":false,"text":""}).to_string().len();
-            let budget = result_bytes.checked_sub(envelope).ok_or(ToolError::Limit)?;
-            let mut end = start;
-            let mut escaped = 0;
-            for (index, character) in text[start..].char_indices() {
-                let next = index + character.len_utf8();
-                if next > *limit as usize {
-                    break;
-                }
-                escaped += escaped_len(character);
-                if escaped > budget {
-                    if end == start {
-                        return Err(ToolError::Limit);
-                    }
-                    break;
-                }
-                end = start + next;
-            }
-            let output = page(end);
-            if output.len() > result_bytes {
-                return Err(ToolError::Limit);
-            }
-            Ok(output)
+            read_page(&bytes, *offset, *limit, result_bytes)
         }
         ToolCall::List { path } | ToolCall::Search { path, .. } => {
             let path = if path == "." { "" } else { path.as_str() };
@@ -1015,7 +1046,7 @@ fn escaped_len(character: char) -> usize {
 }
 
 // Keeps a Limit, not an empty success, when matches exist but none fits.
-fn fit_rows(
+pub(super) fn fit_rows(
     mut rows: Vec<Value>,
     mut truncated: bool,
     result_bytes: usize,
@@ -1101,7 +1132,7 @@ pub(super) fn native(
 }
 
 struct ChangeParent {
-    directory: Dir,
+    directory: std::sync::Arc<Dir>,
     path: String,
     missing: Vec<String>,
     leaf: String,
@@ -1125,7 +1156,7 @@ fn change_parent(root: &Dir, path: &str) -> Result<ChangeParent, ToolError> {
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(ChangeParent {
-                    directory,
+                    directory: std::sync::Arc::new(directory),
                     path: existing,
                     missing: parts[index..]
                         .iter()
@@ -1139,7 +1170,7 @@ fn change_parent(root: &Dir, path: &str) -> Result<ChangeParent, ToolError> {
     }
     check_change_directory(root, &directory)?;
     Ok(ChangeParent {
-        directory,
+        directory: std::sync::Arc::new(directory),
         path: existing,
         missing: Vec::new(),
         leaf,
@@ -1215,10 +1246,35 @@ fn apply_changeset(root: &Dir, changeset: &CommandChangeset) -> Result<String, T
     if !changeset.valid() {
         return Err(ToolError::Path);
     }
+    apply_files(root, &changeset.files)
+}
+
+pub(super) fn apply_worker_changeset(
+    workspace: &Path,
+    changeset: &crate::session::worker::WorkerChangeset,
+) -> Result<String, ToolError> {
+    let root = open_directory(workspace)?;
+    worker_publication_paths(&root, &changeset.files)?;
+    apply_files(&root, &changeset.files)
+}
+
+fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, ToolError> {
     check_change_directory(root, root)?;
     let mut parents = Vec::new();
-    for change in &changeset.files {
-        let parent = change_parent(root, &change.path)?;
+    let mut directories = BTreeMap::<String, std::sync::Arc<Dir>>::new();
+    for change in files {
+        let mut parent = change_parent(root, &change.path)?;
+        if let Some(directory) = directories.get(&parent.path) {
+            if identity(directory)? != identity(&parent.directory)? {
+                return Err(ToolError::Conflict);
+            }
+            parent.directory = std::sync::Arc::clone(directory);
+        } else {
+            directories.insert(
+                parent.path.clone(),
+                std::sync::Arc::clone(&parent.directory),
+            );
+        }
         if parent.missing.is_empty() {
             check_change_file(&parent.directory, &parent.leaf, change.before.as_ref())?;
         } else if change.before.is_some() {
@@ -1226,7 +1282,7 @@ fn apply_changeset(root: &Dir, changeset: &CommandChangeset) -> Result<String, T
         }
         parents.push(parent);
     }
-    for (change, parent) in changeset.files.iter().zip(&parents) {
+    for (change, parent) in files.iter().zip(&parents) {
         verify_change_parent(root, parent)?;
         if parent.missing.is_empty() {
             check_change_file(&parent.directory, &parent.leaf, change.before.as_ref())?;
@@ -1240,7 +1296,7 @@ fn apply_changeset(root: &Dir, changeset: &CommandChangeset) -> Result<String, T
     }
     let mut created = BTreeMap::new();
     let mut affected = false;
-    for (change, mut parent) in changeset.files.iter().zip(parents) {
+    for (change, mut parent) in files.iter().zip(parents) {
         let result = (|| {
             verify_change_parent(root, &parent)?;
             for part in &parent.missing {
@@ -1255,7 +1311,7 @@ fn apply_changeset(root: &Dir, changeset: &CommandChangeset) -> Result<String, T
                     if identity(&live)? != *expected {
                         return Err(ToolError::Conflict);
                     }
-                    parent.directory = live;
+                    parent.directory = std::sync::Arc::new(live);
                 } else {
                     let mut builder = DirBuilder::new();
                     #[cfg(unix)]
@@ -1285,14 +1341,16 @@ fn apply_changeset(root: &Dir, changeset: &CommandChangeset) -> Result<String, T
                     let live = Dir::from_std_file(open_file(&parent.directory, part)?);
                     check_change_directory(root, &live)?;
                     created.insert(path.clone(), identity(&live)?);
-                    parent.directory = live;
+                    parent.directory = std::sync::Arc::new(live);
                 }
                 parent.path = path;
             }
             verify_change_parent(root, &parent)?;
             let mode = check_change_file(&parent.directory, &parent.leaf, change.before.as_ref())?;
             if let Some(after) = &change.after {
-                let bytes = after.bytes().ok_or(ToolError::Path)?;
+                let bytes = after
+                    .bytes_with_limit(MAX_FILE_BYTES)
+                    .ok_or(ToolError::Path)?;
                 let mode = mode & 0o666
                     | if after.executable {
                         if mode & 0o111 == 0 {
@@ -1340,7 +1398,7 @@ fn apply_changeset(root: &Dir, changeset: &CommandChangeset) -> Result<String, T
             });
         }
     }
-    Ok(json!({"applied":changeset.files.len()}).to_string())
+    Ok(json!({"applied":files.len()}).to_string())
 }
 
 fn replace(
@@ -1474,6 +1532,197 @@ pub(super) fn reject_overlap(path: &Path, protected: &Path) -> Result<(), ToolEr
                 return Err(ToolError::Path);
             }
             candidate = path.parent();
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn worker_image(
+    root: &Dir,
+    paths: &[String],
+) -> Result<super::worker::Image, ToolError> {
+    use super::worker::{Entry as WorkerEntry, Image};
+    let mut entries = BTreeMap::new();
+    let mut budget = ScanBudget::default();
+    let mut retained = 0usize;
+    check_change_directory(root, root)?;
+    for path in paths {
+        if entries.contains_key(path) {
+            continue;
+        }
+        if path == "." {
+            command_collect(
+                root,
+                "",
+                &mut entries,
+                &mut budget,
+                &mut retained,
+                SnapshotKind::Worker,
+            )?;
+        } else if !valid_relative(path, false) || path.split('/').count() > 16 {
+            return Err(ToolError::Path);
+        } else {
+            budget.entry()?;
+            if budget.entries > crate::session::worker::WORKER_FILES {
+                return Err(ToolError::Limit);
+            }
+            match open_file(root, path) {
+                Ok(file) => {
+                    let metadata = file.metadata().map_err(|_| ToolError::Path)?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        if metadata.mode() & 0o6000 != 0 {
+                            return Err(ToolError::FilesystemDenied);
+                        }
+                    }
+                    if metadata.is_dir() {
+                        command_collect(
+                            root,
+                            path,
+                            &mut entries,
+                            &mut budget,
+                            &mut retained,
+                            SnapshotKind::Worker,
+                        )?;
+                        entries.insert(
+                            path.clone(),
+                            Entry {
+                                path: path.clone(),
+                                content: None,
+                                executable: false,
+                            },
+                        );
+                    } else {
+                        #[cfg(unix)]
+                        let executable = {
+                            use std::os::unix::fs::PermissionsExt;
+                            metadata.permissions().mode() & 0o111 != 0
+                        };
+                        #[cfg(not(unix))]
+                        let executable = false;
+                        let content = read_regular(
+                            file,
+                            MAX_FILE_BYTES.min(MAX_SNAPSHOT_BYTES.saturating_sub(budget.bytes)),
+                        )?;
+                        budget.bytes = budget
+                            .bytes
+                            .checked_add(content.len())
+                            .ok_or(ToolError::Limit)?;
+                        entries.insert(
+                            path.clone(),
+                            Entry {
+                                path: path.clone(),
+                                content: Some(content),
+                                executable,
+                            },
+                        );
+                    }
+                }
+                Err(_) => {
+                    let parent = change_parent(root, path)?;
+                    if parent.missing.is_empty()
+                        && !parent
+                            .directory
+                            .symlink_metadata(&parent.leaf)
+                            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                    {
+                        return Err(ToolError::Path);
+                    }
+                }
+            }
+        }
+        if entries.len() > crate::session::worker::WORKER_FILES || budget.bytes > MAX_SNAPSHOT_BYTES
+        {
+            return Err(ToolError::Limit);
+        }
+    }
+    let mut image = Image {
+        entries: entries
+            .into_iter()
+            .map(|(path, entry)| {
+                (
+                    path,
+                    match entry.content {
+                        Some(bytes) => WorkerEntry::file(&bytes, entry.executable),
+                        None => WorkerEntry::Directory,
+                    },
+                )
+            })
+            .collect(),
+    };
+    for path in paths.iter().filter(|p| p.as_str() != ".") {
+        image
+            .entries
+            .entry(path.clone())
+            .or_insert(WorkerEntry::Absent);
+    }
+    if image.entries.len() > crate::session::worker::WORKER_FILES {
+        return Err(ToolError::Limit);
+    }
+    Ok(image)
+}
+
+pub(super) fn put_parent_directories(root: &Dir, path: &str) -> Result<(), ToolError> {
+    create_parents(root, path).map(|_| ())
+}
+
+pub(super) fn put_directory(root: &Dir, path: &str) -> Result<(), ToolError> {
+    put_entry(
+        root,
+        Entry {
+            path: path.to_owned(),
+            content: None,
+            executable: false,
+        },
+    )
+}
+
+pub(super) fn worker_publication_paths(root: &Dir, files: &[FileChange]) -> Result<(), ToolError> {
+    let mut listings = BTreeMap::<String, BTreeMap<String, String>>::new();
+    let mut scanned = 0usize;
+    for change in files {
+        let mut directory = root.try_clone().map_err(|_| ToolError::Path)?;
+        let mut parent = String::new();
+        let parts: Vec<_> = change.path.split('/').collect();
+        for (index, part) in parts.iter().enumerate() {
+            if !listings.contains_key(&parent) {
+                let mut names = BTreeMap::new();
+                for entry in directory.entries().map_err(|_| ToolError::Path)? {
+                    scanned += 1;
+                    if scanned > 8192 {
+                        return Err(ToolError::Limit);
+                    }
+                    let name = entry
+                        .map_err(|_| ToolError::Path)?
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| ToolError::Path)?;
+                    let folded = name.to_ascii_lowercase();
+                    if names.insert(folded, name).is_some() {
+                        return Err(ToolError::Path);
+                    }
+                }
+                listings.insert(parent.clone(), names);
+            }
+            let exact = listings[&parent].get(&part.to_ascii_lowercase());
+            if exact.is_some_and(|name| name != part) {
+                return Err(ToolError::Path);
+            }
+            if exact.is_none() {
+                if directory.symlink_metadata(part).is_ok() {
+                    return Err(ToolError::Path);
+                }
+                break;
+            }
+            if index + 1 < parts.len() {
+                directory = Dir::from_std_file(open_file(&directory, part)?);
+                check_change_directory(root, &directory)?;
+                if !parent.is_empty() {
+                    parent.push('/');
+                }
+                parent.push_str(part);
+            }
         }
     }
     Ok(())
