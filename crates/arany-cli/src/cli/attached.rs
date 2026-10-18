@@ -1397,8 +1397,19 @@ async fn submit_idle_run(
         }
         Ok(RunSubmission::Shutdown(reason)) => Err(reason),
         Err(error) => {
-            // Roster preflight cannot read the Workspace, so a refusal after admission returns the draft.
-            if admission.roster.is_some() && composer.is_empty() && !draft.is_empty() {
+            let reloaded = load_view(&admission.state_dir, *session_id).await;
+            // Roster preflight cannot read the Workspace; return the draft only when nothing was committed.
+            if admission.roster.is_some()
+                && composer.is_empty()
+                && !draft.is_empty()
+                && committed_nothing(
+                    reloaded
+                        .as_ref()
+                        .ok()
+                        .map(|reloaded| reloaded.last_sequence),
+                    starting_sequence,
+                )
+            {
                 let _ = composer.insert_paste(&draft);
             }
             let text = if composer.is_empty() {
@@ -1409,13 +1420,7 @@ async fn submit_idle_run(
                     composer.character_count()
                 )
             };
-            Ok(reload_view_or_keep(
-                view,
-                load_view(&admission.state_dir, *session_id).await,
-                Some(text),
-                None,
-            )
-            .map(Feedback::History))
+            Ok(reload_view_or_keep(view, reloaded, Some(text), None).map(Feedback::History))
         }
     }
 }
@@ -2225,6 +2230,10 @@ async fn load_view(state_dir: &Path, session_id: SessionId) -> Result<SessionVie
     Ok(view)
 }
 
+fn committed_nothing<T: PartialEq>(reloaded: Option<T>, starting: T) -> bool {
+    reloaded.is_some_and(|sequence| sequence == starting)
+}
+
 fn reload_view_or_keep(
     view: &mut SessionView,
     reloaded: Result<SessionView, String>,
@@ -2311,6 +2320,12 @@ fn print_run_answer(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn draft_returns_only_when_no_sequence_was_committed() {
+        assert!(super::committed_nothing(Some(7), 7));
+        assert!(!super::committed_nothing(Some(8), 7));
+        assert!(!super::committed_nothing(None, 7));
+    }
     use super::*;
 
     #[test]

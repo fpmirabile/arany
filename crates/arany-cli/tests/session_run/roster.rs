@@ -228,7 +228,6 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
 
 #[test]
 #[cfg(target_os = "linux")]
-#[ignore = "native Linux PTY workspace consent gate"]
 fn attached_profile_admission_waits_for_folder_consent() {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::io::Write;
