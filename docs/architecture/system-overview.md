@@ -48,9 +48,11 @@ A concurrent submission or compaction is refused with `EngineError::Busy`;
 Session and ancestor locks remain scoped to a Run, while the Store thread lives
 until the Engine is closed or dropped. The [execution contract](../specs/execution.md#admission-persistence-and-recovery)
 owns Engine lifetime and admission.
-Submit returns a handle; an actor Engine over `mpsc` waits
-for a second Client when `serve --stdio` starts, because a queue adds no
-ownership boundary for the current single Client.
+The binary's `serve` Server owns a bounded submission/response channel loop over
+that Engine. Its stdio adapter and in-process conformance adapter use the same
+loop. Each active submission has an owned task driving its RunHandle while the
+Server projects its committed Event subscription; bounded client backpressure
+cannot hold Journal appends. The library has no protocol or transport dependency.
 
 The Engine owns admission, scheduling, context, Goal accounting and Run
 transitions. `GoalLedger` admits, reserves and settles actions over the reducer's
@@ -161,6 +163,7 @@ modules.
 | Responsibility | Owner | Contract |
 |---|---|---|
 | CLI grammar and composition | `crates/arany-cli/src/cli/`, `main.rs` | [Terminal](../specs/terminal.md) |
+| Stdio protocol and channel Server | `crates/arany-cli/src/cli/serve/`, `protocol/` | [Serve](../specs/serve.md) |
 | Terminal and pure view projection | `crates/arany-cli/src/terminal/`, `presentation/` | [Terminal](../specs/terminal.md) |
 | Saved API accounts, OAuth and credential helper | `crates/arany-cli/src/accounts/` | [Credentials](../specs/credentials.md), [ChatGPT](../specs/chatgpt.md) |
 | Run admission, Goal ledger and shared Tool step | `crates/arany/src/engine/` | [Execution](../specs/execution.md), [Goals](../specs/goals.md) |

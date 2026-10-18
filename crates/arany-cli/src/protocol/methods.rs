@@ -170,7 +170,7 @@ pub struct TurnStartParams {
     #[schemars(with = "String")]
     pub thread_id: SessionId,
     #[serde(deserialize_with = "turn_input")]
-    #[schemars(length(max = 1 + arany::MAX_MESSAGE_IMAGES))]
+    #[schemars(length(min = 1, max = 1 + arany::MAX_MESSAGE_IMAGES))]
     pub input: Vec<UserInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalInput>,
@@ -536,7 +536,7 @@ fn turn_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<UserInpu
             }
         }
     }
-    if texts > 1 || images > arany::MAX_MESSAGE_IMAGES {
+    if input.is_empty() || texts > 1 || images > arany::MAX_MESSAGE_IMAGES {
         return Err(D::Error::custom(format!(
             "at most one text and {} images",
             arany::MAX_MESSAGE_IMAGES

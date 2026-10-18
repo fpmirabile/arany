@@ -4736,3 +4736,52 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
     );
     engine.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn create_session_on_open_engine_commits_session_started_and_submit_appends_to_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let engine = Engine::open(StateRoot::admit(&state).unwrap(), EngineConfig::default()).unwrap();
+    for title in [String::new(), "x".repeat(129)] {
+        assert!(matches!(
+            engine.create_session(workspace.clone(), Some(title)).await,
+            Err(EngineError::InvalidRequest)
+        ));
+    }
+    let mut tap = engine.subscribe();
+    let session = engine
+        .create_session(workspace.clone(), Some("Explicit".into()))
+        .await
+        .unwrap();
+    assert!(
+        matches!(tokio::time::timeout(Duration::from_secs(10), tap.next()).await.unwrap(), Some(arany::Tapped::Committed(e)) if e.session_id == session && matches!(&e.event, Event::SessionStarted { title,.. } if title == "Explicit"))
+    );
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
+        Finish {
+            summary: "Answer".into(),
+            result: "Hello".into(),
+        },
+    )]));
+    let mut input = request(&workspace, "Hi");
+    input.include_paths.clear();
+    input.session_id = Some(session);
+    let outcome = run_to_end(&engine, &provider, input).await.unwrap();
+    assert_eq!(outcome.session_id, session);
+    engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    let events = store.load_session(session).await.unwrap();
+    let view = store.load_view(session).await.unwrap().unwrap();
+    store.close().await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, Event::SessionStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(view.title, "Explicit");
+    assert_eq!(view.runs[0].id, outcome.run.id);
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+}

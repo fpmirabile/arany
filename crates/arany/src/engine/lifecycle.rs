@@ -1,4 +1,5 @@
 use super::EngineError;
+use crate::journal::Journal;
 use crate::session::input::WorkspaceInputs;
 use crate::session::{
     Event, RunStatus, SessionDefaults, SessionId, SessionListItem, SessionView, WorkspaceIdentity,
@@ -11,17 +12,26 @@ pub async fn create_session(
     workspace: PathBuf,
     title: Option<String>,
 ) -> Result<SessionId, EngineError> {
-    if title
-        .as_ref()
-        .is_some_and(|value| value.is_empty() || value.len() > 128)
-    {
-        return Err(EngineError::InvalidRequest);
-    }
+    validate_session_title(title.as_deref())?;
+    let journal = Journal::new(Store::open(state.try_clone()?)?);
+    let result = create_with_journal(&state, &journal, &workspace, title).await;
+    let closed = journal.close().await;
+    let session_id = result?;
+    closed?;
+    Ok(session_id)
+}
+
+pub(super) async fn create_with_journal(
+    state: &StateRoot,
+    journal: &Journal,
+    workspace: &Path,
+    title: Option<String>,
+) -> Result<SessionId, EngineError> {
+    validate_session_title(title.as_deref())?;
     let session_id = SessionId::new();
-    let mut session_lock = lock_session(&state, session_id)?;
-    let workspace_identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
-    let store = Store::open(state)?;
-    let appended = store
+    let mut session_lock = lock_session(state, session_id)?;
+    let workspace_identity = WorkspaceInputs::admit_identity(workspace, state)?;
+    journal
         .append(
             session_id,
             Event::SessionStarted {
@@ -29,14 +39,8 @@ pub async fn create_session(
                 workspace_identity,
             },
         )
-        .await;
-    if appended.is_ok() {
-        session_lock.keep();
-    }
-    let closed = store.close().await;
-    appended?;
-    closed?;
-    drop(session_lock);
+        .await?;
+    session_lock.keep();
     Ok(session_id)
 }
 
@@ -219,7 +223,7 @@ pub(super) async fn fork_with_store(
     forked
 }
 
-fn validate_session_title(title: Option<&str>) -> Result<(), EngineError> {
+pub(super) fn validate_session_title(title: Option<&str>) -> Result<(), EngineError> {
     if title.is_some_and(|value| value.is_empty() || value.len() > 128) {
         return Err(EngineError::InvalidRequest);
     }
