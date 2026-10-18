@@ -481,6 +481,7 @@ fn fork_projection(
     )?
     .ok_or(StoreError::InvalidHistory)?;
     let inherited = ForkInheritance {
+        workspace_identity: source.workspace_identity,
         rewinds: source.rewinds.clone(),
         runs: source
             .runs

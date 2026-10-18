@@ -554,6 +554,7 @@ impl RunView {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ForkInheritance {
+    pub(crate) workspace_identity: Option<WorkspaceIdentity>,
     pub(crate) rewinds: super::rewind::RewindState,
     pub(crate) runs: Vec<RunView>,
     pub(crate) compactions: Vec<CompactionView>,
@@ -778,7 +779,7 @@ impl SessionView {
                         title: title.clone(),
                         title_is_explicit: !crate::session::placeholder_title(title),
                         inherited_title: None,
-                        workspace_identity: None,
+                        workspace_identity: inherited.and_then(|i| i.workspace_identity),
                         defaults: SessionDefaults::default(),
                         created_sequence: prior,
                         last_sequence: prior,
@@ -841,6 +842,7 @@ impl SessionView {
             return Err(ReplayError::InvalidTransition);
         }
         if crate::supervisor::SupervisorState::before(self, envelope)? {
+            self.rewinds.prefix.update(envelope)?;
             self.last_sequence = envelope.sequence;
             return Ok(());
         }
