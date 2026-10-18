@@ -1023,25 +1023,32 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     if length == 0 || length > lease.candidate_limit() {
         return Err(ToolError::Limit);
     }
-    let staged = lease.candidate_writer().ok().map(|file| CandidateStaging {
-        file,
-        _lease: Arc::clone(lease),
-    });
-    let synced = drain_candidate(reader, length, staged, |staged| {
-        #[cfg(any(test, feature = "test-support"))]
-        let completion = crate::fault::FaultPlan::candidate_sync(staged._lease.token());
-        #[cfg(any(test, feature = "test-support"))]
-        let admitted = completion.is_ok();
-        #[cfg(not(any(test, feature = "test-support")))]
-        let admitted = true;
-        let synced = admitted && staged.file.sync_all().is_ok();
-        drop(staged);
-        #[cfg(any(test, feature = "test-support"))]
-        if let Ok(Some(finished)) = completion {
-            let _ = finished.send(());
-        }
-        synced
-    })
+    let lease = Arc::clone(lease);
+    let synced = drain_candidate(
+        reader,
+        length,
+        move || {
+            lease.candidate_writer().ok().map(|file| CandidateStaging {
+                file,
+                _lease: lease,
+            })
+        },
+        |staged| {
+            #[cfg(any(test, feature = "test-support"))]
+            let completion = crate::fault::FaultPlan::candidate_sync(staged._lease.token());
+            #[cfg(any(test, feature = "test-support"))]
+            let admitted = completion.is_ok();
+            #[cfg(not(any(test, feature = "test-support")))]
+            let admitted = true;
+            let synced = admitted && staged.file.sync_all().is_ok();
+            drop(staged);
+            #[cfg(any(test, feature = "test-support"))]
+            if let Ok(Some(finished)) = completion {
+                let _ = finished.send(());
+            }
+            synced
+        },
+    )
     .await?;
     Ok(if synced {
         CacheCandidate::Received
@@ -1070,11 +1077,12 @@ impl Write for CandidateStaging {
 async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write + Send + 'static>(
     reader: &mut R,
     length: u64,
-    mut staged: Option<W>,
+    stage: impl FnOnce() -> Option<W> + Send + 'static,
     finish: impl FnOnce(W) -> bool + Send + 'static,
 ) -> Result<bool, ToolError> {
     let (chunks, mut pending) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
     let writer = tokio::task::spawn_blocking(move || {
+        let mut staged = stage();
         let mut remaining = length;
         let mut failed = false;
         while let Some(bytes) = pending.blocking_recv() {
@@ -2865,11 +2873,13 @@ mod tests {
         let mut receive = Box::pin(drain_candidate(
             &mut reader,
             archive.len() as u64 + 1,
-            Some(GatedWriter {
-                entered: Some(entered),
-                release: gate,
-                stopped: Some(stopped),
-            }),
+            move || {
+                Some(GatedWriter {
+                    entered: Some(entered),
+                    release: gate,
+                    stopped: Some(stopped),
+                })
+            },
             |_| panic!("truncated candidate reached sync"),
         ));
         let early = tokio::time::timeout(Duration::from_secs(5), async {
@@ -2913,10 +2923,12 @@ mod tests {
     #[tokio::test]
     async fn candidate_drain_keeps_framing_and_skips_sync_after_failures() {
         let archive = vec![b'A'; 2 * 32 * 1024 + 1];
-        for (remaining, flush_fails, truncated) in [
-            (4, false, false),
-            (usize::MAX, true, false),
-            (usize::MAX, false, true),
+        let reactor = std::thread::current().id();
+        for (create_fails, remaining, flush_fails, truncated) in [
+            (true, usize::MAX, false, false),
+            (false, 4, false, false),
+            (false, usize::MAX, true, false),
+            (false, usize::MAX, false, true),
         ] {
             let mut stream = archive.clone();
             if truncated {
@@ -2929,10 +2941,13 @@ mod tests {
             let staged = drain_candidate(
                 &mut reader,
                 archive.len() as u64,
-                Some(FailAfter {
-                    remaining,
-                    flush_fails,
-                }),
+                move || {
+                    assert_ne!(std::thread::current().id(), reactor);
+                    (!create_fails).then_some(FailAfter {
+                        remaining,
+                        flush_fails,
+                    })
+                },
                 move |_| {
                     let _ = synced.send(());
                     true
