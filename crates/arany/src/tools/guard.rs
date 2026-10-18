@@ -1215,7 +1215,7 @@ fn definition_bytes(task: &Task) -> Result<Option<Vec<u8>>, ToolError> {
     use base64::Engine as _;
     match (&task.intent.call, &task.definition) {
         (ToolCall::ParseAgentDefinition { raw_digest, .. }, Some(encoded)) => {
-            if encoded.len() > (64_usize * 1024).div_ceil(3) * 4 {
+            if encoded.len() > DEFINITION_TASK_BYTES {
                 return Err(ToolError::Limit);
             }
             let bytes = base64::engine::general_purpose::STANDARD

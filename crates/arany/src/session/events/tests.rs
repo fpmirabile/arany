@@ -1411,7 +1411,7 @@ mod payload_version_tests {
             Event::decode("ToolFinished", 10, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
-        for previous in [8, 7] {
+        for previous in [9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)

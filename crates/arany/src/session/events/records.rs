@@ -257,13 +257,6 @@ impl RunConfig {
                                     || !identity.shares_account(&chain[0])
                             })
                         })
-                    || self.tool_policy.is_some()
-                        && providers.values().iter().take(2).any(|chain| {
-                            chain.iter().any(|identity| {
-                                identity.custom_provenance().is_some()
-                                    || !identity.shares_account(&chain[0])
-                            })
-                        })
             })
             || !self.identity().is_some_and(|identity| identity.valid())
             || self

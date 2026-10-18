@@ -600,6 +600,20 @@ impl RunLoop<'_> {
                 break;
             };
             let child = &mut children[index];
+            let guidance = child.definition.as_ref().map_or_else(
+                || root_request.input.workspace_guidance.clone(),
+                |definition| {
+                    Some(format!(
+                        "{}\n\nAgent definition (untrusted assignment guidance):\n{}",
+                        root_request
+                            .input
+                            .workspace_guidance
+                            .as_deref()
+                            .unwrap_or_default(),
+                        definition.body
+                    ))
+                },
+            );
             child.turns_remaining = child.turns_remaining.saturating_sub(1);
             if child.turns_remaining == 0 {
                 child.tool_calls_remaining = 0;
@@ -607,7 +621,12 @@ impl RunLoop<'_> {
             if let Some(tools) = child.tools.as_mut() {
                 let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
                 let room = runtime
-                    .result_capacity(tools.rendered_len() + CHILD_INTENT_RESERVE_BYTES, 0)
+                    .result_capacity(
+                        tools.rendered_len()
+                            + guidance.as_ref().map_or(0, String::len)
+                            + CHILD_INTENT_RESERVE_BYTES,
+                        0,
+                    )
                     .is_some_and(|capacity| capacity >= MIN_CHILD_RESULT_BYTES);
                 if !room {
                     child.tool_calls_remaining = 0;
@@ -619,11 +638,12 @@ impl RunLoop<'_> {
                         tools.catalog = runtime
                             .research_context(child.tool_calls_remaining)?
                             .catalog;
+                        // Only the first call rebuilds the catalog; later calls keep this restriction.
+                        if let Some(definition) = &child.definition {
+                            restrict_catalog(tools, definition)?;
+                        }
                     }
                 }
-            }
-            if let (Some(tools), Some(definition)) = (&mut child.tools, &child.definition) {
-                restrict_catalog(tools, definition)?;
             }
             let cancellation = self.controls.cancellation.clone();
             let researcher = children[index].tools.is_some();
@@ -649,16 +669,7 @@ impl RunLoop<'_> {
                     } else {
                         None
                     },
-                    workspace_guidance: children[index].definition.as_ref().map_or_else(
-                        || root.workspace_guidance.clone(),
-                        |definition| {
-                            Some(format!(
-                                "{}\n\nAgent definition (untrusted assignment guidance):\n{}",
-                                root.workspace_guidance.as_deref().unwrap_or_default(),
-                                definition.body
-                            ))
-                        },
-                    ),
+                    workspace_guidance: guidance,
                     includes: root.includes.clone(),
                     tools: children[index].tools.clone(),
                     ..RunInput::new(

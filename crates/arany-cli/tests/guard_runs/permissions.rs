@@ -1210,7 +1210,8 @@ async fn agent_definition_guard_cancellation_during_parsing_stops_before_the_pro
 }
 
 #[tokio::test]
-async fn agent_definition_guard_active_time_exhaustion_during_parsing_closes_the_run() {
+async fn agent_definition_guard_active_time_too_short_for_parsing_fails_the_run_before_any_effect()
+{
     let fixture = Fixture::new(None, false);
     agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
     let (result, requests, _) = fixture
@@ -1227,10 +1228,16 @@ async fn agent_definition_guard_active_time_exhaustion_during_parsing_closes_the
         )
         .await;
     assert!(requests.is_empty());
-    assert_ne!(result.run.status, RunStatus::Active);
+    assert_eq!(result.run.status, RunStatus::Failed);
+    assert!(
+        result.run.tools.is_empty(),
+        "no parser intent fits the remaining time"
+    );
     fixture.engine.close().await.unwrap();
     let store = Store::open_read_only(StateRoot::open_existing(&fixture.state).unwrap()).unwrap();
     let events = store.load_session(result.session_id).await.unwrap();
+    let has = |kind: &str| events.iter().any(|event| event.event.kind() == kind);
+    assert!(!has("ToolStarted") && !has("GoalProviderCallReserved"));
     assert!(
         events
             .iter()
@@ -1380,7 +1387,7 @@ async fn agent_definition_guard_modes_preserve_parent_asks_and_add_review() {
 }
 
 #[tokio::test]
-async fn agent_definition_parsing_ignores_model_permission_rules_without_widening_them() {
+async fn agent_definition_guard_parsing_ignores_model_permission_rules_without_widening_them() {
     for rule in ["deny", "ask"] {
         let fixture = Fixture::new(Some(&json!({"permissions":{ rule: ["*"]}})), false);
         agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
