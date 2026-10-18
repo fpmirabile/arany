@@ -204,11 +204,51 @@ fn supervisor_call_equality_excludes_intent_identity_and_hashes_content() {
         *content = "different".into();
     }
     assert_ne!(call_key(&a), call_key(&b));
-    assert!(
-        !serde_json::to_string(&SupervisorPolicy::default())
-            .unwrap()
-            .contains("payload")
-    );
+
+    let fixture = crate::session::worker_protocol_fixture();
+    let view = SessionView::replay(fixture.session, &fixture.envelopes())
+        .unwrap()
+        .unwrap();
+    let mut envelope = fixture
+        .envelopes()
+        .into_iter()
+        .find(|e| matches!(&e.event, Event::ToolFinished { observation, .. } if matches!(observation.intent.call, ToolCall::Write { .. })))
+        .unwrap();
+    let mut window = VecDeque::new();
+    for n in 1..=3 {
+        envelope.sequence = n;
+        let Event::ToolFinished { observation, .. } = &mut envelope.event else {
+            unreachable!()
+        };
+        observation.intent.call = a.clone();
+        observation.intent.id = uuid::Uuid::now_v7();
+        observation.intent.expires_at_ms = n;
+        let crate::session::worker::EffectTarget::WorkerView { revision, .. } =
+            &mut observation.intent.target
+        else {
+            unreachable!()
+        };
+        *revision = n.try_into().unwrap();
+        observation.disposition = ToolDisposition::Failed;
+        observation.attestation = None;
+        observation.output = "payload".into();
+        let (site, step, footprint) = subject(&view.runs[0], fixture.child, &envelope).unwrap();
+        assert_eq!(site, Site::ToolOutcome);
+        assert!(footprint.is_none());
+        assert_eq!(step.call, call_key(&a));
+        window.push_back(step);
+    }
+    let verdict = SupervisorVerdict {
+        subject_sequence: 3,
+        site: Site::ToolOutcome,
+        evaluator: 1,
+        mode: Mode::Shadow,
+        signals: evaluate(&window, None, &SupervisorPolicy::default()),
+        capped: false,
+    };
+    assert!(verdict.valid());
+    assert_eq!(looping(&verdict.signals).unwrap().0.repeat_identical, 3);
+    assert!(!serde_json::to_string(&verdict).unwrap().contains("payload"));
 }
 
 #[test]
