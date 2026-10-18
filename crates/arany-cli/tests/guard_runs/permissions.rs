@@ -563,7 +563,7 @@ async fn permission_dispatch_over_maximum_command_timeout_limits_before_deny() {
 
 #[tokio::test]
 async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and_reaps_it() {
-    let marker = format!("{}", 41_337 + std::process::id() % 1000);
+    let marker = format!("{}", 30 + std::process::id() % 1000);
     let survivors = || {
         let listing = std::process::Command::new("ps")
             .args(["-A", "-o", "command="])
@@ -604,12 +604,14 @@ async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and
         Some(arany::Attestation::Guard(_))
     ));
     // An exited descendant may linger briefly before its new parent collects it.
-    let reaped = (0..20).any(|_| {
-        survivors() == 0 || {
-            std::thread::sleep(Duration::from_millis(100));
-            false
+    let mut reaped = false;
+    for _ in 0..20 {
+        reaped = survivors() == 0;
+        if reaped {
+            break;
         }
-    });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert!(reaped, "the background child outlived the Guard teardown");
 }
 

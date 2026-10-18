@@ -445,7 +445,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         git,
         &site.intent.call,
         site.intent.limits.result_bytes as usize,
-        Duration::from_millis(u64::from(site.intent.limits.runtime_ms)),
+        site.remaining_runtime(),
     )
     .await;
     #[cfg(target_os = "linux")]

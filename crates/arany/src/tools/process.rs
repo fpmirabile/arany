@@ -3,7 +3,6 @@ use super::catalog::string;
 use super::guard::{GuardContext, capture, payload};
 use super::types::{CommandResult, ToolCall, valid_name, valid_relative};
 use serde_json::{Value, json};
-use std::time::Duration;
 
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
@@ -68,7 +67,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let (status, out, err) = capture(
         command.spawn().map_err(|_| ToolError::Operation)?,
         (site.intent.limits.result_bytes as usize / 2).saturating_sub(128),
-        Duration::from_millis(u64::from(site.intent.limits.runtime_ms)),
+        site.remaining_runtime(),
     )
     .await?;
     #[cfg(target_os = "linux")]

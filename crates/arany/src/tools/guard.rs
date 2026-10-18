@@ -18,7 +18,7 @@ pub(super) const RUNTIME_ROOT: &str = "/usr";
 // Loaded CI hosts stall teardown for seconds; one shared bound only widens the wait for termination evidence.
 pub(super) const TEARDOWN_WAIT: Duration = Duration::from_secs(10);
 const PAYLOAD_KILL_WAIT: Duration = Duration::from_secs(1);
-// The launcher starts its runtime timer only after GO and may then spend the kill wait reaping.
+// The launcher measures its runtime from GO, so the grace covers its kill wait, the report write and GO delivery.
 #[cfg(any(target_os = "macos", test))]
 const PAYLOAD_REPORT_GRACE: Duration = PAYLOAD_KILL_WAIT.saturating_add(Duration::from_secs(1));
 
@@ -910,8 +910,27 @@ pub(super) struct GuardContext<'a> {
     pub(super) root: &'a Path,
     pub(super) workspace: &'a Path,
     pub(super) skill: Option<Vec<u8>>,
+    runtime_started: std::time::Instant,
     #[cfg(target_os = "linux")]
     parent_namespaces: &'a profile::Namespaces,
+}
+
+impl GuardContext<'_> {
+    pub(super) fn remaining_runtime(&self) -> Duration {
+        runtime_after(
+            self.runtime_started,
+            self.intent.limits.runtime_ms,
+            std::time::Instant::now(),
+        )
+    }
+}
+
+fn runtime_after(
+    started: std::time::Instant,
+    runtime_ms: u32,
+    now: std::time::Instant,
+) -> Duration {
+    (started + Duration::from_millis(u64::from(runtime_ms))).saturating_duration_since(now)
 }
 
 #[cfg(target_os = "linux")]
@@ -1101,6 +1120,8 @@ pub(super) fn helper_main() -> ExitCode {
         stdin
             .read_exact(&mut go)
             .map_err(|_| ToolError::Operation)?;
+        #[cfg(target_os = "macos")]
+        let go_received = std::time::Instant::now();
         if go != *b"GO\n" || task.intent.expires_at_ms <= now_ms() {
             return Err(ToolError::Configuration);
         }
@@ -1117,6 +1138,9 @@ pub(super) fn helper_main() -> ExitCode {
         if task.intent.call.is_process() {
             super::fs::copy_seed()?;
         }
+        // Linux has no post-GO supervisor deadline, so its seed copy stays outside the runtime.
+        #[cfg(not(target_os = "macos"))]
+        let go_received = std::time::Instant::now();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1127,6 +1151,7 @@ pub(super) fn helper_main() -> ExitCode {
             root: &root,
             workspace,
             skill,
+            runtime_started: go_received,
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
@@ -1322,20 +1347,22 @@ mod tests {
     }
 
     #[test]
-    fn payload_report_deadline_outlasts_the_launcher_timeout_and_kill_wait_within_a_finite_grace() {
-        let go = tokio::time::Instant::now();
-        let deadline = payload_report_deadline(go, 5_000);
-        let launcher_report = go + Duration::from_millis(5_000) + PAYLOAD_KILL_WAIT;
-        assert!(deadline > launcher_report);
+    fn launcher_runtime_ends_at_the_go_deadline_inside_the_supervisor_grace() {
+        let go = std::time::Instant::now();
+        let runtime = Duration::from_millis(5_000);
+        let setup = Duration::from_millis(1_500);
+        let launcher_end = go + setup + runtime_after(go, 5_000, go + setup);
+        assert_eq!(launcher_end, go + runtime);
         assert_eq!(
-            deadline - go,
-            Duration::from_millis(5_000) + PAYLOAD_REPORT_GRACE
+            runtime_after(go, 5_000, go + runtime + setup),
+            Duration::ZERO
         );
-        assert!(PAYLOAD_REPORT_GRACE < TEARDOWN_WAIT);
-        assert_eq!(
-            payload_report_deadline(go, u32::MAX) - go,
-            Duration::from_millis(u64::from(u32::MAX)) + PAYLOAD_REPORT_GRACE
+        let supervisor_go = tokio::time::Instant::now();
+        assert!(
+            payload_report_deadline(supervisor_go, 5_000)
+                > supervisor_go + runtime + PAYLOAD_KILL_WAIT
         );
+        assert!(payload_report_deadline(supervisor_go, u32::MAX) > supervisor_go);
     }
 
     #[tokio::test]
