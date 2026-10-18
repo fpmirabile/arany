@@ -1199,12 +1199,8 @@ async fn apply_tapped(
             if event.session_id != view.id || event.sequence <= view.last_sequence {
                 return Ok(());
             }
-            let mut candidate = view.clone();
-            match arany::reduce_into(&mut candidate, &event) {
-                Ok(()) => {
-                    *view = candidate;
-                    Ok(())
-                }
+            match arany::reduce_into(view, &event) {
+                Ok(()) => Ok(()),
                 Err(_) => catch_up(state_dir, view).await,
             }
         }
@@ -1215,16 +1211,12 @@ async fn apply_tapped(
 async fn catch_up(state_dir: &std::path::Path, view: &mut SessionView) -> Result<(), String> {
     let state = arany::StateRoot::open_existing(state_dir).map_err(|error| error.to_string())?;
     let store = arany::Store::open_read_only(state).map_err(|error| error.to_string())?;
-    let events = store
-        .load_session(view.id)
+    let loaded = store
+        .load_open_view(view.id)
         .await
         .map_err(|error| error.to_string());
     store.close().await.map_err(|error| error.to_string())?;
-    for event in events? {
-        if event.sequence > view.last_sequence {
-            arany::reduce_into(view, &event).map_err(|error| error.to_string())?;
-        }
-    }
+    *view = loaded?.ok_or_else(|| "Session history unavailable".to_owned())?;
     Ok(())
 }
 
