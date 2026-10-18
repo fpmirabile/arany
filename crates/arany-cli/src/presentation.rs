@@ -999,17 +999,7 @@ pub(crate) fn image_description(image: &arany::ImageAttachment, index: usize) ->
 }
 
 fn append_jsonl(rendered: &mut String, envelope: &EventEnvelope) {
-    let line = EventLine {
-        sequence: envelope.sequence,
-        session_id: envelope.session_id.to_string(),
-        run_id: envelope.run_id.map(|id| id.to_string()),
-        agent_run_id: envelope.agent_run_id.map(|id| id.to_string()),
-        kind: envelope.event.kind().into(),
-        event_version: envelope.event.version() as u32,
-        payload: serde_json::from_str(&envelope.event.payload().expect("validated Event"))
-            .expect("valid Event JSON"),
-        created_at_ms: envelope.created_at_ms,
-    };
+    let line = EventLine::from(envelope);
     let json = serde_json::to_string(&line).expect("serializable Event");
     rendered.push_str(&escape_json_controls(&json));
     rendered.push('\n');

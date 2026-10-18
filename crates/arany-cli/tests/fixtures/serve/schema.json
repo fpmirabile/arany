@@ -929,7 +929,7 @@
     "ReceiptBudget": {
       "additionalProperties": false,
       "properties": {
-        "max_active_ms": {
+        "maxActiveMs": {
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -937,7 +937,7 @@
             "null"
           ]
         },
-        "max_provider_calls": {
+        "maxProviderCalls": {
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -945,13 +945,13 @@
             "null"
           ]
         },
-        "max_runs": {
+        "maxRuns": {
           "format": "uint8",
           "maximum": 255,
           "minimum": 0,
           "type": "integer"
         },
-        "max_tokens": {
+        "maxTokens": {
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -961,7 +961,7 @@
         }
       },
       "required": [
-        "max_runs"
+        "maxRuns"
       ],
       "type": "object"
     },
@@ -1034,7 +1034,7 @@
     "ReceiptReport": {
       "additionalProperties": false,
       "properties": {
-        "cached_input_tokens": {
+        "cachedInputTokens": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -1066,7 +1066,7 @@
         "changes",
         "evidence",
         "unresolved",
-        "cached_input_tokens"
+        "cachedInputTokens"
       ],
       "type": "object"
     },
@@ -1222,6 +1222,7 @@
           "type": "string"
         },
         "title": {
+          "maxLength": 128,
           "type": [
             "string",
             "null"

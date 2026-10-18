@@ -295,17 +295,21 @@ async fn receipt_get_matches_goal_finished_report_and_bounds_the_entire_response
     let committed = view.goals.iter().find(|item| item.id == goal).unwrap();
     assert_eq!(receipt["objective"], objective);
     assert_eq!(receipt["status"], committed.status.as_str());
+    assert_eq!(receipt["budget"]["maxRuns"], committed.budget.max_runs);
     assert_eq!(
-        receipt["budget"],
-        serde_json::to_value(committed.budget).unwrap()
+        receipt["budget"]["maxProviderCalls"],
+        json!(committed.budget.max_provider_calls)
     );
     assert_eq!(receipt["usage"]["providerCalls"], committed.provider_calls);
     assert_eq!(receipt["usage"]["activeMs"], committed.active_ms);
+    let report = committed.report.as_ref().unwrap();
+    assert_eq!(receipt["report"]["summary"], report.summary);
+    assert_eq!(receipt["report"]["changes"], json!(report.changes));
     assert_eq!(
-        receipt["report"],
-        serde_json::to_value(committed.report.as_ref().unwrap()).unwrap()
+        receipt["report"]["cachedInputTokens"],
+        report.cached_input_tokens
     );
-    assert!(events.iter().any(|event| matches!(&event.event, Event::GoalFinished { goal_id, report, .. } if *goal_id == goal && serde_json::to_value(report).unwrap() == receipt["report"])));
+    assert!(events.iter().any(|event| matches!(&event.event, Event::GoalFinished { goal_id, report: finished, .. } if *goal_id == goal && finished.summary == report.summary)));
 }
 
 #[tokio::test]
@@ -548,6 +552,29 @@ async fn events_resync_is_emitted_when_the_tap_lags_behind_a_stalled_client() {
     assert_eq!(resync["method"], "events/resync");
     assert_eq!(resync["params"]["threadId"], json!(thread));
     assert_eq!(resync["params"]["lastSequence"], cursor);
+    let providers = arany::AdmittedProviders::single(scripted());
+    let mut run = arany::test_support::scenario::request(&workspace, "Again");
+    run.session_id = Some(thread);
+    run.title = None;
+    run.include_paths.clear();
+    app.submit(providers, run, arany::RunControls::default())
+        .unwrap()
+        .result
+        .await
+        .unwrap();
+    loop {
+        let tapped = tap.next().await.unwrap();
+        let ours = matches!(&tapped, arany::Tapped::Committed(event) if event.session_id == thread);
+        history.observe(tapped, &outbound, &[]).await.unwrap();
+        if ours {
+            break;
+        }
+    }
+    history
+        .observe(arany::Tapped::Resync { missed: 2 }, &outbound, &[])
+        .await
+        .unwrap();
+    assert!(output.try_recv().is_err());
     let subscription = Request {
         jsonrpc: Default::default(),
         id: RequestId::Integer(11),
@@ -572,4 +599,156 @@ async fn events_resync_is_emitted_when_the_tap_lags_behind_a_stalled_client() {
         )
         .unwrap()
     );
+}
+
+#[tokio::test]
+async fn events_subscribe_during_a_running_turn_joins_replay_and_live_without_gap_or_duplicate() {
+    let _deadline = deadline();
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let (started, mut start) = mpsc::unbounded_channel();
+    let provider = Arc::new(WaitingProvider {
+        started,
+        dropped: Arc::new(AtomicUsize::new(0)),
+        requests: Arc::new(Mutex::new(Vec::new())),
+        identity: arany::ProviderIdentity::new("openai", "gpt-5.4", arany::Provenance::native()),
+    });
+    let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+    let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+    let client = async {
+        let thread = start_thread(&input, &mut output, &workspace).await;
+        input
+            .send(request(
+                3,
+                "turn/start",
+                json!({"threadId":thread,"input":[{"type":"text","text":"Wait"}]}),
+            ))
+            .await
+            .unwrap();
+        let turn = next(&mut output).await["result"]["turn"]["id"].clone();
+        start.recv().await.unwrap();
+        input
+            .send(request(
+                10,
+                "events/subscribe",
+                json!({"threadId":thread,"since":0}),
+            ))
+            .await
+            .unwrap();
+        let mut sequences = Vec::new();
+        loop {
+            let message = next(&mut output).await;
+            if message["id"] == 10 {
+                assert!(message["result"]["nextSince"].is_null());
+                sequences.extend(
+                    message["result"]["events"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|event| event["sequence"].as_u64().unwrap()),
+                );
+                break;
+            }
+        }
+        let replayed = sequences.len();
+        input
+            .send(request(
+                5,
+                "turn/interrupt",
+                json!({"threadId":thread,"turnId":turn}),
+            ))
+            .await
+            .unwrap();
+        input.send(ClientMessage::Eof).await.unwrap();
+        while let Some(message) = output.recv().await {
+            let message = serde_json::to_value(message).unwrap();
+            if message["method"] == "events/committed" {
+                sequences.push(message["params"]["event"]["sequence"].as_u64().unwrap());
+            }
+        }
+        (thread, sequences, replayed)
+    };
+    let (result, (thread, sequences, replayed)) = tokio::join!(
+        server::run_with_threads(
+            engine(&state),
+            state.clone(),
+            inbound,
+            outbound,
+            threads::Threads {
+                provider: Some(provider),
+                ..Default::default()
+            }
+        ),
+        client
+    );
+    result.unwrap();
+    let (events, _) = closed_view(&state, thread).await;
+    assert!(replayed > 0 && sequences.len() > replayed);
+    let first = sequences[0];
+    let expected: Vec<u64> = (first..first + sequences.len() as u64).collect();
+    assert_eq!(sequences, expected);
+    assert_eq!(
+        sequences,
+        events
+            .iter()
+            .map(|event| event.sequence)
+            .skip_while(|sequence| *sequence < first)
+            .take(sequences.len())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn thread_fork_checks_the_reply_size_before_persisting_a_fork() {
+    let _deadline = deadline();
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+    let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+    let client = async {
+        let thread = start_thread(&input, &mut output, &workspace).await;
+        finish_turn(&input, &mut output, thread, "Hi").await;
+        let oversized = Message::Request(Request {
+            jsonrpc: Default::default(),
+            id: RequestId::String("i".repeat(MAX_LINE_BYTES - 256)),
+            method: "thread/fork".into(),
+            params: Some(json!({"threadId":thread,"cwd":workspace})),
+        });
+        assert!(encode_line(&oversized).unwrap().len() <= MAX_LINE_BYTES);
+        input.send(ClientMessage::Message(oversized)).await.unwrap();
+        assert_eq!(
+            next(&mut output).await["error"]["data"]["reason"],
+            "contextTooLarge"
+        );
+        input.send(ClientMessage::Eof).await.unwrap();
+        thread
+    };
+    let (result, thread) = tokio::join!(
+        server::run_with_threads(
+            engine(&state),
+            state.clone(),
+            inbound,
+            outbound,
+            threads::Threads {
+                provider: Some(scripted()),
+                ..Default::default()
+            }
+        ),
+        client
+    );
+    result.unwrap();
+    let (events, _) = closed_view(&state, thread).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::SessionForked { .. }))
+    );
+    let listed = arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
 }

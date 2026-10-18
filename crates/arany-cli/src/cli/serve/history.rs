@@ -6,12 +6,12 @@ use super::{
 use arany::{Engine, EngineError, SessionId, Tapped};
 use arany_cli::protocol::{EventLine, methods::*, rpc::*};
 use serde_json::Value;
-use std::{collections::HashMap, future::Future, path::Path, task::Poll};
+use std::{collections::BTreeMap, future::Future, path::Path, task::Poll};
 use tokio::sync::mpsc;
 
 #[derive(Default)]
 pub(super) struct History {
-    cursors: HashMap<SessionId, u64>,
+    cursors: BTreeMap<SessionId, u64>,
 }
 
 impl History {
@@ -66,6 +66,19 @@ impl History {
                 let (workspace, _) =
                     crate::cli::admit_workspace(Some(input.cwd.into()), Some(state.into()))
                         .map_err(|_| Fault::params())?;
+                let placeholder = ThreadResult {
+                    thread: Thread {
+                        id: input.thread_id,
+                        title: "\u{1}".repeat(128),
+                        workspace: workspace.to_string_lossy().into_owned(),
+                        created_at_ms: i64::MIN,
+                        forked_from_id: Some(input.thread_id),
+                        goal: None,
+                    },
+                };
+                if encode_line(&response(request.id.clone(), &placeholder)).is_err() {
+                    return Err(Fault::engine(EngineError::ContextTooLarge));
+                }
                 let id = engine
                     .fork_session(input.thread_id, workspace.clone(), input.title)
                     .await
@@ -157,10 +170,7 @@ impl History {
                 }
             }
             Tapped::Resync { missed } => {
-                // Sort so multi-thread recovery is independent of HashMap iteration order.
-                let mut cursors: Vec<_> = self.cursors.iter().collect();
-                cursors.sort_unstable_by_key(|(id, _)| id.to_string());
-                for (&id, &cursor) in cursors {
+                for (id, cursor) in std::mem::take(&mut self.cursors) {
                     emit(
                         outbound,
                         opt_out,

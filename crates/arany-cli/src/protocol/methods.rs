@@ -523,7 +523,7 @@ pub struct ReceiptGoal {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReceiptBudget {
     pub max_provider_calls: Option<u32>,
     pub max_tokens: Option<u64>,
@@ -544,7 +544,7 @@ pub struct ReceiptUsage {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReceiptReport {
     pub summary: String,
     pub changes: Vec<String>,
@@ -562,6 +562,7 @@ pub struct ThreadForkParams {
     #[schemars(regex(pattern = "^/"))]
     pub cwd: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 128))]
     pub title: Option<String>,
 }
 
