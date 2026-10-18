@@ -357,6 +357,7 @@ impl RunView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolView {
+    pub checkpoint: Option<super::Checkpoint>,
     pub intent: crate::tools::EffectIntent,
     pub observation: Option<crate::tools::ToolObservation>,
     pub review_call_index: Option<u32>,

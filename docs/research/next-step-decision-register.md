@@ -231,6 +231,15 @@ another secret-adjacent preference record. [The credential contract](../specs/cr
 owns the selection and validation behavior; [the scoped finding](../security/findings/ambiguous-saved-access-selection.md)
 retains the failure context.
 
+### D-21 — Checkpoint storage
+
+Claude Code supplies the Run/prompt checkpoint shape and retention precedent;
+Cline/Roo supply the intended restore choices and compare surface. Arany uses
+content-addressed private storage instead of shadow Git because it already has
+exact validated changesets, and its Git operations require a neutralized private
+view. [The Tool contract](../specs/tools.md#checkpoints-and-rewind) owns capture
+behavior, retention and storage limits.
+
 ## 3. Expansion decisions
 
 Reconsider a boundary only for its named constraint. Subject reports retain

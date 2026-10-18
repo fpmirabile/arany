@@ -8,6 +8,8 @@ use tokio::sync::oneshot;
 type Admits = fn(&Event) -> bool;
 
 enum Fault {
+    Checkpoint(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
+    CheckpointStall(SessionId),
     SupervisorOff(SessionId),
     WorkerReceipt(uuid::Uuid),
     GoalAppend(SessionId, Admits),
@@ -46,6 +48,30 @@ fn take(mut matches: impl FnMut(&Fault) -> bool) -> Option<Fault> {
 pub struct FaultPlan;
 
 impl FaultPlan {
+    pub fn gate_checkpoint(session: SessionId) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, wait) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        plan().push(Fault::Checkpoint(session, entered, released));
+        (wait, release)
+    }
+
+    pub fn stall_checkpoint(session: SessionId) {
+        plan().push(Fault::CheckpointStall(session));
+    }
+
+    pub(crate) fn checkpoint_stalled(session: SessionId) -> bool {
+        take(|fault| matches!(fault, Fault::CheckpointStall(id) if *id == session)).is_some()
+    }
+
+    pub(crate) fn checkpoint_gate(
+        session: SessionId,
+    ) -> Option<(oneshot::Sender<()>, oneshot::Receiver<()>)> {
+        match take(|fault| matches!(fault, Fault::Checkpoint(id, ..) if *id == session)) {
+            Some(Fault::Checkpoint(_, entered, release)) => Some((entered, release)),
+            _ => None,
+        }
+    }
+
     pub fn supervisor_off(session_id: SessionId) {
         plan().push(Fault::SupervisorOff(session_id));
     }
