@@ -243,13 +243,53 @@ impl RunLoop<'_> {
                 deadline,
             )
             .await;
-        let Drained {
-            mut abort_reason,
-            pending,
-        } = match driven {
+        let drained = match driven {
             Ok(drained) => drained,
             Err(error) => return Err(queue.abort_with(error).await),
         };
+        self.settle_delegation(
+            root_request,
+            children,
+            active_segment,
+            drained,
+            queue.primary_step.take(),
+            deadline,
+        )
+        .await
+    }
+
+    fn settle_delegation<'b>(
+        &'b self,
+        root_request: &'b mut ProviderRequest,
+        children: Vec<ChildWork>,
+        active_segment: Option<ActiveSegment>,
+        drained: Drained,
+        primary_step: Option<(Vec<ToolRequest>, ProviderTurn)>,
+        deadline: Instant,
+    ) -> super::step::BoxedStep<'b, bool> {
+        Box::pin(self.settle_delegation_inner(
+            root_request,
+            children,
+            active_segment,
+            drained,
+            primary_step,
+            deadline,
+        ))
+    }
+
+    async fn settle_delegation_inner(
+        &self,
+        root_request: &mut ProviderRequest,
+        mut children: Vec<ChildWork>,
+        mut active_segment: Option<ActiveSegment>,
+        drained: Drained,
+        primary_step: Option<(Vec<ToolRequest>, ProviderTurn)>,
+        deadline: Instant,
+    ) -> Result<bool, EngineError> {
+        let Drained {
+            mut abort_reason,
+            pending,
+        } = drained;
         if let Some(segment) = active_segment.take() {
             self.settle_active_segment(segment)?;
         }
@@ -309,7 +349,7 @@ impl RunLoop<'_> {
             }
             .map(|()| false);
         }
-        if let Some((requests, turn)) = queue.primary_step.take() {
+        if let Some((requests, turn)) = primary_step {
             let Some(request) = self.begin_tool_step(requests).await? else {
                 return self.fail_primary().await.map(|()| false);
             };

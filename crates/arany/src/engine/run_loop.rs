@@ -563,37 +563,64 @@ impl<'a> RunLoop<'a> {
                     turn,
                     ..
                 }) if valid_response => {
-                    if self.pause_at_boundary() {
-                        return self.settle_stopped_primary().await;
+                    if self
+                        .primary_tools(root_request, requests, turn, planning)
+                        .await?
+                    {
+                        continue;
                     }
-                    let Some(request) = self.begin_tool_step(requests).await? else {
-                        return self.fail_primary().await;
-                    };
-                    let grant = Grant::Primary {
-                        request: &mut *root_request,
-                        review_allowed: planning && self.ledger().admits(Action::Review),
-                    };
-                    match Box::pin(self.execute_step(grant, request, turn)).await {
-                        Ok(true) => {}
-                        Ok(false) if self.controls.cancellation.is_cancelled() => {
-                            return self.settle_stopped_primary().await;
-                        }
-                        Ok(false) if self.ledger().active_time_exhausted() => {
-                            return self.settle_stopped_primary().await;
-                        }
-                        Ok(false) => return self.fail_primary().await,
-                        Err(EngineError::GoalBudgetExhausted) => {
-                            return self.settle_stopped_primary().await;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                    Box::pin(self.verify_workers()).await?;
+                    return Ok(());
                 }
                 CallResult::Cancelled => return self.cancel_primary().await,
                 CallResult::Response(_) if budget_refused => return self.fail_for_budget().await,
                 _ => return self.fail_primary().await,
             }
         }
+    }
+
+    fn primary_tools<'b>(
+        &'b self,
+        root_request: &'b mut ProviderRequest,
+        requests: Vec<crate::ToolRequest>,
+        turn: crate::provider::ProviderTurn,
+        planning: bool,
+    ) -> step::BoxedStep<'b, bool> {
+        Box::pin(self.primary_tools_inner(root_request, requests, turn, planning))
+    }
+
+    async fn primary_tools_inner(
+        &self,
+        root_request: &mut ProviderRequest,
+        requests: Vec<crate::ToolRequest>,
+        turn: crate::provider::ProviderTurn,
+        planning: bool,
+    ) -> Result<bool, EngineError> {
+        if self.pause_at_boundary() {
+            return self.settle_stopped_primary().await.map(|()| false);
+        }
+        let Some(request) = self.begin_tool_step(requests).await? else {
+            return self.fail_primary().await.map(|()| false);
+        };
+        let grant = Grant::Primary {
+            request: &mut *root_request,
+            review_allowed: planning && self.ledger().admits(Action::Review),
+        };
+        match Box::pin(self.execute_step(grant, request, turn)).await {
+            Ok(true) => {}
+            Ok(false) if self.controls.cancellation.is_cancelled() => {
+                return self.settle_stopped_primary().await.map(|()| false);
+            }
+            Ok(false) if self.ledger().active_time_exhausted() => {
+                return self.settle_stopped_primary().await.map(|()| false);
+            }
+            Ok(false) => return self.fail_primary().await.map(|()| false),
+            Err(EngineError::GoalBudgetExhausted) => {
+                return self.settle_stopped_primary().await.map(|()| false);
+            }
+            Err(error) => return Err(error),
+        }
+        Box::pin(self.verify_workers()).await?;
+        Ok(true)
     }
 
     async fn stop_primary(
@@ -657,7 +684,14 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
-    async fn invoke_primary(
+    fn invoke_primary<'b>(
+        &'b self,
+        root: &'b mut ProviderRequest,
+    ) -> step::BoxedStep<'b, (CallResult, ActiveSegment)> {
+        Box::pin(self.invoke_primary_inner(root))
+    }
+
+    async fn invoke_primary_inner(
         &self,
         root: &mut ProviderRequest,
     ) -> Result<(CallResult, ActiveSegment), EngineError> {
