@@ -120,6 +120,10 @@ pub struct ThreadResumeParams {
     #[schemars(schema_with = "optional_effort_schema")]
     pub effort: Option<Effort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration: Option<Collaboration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_children: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<PermissionMode>,

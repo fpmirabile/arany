@@ -292,19 +292,22 @@ pub(super) async fn input(
             }
             notice_mcp(state, &params.mcp_servers);
             let cwd = params.cwd;
+            let selection = config.thread(cwd.clone());
             send_request(
                 state,
                 serve,
                 "thread/resume",
                 ThreadResumeParams {
                     thread_id: params.session_id,
-                    cwd: cwd.clone(),
-                    provider: config.provider.profile_label(),
-                    model: config.model.clone(),
-                    effort: config.effort,
-                    tools: Some(config.tools),
-                    permission_mode: None,
-                    include_paths: None,
+                    cwd: selection.cwd,
+                    provider: selection.provider,
+                    model: selection.model,
+                    effort: selection.effort,
+                    collaboration: selection.collaboration,
+                    max_active_children: selection.max_active_children,
+                    tools: selection.tools,
+                    permission_mode: selection.permission_mode,
+                    include_paths: selection.include_paths,
                 },
                 Pending::Load { id, cwd, replay },
             )

@@ -120,6 +120,17 @@ fn start_with_guard(
     tools: bool,
     guard: PathBuf,
 ) -> (Writer, Reader, tokio::task::JoinHandle<Result<(), String>>) {
+    let mut config = config(state);
+    config.tools = tools;
+    start_with_config(config, provider, guard)
+}
+
+fn start_with_config(
+    config: Config,
+    provider: Arc<dyn Provider>,
+    guard: PathBuf,
+) -> (Writer, Reader, tokio::task::JoinHandle<Result<(), String>>) {
+    let state = &config.state;
     let engine = arany::test_support::engine::open(
         StateRoot::admit(state).expect("private State"),
         EngineConfig {
@@ -128,8 +139,6 @@ fn start_with_guard(
         },
     )
     .unwrap();
-    let mut config = config(state);
-    config.tools = tools;
     let state_dir = state.to_path_buf();
     let (client, server) = tokio::io::duplex(64 * 1024);
     let (reader, writer) = tokio::io::split(client);
@@ -543,6 +552,124 @@ async fn load_replays_committed_history_after_restart_and_prompt_continues_the_s
     assert_eq!(view.runs[1].objective, "Continue");
     assert_ne!(view.runs[0].id, view.runs[1].id);
     assert!(view.runs.iter().all(|r| r.status == RunStatus::Finished));
+}
+
+#[tokio::test]
+async fn session_admission_preserves_cli_child_restrictions() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    for (collaboration, limit, policy) in [
+        (
+            Collaboration::Single,
+            None,
+            arany::CollaborationPolicy::Single,
+        ),
+        (
+            Collaboration::Auto,
+            Some(0),
+            arany::CollaborationPolicy::Auto {
+                max_active_children: 0,
+            },
+        ),
+    ] {
+        for method in ["session/new", "session/load", "session/resume"] {
+            let root = tempfile::tempdir().unwrap();
+            let workspace = root.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let state = root.path().join("state");
+            let mut selection = config(&state);
+            selection.collaboration = collaboration.clone();
+            selection.max_active_children = limit;
+            let provider = Arc::new(
+                ScriptedProvider::new(vec![
+                    arany::ProviderOutcome::Delegate(arany::Delegate {
+                        children: vec![arany::ChildAssignment {
+                            editor: None,
+                            objective: "Inspect".into(),
+                            profile: None,
+                        }],
+                        agent: None,
+                    }),
+                    arany::ProviderOutcome::Finish(arany::Finish {
+                        summary: "Child".into(),
+                        result: "Inspected".into(),
+                    }),
+                    arany::ProviderOutcome::Finish(arany::Finish {
+                        summary: "Answer".into(),
+                        result: "Done".into(),
+                    }),
+                ])
+                .with_profile("openai", "gpt-5.4"),
+            );
+            let (mut writer, mut reader, mut task) = start_with_config(
+                selection,
+                provider.clone(),
+                std::env::current_exe().unwrap(),
+            );
+            initialize(&mut writer, &mut reader).await;
+            let session = session(&mut writer, &mut reader, &workspace).await;
+            if method == "session/resume" {
+                writer.shutdown().await.unwrap();
+                task.await.unwrap().unwrap();
+                let mut selection = config(&state);
+                selection.collaboration = collaboration.clone();
+                selection.max_active_children = limit;
+                (writer, reader, task) = start_with_config(
+                    selection,
+                    provider.clone(),
+                    std::env::current_exe().unwrap(),
+                );
+                initialize(&mut writer, &mut reader).await;
+            }
+            if method != "session/new" {
+                send(
+                    &mut writer,
+                    json!(3),
+                    method,
+                    json!({"sessionId":session,"cwd":workspace,"mcpServers":[]}),
+                )
+                .await;
+                validate_session_result(&next(&mut reader).await, method);
+            }
+            send(
+                &mut writer,
+                json!(4),
+                "session/prompt",
+                json!({"sessionId":session,"prompt":[{"type":"text","text":"Delegate inspection"}]}),
+            )
+            .await;
+            let response = loop {
+                let message = next(&mut reader).await;
+                if message["id"] == 4 {
+                    break message;
+                }
+            };
+            writer.shutdown().await.unwrap();
+            task.await.unwrap().unwrap();
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            let events = store.load_session(session).await.unwrap();
+            let view = store.load_view(session).await.unwrap().unwrap();
+            store.close().await.unwrap();
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event.event,
+                    Event::AgentSpawned {
+                        role: arany::AgentRole::Child,
+                        ..
+                    }
+                )),
+                "{method} under {policy:?} spawned a child"
+            );
+            let requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1, "{method} under {policy:?}");
+            assert_eq!(requests[0].collaboration, policy, "{method}");
+            assert_eq!(
+                response["error"]["data"]["reason"], "turnFailed",
+                "{method}"
+            );
+            assert_eq!(view.runs.len(), 1, "{method}");
+            assert_eq!(view.runs[0].status, RunStatus::Failed, "{method}");
+        }
+    }
 }
 
 #[tokio::test]

@@ -1328,6 +1328,16 @@
     "ThreadResumeParams": {
       "additionalProperties": false,
       "properties": {
+        "collaboration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Collaboration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cwd": {
           "pattern": "^/",
           "type": "string"
@@ -1349,6 +1359,15 @@
           },
           "type": [
             "array",
+            "null"
+          ]
+        },
+        "maxActiveChildren": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },
