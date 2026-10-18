@@ -2512,7 +2512,8 @@ mod goals {
                 )
             };
             let mut plan = write_plan();
-            plan.paths = vec!["notes".into()];
+            plan.paths = vec!["notes/facts.txt".into()];
+            plan.budget = arany::GoalBudget::default();
             plan.success_criterion = arany::GoalSuccessCriterion::WorkspaceFileContent {
                 path: "notes/facts.txt".into(),
                 content: "three".into(),
@@ -2530,6 +2531,7 @@ mod goals {
             );
             let mut input = request(&workspace, "Change the facts");
             input.session_id = Some(session);
+            input.title = None;
             input.include_paths.clear();
             let outcome = {
                 let gate = (!unavailable).then(|| arany::FaultPlan::gate_checkpoint(session));

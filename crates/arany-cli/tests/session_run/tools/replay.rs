@@ -602,7 +602,13 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
     };
     let observed = |intent: arany::EffectIntent, disposition, output: String| Event::ToolFinished {
-        checkpoint: None,
+        checkpoint: matches!(intent.call, ToolCall::ApplyChangeset { .. }).then_some(
+            arany::Checkpoint {
+                status: arany::CheckpointStatus::NotNeeded,
+                reason: None,
+                pruned_before_run: None,
+            },
+        ),
         run_id: run,
         agent_run_id: primary,
         observation: arany::ToolObservation {
@@ -924,9 +930,13 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     if let Event::ToolStarted { intent, .. } = &mut out_of_plan_integration[INTEGRATION_STARTED] {
         *intent = out_of_plan_intent.clone();
     }
-    if let Event::ToolFinished { observation, .. } =
-        &mut out_of_plan_integration[INTEGRATION_FINISHED]
+    if let Event::ToolFinished {
+        observation,
+        checkpoint,
+        ..
+    } = &mut out_of_plan_integration[INTEGRATION_FINISHED]
     {
+        *checkpoint = None;
         observation.intent = out_of_plan_intent.clone();
         observation.disposition = ToolDisposition::Denied;
         observation.output = "The effect is outside the active Goal plan".into();
@@ -969,9 +979,17 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         unreachable!()
     };
     let intent = intent.clone();
-    if let Event::ToolFinished { observation, .. } =
-        &mut forged_out_of_plan_publication[INTEGRATION_FINISHED]
+    if let Event::ToolFinished {
+        observation,
+        checkpoint,
+        ..
+    } = &mut forged_out_of_plan_publication[INTEGRATION_FINISHED]
     {
+        *checkpoint = Some(arany::Checkpoint {
+            status: arany::CheckpointStatus::NotNeeded,
+            reason: None,
+            pruned_before_run: None,
+        });
         observation.disposition = ToolDisposition::Succeeded;
         observation.output = "{\"applied\":1}".into();
         observation.attestation = Some(arany::Attestation::Guard(arany::GuardReceipt {
