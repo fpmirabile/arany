@@ -57,6 +57,7 @@ struct Fixture {
     engine: Engine,
     deny_humans: bool,
     command_maximum: Option<u32>,
+    max_children: u8,
     settings: Option<Value>,
 }
 
@@ -105,6 +106,7 @@ impl Fixture {
             engine,
             deny_humans: false,
             command_maximum: None,
+            max_children: 1,
             settings: settings.cloned(),
         }
     }
@@ -146,7 +148,7 @@ impl Fixture {
         input.include_paths.clear();
         input.policy = if team {
             CollaborationPolicy::Auto {
-                max_active_children: 1,
+                max_active_children: self.max_children,
             }
         } else {
             CollaborationPolicy::Single
@@ -2285,18 +2287,17 @@ struct PostCase {
 }
 
 async fn post_case(hook: Value) -> PostCase {
+    post_run(hook, false).await
+}
+
+async fn post_run(hook: Value, stopped: bool) -> PostCase {
     let fixture = Fixture::new(Some(&post_settings(hook)), true);
     let write = call("edit");
-    let (result, requests, _) = fixture
-        .run(
-            vec![
-                tool_outcome(write.clone(), Some(Box::new(plan(&write)))),
-                finish("answer"),
-            ],
-            None,
-            false,
-        )
-        .await;
+    let mut outcomes = vec![tool_outcome(write.clone(), Some(Box::new(plan(&write))))];
+    if !stopped {
+        outcomes.push(finish("answer"));
+    }
+    let (result, requests, _) = fixture.run(outcomes, None, false).await;
     let live_feedback = requests
         .get(1)
         .and_then(|request| request.input.tools.as_ref())
@@ -2414,6 +2415,42 @@ async fn hook_post_tool_use_feedback_is_journaled_and_never_undoes() {
             assert!(!result["changeset"]["files"].as_array().unwrap().is_empty());
         }
     }
+}
+
+#[tokio::test]
+async fn hook_post_tool_use_continue_false_stops_after_the_committed_effect() {
+    let case = post_run(shell_hook(r#"printf '%s' '{"continue":false,"stopReason":"review required","decision":"block","reason":"not model feedback"}'"#), true).await;
+    assert_eq!(case.status, RunStatus::StoppedByHook);
+    assert_eq!(case.provider_calls, 1);
+    assert_eq!(case.host_file, "done");
+    assert_eq!(
+        case.tool.observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Succeeded
+    );
+    assert!(case.tool.hook_feedback().is_empty());
+    assert_eq!(
+        case.tool.hooks[0].outcome.as_ref().unwrap().result,
+        arany::permissions::HookResult::Stopped {
+            reason: Some("review required".into())
+        }
+    );
+    let session = case.events[0].session_id;
+    let view = SessionView::replay(session, &case.events).unwrap().unwrap();
+    let run = &view.runs[0];
+    assert!(run.assistant_message.is_none());
+    assert_eq!(
+        arany_cli::presentation::run_feedback(run).as_deref(),
+        Some("Run stopped by hook: review required")
+    );
+    let last_hook = case
+        .events
+        .iter()
+        .position(|event| matches!(event.event, Event::HookFinished { .. }))
+        .unwrap();
+    assert!(case.events[last_hook + 1..].iter().all(|event| !matches!(
+        event.event,
+        Event::ProviderCallRecorded { .. } | Event::ToolStarted { .. } | Event::HookStarted { .. }
+    )));
 }
 
 #[tokio::test]
@@ -2857,6 +2894,110 @@ async fn hook_identity_update_proceeds_unchanged() {
 
 mod lifecycle_hooks {
     use super::*;
+
+    #[tokio::test]
+    async fn continue_false_stops_primary_and_child_without_feedback_or_later_hooks() {
+        for child in [false, true] {
+            let event = if child { "SubagentStop" } else { "Stop" };
+            let settings = json!({"hooks":{event:[{"hooks":[
+                shell_hook(r#"printf '%s' '{"continue":false,"stopReason":"halt","decision":"block","reason":"not feedback"}'"#),
+                shell_hook("exit 2")
+            ]}]}});
+            let fixture = Fixture::new(Some(&settings), false);
+            let outcomes = if child {
+                vec![
+                    ProviderOutcome::Delegate(arany::Delegate {
+                        children: vec![arany::ChildAssignment {
+                            editor: None,
+                            objective: "Research the task".into(),
+                            profile: None,
+                        }],
+                        agent: None,
+                    }),
+                    finish("child answer"),
+                ]
+            } else {
+                vec![finish("candidate")]
+            };
+            let (result, requests, _) = fixture.run(outcomes, None, child).await;
+            assert_eq!(result.run.status, RunStatus::StoppedByHook);
+            assert_eq!(requests.len(), if child { 2 } else { 1 });
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.input.stop_hook_feedback.is_empty())
+            );
+            let (events, view) = fixture.reopen(result.session_id).await;
+            let run = &view.runs[0];
+            assert_eq!(run.lifecycle_hooks.len(), 1);
+            assert_eq!(run.hook_stop_reason(), Some(Some("halt")));
+            assert_eq!(
+                run.agents[usize::from(child)].status,
+                arany::AgentStatus::StoppedByHook
+            );
+            assert!(run.assistant_message.is_none());
+            assert_eq!(
+                SessionView::replay(result.session_id, &events)
+                    .unwrap()
+                    .unwrap(),
+                view
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_stop_continue_false_drains_the_sibling_as_cancelled() {
+        let settings = json!({"hooks":{"SubagentStop":[{"hooks":[
+            shell_hook("printf '%s' '{\"continue\":false,\"stopReason\":\"a\\u001b[31mb\"}'")
+        ]}]}});
+        let mut fixture = Fixture::new(Some(&settings), false);
+        fixture.max_children = 2;
+        let child = |objective: &str| arany::ChildAssignment {
+            editor: None,
+            objective: objective.into(),
+            profile: None,
+        };
+        let outcomes = vec![
+            ProviderOutcome::Delegate(arany::Delegate {
+                children: vec![child("Research one"), child("Research two")],
+                agent: None,
+            }),
+            finish("child one"),
+            finish("child two"),
+        ];
+        let (result, requests, _) = fixture.run(outcomes, None, true).await;
+        assert_eq!(result.run.status, RunStatus::StoppedByHook);
+        assert_eq!(requests.len(), 3);
+        let (events, view) = fixture.reopen(result.session_id).await;
+        let run = &view.runs[0];
+        let statuses: Vec<_> = run.agents.iter().map(|agent| agent.status).collect();
+        assert_eq!(statuses[0], arany::AgentStatus::StoppedByHook);
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == arany::AgentStatus::StoppedByHook)
+                .count(),
+            2
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == arany::AgentStatus::Cancelled)
+                .count(),
+            1
+        );
+        assert_eq!(run.lifecycle_hooks.len(), 1);
+        assert!(run.assistant_message.is_none());
+        let feedback = arany_cli::presentation::run_feedback(run).unwrap();
+        assert!(!feedback.contains('\u{1b}'));
+        assert!(feedback.starts_with("Run stopped by hook: a"));
+        assert_eq!(
+            SessionView::replay(result.session_id, &events)
+                .unwrap()
+                .unwrap(),
+            view
+        );
+    }
 
     #[tokio::test]
     async fn stop_hook_blocks_at_most_eight_times_and_is_journaled() {

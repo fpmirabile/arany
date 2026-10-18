@@ -333,7 +333,9 @@ impl Event {
                             super::MAX_ASSISTANT_MESSAGE_BYTES,
                         )
                     }
-                    AgentDisposition::Failed | AgentDisposition::Cancelled
+                    AgentDisposition::Failed
+                    | AgentDisposition::Cancelled
+                    | AgentDisposition::StoppedByHook
                         if summary.is_none() && result.is_none() =>
                     {
                         Ok(())

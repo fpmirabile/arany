@@ -661,7 +661,9 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 return Err(ReplayError::InvalidTransition);
             }
             if *disposition == AgentDisposition::Finished
-                && (!run.hooks_settled() || run.stop_blocked(*agent_run_id))
+                && (!run.hooks_settled()
+                    || run.stop_blocked(*agent_run_id)
+                    || run.hook_stop_reason().is_some())
             {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -684,8 +686,17 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                     }
                 }
             }
+            if *disposition == AgentDisposition::StoppedByHook
+                && (!run.hooks_settled()
+                    || (!run.actor_stopped_by_hook(*agent_run_id)
+                        && run.agents[index].role != AgentRole::Primary)
+                    || run.hook_stop_reason().is_none())
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
             let agent = &mut run.agents[index];
             agent.status = match disposition {
+                AgentDisposition::StoppedByHook => AgentStatus::StoppedByHook,
                 AgentDisposition::Finished => AgentStatus::Finished,
                 AgentDisposition::Failed => AgentStatus::Failed,
                 AgentDisposition::Cancelled => AgentStatus::Cancelled,

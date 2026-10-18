@@ -222,7 +222,21 @@ pub(super) fn apply(
                 {
                     RunStatus::Finished
                 }
-                RunDisposition::Failed if run.assistant_message.is_none() => RunStatus::Failed,
+                RunDisposition::StoppedByHook
+                    if run.assistant_message.is_none()
+                        && run.hooks_settled()
+                        && run.hook_stop_reason().is_some()
+                        && run
+                            .primary()
+                            .is_some_and(|agent| agent.status == AgentStatus::StoppedByHook) =>
+                {
+                    RunStatus::StoppedByHook
+                }
+                RunDisposition::Failed
+                    if run.assistant_message.is_none() && run.hook_stop_reason().is_none() =>
+                {
+                    RunStatus::Failed
+                }
                 RunDisposition::Cancelled if run.assistant_message.is_none() => {
                     RunStatus::Cancelled
                 }

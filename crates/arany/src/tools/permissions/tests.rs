@@ -1391,6 +1391,9 @@ fn post_tool_use_output_becomes_bounded_feedback_and_never_replaces_the_result()
     let post = |value: serde_json::Value| json!({"hookSpecificOutput": value}).to_string();
     for (exit, stdout, stderr, expected) in [
         (Some(0), String::new(), "", HookResult::Passed),
+        (Some(0), json!({"continue":false,"stopReason":"halt\nnow","decision":"block","reason":"not feedback"}).to_string(), "", HookResult::Stopped { reason: Some("haltnow".into()) }),
+        (Some(0), json!({"continue":false}).to_string(), "", HookResult::Stopped { reason: None }),
+        (Some(0), json!({"continue":false,"stopReason":"é".repeat(2000)}).to_string(), "", HookResult::Stopped { reason: Some("é".repeat(MAX_HOOK_REASON_BYTES / 2)) }),
         (Some(2), String::new(), "bad\nfile", lines(&["badfile"])),
         (Some(2), String::new(), "", lines(&["blocked without a reason"])),
         (Some(1), String::new(), "x", ignored(HookIgnoreReason::NonZeroExit)),
@@ -1648,7 +1651,9 @@ fn lifecycle_hook_inputs_and_results_are_bounded_and_fail_closed() {
             0,
             r#"{"continue":false,"stopReason":"halt","decision":"block","reason":"verify"}"#,
             "",
-            HookResult::Passed,
+            HookResult::Stopped {
+                reason: Some("halt".into()),
+            },
         ),
     ] {
         assert_eq!(

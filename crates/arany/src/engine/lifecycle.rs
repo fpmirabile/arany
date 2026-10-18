@@ -232,12 +232,11 @@ pub(super) async fn fork_with_store(
     source_lock.keep();
     let identity = WorkspaceInputs::admit_identity(workspace, state)?;
     ensure_session_workspace(&source, identity)?;
-    if !source.runs.last().is_some_and(|run| {
-        matches!(
-            run.status,
-            RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
-        )
-    }) {
+    if !source
+        .runs
+        .last()
+        .is_some_and(|run| run.status.is_outcome())
+    {
         return Err(EngineError::ForkNotAtRunBoundary);
     }
     let forked = store

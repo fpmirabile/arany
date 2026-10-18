@@ -362,15 +362,12 @@ async fn run_on_engine(
         .last()
         .filter(|run| **run == outcome.run)
         .ok_or("Run history unavailable or invalid")?;
-    let paused = interrupted
+    let paused = (interrupted || run.status == RunStatus::StoppedByHook)
         && view.goal(outcome.goal_id).is_some_and(|goal| {
             matches!(goal.status, GoalStatus::Running | GoalStatus::Interrupted)
         });
     let success = run.status == RunStatus::Finished && !paused;
-    if !matches!(
-        run.status,
-        RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled
-    ) {
+    if !run.status.is_outcome() {
         return Err("Run did not reach a terminal state".into());
     }
     let stdout = render_exec(run, &events, args.output.into(), new_session);
@@ -384,6 +381,7 @@ async fn run_on_engine(
                     RunStatus::Finished => "finished",
                     RunStatus::Failed => "failed",
                     RunStatus::Cancelled => "cancelled",
+                    RunStatus::StoppedByHook => "stopped_by_hook",
                     _ => return Err("Run did not reach a terminal state".into()),
                 },
                 match run.config.as_ref() {
@@ -431,11 +429,22 @@ async fn run_on_engine(
                 receipt.push_str(notice);
                 receipt.push('\n');
             }
+            if run.status == RunStatus::StoppedByHook
+                && let Some(notice) = crate::presentation::run_feedback(run)
+            {
+                receipt.push_str("error: ");
+                receipt.push_str(&notice);
+                receipt.push('\n');
+            }
             receipt
         }
         OutputArg::Jsonl if success => String::new(),
         OutputArg::Jsonl => match run.status {
             RunStatus::Cancelled => "error: Run cancelled\n".into(),
+            RunStatus::StoppedByHook => format!(
+                "error: {}\n",
+                crate::presentation::run_feedback(run).unwrap_or_default()
+            ),
             RunStatus::Failed => "error: Run failed\n".into(),
             // A finished Run that is not a success keeps its Goal paused.
             _ => "error: Goal paused before completion\n".into(),
@@ -1208,12 +1217,8 @@ mod tests {
             let version = match line["kind"].as_str() {
                 Some("RunStarted") => 13,
                 Some("AgentSpawned") => 9,
-                Some(
-                    "AgentFinished"
-                    | "ProviderCallRecorded"
-                    | "GoalProviderCallReserved"
-                    | "RunFinished",
-                ) => 7,
+                Some("AgentFinished" | "RunFinished") => 8,
+                Some("ProviderCallRecorded" | "GoalProviderCallReserved") => 7,
                 _ => 6,
             };
             assert_eq!(line["event_version"], version);
