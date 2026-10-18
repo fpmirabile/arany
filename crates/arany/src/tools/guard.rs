@@ -1016,11 +1016,7 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
         file,
         _lease: Arc::clone(lease),
     });
-    let staged = drain_candidate(reader, length, staged).await?;
-    let Some(staged) = staged else {
-        return Ok(CacheCandidate::Failed);
-    };
-    let synced = tokio::task::spawn_blocking(move || {
+    let synced = drain_candidate(reader, length, staged, |staged| {
         #[cfg(any(test, feature = "test-support"))]
         let completion = crate::fault::FaultPlan::candidate_sync(staged._lease.token());
         #[cfg(any(test, feature = "test-support"))]
@@ -1035,8 +1031,7 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
         }
         synced
     })
-    .await
-    .map_err(|_| ToolError::Operation)?;
+    .await?;
     Ok(if synced {
         CacheCandidate::Received
     } else {
@@ -1065,34 +1060,39 @@ async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write + Send + 'sta
     reader: &mut R,
     length: u64,
     mut staged: Option<W>,
-) -> Result<Option<W>, ToolError> {
-    let mut buffer = vec![0u8; 32 * 1024];
+    finish: impl FnOnce(W) -> bool + Send + 'static,
+) -> Result<bool, ToolError> {
+    let (chunks, mut pending) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+    let writer = tokio::task::spawn_blocking(move || {
+        let mut remaining = length;
+        let mut failed = false;
+        while let Some(bytes) = pending.blocking_recv() {
+            remaining -= bytes.len() as u64;
+            if !failed && let Some(writer) = staged.as_mut() {
+                failed = writer.write_all(&bytes).is_err();
+            }
+        }
+        let Some(mut writer) = staged else {
+            return false;
+        };
+        remaining == 0 && !failed && writer.flush().is_ok() && finish(writer)
+    });
     let mut remaining = length;
     while remaining > 0 {
-        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let wanted = usize::try_from(remaining.min(32 * 1024)).unwrap_or(32 * 1024);
+        let mut buffer = vec![0u8; wanted];
         reader
-            .read_exact(&mut buffer[..wanted])
+            .read_exact(&mut buffer)
             .await
             .map_err(|_| ToolError::Operation)?;
-        if let Some(mut writer) = staged.take() {
-            (staged, buffer) = tokio::task::spawn_blocking(move || {
-                let written = writer.write_all(&buffer[..wanted]).is_ok();
-                (written.then_some(writer), buffer)
-            })
+        chunks
+            .send(buffer)
             .await
             .map_err(|_| ToolError::Operation)?;
-        }
         remaining -= wanted as u64;
     }
-    if let Some(mut writer) = staged.take() {
-        staged = tokio::task::spawn_blocking(move || {
-            let flushed = writer.flush().is_ok();
-            flushed.then_some(writer)
-        })
-        .await
-        .map_err(|_| ToolError::Operation)?;
-    }
-    Ok(staged)
+    drop(chunks);
+    writer.await.map_err(|_| ToolError::Operation)
 }
 
 // Seatbelt blocks Tokio's signal wake socket, so macOS closes stdin and polls try_wait when reaping.
@@ -2686,7 +2686,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
         let prior = captured_archive(temp.path(), &identity, b"prior");
-        let candidate = captured_archive(temp.path(), &identity, b"candidate");
+        let candidate = captured_archive(temp.path(), &identity, &vec![b'C'; 2 * 32 * 1024 + 1]);
         publish_archive(&state, &identity, &prior).await;
 
         for action in ["cancel", "timeout", "fail", "publish"] {
@@ -2705,8 +2705,8 @@ mod tests {
             tokio::select! {
                 biased;
                 _ = &mut receive => panic!("candidate returned before sync: {action}"),
-                result = tokio::time::timeout(Duration::from_secs(5), entered) => {
-                    result.unwrap().unwrap();
+                result = entered => {
+                    result.unwrap();
                 }
             }
             let (mut committed, _) = session.lease.archive().unwrap().unwrap();
@@ -2745,10 +2745,7 @@ mod tests {
                     .effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
                     .unwrap();
                 release.send(()).unwrap();
-                tokio::time::timeout(Duration::from_secs(5), finished)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                finished.await.unwrap();
                 assert!(!reservation.exists(), "reservation retained after {action}");
                 assert!(
                     !candidate_path.exists(),
@@ -2762,10 +2759,7 @@ mod tests {
                 continue;
             }
             release.send(()).unwrap();
-            let outcome = tokio::time::timeout(Duration::from_secs(5), receive)
-                .await
-                .unwrap()
-                .unwrap();
+            let outcome = receive.await.unwrap();
             assert!(
                 outcome
                     == if action == "fail" {
@@ -2818,12 +2812,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn candidate_drain_consumes_the_archive_after_a_write_failure() {
+    async fn candidate_drain_keeps_framing_and_skips_sync_after_failures() {
         let archive = vec![b'A'; 2 * 32 * 1024 + 1];
-        for (remaining, flush_fails) in [(4, false), (usize::MAX, true)] {
+        for (remaining, flush_fails, truncated) in [
+            (4, false, false),
+            (usize::MAX, true, false),
+            (usize::MAX, false, true),
+        ] {
             let mut stream = archive.clone();
-            stream.extend(b"CACHE_DONE\n");
+            if truncated {
+                stream.pop();
+            } else {
+                stream.extend(b"CACHE_DONE\n");
+            }
             let mut reader = tokio::io::BufReader::new(stream.as_slice());
+            let (synced, completion) = tokio::sync::oneshot::channel();
             let staged = drain_candidate(
                 &mut reader,
                 archive.len() as u64,
@@ -2831,10 +2834,21 @@ mod tests {
                     remaining,
                     flush_fails,
                 }),
+                move |_| {
+                    let _ = synced.send(());
+                    true
+                },
             )
-            .await
-            .unwrap();
-            assert!(staged.is_none());
+            .await;
+            assert!(
+                completion.await.is_err(),
+                "failed staging reached candidate sync"
+            );
+            if truncated {
+                assert!(matches!(staged, Err(ToolError::Operation)));
+                continue;
+            }
+            assert!(!staged.unwrap());
             let mut trailer = String::new();
             reader.read_line(&mut trailer).await.unwrap();
             assert_eq!(trailer, "CACHE_DONE\n");

@@ -136,7 +136,7 @@ impl FaultPlan {
         {
             let _ = entered.send(());
             release
-                .recv_timeout(std::time::Duration::from_secs(10))
+                .recv()
                 .map_err(|_| io::Error::other("candidate sync gate closed"))?;
             Some(finished)
         } else {
