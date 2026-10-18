@@ -148,6 +148,36 @@ pub trait BoundedOutput {
     fn bounded_output_with_input(&mut self) -> io::Result<Output>;
 }
 
+#[cfg(test)]
+pub(crate) fn isolate_test() -> bool {
+    const CHILD: &str = "ARANY_ISOLATED_TEST";
+    let thread = std::thread::current();
+    let test = thread.name().expect("named test thread");
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return false;
+    }
+    // With no sibling tests or subprocesses, dropping a flock owner closes its last descriptor.
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", test, "--test-threads=1", "--nocapture"])
+        .env_clear()
+        .env(CHILD, test)
+        .env(
+            "TMPDIR",
+            std::fs::canonicalize(std::env::temp_dir()).expect("physical temporary root"),
+        )
+        .bounded_output_for(Duration::from_secs(30), 64 * 1024)
+        .expect("isolated test process");
+    assert!(
+        output.status.success(),
+        "{test}: isolated test failed: {:?}; stdout={:?}; stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert_single_test_completed(&output.stdout, test);
+    true
+}
+
 // `diskimage` can hold a just-used fixture image briefly: retry gracefully, force only last, all within `deadline`.
 // Each attempt re-resolves the device from the image path, so a reused disk number is never detached.
 #[cfg(target_os = "macos")]
