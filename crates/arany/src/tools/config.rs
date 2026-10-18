@@ -229,6 +229,10 @@ impl Config {
             return false;
         }
         let path = match call {
+            ToolCall::PrepareWorker { .. }
+            | ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
+            } => return false,
             ToolCall::ParseAgentDefinition { .. } => return true,
             ToolCall::List { path }
             | ToolCall::Read { path, .. }
@@ -239,7 +243,9 @@ impl Config {
             ToolCall::Command { program, .. } | ToolCall::CommandUnguarded { program, .. } => {
                 return self.commands.iter().any(|value| &value.name == program);
             }
-            ToolCall::ApplyChangeset { changeset, .. } => {
+            ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+            } => {
                 return changeset
                     .files
                     .iter()

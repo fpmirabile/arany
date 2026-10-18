@@ -237,6 +237,7 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
         .model_tools()
         .iter()
         .skip((run.tool_compaction_covered_count as usize).saturating_sub(run.parse_count()))
+        .filter(|tool| !matches!(tool.intent.call, ToolCall::PrepareWorker { .. }))
         .map(|tool| match &tool.observation {
             Some(observation) => model_result(observation, &tool.hook_feedback()),
             None => json!({"call": model_call(&tool.intent.call), "execution": "uncertain; never replay"}),

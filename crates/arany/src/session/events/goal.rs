@@ -196,6 +196,9 @@ impl GoalPlanContract {
     ) {
         use crate::tools::{ToolCall, ToolDisposition};
 
+        if observation.intent.target != crate::session::worker::EffectTarget::Workspace {
+            return;
+        }
         if matches!(state, GoalSuccessState::NoContract)
             || matches!(
                 (&self.success_criterion, &*state),
@@ -223,8 +226,11 @@ impl GoalPlanContract {
                 },
             ) => {
                 if let ToolCall::ApplyChangeset {
-                    source_intent_digest,
-                    ..
+                    source:
+                        crate::session::worker::ChangesetSource::CommandReceipt {
+                            source_intent_digest,
+                            ..
+                        },
                 } = &observation.intent.call
                     && *pending_integration == Some(*source_intent_digest)
                 {
@@ -330,7 +336,9 @@ fn file_observation_digest(
                 .ok()
                 .and_then(|value| value.get("sha256")?.as_str().map(str::to_owned))
         }
-        ToolCall::ApplyChangeset { changeset, .. } => changeset
+        ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+        } => changeset
             .files
             .iter()
             .find(|change| change.path == path)
@@ -369,7 +377,11 @@ impl GoalPlanContract {
     pub(crate) fn allows_call(&self, call: &crate::tools::ToolCall) -> bool {
         use crate::tools::ToolCall;
         match call {
-            ToolCall::ParseAgentDefinition { .. } => false,
+            ToolCall::ParseAgentDefinition { .. }
+            | ToolCall::PrepareWorker { .. }
+            | ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
+            } => false,
             ToolCall::List { path }
             | ToolCall::Read { path, .. }
             | ToolCall::Search { path, .. }
@@ -382,7 +394,9 @@ impl GoalPlanContract {
             ToolCall::Command { program, .. } | ToolCall::CommandUnguarded { program, .. } => {
                 self.commands.contains(program)
             }
-            ToolCall::ApplyChangeset { changeset, .. } => changeset
+            ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+            } => changeset
                 .files
                 .iter()
                 .all(|change| self.allows_path(&change.path)),

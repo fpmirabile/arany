@@ -222,8 +222,10 @@ fn results_pair_with_request_ids_and_integrations_are_labelled_data() {
         observation(command_step.requests[0].call.clone(), "{}"),
         observation(
             ToolCall::ApplyChangeset {
-                source_intent_digest: [3; 32],
-                changeset: crate::tools::CommandChangeset::default(),
+                source: crate::session::worker::ChangesetSource::CommandReceipt {
+                    source_intent_digest: [3; 32],
+                    changeset: crate::tools::CommandChangeset::default(),
+                },
             },
             "applied",
         ),
@@ -311,6 +313,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
     use crate::session::{RunStatus, RunView, ToolView};
     let observed = observation(read("src/lib.rs"), "{\"text\":\"ok\"}");
     let run = RunView {
+        workers: Default::default(),
         id: RunId::new(),
         objective: "o".into(),
         images: Vec::new(),
@@ -333,8 +336,10 @@ fn history_tool_block_projects_calls_without_intent_internals() {
             ToolView {
                 intent: observation(
                     ToolCall::ApplyChangeset {
-                        source_intent_digest: [7; 32],
-                        changeset: crate::tools::CommandChangeset::default(),
+                        source: crate::session::worker::ChangesetSource::CommandReceipt {
+                            source_intent_digest: [7; 32],
+                            changeset: crate::tools::CommandChangeset::default(),
+                        },
                     },
                     "",
                 )
@@ -399,6 +404,7 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
         )
     };
     let mut run = RunView {
+        workers: Default::default(),
         id: RunId::new(),
         objective: "o".into(),
         images: Vec::new(),

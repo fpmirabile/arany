@@ -84,7 +84,7 @@ const fn write_row(name: &'static str, order: u8, description: &'static str) -> 
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 16] = [
+pub(crate) static ALL: [OperationFacts; 17] = [
     read_row(
         "list",
         Family::File,
@@ -196,7 +196,13 @@ pub(crate) static ALL: [OperationFacts; 16] = [
         prelude: true,
         ..facts_row("parse_agent_definition", Family::Preparation, 15, "")
     },
+    facts_row("prepare_worker", Family::Preparation, 16, ""),
 ];
+
+static WORKER_BASE: OperationFacts = OperationFacts {
+    site: Site::InProcess,
+    ..facts_row("prepare_worker", Family::Preparation, 16, "")
+};
 
 impl ToolCall {
     pub const fn site(&self) -> Site {
@@ -205,6 +211,15 @@ impl ToolCall {
 
     pub(crate) const fn facts(&self) -> &'static OperationFacts {
         match self {
+            Self::PrepareWorker { preparation }
+                if matches!(
+                    preparation.purpose,
+                    crate::session::worker::WorkerDataPurpose::Base
+                ) =>
+            {
+                &WORKER_BASE
+            }
+            Self::PrepareWorker { .. } => &ALL[16],
             Self::ParseAgentDefinition { .. } => &ALL[15],
             Self::List { .. } => &ALL[0],
             Self::Read { .. } => &ALL[1],
@@ -463,8 +478,10 @@ mod tests {
                 cwd: ".".into(),
             },
             ToolCall::ApplyChangeset {
-                source_intent_digest: [1; 32],
-                changeset: CommandChangeset::default(),
+                source: crate::session::worker::ChangesetSource::CommandReceipt {
+                    source_intent_digest: [1; 32],
+                    changeset: CommandChangeset::default(),
+                },
             },
             ToolCall::Skill {
                 name: "guide".into(),
@@ -500,6 +517,14 @@ mod tests {
             ToolCall::ParseAgentDefinition {
                 index: 0,
                 raw_digest: [1; 32],
+            },
+            ToolCall::PrepareWorker {
+                preparation: crate::session::worker::WorkerPreparation {
+                    assignment_id: crate::session::AgentRunId::new(),
+                    purpose: crate::session::worker::WorkerDataPurpose::Handover,
+                    max_bytes: 1,
+                    max_chunks: 1,
+                },
             },
         ]
     }
@@ -570,7 +595,10 @@ mod tests {
         assert!(
             ALL.iter()
                 .filter(|facts| facts.schema().is_none())
-                .all(|facts| matches!(facts.name, "apply_changeset" | "parse_agent_definition"))
+                .all(|facts| matches!(
+                    facts.name,
+                    "apply_changeset" | "parse_agent_definition" | "prepare_worker"
+                ))
         );
     }
 }

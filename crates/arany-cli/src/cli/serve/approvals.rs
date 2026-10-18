@@ -289,6 +289,7 @@ mod tests {
 
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
+            target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: RunId::new(),
             agent_run_id: AgentRunId::new(),

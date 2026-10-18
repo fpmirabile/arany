@@ -1526,6 +1526,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                worker_policy: None,
                 agent_definitions: None,
                 roster: None,
                 providers: None,
@@ -1554,6 +1555,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
         },
         Event::AgentSpawned {
             profile: None,
+            assignment: None,
             definition: None,
             run_id,
             agent_run_id,
@@ -4877,6 +4879,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
         Event::RunStarted {
             run_id,
             config: arany::RunConfig {
+                worker_policy: None,
                 agent_definitions: None,
                 roster: None,
                 providers: None,
@@ -4905,6 +4908,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
         },
         Event::AgentSpawned {
             profile: None,
+            assignment: None,
             definition: None,
             run_id,
             agent_run_id,

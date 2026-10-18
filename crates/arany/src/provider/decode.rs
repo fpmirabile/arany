@@ -86,7 +86,9 @@ pub(crate) fn tool_request(
     if !call.valid()
         || matches!(
             call,
-            ToolCall::ApplyChangeset { .. } | ToolCall::ParseAgentDefinition { .. }
+            ToolCall::ApplyChangeset { .. }
+                | ToolCall::ParseAgentDefinition { .. }
+                | crate::tools::ToolCall::PrepareWorker { .. }
         )
     {
         return Err(ProviderError::InvalidOutcome);

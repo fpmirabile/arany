@@ -25,6 +25,7 @@ pub(super) fn apply(
             .and_then(|config| config.tool_policy.as_ref())
             .is_some_and(|policy| policy.permissions_digest.is_some());
         let definition_mode = super::definition_mode(run, *agent_run_id)?;
+        let restrictions = super::mode_restrictions(run, *agent_run_id)?;
         let unguarded = observation.intent.call.is_unguarded();
         if configured || definition_mode.is_some() || unguarded {
             let tool = pending_tool(run, *agent_run_id)?;
@@ -32,7 +33,7 @@ pub(super) fn apply(
                 .permission_verdict
                 .as_ref()
                 .ok_or(ReplayError::InvalidTransition)?;
-            if let Some(mode) = definition_mode {
+            for mode in restrictions {
                 let restriction = crate::tools::permissions::PermissionConfig::evaluate_mode(
                     mode,
                     &observation.intent.call,
@@ -290,7 +291,8 @@ pub(super) fn apply(
                 true
             } else if let Some(contract) = &goal.plan_contract {
                 !goal.awaiting_plan_contract
-                    && (contract.allows_call(&intent.call)
+                    && (matches!(intent.call, crate::tools::ToolCall::PrepareWorker { .. })
+                        || contract.allows_call(&intent.call)
                         || matches!(&intent.call, crate::tools::ToolCall::ApplyChangeset { .. }))
             } else {
                 goal.awaiting_plan_contract && intent.call.is_goal_plan_prelude()
@@ -326,6 +328,8 @@ pub(super) fn apply(
                                 observation.disposition == crate::tools::ToolDisposition::Succeeded
                             })
                         })
+                } else if let crate::tools::ToolCall::PrepareWorker { preparation } = &intent.call {
+                    super::worker::base_preparation(run, preparation)
                 } else if integration {
                     valid_integration_source(run, intent)
                 } else {
@@ -381,6 +385,11 @@ pub(super) fn apply(
             let out_of_plan_integration = matches!(
                 &observation.intent.call,
                 crate::tools::ToolCall::ApplyChangeset { .. }
+            ) && !matches!(
+                observation.intent.call,
+                crate::tools::ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                }
             ) && goal
                 .plan_contract
                 .as_ref()
@@ -459,7 +468,16 @@ pub(super) fn apply(
                 .ok_or(ReplayError::InvalidTransition)?;
             let goal = current_goal_mut(current, goal_id)?;
             if let Some(contract) = goal.plan_contract.as_ref() {
-                contract.observe_success(&mut goal.success_state, observation);
+                if matches!(
+                    observation.intent.call,
+                    crate::tools::ToolCall::ApplyChangeset {
+                        source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                    }
+                ) {
+                    goal.success_state = contract.initial_success_state();
+                } else {
+                    contract.observe_success(&mut goal.success_state, observation);
+                }
                 goal.success_criterion_satisfied =
                     contract.success_state_satisfied(&goal.success_state);
             }
@@ -551,9 +569,18 @@ fn pending_tool(
 }
 
 fn valid_integration_source(run: &RunView, intent: &crate::tools::EffectIntent) -> bool {
+    if let crate::tools::ToolCall::ApplyChangeset {
+        source: source @ crate::session::worker::ChangesetSource::WorkerHandover { .. },
+    } = &intent.call
+    {
+        return super::worker::integration_source(run, source);
+    }
     let crate::tools::ToolCall::ApplyChangeset {
-        source_intent_digest,
-        changeset,
+        source:
+            crate::session::worker::ChangesetSource::CommandReceipt {
+                source_intent_digest,
+                changeset,
+            },
     } = &intent.call
     else {
         return false;

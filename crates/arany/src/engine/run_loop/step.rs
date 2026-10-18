@@ -243,8 +243,10 @@ impl RunLoop<'_> {
                 return Ok(false);
             }
             call = ToolCall::ApplyChangeset {
-                source_intent_digest,
-                changeset,
+                source: crate::session::worker::ChangesetSource::CommandReceipt {
+                    source_intent_digest,
+                    changeset,
+                },
             };
             if !call.valid() {
                 return Ok(false);
@@ -304,8 +306,10 @@ impl RunLoop<'_> {
         );
         let integration =
             matches!(intent.call, ToolCall::Command { .. }).then(|| ToolCall::ApplyChangeset {
-                source_intent_digest: intent.digest(),
-                changeset: CommandChangeset { files: Vec::new() },
+                source: crate::session::worker::ChangesetSource::CommandReceipt {
+                    source_intent_digest: intent.digest(),
+                    changeset: CommandChangeset { files: Vec::new() },
+                },
             });
         let reserved: Vec<_> = std::iter::once(&intent.call).chain(&integration).collect();
         let overhead = grant.context()?.reserved_len(step, &reserved);
@@ -565,8 +569,8 @@ impl RunLoop<'_> {
     }
 
     fn permission(&self, grant: &Grant<'_>, runtime: &ToolRuntime, call: &ToolCall) -> Permission {
-        // Definition parsing is an internal Engine step, never a model Tool; it runs only in the fixed Guard grant.
-        if matches!(call, ToolCall::ParseAgentDefinition { .. }) {
+        // Engine-owned definition parsing and worker preparation are never model Tools, so rules and modes do not apply; each runs only in its fixed grant.
+        if call.is_internal() {
             return Permission {
                 decision: Decision::Allow,
                 basis: PermissionSource::Mode,
@@ -1212,7 +1216,7 @@ impl RunLoop<'_> {
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id: intent.agent_run_id,
-            record: call_record(AgentPhase::ToolReview, &result, valid),
+            record: call_record(AgentPhase::ToolReview, &result, valid, None),
         })
         .await?;
         if let Some(active_segment) = active_segment {

@@ -625,7 +625,10 @@ async fn native_file_journey_helper() {
     let mut proposed = calls.iter();
     for (index, tool) in run.tools.iter().enumerate() {
         let observation = tool.observation.as_ref().expect("persisted receipt");
-        if let ToolCall::ApplyChangeset { changeset, .. } = &observation.intent.call {
+        if let ToolCall::ApplyChangeset {
+            source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
+        } = &observation.intent.call
+        {
             assert_eq!(index, 10);
             assert_eq!(
                 changeset
@@ -682,6 +685,11 @@ async fn native_file_journey_helper() {
                 assert_eq!(receipt.limits, observation.intent.limits);
             }
             arany::Attestation::Unguarded(_) => panic!("macOS journeys never run unguarded"),
+            arany::Attestation::WorkerRead { .. }
+            | arany::Attestation::WorkerMutation { .. }
+            | arany::Attestation::WorkerData { .. } => {
+                panic!("macOS journeys never run worker Tools")
+            }
         }
     }
     let command: serde_json::Value =

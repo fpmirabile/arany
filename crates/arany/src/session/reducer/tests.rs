@@ -10,6 +10,7 @@ mod goal_recovery_tests {
         let goal_id = GoalId::new();
         let run_id = RunId::new();
         let intent = EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
             agent_run_id: AgentRunId::new(),
@@ -60,6 +61,7 @@ mod goal_recovery_tests {
             last_sequence: 1,
             lineage: None,
             runs: vec![RunView {
+                workers: Default::default(),
                 id: run_id,
                 objective: "Inspect before planning".into(),
                 images: Vec::new(),
@@ -152,6 +154,7 @@ mod goal_replay_tests {
 
     fn config(policy: CollaborationPolicy, tools: bool) -> RunConfig {
         RunConfig {
+            worker_policy: None,
             agent_definitions: None,
             roster: None,
             providers: None,
@@ -190,6 +193,13 @@ mod goal_replay_tests {
         tokens: Option<u32>,
     ) -> ProviderCallRecord {
         ProviderCallRecord {
+            delegation: (disposition == ProviderCallDisposition::Delegated).then(|| {
+                vec![crate::session::worker::ChildAssignment::Researcher {
+                    objective: "Check the child result".into(),
+                    definition: None,
+                    profile: None,
+                }]
+            }),
             phase,
             disposition,
             response_id: None,
@@ -203,7 +213,34 @@ mod goal_replay_tests {
         }
     }
 
-    fn journal(session_id: SessionId, events: Vec<Event>) -> Vec<EventEnvelope> {
+    fn journal(session_id: SessionId, mut events: Vec<Event>) -> Vec<EventEnvelope> {
+        for i in 0..events.len() {
+            if matches!(&events[i], Event::ProviderCallRecorded { record, .. } if record.disposition == ProviderCallDisposition::Delegated)
+            {
+                let assignments = events[i + 1..]
+                    .iter()
+                    .filter_map(|e| match e {
+                        Event::AgentSpawned {
+                            role: AgentRole::Child,
+                            objective: Some(objective),
+                            definition,
+                            profile,
+                            ..
+                        } => Some(crate::session::worker::ChildAssignment::Researcher {
+                            objective: objective.clone(),
+                            definition: definition.clone(),
+                            profile: profile.clone(),
+                        }),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !assignments.is_empty()
+                    && let Event::ProviderCallRecorded { record, .. } = &mut events[i]
+                {
+                    record.delegation = Some(assignments);
+                }
+            }
+        }
         events
             .into_iter()
             .zip(1..)
@@ -275,6 +312,7 @@ mod goal_replay_tests {
             },
             Event::AgentSpawned {
                 profile,
+                assignment: None,
                 definition: None,
                 run_id,
                 agent_run_id,
@@ -309,6 +347,7 @@ mod goal_replay_tests {
                 ),
             },
             Event::AgentFinished {
+                worker: None,
                 run_id,
                 agent_run_id,
                 disposition: AgentDisposition::Finished,
@@ -344,6 +383,7 @@ mod goal_replay_tests {
     fn cancel_run(run_id: RunId, agent_run_id: AgentRunId) -> Vec<Event> {
         vec![
             Event::AgentFinished {
+                worker: None,
                 run_id,
                 agent_run_id,
                 disposition: AgentDisposition::Cancelled,
@@ -631,6 +671,7 @@ mod goal_replay_tests {
                     grant: Some(ChildGrant::NoTools),
                     definition: None,
                     profile: Some("spare".into()),
+                    assignment: None,
                 },
                 Event::GoalProviderCallReserved {
                     goal_id: goal,
@@ -1106,6 +1147,7 @@ mod goal_replay_tests {
             });
             events.push(Event::AgentSpawned {
                 profile: None,
+                assignment: None,
                 definition: None,
                 run_id,
                 agent_run_id: child,
@@ -1158,6 +1200,7 @@ mod goal_replay_tests {
             ),
         });
         finished_prefix.push(Event::AgentFinished {
+            worker: None,
             run_id,
             agent_run_id,
             disposition: AgentDisposition::Finished,
@@ -1187,6 +1230,7 @@ mod goal_replay_tests {
             .expect("open reservation replays")
             .expect("Session exists");
         let intent = crate::tools::EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
             agent_run_id,
@@ -1790,6 +1834,7 @@ mod goal_replay_tests {
                 ),
             },
             Event::AgentFinished {
+                worker: None,
                 run_id,
                 agent_run_id,
                 disposition: AgentDisposition::Finished,
@@ -2024,6 +2069,7 @@ mod goal_replay_tests {
         });
         events.extend([
             Event::AgentFinished {
+                worker: None,
                 run_id,
                 agent_run_id,
                 disposition: AgentDisposition::Finished,
@@ -2145,6 +2191,7 @@ mod goal_replay_tests {
             ),
         });
         events.push(Event::AgentFinished {
+            worker: None,
             run_id,
             agent_run_id,
             disposition: AgentDisposition::Finished,
@@ -2224,6 +2271,7 @@ mod goal_replay_tests {
                 ),
             });
             events.push(Event::AgentFinished {
+                worker: None,
                 run_id,
                 agent_run_id,
                 disposition: AgentDisposition::Finished,
@@ -2324,6 +2372,7 @@ mod goal_replay_tests {
         });
         // Engine fails the primary when the Tool deadline or context capacity refuses before ToolStarted.
         events.push(Event::AgentFinished {
+            worker: None,
             run_id,
             agent_run_id,
             disposition: AgentDisposition::Failed,
@@ -2548,6 +2597,7 @@ mod goal_replay_tests {
             last_sequence: 1,
             lineage: None,
             runs: vec![RunView {
+                workers: Default::default(),
                 id: run_id,
                 objective: GOAL_OBJECTIVE.into(),
                 images: Vec::new(),
@@ -2559,6 +2609,7 @@ mod goal_replay_tests {
                 )),
                 agents: vec![AgentView {
                     profile: None,
+                    assignment: None,
                     definition: None,
                     id: agent_run_id,
                     role: AgentRole::Primary,
@@ -2630,6 +2681,7 @@ mod goal_replay_tests {
         let run_id = view.runs[0].id;
         let event = Event::AgentSpawned {
             profile: None,
+            assignment: None,
             definition: None,
             run_id,
             agent_run_id: AgentRunId::new(),
@@ -2691,6 +2743,7 @@ mod goal_replay_tests {
 
     fn child_intent(run_id: RunId, agent_run_id: AgentRunId, call: ToolCall) -> EffectIntent {
         EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
             agent_run_id,
@@ -2870,6 +2923,7 @@ mod goal_replay_tests {
         assert!(rejected(
             &view,
             Event::AgentFinished {
+                worker: None,
                 run_id: run,
                 agent_run_id: child,
                 disposition: AgentDisposition::Cancelled,
@@ -2909,6 +2963,7 @@ mod goal_replay_tests {
         apply(
             &mut view,
             Event::AgentFinished {
+                worker: None,
                 run_id: run,
                 agent_run_id: child,
                 disposition: AgentDisposition::Finished,
@@ -3109,6 +3164,7 @@ mod goal_replay_tests {
 
     fn file_observation(call: ToolCall, content: &[u8]) -> ToolObservation {
         let intent = EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: RunId::new(),
             agent_run_id: AgentRunId::new(),
@@ -3172,12 +3228,14 @@ mod goal_replay_tests {
             last_sequence: 1,
             lineage: None,
             runs: vec![RunView {
+                workers: Default::default(),
                 id: run_id,
                 objective: GOAL_OBJECTIVE.into(),
                 images: Vec::new(),
                 config: Some(config(CollaborationPolicy::Single, true)),
                 agents: vec![AgentView {
                     profile: None,
+                    assignment: None,
                     definition: None,
                     id: agent_run_id,
                     role: AgentRole::Primary,
@@ -3316,6 +3374,7 @@ mod goal_replay_tests {
             lineage: None,
             runs: vec![
                 RunView {
+                    workers: Default::default(),
                     id: earlier_run_id,
                     objective: GOAL_OBJECTIVE.into(),
                     images: Vec::new(),
@@ -3342,12 +3401,14 @@ mod goal_replay_tests {
                     provider_fallbacks: Vec::new(),
                 },
                 RunView {
+                    workers: Default::default(),
                     id: run_id,
                     objective: GOAL_OBJECTIVE.into(),
                     images: Vec::new(),
                     config: Some(config(CollaborationPolicy::Single, true)),
                     agents: vec![AgentView {
                         profile: None,
+                        assignment: None,
                         definition: None,
                         id: agent_run_id,
                         role: AgentRole::Primary,
@@ -4301,8 +4362,10 @@ mod goal_replay_tests {
                 good.run,
                 good.agent,
                 ToolCall::ApplyChangeset {
-                    source_intent_digest: good.host.digest(),
-                    changeset: crate::tools::CommandChangeset { files: Vec::new() },
+                    source: crate::session::worker::ChangesetSource::CommandReceipt {
+                        source_intent_digest: good.host.digest(),
+                        changeset: crate::tools::CommandChangeset { files: Vec::new() },
+                    },
                 },
             ),
             active_ceiling_ms: 0,
@@ -4693,6 +4756,7 @@ mod goal_replay_tests {
                     record: cached_call.clone(),
                 },
                 Event::AgentFinished {
+                    worker: None,
                     run_id,
                     agent_run_id,
                     disposition: AgentDisposition::Finished,

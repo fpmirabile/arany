@@ -115,6 +115,8 @@ impl ContextUsage {
 #[serde(deny_unknown_fields)]
 pub struct RunConfig {
     #[serde(deserialize_with = "Option::deserialize")]
+    pub worker_policy: Option<super::WorkerPolicy>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub agent_definitions: Option<crate::tools::DefinitionRegistryPin>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub roster: Option<Box<crate::provider::RosterSnapshot>>,
@@ -189,7 +191,9 @@ impl RunConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
-        if self
+        if self.worker_policy.as_ref().is_some_and(|p| {
+            !p.valid() || self.agent_definitions.is_none() || self.tool_policy.is_none()
+        }) || self
             .agent_definitions
             .as_ref()
             .is_some_and(|pin| !pin.valid() || self.tool_policy.is_none())
@@ -291,6 +295,7 @@ pub enum AgentRole {
 pub enum ChildGrant {
     NoTools,
     ReadOnly,
+    EditOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -450,6 +455,8 @@ pub enum ProviderCallDisposition {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderCallRecord {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub delegation: Option<Vec<super::ChildAssignment>>,
     pub phase: crate::provider::AgentPhase,
     pub disposition: ProviderCallDisposition,
     pub requested_tools: u8,
@@ -480,7 +487,12 @@ impl ProviderCallRecord {
     }
 
     pub(super) fn validate(&self) -> Result<(), ReplayError> {
-        if self.requested_tools > MAX_STEP_TOOL_CALLS
+        if !serde_json::to_vec(self).is_ok_and(|b| b.len() <= crate::store::MAX_EVENT_BYTES)
+            || (self.disposition == ProviderCallDisposition::Delegated) != self.delegation.is_some()
+            || self.delegation.as_ref().is_some_and(|plan| {
+                plan.is_empty() || plan.len() > 8 || plan.iter().any(|a| !a.valid())
+            })
+            || self.requested_tools > MAX_STEP_TOOL_CALLS
             || (self.disposition == ProviderCallDisposition::ToolRequested)
                 != (self.requested_tools > 0)
             || self.response_id.as_ref().is_some_and(|id| {

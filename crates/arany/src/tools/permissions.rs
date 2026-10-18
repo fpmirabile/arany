@@ -515,7 +515,9 @@ impl Rule {
                             .any(|(index, _)| pattern.is_match(&text[index + 1..]))
             }
             ToolCall::Skill { name, .. } => pattern.is_match(name),
-            ToolCall::ApplyChangeset { changeset, .. } => {
+            ToolCall::ApplyChangeset {
+                source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
+            } => {
                 if decision == Decision::Allow {
                     !changeset.files.is_empty()
                         && changeset

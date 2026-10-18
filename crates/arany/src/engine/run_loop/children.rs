@@ -255,19 +255,14 @@ impl RunLoop<'_> {
         let mut children = Vec::with_capacity(objectives.len());
         for (index, assignment) in objectives.into_iter().enumerate() {
             let objective = assignment.objective;
-            let profile = assignment.profile.or_else(|| {
-                self.routing
-                    .providers
-                    .roster
-                    .as_ref()
-                    .map(|roster| roster.snapshot.providers.child.clone())
-            });
+            let profile = assignment.profile.or_else(|| self.default_child_profile());
             if self.controls.cancellation.is_cancelled() {
                 break;
             }
             let agent_run_id = AgentRunId::new();
             self.append(Event::AgentSpawned {
                 profile,
+                assignment: None,
                 definition: agent.clone(),
                 run_id: self.run_id,
                 agent_run_id,
@@ -482,7 +477,7 @@ impl RunLoop<'_> {
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id,
-            record: call_record(AgentPhase::ChildWork, &result, valid_response),
+            record: call_record(AgentPhase::ChildWork, &result, valid_response, None),
         })
         .await?;
         let disposition = match result {
@@ -761,6 +756,7 @@ impl RunLoop<'_> {
         call_reserved: bool,
     ) -> Result<(), EngineError> {
         self.append(Event::AgentFinished {
+            worker: None,
             run_id: self.run_id,
             agent_run_id,
             disposition,

@@ -111,6 +111,7 @@ pub(crate) fn goal_plan_contract() -> GoalPlanContract {
 
 fn intent(call: crate::tools::ToolCall) -> crate::tools::EffectIntent {
     crate::tools::EffectIntent {
+        target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: RunId::new(),
         agent_run_id: AgentRunId::new(),
