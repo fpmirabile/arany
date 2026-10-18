@@ -45,7 +45,7 @@ Implemented C2 decisions are owned by [Execution](../../docs/specs/execution.md#
 Follow the [plan's open-question routing](./README.md#open-questions):
 [roadmap item 6](../../NEXT_STEPS.md#pursue-in-order) owns RPI exhaustion and Auto
 authority, item 12 owns Supervisor threshold calibration, and the
-[E4 freeze entry](../../NEXT_STEPS.md#freeze-until-item-11-lands) owns checkpoint quotas.
+[E4 freeze entry](../../NEXT_STEPS.md#frozen-areas) owns checkpoint quotas.
 Native build and team measurements remain roadmap evidence, not design proof.
 Multiple supervisors and cross-Session memory require a demonstrated need
 before expanding this scope.

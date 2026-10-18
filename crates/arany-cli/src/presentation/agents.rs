@@ -151,8 +151,8 @@ fn agent_lines(
             worker.status, worker.cause
         ));
         lines.push(format!(
-            "Publication: {:?}; integration: {:?}",
-            worker.publication, worker.integration
+            "Publication: {:?}; integration: {:?}; discarded: {:?}",
+            worker.publication, worker.integration, worker.discarded
         ));
         lines.push(format!(
             "Private outcome unknown: {}; cleanup confirmed: {}",

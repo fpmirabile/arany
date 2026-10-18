@@ -857,3 +857,25 @@ fn many_worker_lines_never_displace_unguarded_or_unknown_facts() {
     );
     assert!(serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES);
 }
+
+#[test]
+fn unresolved_facts_always_leave_room_for_the_omission_marker() {
+    let mut report = GoalReport {
+        summary: "Summary".into(),
+        cached_input_tokens: 0,
+        changes: Vec::new(),
+        evidence: Vec::new(),
+        unresolved: Vec::new(),
+    };
+    let mut omitted = false;
+    for index in 0..64 {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            &format!("fact {index} {}", "x".repeat(500)),
+            &mut omitted,
+        );
+    }
+    assert!(omitted);
+    assert!(goal_report_fits_with_omission(&mut report));
+}

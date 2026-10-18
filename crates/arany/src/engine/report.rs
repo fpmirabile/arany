@@ -423,13 +423,14 @@ fn push_success_facts(
 #[cfg(test)]
 mod tests;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum GoalReportSection {
     Changes,
     Evidence,
     Unresolved,
 }
 
+const GOAL_REPORT_ITEM_LIMIT: usize = 32;
 const GOAL_REPORT_OMISSION: &str =
     "Some lower-priority Goal facts were omitted to fit the report limits.";
 
@@ -444,7 +445,7 @@ fn push_goal_report_item(
         GoalReportSection::Evidence => report.evidence.len(),
         GoalReportSection::Unresolved => report.unresolved.len(),
     };
-    if count >= 32 {
+    if count >= GOAL_REPORT_ITEM_LIMIT - usize::from(section == GoalReportSection::Unresolved) {
         *omitted_facts = true;
         return;
     }
@@ -456,7 +457,8 @@ fn push_goal_report_item(
     }
     if serde_json::to_vec(report).map_or(true, |bytes| {
         bytes.len() > crate::session::MAX_GOAL_REPORT_BYTES
-    }) {
+    }) || section == GoalReportSection::Unresolved && !goal_report_fits_with_omission(report)
+    {
         match section {
             GoalReportSection::Changes => report.changes.pop(),
             GoalReportSection::Evidence => report.evidence.pop(),
@@ -468,7 +470,9 @@ fn push_goal_report_item(
 
 fn append_goal_report_omission(report: &mut GoalReport, protected_unresolved_count: usize) {
     while !goal_report_fits_with_omission(report) {
-        if report.unresolved.len() >= 32 && report.unresolved.len() > protected_unresolved_count {
+        if report.unresolved.len() >= GOAL_REPORT_ITEM_LIMIT
+            && report.unresolved.len() > protected_unresolved_count
+        {
             report.unresolved.pop();
             continue;
         }
@@ -491,7 +495,7 @@ fn append_goal_report_omission(report: &mut GoalReport, protected_unresolved_cou
 }
 
 fn goal_report_fits_with_omission(report: &mut GoalReport) -> bool {
-    if report.unresolved.len() >= 32 {
+    if report.unresolved.len() >= GOAL_REPORT_ITEM_LIMIT {
         return false;
     }
     report.unresolved.push(GOAL_REPORT_OMISSION.to_owned());

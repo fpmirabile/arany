@@ -32,9 +32,9 @@ Dogfooding starts after item 2; the owner leads it when that point is reached. E
 
 Teams support read-only researchers (C1) and Run-scoped edit-only workers (C2) with explicit fresh-assignment ID resume ([Session](./docs/specs/session.md#worker-identity-and-explicit-reassignment)). Native build evidence and named-host measurements still precede Build-profile support claims (finite approved maxima: 4 GiB memory, 8 GiB requested cache, 1 GiB project storage, 256 tasks; effective cache capacity derives from StateRoot headroom and is not guaranteed). Remote MCP/OAuth, interactive/background jobs and other network grants need their own Policy/Guard/protocol evidence; retain the existing [Tool scope](./docs/specs/tools.md) until each slice lands.
 
-### Freeze until item 11 lands
+### Frozen areas
 
-Item 11 (C2) has landed. On 2026-10-18 the owner lifted this freeze for E4 checkpoints and for item 12 (C3 views and the Supervisor in shadow mode), accepting their plans; it stays in force for the rest of the list below until the owner lifts it.
+On 2026-10-18 the owner lifted this freeze for E4 checkpoints and for item 12 (C3 views and the Supervisor in shadow mode), accepting their plans; it stays in force for the rest of the list below until the owner lifts it.
 
 CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
 

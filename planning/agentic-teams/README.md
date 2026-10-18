@@ -393,7 +393,7 @@ subject under the existing telemetry contract.
 
 Owner: Fernando Mirabile. [Roadmap item 6](../../NEXT_STEPS.md#pursue-in-order)
 owns RPI exhaustion and Auto authority decisions; item 12 owns Supervisor
-threshold calibration. The [E4 freeze entry](../../NEXT_STEPS.md#freeze-until-item-11-lands)
+threshold calibration. The [E4 freeze entry](../../NEXT_STEPS.md#frozen-areas)
 owns checkpoint quotas. Resolve each before its corresponding slice.
 The [design rationale](./design-tree.md) explains the choices that remain live.
 
