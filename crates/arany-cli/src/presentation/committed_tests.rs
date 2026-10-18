@@ -207,7 +207,7 @@ async fn cancelled_preview_jsonl_includes_committed_checkpoints_and_commentary()
             request(&workspace, "question"),
             RunControls {
                 cancellation,
-                progress: Some(observed),
+                hints: Some(observed),
                 ..RunControls::default()
             },
         )

@@ -2887,7 +2887,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
                         tools: ToolGrant::Configured,
                         approvals: Some(approvals.clone()),
                         cancellation,
-                        progress: Some(RunHints::new()),
+                        hints: Some(RunHints::new()),
                         ..Default::default()
                     }
                 ),

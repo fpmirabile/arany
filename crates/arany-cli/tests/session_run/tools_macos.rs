@@ -1823,7 +1823,7 @@ int main(void) {
                         tools: ToolGrant::Configured,
                         approvals: granted,
                         cancellation,
-                        progress: Some(hints.clone()),
+                        hints: Some(hints.clone()),
                         ..Default::default()
                     }
                 ),

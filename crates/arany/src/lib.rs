@@ -88,6 +88,7 @@ pub use tools::types::valid_name as valid_tool_name;
 
 pub use tools::catalog::Site;
 
+// Validates each Event like replay but skips its whole-history compaction checks; for presentation views only.
 pub fn reduce_into(view: &mut SessionView, envelope: &EventEnvelope) -> Result<(), ReplayError> {
     view.apply_committed(envelope)
 }

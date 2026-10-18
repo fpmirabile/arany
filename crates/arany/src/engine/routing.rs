@@ -1,5 +1,5 @@
+use super::hints::HintPublisher;
 use super::ledger::{Action, GoalLedger};
-use super::progress::ProgressPublisher;
 use super::run_loop::{CallFailure, CallResult, invoke_bounded_with_preview};
 use super::{EngineError, RunCancellation};
 use crate::journal::Journal;
@@ -28,7 +28,7 @@ pub(super) struct CallRouter<'a> {
     pub(super) providers: AdmittedProviders,
     pub(super) journal: &'a Journal,
     pub(super) ledger: &'a GoalLedger,
-    pub(super) publisher: Option<&'a ProgressPublisher>,
+    pub(super) publisher: Option<&'a HintPublisher>,
 }
 
 pub(super) fn switched_identity(
@@ -320,9 +320,7 @@ impl CallRouter<'_> {
         };
         let action = match role {
             ProviderRole::Primary => Action::ProviderCall {
-                previews: self
-                    .publisher
-                    .is_some_and(ProgressPublisher::previews_enabled),
+                previews: self.publisher.is_some_and(HintPublisher::previews_enabled),
                 steering: false,
             },
             ProviderRole::Child => Action::Child {

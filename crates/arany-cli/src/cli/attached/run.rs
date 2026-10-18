@@ -60,7 +60,7 @@ pub(super) async fn submit_selected<'a>(
     selection: Selection<'_>,
     request: RunRequest,
     cancellation: RunCancellation,
-    progress: RunHints,
+    hints: RunHints,
     tools: ToolAccess<'_>,
     steering: RunSteering,
     roster: Option<crate::cli::provider::roster::SelectedRoster>,
@@ -100,7 +100,7 @@ pub(super) async fn submit_selected<'a>(
         providers,
         request,
         cancellation,
-        progress,
+        hints,
         tools,
         steering,
     )
@@ -111,7 +111,7 @@ fn submit_with_providers<'a>(
     providers: AdmittedProviders,
     request: RunRequest,
     cancellation: RunCancellation,
-    progress: RunHints,
+    hints: RunHints,
     tools: ToolAccess<'_>,
     steering: RunSteering,
 ) -> Result<RunHandle<'a>, RunAttemptError> {
@@ -145,7 +145,7 @@ fn submit_with_providers<'a>(
                 approvals: Some(tools.approvals.clone()),
                 steering: Some(steering),
                 cancellation,
-                progress: Some(progress),
+                hints: Some(hints),
             },
         )
         .map_err(|error| {
@@ -1289,7 +1289,7 @@ mod tests {
                 .expect("ordinary greeting retains the admitted native file capability")
                 .await
                 .map(|result| result.run)
-                .unwrap();
+                .expect("ordinary greeting Run finishes");
                 session = Some(outcome.session_id);
                 assert_eq!(outcome.run.status, RunStatus::Finished);
             }
@@ -1334,7 +1334,7 @@ mod tests {
             std::fs::write(&private, serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["."],"write":true,
                 "commands":[{"name":"sh","executable":"/bin/sh","sha256":"0".repeat(64),"interpreter":true,"inputs":[]}],"skills":[],"mcp":[]})).unwrap()).unwrap();
             std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
-            let submitted = submit_with_providers(
+            let error = match submit_with_providers(
                 &engine,
                 AdmittedProviders::single(Arc::new(Greeting::new(
                     profile,
@@ -1359,8 +1359,7 @@ mod tests {
                     approvals: &approvals,
                 },
                 RunSteering::new(),
-            );
-            let error = match submitted {
+            ) {
                 Ok(handle) => finish_run(handle.await)
                     .expect_err("explicit Tool admission must reject before inference"),
                 Err(error) => error,

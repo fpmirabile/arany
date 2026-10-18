@@ -1413,7 +1413,7 @@ pub(super) async fn native_command_changeset_corpus(
                             tools: ToolGrant::Configured,
                             approvals: granted,
                             cancellation,
-                            progress: Some(RunHints::new()),
+                            hints: Some(RunHints::new()),
                             ..Default::default()
                         },
                     )

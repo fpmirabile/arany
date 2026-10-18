@@ -2725,68 +2725,135 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
 }
 
 #[tokio::test]
-async fn run_hints_carry_no_committed_facts() {
+async fn run_hints_carry_only_display_text_for_the_committed_run() {
     let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = facts_workspace(temp.path(), "v1");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
-    let provider = Arc::new(ScriptedProvider::new(vec![finish_with("accepted answer")]));
+    let provider = Arc::new(crate::PreviewProvider {
+        text: arany::PreviewText {
+            answer: "x".repeat(2300),
+            commentary: Vec::new(),
+            commentary_limited: false,
+        },
+        completion: None,
+    });
     let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
         EngineConfig::default(),
     )
-    .expect("Engine");
-    let mut hints = RunHints::new();
+    .expect("engine");
+    let mut hints = RunHints::with_previews();
     let mut previews = hints.previews();
-    let mut input = request(&workspace, "Question");
+    let cancellation = RunCancellation::new();
+    let mut input = request(&workspace, "question");
     input.include_paths.clear();
-    let (mut stream, outcome) = {
-        let handle = engine
+    let (mut events, update, outcome) = {
+        let arany::RunHandle { events, result, .. } = engine
             .submit(
                 AdmittedProviders::single(provider),
                 input,
                 RunControls {
-                    progress: Some(hints.clone()),
+                    cancellation: cancellation.clone(),
+                    hints: Some(hints.clone()),
                     ..Default::default()
                 },
             )
             .expect("submission");
-        let arany::RunHandle {
-            events: stream,
-            result,
-            ..
-        } = handle;
-        let outcome = result.await.expect("committed Run").run;
-        (stream, outcome)
+        let mut result = std::pin::pin!(tokio::time::timeout(Duration::from_secs(10), result));
+        let update = tokio::select! {
+            update = previews.changed() => update.expect("preview update"),
+            _ = &mut result => panic!("the Run ended before its preview"),
+        };
+        assert!(cancellation.cancel());
+        let outcome = result
+            .await
+            .expect("cancellation deadline")
+            .expect("cancelled Run")
+            .run;
+        (events, update, outcome)
     };
     engine.close().await.expect("engine shutdown");
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    assert_eq!(update.run_id, outcome.run.id);
+    assert!(!update.text.answer.is_empty());
+    assert!(outcome.run.assistant_message.is_none());
+    tokio::select! {
+        biased;
+        _ = hints.waiting_changed() => panic!("no Tool waited for capacity"),
+        () = std::future::ready(()) => {}
+    }
     let mut tapped = Vec::new();
-    while let Some(event) = stream.next().await {
+    while let Some(event) = events.next().await {
         let arany::Tapped::Committed(event) = event else {
             panic!("bounded Run cannot lag");
         };
         tapped.push((*event).clone());
     }
-    assert!(
-        tapped
-            .iter()
-            .any(|event| matches!(event.event, Event::RunFinished { .. }))
-    );
-    tokio::select! {
-        biased;
-        _ = previews.changed() => panic!("committed facts must not publish preview hints"),
-        _ = hints.waiting_changed() => panic!("committed facts must not publish capacity hints"),
-        () = std::future::ready(()) => {}
-    }
-    let (events, view) = replayed(&state_path, outcome.session_id).await;
-    assert_eq!(tapped, events);
-    let mut live = SessionView::replay(outcome.session_id, &tapped[..1])
-        .expect("Session creation")
+    let (journal, _) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(tapped, journal);
+}
+
+#[tokio::test]
+async fn live_reduction_of_an_autonomous_goal_equals_the_reloaded_view() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let provider = ScriptedProvider::new(vec![
+        finish_with("earlier turn"),
+        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        finish_with("first pass"),
+        crate::tool_outcome(facts_read(), None),
+        finish_with("verified"),
+    ])
+    .with_before_call(3, write_facts(&workspace, "v2"));
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut earlier = request(&workspace, "Earlier");
+    earlier.include_paths.clear();
+    let earlier = run_to_end(&engine, &provider, earlier)
+        .await
+        .expect("earlier Run");
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+        .expect("read-only Store");
+    let mut live = store
+        .load_view(earlier.session_id)
+        .await
+        .expect("closed view")
         .expect("Session");
-    for event in &tapped[1..] {
-        arany::reduce_into(&mut live, event).expect("incremental committed reduction");
+    let mut input = autonomous_input(&workspace);
+    input.session_id = Some(earlier.session_id);
+    input.title = None;
+    let mut events = {
+        let arany::RunHandle { events, result, .. } = engine
+            .submit(
+                AdmittedProviders::single(provider),
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            )
+            .expect("submission");
+        let outcome = result.await.expect("autonomous Goal").run;
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        events
+    };
+    engine.close().await.expect("engine shutdown");
+    while let Some(event) = events.next().await {
+        let arany::Tapped::Committed(event) = event else {
+            panic!("bounded Run cannot lag");
+        };
+        arany::reduce_into(&mut live, &event).expect("incremental committed reduction");
     }
-    assert_eq!(live, view);
-    assert_eq!(view.runs[0], outcome.run);
+    let reloaded = store
+        .load_view(earlier.session_id)
+        .await
+        .expect("reloaded view")
+        .expect("Session");
+    store.close().await.expect("Store shutdown");
+    assert_eq!(live, reloaded);
+    assert_eq!(reloaded.goals.last().expect("Goal").run_ids.len(), 2);
 }
 
 #[tokio::test]
@@ -5003,7 +5070,7 @@ async fn previews_chunk_a_finishing_call_within_its_bound() {
         input,
         RunControls {
             cancellation: RunCancellation::new(),
-            progress: Some(RunHints::with_previews()),
+            hints: Some(RunHints::with_previews()),
             ..Default::default()
         },
     )

@@ -22,15 +22,17 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 mod compaction;
+mod hints;
 mod ledger;
 mod lifecycle;
-mod progress;
 mod report;
 mod routing;
 mod run_loop;
 #[cfg(test)]
 mod tests;
 pub use crate::tools::Cancellation as RunCancellation;
+use hints::HintPublisher;
+pub use hints::{DisplayUpdate, RunHints, RunPreview};
 pub use ledger::Action;
 use ledger::GoalLedger;
 pub use lifecycle::{
@@ -38,8 +40,6 @@ pub use lifecycle::{
     set_session_defaults,
 };
 use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
-use progress::ProgressPublisher;
-pub use progress::{DisplayUpdate, RunHints, RunPreview};
 use report::goal_report;
 use routing::CallScope;
 use run_loop::{LoopControls, RunIdentity, RunLoop};
@@ -287,7 +287,7 @@ pub struct RunControls {
     /// A pause request is sticky for the steering handle's lifetime, so each submission needs its own.
     pub steering: Option<RunSteering>,
     pub cancellation: RunCancellation,
-    pub progress: Option<RunHints>,
+    pub hints: Option<RunHints>,
 }
 
 /// The last committed Run of a submission.
@@ -941,7 +941,7 @@ impl Engine {
             approvals,
             steering,
             cancellation,
-            progress,
+            hints,
         } = controls;
         let submission = AdmittedSubmission {
             providers,
@@ -955,7 +955,7 @@ impl Engine {
         let result = Box::pin(async move {
             let _slot = slot;
             let result = self
-                .run_inner(&submission, request, run_cancellation, progress)
+                .run_inner(&submission, request, run_cancellation, hints)
                 .await;
             match &result {
                 Ok(RunResult {
@@ -981,7 +981,7 @@ impl Engine {
         submission: &AdmittedSubmission,
         request: RunRequest,
         cancellation: RunCancellation,
-        progress: Option<RunHints>,
+        hints: Option<RunHints>,
     ) -> Result<RunResult, EngineError> {
         let workspace = request.workspace.clone();
         let include_paths = request.include_paths.clone();
@@ -997,7 +997,7 @@ impl Engine {
             submission,
             request,
             cancellation.clone(),
-            progress.clone(),
+            hints.clone(),
             entry,
             &mut leases,
         ))
@@ -1018,7 +1018,7 @@ impl Engine {
                 submission,
                 next,
                 cancellation.clone(),
-                progress.clone(),
+                hints.clone(),
                 GoalEntry::Continue,
                 &mut leases,
             ))
@@ -1052,7 +1052,7 @@ impl Engine {
         submission: &AdmittedSubmission,
         request: RunRequest,
         cancellation: RunCancellation,
-        progress: Option<RunHints>,
+        hints: Option<RunHints>,
         entry: GoalEntry,
         leases: &mut WorkspaceLeases,
     ) -> Result<RunTurn, EngineError> {
@@ -1069,7 +1069,7 @@ impl Engine {
                 &request,
                 identity,
                 entry,
-                progress.as_ref().is_some_and(RunHints::previews_enabled),
+                hints.as_ref().is_some_and(RunHints::previews_enabled),
                 leases,
             )
             .await?;
@@ -1121,7 +1121,7 @@ impl Engine {
                 .trace_run(session_id, goal.id, (context_started, context_ended));
         // Reduces the open state that appends validate; the closed view would reject this Run's links.
         let ledger = self.open_ledger(session_id, goal.id).await?;
-        let publisher = progress.map(|progress| ProgressPublisher::new(progress, run_id));
+        let publisher = hints.map(|hints| HintPublisher::new(hints, run_id));
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
@@ -1219,7 +1219,7 @@ impl Engine {
         controls: LoopControls<'_>,
         request: ProviderRequest,
         ledger: &GoalLedger,
-        publisher: Option<&ProgressPublisher>,
+        publisher: Option<&HintPublisher>,
     ) -> Result<(), EngineError> {
         // Boxed: the Run loop's future is large and would overflow a small caller stack.
         Box::pin(

@@ -748,7 +748,7 @@ async fn fallback_only_on_pre_output_call_failure_and_never_after_partial_output
             bindings,
             input(&workspace),
             RunControls {
-                progress: Some(RunHints::with_previews()),
+                hints: Some(RunHints::with_previews()),
                 ..RunControls::default()
             },
         )

@@ -94,22 +94,22 @@ pub(super) struct PreviewContext {
     pub(super) limit_recorded: bool,
 }
 
-pub(super) struct ProgressPublisher {
-    progress: RunHints,
+pub(super) struct HintPublisher {
+    hints: RunHints,
     run_id: RunId,
 }
 
-impl ProgressPublisher {
-    pub(super) fn new(progress: RunHints, run_id: RunId) -> Self {
-        Self { progress, run_id }
+impl HintPublisher {
+    pub(super) fn new(hints: RunHints, run_id: RunId) -> Self {
+        Self { hints, run_id }
     }
 
     pub(super) fn previews_enabled(&self) -> bool {
-        self.progress.previews_enabled()
+        self.hints.previews_enabled()
     }
 
     pub(super) fn tool_queue(&self) -> watch::Sender<Option<uuid::Uuid>> {
-        self.progress.waiting_sender.clone()
+        self.hints.waiting_sender.clone()
     }
 
     pub(super) fn preview_context(
@@ -161,7 +161,7 @@ impl ProgressPublisher {
         call_index: u32,
         text: Option<Arc<PreviewText>>,
     ) {
-        self.progress
+        self.hints
             .preview_sender
             .send_replace(text.map(|text| DisplayUpdate {
                 run_id: self.run_id,

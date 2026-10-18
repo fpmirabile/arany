@@ -39,6 +39,13 @@ mod permissions;
 pub use arany::test_support::process;
 
 use arany::test_support::engine as engine_support;
+
+async fn next_committed(events: &mut arany::Subscription, what: &str) -> Arc<arany::EventEnvelope> {
+    match tokio::time::timeout(Duration::from_secs(5), events.next()).await {
+        Ok(Some(arany::Tapped::Committed(event))) => event,
+        _ => panic!("{what}"),
+    }
+}
 use engine_support::{run_to_end, run_with};
 
 #[test]
@@ -1172,7 +1179,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             });
             let controls = RunControls {
                 tools: if tools { ToolGrant::Configured } else { ToolGrant::None },
-                progress: previews.then(RunHints::with_previews),
+                hints: previews.then(RunHints::with_previews),
                 ..Default::default()
             };
             let result = run_with(&engine, &provider, next, controls).await;
@@ -3459,7 +3466,7 @@ async fn provisional_text_is_reconciled_before_an_answer_can_commit() {
             objective,
             RunControls {
                 cancellation: RunCancellation::new(),
-                progress: Some(RunHints::with_previews()),
+                hints: Some(RunHints::with_previews()),
                 ..Default::default()
             },
         )
@@ -3548,16 +3555,14 @@ fn preview_checkpoint_survives_abrupt_process_death() {
                     objective,
                     RunControls {
                         cancellation: RunCancellation::new(),
-                        progress: Some(observed),
+                        hints: Some(observed),
                         ..Default::default()
                     },
                 )
                 .await
             });
             loop {
-                let Some(arany::Tapped::Committed(event)) = events.next().await else {
-                    panic!("committed checkpoint");
-                };
+                let event = next_committed(&mut events, "committed checkpoint").await;
                 if matches!(event.event, Event::AssistantDisplayRecorded { .. }) {
                     let id = observer
                         .session_for_run(event.run_id.unwrap())
@@ -3712,7 +3717,7 @@ async fn display_limits_preserve_a_maximal_answer_and_record_omitted_commentary(
         objective,
         RunControls {
             cancellation: RunCancellation::new(),
-            progress: Some(RunHints::with_previews()),
+            hints: Some(RunHints::with_previews()),
             ..Default::default()
         },
     )
@@ -4463,7 +4468,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
         }
         assert_eq!(started.expect("started signal"), Some(()));
         loop {
-            let Some(arany::Tapped::Committed(event)) = events.next().await else { panic!("committed active Run"); };
+            let event = next_committed(&mut events, "committed active Run").await;
             if matches!(event.event, Event::AgentSpawned { .. }) { break; }
         }
         assert!(cancellation.cancel());
@@ -4507,7 +4512,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
         assert_eq!(outcome.run.agents[0].provider_calls[0].input_tokens, None);
         assert_eq!(outcome.run.agents[0].provider_calls[0].output_tokens, None);
         loop {
-            let Some(arany::Tapped::Committed(event)) = events.next().await else { panic!("committed cancellation"); };
+            let event = next_committed(&mut events, "committed cancellation").await;
             if matches!(event.event, Event::RunFinished { .. }) {
                 assert_eq!(Some(event.sequence), outcome.run.finished_sequence);
                 break;
@@ -4646,7 +4651,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                         "no retry or extra call"
                     );
                     let terminal = loop {
-                        let Some(arany::Tapped::Committed(event)) = tapped.next().await else { panic!("committed terminal Event"); };
+                        let event = next_committed(&mut tapped, "committed terminal Event").await;
                         if matches!(event.event, Event::RunFinished { .. }) { break event; }
                     };
                     let store = Store::open_read_only(
@@ -4738,7 +4743,7 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
     let mut tapped = engine.subscribe();
     let observer = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
     let cancellation = cancel.clone();
-    let run_progress = RunHints::with_previews();
+    let run_hints = RunHints::with_previews();
     let task = tokio::spawn(async move {
         let outcome = run_with(
             &engine,
@@ -4746,7 +4751,7 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
             objective,
             RunControls {
                 cancellation,
-                progress: Some(run_progress),
+                hints: Some(run_hints),
                 ..Default::default()
             },
         )
@@ -4756,7 +4761,7 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
     });
     let session_id = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let Some(arany::Tapped::Committed(event)) = tapped.next().await else { panic!("committed checkpoint"); };
+            let event = next_committed(&mut tapped, "committed checkpoint").await;
             if matches!(&event.event, Event::AssistantDisplayRecorded { chunk, .. } if chunk.category == arany::DisplayCategory::Answer) {
                 let session_id = event.session_id;
                 let events = observer.load_session(session_id).await.unwrap();

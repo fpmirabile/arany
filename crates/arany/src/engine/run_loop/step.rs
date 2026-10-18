@@ -3,8 +3,8 @@ use super::{
     ActivePause, ActiveSegment, CallResult, RunLoop, TOOL_CLEANUP_OVERHEAD, TOOL_REVIEW_DEADLINE,
     call_record, valid_finish,
 };
+use crate::engine::hints::HintPublisher;
 use crate::engine::ledger::{Action, duration_ms};
-use crate::engine::progress::ProgressPublisher;
 use crate::engine::{EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{
     AgentPhase, PromptRole, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn,
@@ -999,7 +999,7 @@ impl RunLoop<'_> {
     ) -> Result<(ToolObservation, Option<ActiveSegment>, bool), EngineError> {
         let mut queue_pause = Some(queue_pause);
         let mut active_time_exhausted = false;
-        let runtime = runtime.with_queue_progress(self.progress.map(ProgressPublisher::tool_queue));
+        let runtime = runtime.with_queue_progress(self.hints.map(HintPublisher::tool_queue));
         let (active_sender, mut active_receiver) =
             tokio::sync::mpsc::channel::<ActiveActionRequest>(1);
         let runtime = runtime.with_active_action_gate(active_sender);
@@ -1051,8 +1051,8 @@ impl RunLoop<'_> {
     }
 
     fn clear_tool_queue(&self) {
-        if let Some(progress) = self.progress {
-            progress.tool_queue().send_replace(None);
+        if let Some(hints) = self.hints {
+            hints.tool_queue().send_replace(None);
         }
     }
 

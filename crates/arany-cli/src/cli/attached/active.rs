@@ -384,13 +384,13 @@ pub(super) async fn submit_objective(
         GoalStart::Plain | GoalStart::Autonomous => goal == GoalStart::Autonomous,
     };
     let cancellation = RunCancellation::new();
-    let progress = if terminal.is_linear() {
+    let hints = if terminal.is_linear() {
         RunHints::new()
     } else {
         RunHints::with_previews()
     };
-    let mut previews = progress.previews();
-    let mut waiting_progress = progress.clone();
+    let mut previews = hints.previews();
+    let mut waiting_hints = hints.clone();
     let (approvals, mut inbox) =
         arany::ToolApprovals::new(composer.approval_mode().unwrap_or_default());
     let mut pending: Option<arany::ToolApproval> = None;
@@ -434,7 +434,7 @@ pub(super) async fn submit_objective(
         },
         request,
         cancellation.clone(),
-        progress.clone(),
+        hints.clone(),
         run::ToolAccess {
             configured: admission.tools,
             permissions: admission.workspace_permissions.as_ref(),
@@ -457,7 +457,7 @@ pub(super) async fn submit_objective(
                 .map_err(|error| error.to_string())?,
             None => false,
         };
-        let (result, events) = handle
+        let (result, mut events) = handle
             .as_mut()
             .map(|handle| (&mut handle.result, &mut handle.events))
             .unzip();
@@ -529,23 +529,31 @@ pub(super) async fn submit_objective(
                 }
             }
             event = async {
-                match events {
+                match events.as_deref_mut() {
                     Some(events) => events.next().await,
                     None => std::future::pending().await,
                 }
             } => {
-                let applied = match event {
-                    Some(arany::Tapped::Committed(event)) => {
-                        if event.session_id != view.id || event.sequence <= view.last_sequence {
-                            continue;
-                        }
-                        arany::reduce_into(view, &event).map_err(|error| error.to_string())
+                let mut event = event;
+                let mut drained = 0;
+                let applied = loop {
+                    let Some(tapped) = event else {
+                        break Err("Run event stream closed".to_owned());
+                    };
+                    if apply_tapped(&admission.state_dir, view, tapped).await.is_err() {
+                        break Err("Run history unavailable; check Session history".to_owned());
                     }
-                    Some(arany::Tapped::Resync { .. }) => catch_up(&admission.state_dir, view).await,
-                    None => break "Run event stream closed".to_owned(),
+                    drained += 1;
+                    let Some(events) = events.as_deref_mut().filter(|_| drained < EVENT_DRAIN_LIMIT) else {
+                        break Ok(());
+                    };
+                    match tokio::time::timeout(Duration::ZERO, events.next()).await {
+                        Ok(next) => event = next,
+                        Err(_) => break Ok(()),
+                    }
                 };
-                if applied.is_err() {
-                    break "Run history unavailable; check Session history".to_owned();
+                if let Err(reason) = applied {
+                    break reason;
                 }
                 if !user_recorded && let Some(run) = view.runs.last().filter(|run| run.accepted_sequence > starting_sequence) {
                     if terminal.record_user_run(run).is_err() {
@@ -562,7 +570,7 @@ pub(super) async fn submit_objective(
                     break "terminal rendering failed".to_owned();
                 }
             }
-            waiting = waiting_progress.waiting_changed() => {
+            waiting = waiting_hints.waiting_changed() => {
                 terminal.set_waiting_tool(waiting);
                 if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                     break "terminal rendering failed".to_owned();
@@ -1176,6 +1184,27 @@ fn compaction_notice(record: &CompactionRecord) -> String {
             };
             format!("Error: Compaction failed: {reason}; {usage}{bound}")
         }
+    }
+}
+
+const EVENT_DRAIN_LIMIT: usize = 64;
+
+async fn apply_tapped(
+    state_dir: &std::path::Path,
+    view: &mut SessionView,
+    tapped: arany::Tapped,
+) -> Result<(), String> {
+    match tapped {
+        arany::Tapped::Committed(event) => {
+            if event.session_id != view.id || event.sequence <= view.last_sequence {
+                return Ok(());
+            }
+            match arany::reduce_into(view, &event) {
+                Ok(()) => Ok(()),
+                Err(_) => catch_up(state_dir, view).await,
+            }
+        }
+        arany::Tapped::Resync { .. } => catch_up(state_dir, view).await,
     }
 }
 
