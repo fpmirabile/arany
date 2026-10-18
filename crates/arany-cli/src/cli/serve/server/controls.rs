@@ -25,6 +25,13 @@ impl Submission {
             });
         }
         let input: TurnStartParams = params(value)?;
+        if input
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.resume_goal_id.is_some())
+        {
+            return Err(Fault::params());
+        }
         Ok(Self {
             thread_id: input.thread_id,
             input: input.input,
@@ -53,18 +60,14 @@ impl Submission {
                 GoalRequest::resume(*id, true)
             }
             Start::Turn(Some(GoalInput {
-                resume_goal_id: Some(_),
-                ..
-            })) => return Err(Fault::params()),
-            Start::Turn(Some(GoalInput {
                 autonomous: true, ..
             })) => GoalRequest::autonomous(loaded.goal_budget, arany::GoalPhase::Implementation),
             Start::Turn(_) => GoalRequest::default(),
         };
         if goal.id.is_none() {
             goal.budget = Some(loaded.goal_budget);
+            goal.resource_settings = loaded.resource_settings;
         }
-        goal.resource_settings = loaded.resource_settings;
         Ok(goal)
     }
 }
@@ -86,7 +89,6 @@ fn running(
             turn.thread_id == thread_id
                 && turn.state.run_id.is_some()
                 && turn_id.is_none_or(|id| turn.state.run_id == Some(id))
-                && !turn.state.pending_completion
                 && !turn.result.is_finished()
         })
         .ok_or_else(|| Fault::state(Reason::TurnNotActive))
@@ -119,4 +121,50 @@ fn refusal(refused: SteeringRefused) -> Fault {
         SteeringRefused::TooLarge => Reason::TooLarge,
         SteeringRefused::Unavailable => Reason::Unavailable,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::serve::items::TurnState;
+
+    #[tokio::test]
+    async fn pause_and_steer_are_accepted_between_autonomous_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = arany::Engine::open(
+            arany::StateRoot::admit(&temp.path().join("state")).unwrap(),
+            arany::EngineConfig::default(),
+        )
+        .unwrap();
+        let thread_id = SessionId::new();
+        let (run_id, goal_id) = (RunId::new(), GoalId::new());
+        let worker = tokio::spawn(std::future::pending::<()>());
+        let turn = ActiveTurn {
+            thread_id,
+            result: worker.abort_handle(),
+            events: engine.subscribe(),
+            cancel: arany::RunCancellation::new(),
+            approvals: crate::cli::serve::approvals::Approvals::empty_for_test(),
+            steering: arany::RunSteering::new(),
+            pending_start: None,
+            result_done: false,
+            state: TurnState {
+                run_id: Some(run_id),
+                goal_id: Some(goal_id),
+                pending_completion: true,
+                ..Default::default()
+            },
+        };
+        let ids = json!({"threadId":thread_id,"goalId":goal_id});
+        assert_eq!(pause(Some(&turn), Some(ids)).ok().unwrap(), json!({}));
+        assert!(!turn.steering.pause(), "the pause is already requested");
+        let note = json!({"threadId":thread_id,"turnId":run_id,"input":[{"type":"text","text":"next Run"}]});
+        assert_eq!(
+            steer(Some(&turn), Some(note)).ok().unwrap(),
+            json!({"turnId":run_id})
+        );
+        assert_eq!(turn.steering.withdraw_note().as_deref(), Some("next Run"));
+        drop(turn);
+        engine.close().await.unwrap();
+    }
 }

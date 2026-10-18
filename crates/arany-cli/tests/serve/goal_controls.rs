@@ -111,9 +111,24 @@ where
     Fut: Future<Output = Value>,
 {
     let root = tempfile::tempdir().unwrap();
-    let workspace = root.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(root.path().join("workspace")).unwrap();
+    let thread = serve_in(root.path(), provider, None, script).await;
     let state = root.path().join("state");
+    (root, state, thread)
+}
+
+async fn serve_in<F, Fut>(
+    root: &std::path::Path,
+    provider: Arc<dyn Provider>,
+    resume: Option<arany::SessionId>,
+    script: F,
+) -> arany::SessionId
+where
+    F: FnOnce(Wire, Value) -> Fut,
+    Fut: Future<Output = Value>,
+{
+    let workspace = root.join("workspace");
+    let state = root.join("state");
     let threads = threads::Threads {
         provider: Some(provider),
         ..Default::default()
@@ -132,14 +147,26 @@ where
             json!({"clientInfo":{"name":"test","version":"1"}}),
         )
         .await;
-        let thread = wire
-            .call(
-                2,
-                "thread/start",
-                json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4","collaboration":"auto","maxActiveChildren":1}),
-            )
-            .await["result"]["thread"]["id"]
-            .clone();
+        let thread = match resume {
+            Some(id) => {
+                let resumed = wire
+                    .call(
+                        6,
+                        "thread/resume",
+                        json!({"threadId":id,"cwd":workspace,"provider":"openai","model":"gpt-5.4"}),
+                    )
+                    .await;
+                resumed["result"]["thread"]["id"].clone()
+            }
+            None => wire
+                .call(
+                    2,
+                    "thread/start",
+                    json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4","collaboration":"auto","maxActiveChildren":1}),
+                )
+                .await["result"]["thread"]["id"]
+                .clone(),
+        };
         let input = wire.input.clone();
         let thread = script(wire, thread).await;
         input.send(ClientMessage::Eof).await.unwrap();
@@ -150,7 +177,7 @@ where
         client
     );
     result.unwrap();
-    (root, state, serde_json::from_value(thread).unwrap())
+    serde_json::from_value(thread).unwrap()
 }
 
 fn reason(response: &Value) -> (&Value, &Value) {
@@ -303,7 +330,7 @@ async fn pause_ends_the_turn_interrupted_and_goal_resume_continues_the_pinned_ob
             .call(
                 21,
                 "goal/resume",
-                json!({"threadId":thread,"goalId":turn["goalId"]}),
+                json!({"threadId":thread,"goalId":turn["goalId"],"input":[{"type":"text","text":"Carry on"}]}),
             )
             .await;
         assert_eq!(resumed["result"]["turn"]["status"], "inProgress");
@@ -315,6 +342,14 @@ async fn pause_ends_the_turn_interrupted_and_goal_resume_continues_the_pinned_ob
             completed["params"]["turn"]["id"],
             resumed["result"]["turn"]["id"]
         );
+        let message = wire
+            .seen
+            .iter()
+            .find(|m| {
+                m["method"] == "item/started" && m["params"]["turnId"] == resumed["result"]["turn"]["id"]
+            })
+            .expect("resumed user message");
+        assert_eq!(message["params"]["item"]["text"], "Carry on");
         let again = wire
             .call(
                 22,
@@ -368,4 +403,74 @@ async fn oversized_steer_line_is_rejected_by_the_line_cap_and_the_next_line_is_s
     };
     let (result, ()) = tokio::join!(reader, peer);
     result.unwrap();
+}
+
+#[tokio::test]
+async fn resume_of_an_exhausted_goal_closes_it_failed_in_a_second_server() {
+    let _deadline = deadline();
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("workspace")).unwrap();
+    let state = root.path().join("state");
+    let preferences = json!({"version":3,"preferences":{
+        "completion":"tabs",
+        "view":"classic",
+        "goal_budget":arany::GoalBudget{max_provider_calls:Some(1),..Default::default()},
+        "resources":arany::ToolResourceSettings::default(),
+    }});
+    arany::StateRoot::admit(&state)
+        .unwrap()
+        .record(arany::RecordKind::UiPreferences)
+        .replace(&serde_json::to_vec(&preferences).unwrap())
+        .unwrap();
+
+    let (provider, mut gate) = gated(vec![delegate()]);
+    let goal = Arc::new(Mutex::new(Value::Null));
+    let seen_goal = goal.clone();
+    let id = serve_in(root.path(), provider, None, |mut wire, thread| async move {
+        let turn = wire.start_turn(&thread, "Spend the only call").await;
+        gate.started.recv().await.unwrap();
+        let pause = json!({"threadId":thread,"goalId":turn["goalId"]});
+        assert_eq!(
+            wire.call(10, "goal/pause", pause).await["result"],
+            json!({})
+        );
+        gate.release.send(()).unwrap();
+        let completed = wire.notification("turn/completed").await;
+        assert_eq!(completed["params"]["turn"]["status"], "interrupted");
+        *seen_goal.lock().unwrap() = turn["goalId"].clone();
+        thread
+    })
+    .await;
+    let goal = goal.lock().unwrap().clone();
+
+    let provider = Arc::new(ScriptedProvider::new(Vec::new()).with_profile("openai", "gpt-5.4"));
+    let requests = provider.requests.clone();
+    serve_in(
+        root.path(),
+        provider,
+        Some(id),
+        |mut wire, thread| async move {
+            let params = json!({"threadId":thread,"goalId":goal});
+            let exhausted = wire.call(40, "goal/resume", params.clone()).await;
+            assert_eq!(
+                reason(&exhausted),
+                (&json!(-32000), &json!("goalBudgetExhausted"))
+            );
+            let again = wire.call(41, "goal/resume", params).await;
+            assert_eq!(reason(&again), (&json!(-32000), &json!("goalUnavailable")));
+            assert!(wire.seen.iter().all(|m| m["method"] != "turn/started"));
+            thread
+        },
+    )
+    .await;
+    assert!(requests.lock().unwrap().is_empty());
+    let (events, view) = closed_view(&state, id).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.event, Event::GoalResumed { .. }))
+    );
+    assert_eq!(view.runs.len(), 1);
+    assert_eq!(view.goals[0].status, arany::GoalStatus::Failed);
+    assert_eq!(view.interrupted_goal_id(), None);
 }
