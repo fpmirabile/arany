@@ -696,7 +696,7 @@ fn diff_output(numstat: &Captured, patch: &Captured, budget: usize) -> Result<Va
     let mut hidden = false;
     for line in String::from_utf8_lossy(&patch.stdout).split_inclusive('\n') {
         if let Some(header) = line.strip_prefix("diff --git ") {
-            // The new-side path follows the last " b/"; an unparseable header hides its hunk (fail closed).
+            // The new-side path follows the last " b/"; an unparsable header hides its hunk (fail closed).
             hidden = header
                 .rfind(" b/")
                 .is_none_or(|at| excluded(header[at + 3..].trim_end()));

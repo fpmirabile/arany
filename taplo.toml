@@ -1,0 +1,5 @@
+include = ["Cargo.toml", "crates/*/Cargo.toml", "clippy.toml",
+           "deny.toml", "rust-toolchain.toml"]
+
+[formatting]
+reorder_keys = false

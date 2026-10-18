@@ -1,0 +1,19 @@
+[files]
+extend-exclude = [".env", ".env.*", "**/.env", "**/.env.*",
+                  "Cargo.lock", "target/**", ".lavish/**"]
+
+[default]
+# Deliberately incomplete or misspelled terminal input and a partial frame title.
+extend-ignore-re = ['"(?:/provder(?:\\[nr])?|/hel|/hepl|alway)"', 'b"/helX\\x1b\[Dp"', 'b"Choose Provid"']
+
+[default.extend-words]
+# Terminal library name and the shared Ctrl+P/N navigation shorthand.
+Ratatui = "Ratatui"
+PN = "PN"
+
+[type.rust.extend-identifiers]
+# Kernel capability field, POSIX flag, Mach timebase field and JWT header field.
+CapInh = "CapInh"
+WRONLY = "WRONLY"
+numer = "numer"
+typ = "typ"
