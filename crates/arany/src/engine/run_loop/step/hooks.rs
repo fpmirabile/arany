@@ -682,7 +682,12 @@ impl RunLoop<'_> {
         } else {
             self.primary_call()
         };
-        tail.max_events_for_admitted(&self.routing.providers) + self.ledger().verdicts(tail)
+        let verdicts = self.ledger().verdicts(tail);
+        tail.max_events_for_admitted(&self.routing.providers)
+            + verdicts
+            + usize::from(
+                verdicts > 0 && matches!(event, HookEvent::Stop | HookEvent::SubagentStop),
+            )
     }
 
     fn lifecycle_ceiling(&self, pending_ms: u64) -> Result<u64, EngineError> {

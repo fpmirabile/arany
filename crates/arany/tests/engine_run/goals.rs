@@ -5667,10 +5667,103 @@ async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable
 }
 
 #[tokio::test]
+async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
+    async fn run(root: &Path, free: Option<(usize, usize)>) -> Vec<arany::EventEnvelope> {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = facts_workspace(root, "stable");
+        let state_path = root.join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        let permissions = state_path.join("permissions.json");
+        std::fs::write(
+            &permissions,
+            br#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"unconfigured","args":[]}]}]}}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&permissions, std::fs::Permissions::from_mode(0o600)).unwrap();
+        engine.close().await.unwrap();
+        if let Some((offset, free)) = free {
+            let mut connection =
+                rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
+            let transaction = connection.transaction().unwrap();
+            for sequence in 2..=i64::try_from(10_000 - offset - free).unwrap() {
+                transaction.execute(
+                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)",
+                    rusqlite::params![sequence, session.to_string()],
+                ).unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        let engine = facts_engine(StateRoot::open_existing(&state_path).unwrap(), &state_path);
+        let provider = Arc::new(ScriptedProvider::new(vec![finish_with("candidate"); 9]));
+        let mut input = request(&workspace, "Finish after the Stop continuations");
+        input.include_paths.clear();
+        input.session_id = Some(session);
+        input.title = None;
+        let result = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await;
+        if free.is_some_and(|(_, free)| free == 9) {
+            assert!(matches!(
+                result,
+                Err(EngineError::Store(arany::StoreError::ReplayLimit))
+            ));
+        } else {
+            assert_eq!(result.unwrap().run.status, RunStatus::Finished);
+        }
+        engine.close().await.unwrap();
+        replayed(&state_path, session).await.0
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let dry = run(&temp.path().join("dry"), None).await;
+    let last_hook = dry
+        .iter()
+        .rposition(|e| matches!(e.event, Event::HookStarted { .. }))
+        .unwrap();
+    let initial = dry
+        .iter()
+        .position(|e| matches!(e.event, Event::GoalStarted { .. }))
+        .unwrap();
+    let offset = last_hook - initial;
+    for free in [9, 10] {
+        let events = run(
+            &temp.path().join(format!("free-{free}")),
+            Some((offset, free)),
+        )
+        .await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, Event::HookStarted { .. }))
+                .count(),
+            if free == 9 { 7 } else { 8 },
+            "free {free}: the last blocked hook needs its pair, verdict and complete continuation tail"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event, Event::SupervisorVerdictRecorded { .. }))
+        );
+    }
+}
+
+#[tokio::test]
 async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_outcome() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = facts_workspace(temp.path(), "stable");
     let mut observations = Vec::new();
+    let normalized_run = arany::RunId::new();
+    let normalized_actor = arany::AgentRunId::new();
     for enabled in [true, false] {
         let state_path = temp.path().join(if enabled { "shadow" } else { "off" });
         let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
@@ -5715,20 +5808,40 @@ async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_out
             .collect();
         assert_eq!(verdicts.len(), if enabled { 2 } else { 0 });
         for (sequence, verdict) in verdicts {
+            assert!(
+                verdict
+                    .signals
+                    .iter()
+                    .any(|signal| signal.signal == arany::supervisor::SignalKind::Loop)
+            );
             assert_eq!(sequence, verdict.subject_sequence + 1);
         }
         assert_eq!(view.runs[0].status, RunStatus::Finished);
         let inputs: Vec<_> = calls
             .iter()
             .map(|c| {
-                c.input
-                    .tools
-                    .as_ref()
-                    .unwrap()
-                    .observations()
-                    .iter()
-                    .map(|o| (o.intent.call.clone(), o.disposition, o.output.clone()))
-                    .collect::<Vec<_>>()
+                let mut input = c.input.clone();
+                // Elapsed and reserved time vary across live Runs; compare every other Goal fact.
+                let normalize_facts = |facts: &mut arany::GoalContextFacts| {
+                    facts.active_ms = 0;
+                    facts.reserved_active_ms = 0;
+                };
+                if let Some(facts) = &mut input.goal_context_facts {
+                    normalize_facts(facts);
+                }
+                for step in &mut input.tools.as_mut().unwrap().steps {
+                    if let Some(facts) = &mut step.facts {
+                        normalize_facts(facts);
+                    }
+                    for observation in &mut step.observations {
+                        // Normalize the per-run intent identities and expiry, which never enter model input.
+                        observation.intent.id = Uuid::nil();
+                        observation.intent.run_id = normalized_run;
+                        observation.intent.agent_run_id = normalized_actor;
+                        observation.intent.expires_at_ms = 0;
+                    }
+                }
+                input
             })
             .collect();
         observations.push((

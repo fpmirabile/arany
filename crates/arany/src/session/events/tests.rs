@@ -1808,15 +1808,13 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
             "missing {field}"
         );
     }
-    assert!(
-        Event::decode(
-            event.kind(),
-            1,
-            &" ".repeat(MAX_VERDICT_BYTES + 1),
-            run,
-            actor
-        )
-        .is_err()
+    let padded = format!(
+        "{payload}{}",
+        " ".repeat(MAX_VERDICT_BYTES + 1 - payload.len())
     );
+    assert!(matches!(
+        Event::decode(event.kind(), 1, &padded, run, actor),
+        Err(ReplayError::InvalidPayload)
+    ));
     assert_eq!(payload_version("RunStarted"), Some(14));
 }
