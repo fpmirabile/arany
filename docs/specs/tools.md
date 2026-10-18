@@ -52,6 +52,8 @@ The same settings restrict children; a child cannot select its own settings or e
 
 ### Modes and approval decisions
 
+The [serve approval transport](./serve.md#server-requests) is another human client of the same one-use approval channel.
+
 The peer contract is [Claude Code permission modes](https://code.claude.com/docs/en/permissions#permission-modes). The five accepted spellings are case-sensitive; aliases and bypass modes reject. The parser's omitted `defaultMode` is `default`; it does not change Arany's existing interactive default.
 
 | Mode | Peer behavior | Arany mapping and narrowing |

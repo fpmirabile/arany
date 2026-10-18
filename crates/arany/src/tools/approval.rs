@@ -72,6 +72,10 @@ impl ToolApproval {
     pub fn decide(self, reply: impl Into<ApprovalReply>) {
         let _ = self.reply.send(reply.into());
     }
+
+    pub async fn abandoned(&mut self) {
+        self.reply.closed().await;
+    }
 }
 
 impl ApprovalInbox {

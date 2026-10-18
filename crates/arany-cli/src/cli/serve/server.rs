@@ -116,7 +116,7 @@ struct ActiveTurn {
     result: tokio::task::AbortHandle,
     events: arany::Subscription,
     cancel: RunCancellation,
-    decliner: tokio::task::AbortHandle,
+    approvals: super::approvals::Approvals,
     pending_start: Option<RequestId>,
     result_done: bool,
     state: TurnState,
@@ -126,7 +126,6 @@ impl Drop for ActiveTurn {
     fn drop(&mut self) {
         self.cancel.cancel();
         self.result.abort();
-        self.decliner.abort();
     }
 }
 
@@ -175,6 +174,7 @@ async fn run_inner(
     let engine = Arc::new(engine);
     let mut active: Option<ActiveTurn> = None;
     let mut workers = tokio::task::JoinSet::<Result<arany::RunResult, EngineError>>::new();
+    let next_server_id = Arc::new(std::sync::atomic::AtomicI64::new(1));
     let mut initialized = false;
     let mut opt_out = Vec::<String>::new();
     let mut shutdown = false;
@@ -200,6 +200,7 @@ async fn run_inner(
             match next {
                 Next::Input(None | Some(ClientMessage::Eof)) => {
                     if let Some(turn) = &active {
+                        turn.approvals.close();
                         turn.cancel.cancel();
                     }
                     shutdown = true;
@@ -292,8 +293,7 @@ async fn run_inner(
                                 };
                                 goal.budget = Some(loaded.goal_budget);
                                 goal.resource_settings = loaded.resource_settings;
-                                let (approvals, mut inbox) =
-                                    ToolApprovals::new(loaded.approval_mode);
+                                let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
                                 let view = threads::load_view(&state, input.thread_id).await?;
                                 let first_sequence = view
                                     .last_sequence
@@ -319,18 +319,23 @@ async fn run_inner(
                                     progress: None,
                                 };
                                 let (started, ready) = tokio::sync::oneshot::channel();
+                                let approval_end = RunCancellation::new();
+                                let finished = approval_end.clone();
                                 let result = workers.spawn(async move {
-                                    match worker_engine.submit(providers, request, controls) {
-                                        Ok(handle) => {
-                                            let _ =
-                                                started.send(Ok((handle.events, handle.cancel)));
-                                            handle.result.await
-                                        }
-                                        Err(error) => {
-                                            let _ = started.send(Err(error));
-                                            Err(EngineError::InvalidRequest)
-                                        }
-                                    }
+                                    let result =
+                                        match worker_engine.submit(providers, request, controls) {
+                                            Ok(handle) => {
+                                                let _ = started
+                                                    .send(Ok((handle.events, handle.cancel)));
+                                                handle.result.await
+                                            }
+                                            Err(error) => {
+                                                let _ = started.send(Err(error));
+                                                Err(EngineError::InvalidRequest)
+                                            }
+                                        };
+                                    finished.cancel();
+                                    result
                                 });
                                 let (events, cancel) = match ready.await {
                                     Ok(Ok(handle)) => handle,
@@ -343,17 +348,31 @@ async fn run_inner(
                                         return Err(Fault::engine(EngineError::CoordinatorFailed));
                                     }
                                 };
-                                let decliner = tokio::spawn(async move {
-                                    while let Some(approval) = inbox.next().await {
-                                        approval.decide(false);
-                                    }
-                                });
+                                let approvals = super::approvals::Approvals::start(
+                                    inbox,
+                                    cancel.clone(),
+                                    input.thread_id,
+                                    outbound.clone(),
+                                    next_server_id.clone(),
+                                    approval_end,
+                                    {
+                                        let state = state.clone();
+                                        let thread_id = input.thread_id;
+                                        move |intent| {
+                                            super::approvals::started_at(
+                                                state.clone(),
+                                                thread_id,
+                                                intent,
+                                            )
+                                        }
+                                    },
+                                );
                                 active = Some(ActiveTurn {
                                     thread_id: input.thread_id,
                                     result,
                                     events,
                                     cancel,
-                                    decliner: decliner.abort_handle(),
+                                    approvals,
                                     pending_start: Some(id.clone()),
                                     result_done: false,
                                     state: TurnState {
@@ -374,6 +393,7 @@ async fn run_inner(
                                             && !turn.result.is_finished()
                                     })
                                     .ok_or_else(|| Fault::state(Reason::TurnNotActive))?;
+                                turn.approvals.close();
                                 turn.cancel.cancel();
                                 Ok(Some(json!({})))
                             }
@@ -393,8 +413,17 @@ async fn run_inner(
                 }
                 Next::Input(Some(ClientMessage::Message(Message::Notification(_)))) => {}
                 Next::Input(Some(ClientMessage::Message(
-                    Message::Response(_) | Message::Error(_),
-                ))) => {}
+                    message @ (Message::Response(_) | Message::Error(_)),
+                ))) => {
+                    let (id, result) = match message {
+                        Message::Response(reply) => (Some(reply.id), Some(reply.result)),
+                        Message::Error(reply) => (reply.id, None),
+                        _ => (None, None),
+                    };
+                    if let (Some(id), Some(turn)) = (id, active.as_ref()) {
+                        turn.approvals.respond(id, result);
+                    }
+                }
                 Next::Event(Some(event)) => {
                     observe(
                         active.as_mut().expect("active turn"),
@@ -409,6 +438,7 @@ async fn run_inner(
                 Next::Done(result) => {
                     let turn = active.as_mut().expect("active turn");
                     turn.result_done = true;
+                    turn.approvals.close();
                     loop {
                         let event = {
                             let mut next = std::pin::pin!(turn.events.next());
@@ -750,7 +780,7 @@ mod tests {
             result: worker.abort_handle(),
             events,
             cancel,
-            decliner: worker.abort_handle(),
+            approvals: super::super::approvals::Approvals::empty_for_test(),
             pending_start: Some(RequestId::Integer(3)),
             result_done: true,
             state: TurnState {
