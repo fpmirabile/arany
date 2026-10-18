@@ -543,10 +543,11 @@ async fn permission_dispatch_over_maximum_command_timeout_limits_before_deny() {
 #[tokio::test]
 async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and_reaps_it() {
     let marker = format!("30.{}", std::process::id());
-    let survivors = || {
-        let listing = std::process::Command::new("ps")
+    let sleepers = || async {
+        let listing = tokio::process::Command::new("ps")
             .args(["-A", "-o", "command="])
             .output()
+            .await
             .expect("process listing");
         String::from_utf8_lossy(&listing.stdout)
             .lines()
@@ -563,13 +564,27 @@ async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and
     };
     let mut plan = plan(&call);
     plan.command_timeout_ms = Some(10_000);
-    let (result, _, _) = fixture
-        .run(
+    let observe_both = async {
+        for _ in 0..300 {
+            if sleepers().await == 2 {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    };
+    let ((result, _, _), started) = tokio::join!(
+        fixture.run(
             vec![tool_outcome(call, Some(Box::new(plan))), finish("answer")],
             Some(arany::ApprovalMode::Request),
             false,
-        )
-        .await;
+        ),
+        observe_both
+    );
+    assert!(
+        started,
+        "the foreground and background children both started"
+    );
     let tool = &result.run.tools[0];
     let observation = tool.observation.as_ref().unwrap();
     assert_eq!(
@@ -586,7 +601,7 @@ async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and
     // An exited descendant may linger briefly before its new parent collects it.
     let mut reaped = false;
     for _ in 0..20 {
-        reaped = survivors() == 0;
+        reaped = sleepers().await == 0;
         if reaped {
             break;
         }

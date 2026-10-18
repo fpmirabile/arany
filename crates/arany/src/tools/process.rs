@@ -64,11 +64,12 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         &site.config.runtime_grants,
         site.intent.limits.cache_bytes > 0,
     )?;
-    let runtime = site.remaining_runtime();
+    let deadline = tokio::time::Instant::now() + site.remaining_runtime();
+    let child = spawn_before(&mut command, deadline)?;
     let (status, out, err) = capture(
-        spawn_before(&mut command, tokio::time::Instant::now() + runtime)?,
+        child,
         (site.intent.limits.result_bytes as usize / 2).saturating_sub(128),
-        runtime,
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
     )
     .await?;
     #[cfg(target_os = "linux")]
