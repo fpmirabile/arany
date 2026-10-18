@@ -235,8 +235,6 @@
             "ToolStarted",
             "ToolFinished",
             "ToolPermissionDecided",
-            "HookStarted",
-            "HookFinished",
             "AgentFinished",
             "MessageCommitted",
             "RunFinished"
