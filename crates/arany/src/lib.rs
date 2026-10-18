@@ -83,7 +83,7 @@ pub use tools::{
     ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile,
     ToolResourceSettings, ToolStep, TrustRecordError, TrustReset, UnguardedPrompt,
     UnguardedReceipt, WorkspacePermissions, configured_skill_names, list_workspace_entries,
-    mention_paths, native_protection_supported, project_skills, runtime_skill_names,
+    mention_paths, native_protection_supported, now_ms, project_skills, runtime_skill_names,
     tool_guard_main,
 };
 

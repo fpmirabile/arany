@@ -261,7 +261,7 @@ impl RunView {
         }) && self
             .tools
             .iter()
-            .chain(self.agents.iter().flat_map(|a| &a.tools))
+            .chain(self.agents.iter().flat_map(|agent| &agent.tools))
             .all(|tool| {
                 tool.hooks.iter().all(|hook| {
                     hook.outcome
@@ -274,7 +274,12 @@ impl RunView {
     fn stopped_hooks(&self) -> impl Iterator<Item = (&HookView, Option<&str>)> {
         self.lifecycle_hooks
             .iter()
-            .chain(self.tools.iter().flat_map(|tool| &tool.hooks))
+            .chain(
+                self.tools
+                    .iter()
+                    .chain(self.agents.iter().flat_map(|agent| &agent.tools))
+                    .flat_map(|tool| &tool.hooks),
+            )
             .filter_map(|hook| match &hook.outcome.as_ref()?.result {
                 crate::tools::permissions::HookResult::Stopped { reason } => {
                     Some((hook, reason.as_deref()))

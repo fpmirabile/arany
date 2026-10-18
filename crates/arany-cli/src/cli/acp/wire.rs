@@ -36,10 +36,8 @@ pub(super) struct AcpNotification {
 pub(super) struct AcpResponse {
     #[serde(rename = "jsonrpc")]
     pub _jsonrpc: Version,
-    #[serde(rename = "id")]
-    pub _id: RequestId,
-    #[serde(rename = "result")]
-    pub _result: Value,
+    pub id: RequestId,
+    pub result: Value,
 }
 
 #[derive(Deserialize)]
@@ -48,8 +46,7 @@ pub(super) struct AcpError {
     #[serde(rename = "jsonrpc")]
     pub _jsonrpc: Version,
     #[serde(deserialize_with = "Deserialize::deserialize")]
-    #[serde(rename = "id")]
-    pub _id: Option<RequestId>,
+    pub id: Option<RequestId>,
     #[serde(rename = "error")]
     pub _error: AcpErrorObject,
 }
@@ -139,17 +136,77 @@ fn blocks<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<PromptBlock>, D:
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum PromptBlock {
-    Text { text: String },
-    ResourceLink { name: String, uri: String },
+    Text {
+        text: String,
+    },
+    ResourceLink {
+        name: String,
+        uri: String,
+    },
+    Resource {
+        resource: TextResource,
+    },
+    Image {
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+        data: String,
+    },
+}
+
+#[derive(Deserialize)]
+pub(super) struct TextResource {
+    pub uri: String,
+    pub text: String,
+    pub blob: Option<serde::de::IgnoredAny>,
 }
 
 impl Prompt {
-    pub fn text(&self) -> Result<String, ()> {
+    pub fn input(self) -> Result<Vec<arany_cli::protocol::methods::UserInput>, ()> {
+        use arany_cli::protocol::methods::{ImageMediaType, TurnStartParams, UserInput};
         let mut combined = String::new();
+        let mut images = Vec::new();
         for block in &self.prompt {
+            let context;
             let parts: &[&str] = match block {
                 PromptBlock::Text { text } => &[text],
                 PromptBlock::ResourceLink { name, uri } => &["[@", name, "](", uri, ")"],
+                PromptBlock::Resource { resource } => {
+                    if resource.blob.is_some()
+                        || resource.uri.len() > 64 * 1024
+                        || resource.text.len() > 64 * 1024
+                    {
+                        return Err(());
+                    }
+                    context = [
+                        resource
+                            .uri
+                            .replace('&', "&amp;")
+                            .replace('<', "&lt;")
+                            .replace('>', "&gt;")
+                            .replace('"', "&quot;"),
+                        context_body(&resource.text),
+                    ];
+                    &[
+                        "<context ref=\"",
+                        &context[0],
+                        "\">",
+                        &context[1],
+                        "</context>",
+                    ]
+                }
+                PromptBlock::Image { mime_type, data } => {
+                    if mime_type != "image/png"
+                        || images.len() >= arany::MAX_MESSAGE_IMAGES
+                        || data.len() > arany::MAX_IMAGE_BYTES.div_ceil(3) * 4
+                    {
+                        return Err(());
+                    }
+                    images.push(UserInput::Image {
+                        media_type: ImageMediaType::Png,
+                        data: data.clone(),
+                    });
+                    continue;
+                }
             };
             for part in parts {
                 if part.len() > 64 * 1024 - combined.len() {
@@ -158,10 +215,18 @@ impl Prompt {
                 combined.push_str(part);
             }
         }
-        if combined.trim().is_empty() {
+        if combined.trim().is_empty() && images.is_empty() {
             return Err(());
         }
-        Ok(combined)
+        if !combined.is_empty() {
+            images.insert(0, UserInput::Text { text: combined });
+        }
+        // Reuse serve's byte, count and base64 admission before translating the request.
+        let params: TurnStartParams = serde_json::from_value(json!({
+            "threadId": self.session_id, "input": images
+        }))
+        .map_err(|_| ())?;
+        Ok(params.input)
     }
 }
 
@@ -182,7 +247,7 @@ pub(super) fn initialized() -> Value {
         "protocolVersion": 1,
         "agentCapabilities": {
             "loadSession": false,
-            "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false},
+            "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true},
             "mcpCapabilities": {"http": false, "sse": false},
             "sessionCapabilities": {}
         },
@@ -216,4 +281,21 @@ pub(super) fn answer(session: SessionId, text: &str) -> Value {
         "sessionId": session, "update": {"sessionUpdate": "agent_message_chunk",
             "content": {"type": "text", "text": text}}
     }})
+}
+
+fn context_body(text: &str) -> String {
+    let mut safe = String::with_capacity(text.len());
+    let mut start = 0;
+    for (index, _) in text.match_indices('<') {
+        if text.as_bytes()[index..]
+            .get(..9)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"</context"))
+        {
+            safe.push_str(&text[start..index]);
+            safe.push_str("&lt;");
+            start = index + 1;
+        }
+    }
+    safe.push_str(&text[start..]);
+    safe
 }

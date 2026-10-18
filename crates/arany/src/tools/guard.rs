@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{ExitCode, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::{Child, Command};
@@ -151,7 +152,7 @@ impl BuildCacheTransfer {
 }
 
 pub(super) struct BuildCacheSession {
-    pub(super) lease: BuildCacheLease,
+    pub(super) lease: Arc<BuildCacheLease>,
     pub(super) transfer: BuildCacheTransfer,
 }
 
@@ -197,7 +198,7 @@ pub(super) fn build_cache_session(
     };
     let candidate_bytes = lease.candidate_limit();
     Ok(Some(BuildCacheSession {
-        lease,
+        lease: Arc::new(lease),
         transfer: BuildCacheTransfer {
             identity,
             exclusions,
@@ -259,24 +260,23 @@ pub(super) async fn publish_cache_candidate(
         (CacheCandidate::Received, None) => CacheUpdate::NotApplicable,
         (CacheCandidate::Received, Some(cache)) => {
             let publication = tokio::task::spawn_blocking(move || {
-                let mut cache = cache;
-                let mut candidate = match cache.lease.open_candidate() {
+                let Ok(mut lease) = Arc::try_unwrap(cache.lease) else {
+                    return CacheUpdate::Uncertain;
+                };
+                let mut candidate = match lease.open_candidate() {
                     Ok(candidate) => candidate,
-                    Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
+                    Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
                         return CacheUpdate::Rejected;
                     }
-                    Err(_) if cache.lease.publication_uncertain() => return CacheUpdate::Uncertain,
+                    Err(_) if lease.publication_uncertain() => return CacheUpdate::Uncertain,
                     Err(_) => return CacheUpdate::Failed,
                 };
-                match cache
-                    .lease
-                    .publish(&mut candidate, &cache.transfer.exclusions)
-                {
+                match lease.publish(&mut candidate, &cache.transfer.exclusions) {
                     Ok(()) => CacheUpdate::Published,
-                    Err(StoreError::StorageFull) if !cache.lease.publication_uncertain() => {
+                    Err(StoreError::StorageFull) if !lease.publication_uncertain() => {
                         CacheUpdate::Rejected
                     }
-                    Err(_) if cache.lease.publication_uncertain() => CacheUpdate::Uncertain,
+                    Err(_) if lease.publication_uncertain() => CacheUpdate::Uncertain,
                     Err(_) => CacheUpdate::Failed,
                 }
             });
@@ -1000,7 +1000,7 @@ pub(super) async fn send_cache_archive<W: tokio::io::AsyncWrite + Unpin>(
 
 pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
-    lease: &BuildCacheLease,
+    lease: &Arc<BuildCacheLease>,
 ) -> Result<CacheCandidate, ToolError> {
     use tokio::io::AsyncReadExt;
 
@@ -1023,46 +1023,93 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
     if length == 0 || length > lease.candidate_limit() {
         return Err(ToolError::Limit);
     }
-    let staged = drain_candidate(reader, length, lease.candidate_writer().ok()).await?;
-    let Some(file) = staged else {
-        return Ok(CacheCandidate::Failed);
-    };
-    #[cfg(any(test, feature = "test-support"))]
-    let synced =
-        crate::fault::FaultPlan::candidate_sync(lease.token()).and_then(|()| file.sync_all());
-    #[cfg(not(any(test, feature = "test-support")))]
-    let synced = file.sync_all();
-    if synced.is_err() {
-        return Ok(CacheCandidate::Failed);
+    let lease = Arc::clone(lease);
+    let synced = drain_candidate(
+        reader,
+        length,
+        move || {
+            lease.candidate_writer().ok().map(|file| CandidateStaging {
+                file,
+                _lease: lease,
+            })
+        },
+        |staged| {
+            #[cfg(any(test, feature = "test-support"))]
+            let completion = crate::fault::FaultPlan::candidate_sync(staged._lease.token());
+            #[cfg(any(test, feature = "test-support"))]
+            let admitted = completion.is_ok();
+            #[cfg(not(any(test, feature = "test-support")))]
+            let admitted = true;
+            let synced = admitted && staged.file.sync_all().is_ok();
+            drop(staged);
+            #[cfg(any(test, feature = "test-support"))]
+            if let Ok(Some(finished)) = completion {
+                let _ = finished.send(());
+            }
+            synced
+        },
+    )
+    .await?;
+    Ok(if synced {
+        CacheCandidate::Received
+    } else {
+        CacheCandidate::Failed
+    })
+}
+
+// Drop the file before the lease can reclaim its reservation and identity lock.
+struct CandidateStaging {
+    file: cap_std::fs::File,
+    _lease: Arc<BuildCacheLease>,
+}
+
+impl Write for CandidateStaging {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.file.write(bytes)
     }
-    Ok(CacheCandidate::Received)
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
 }
 
 // Keep draining after a staging write failure so the archive stream stays aligned.
-async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write>(
+async fn drain_candidate<R: tokio::io::AsyncRead + Unpin, W: Write + Send + 'static>(
     reader: &mut R,
     length: u64,
-    mut staged: Option<W>,
-) -> Result<Option<W>, ToolError> {
-    use tokio::io::AsyncReadExt;
-
-    let mut buffer = vec![0u8; 32 * 1024];
+    stage: impl FnOnce() -> Option<W> + Send + 'static,
+    finish: impl FnOnce(W) -> bool + Send + 'static,
+) -> Result<bool, ToolError> {
+    let (chunks, mut pending) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+    let writer = tokio::task::spawn_blocking(move || {
+        let mut staged = stage();
+        let mut remaining = length;
+        let mut failed = false;
+        while let Some(bytes) = pending.blocking_recv() {
+            remaining -= bytes.len() as u64;
+            if !failed && let Some(writer) = staged.as_mut() {
+                failed = writer.write_all(&bytes).is_err();
+            }
+        }
+        let Some(mut writer) = staged else {
+            return false;
+        };
+        remaining == 0 && !failed && writer.flush().is_ok() && finish(writer)
+    });
     let mut remaining = length;
+    let mut read = Ok(());
     while remaining > 0 {
-        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
-        reader
-            .read_exact(&mut buffer[..wanted])
-            .await
-            .map_err(|_| ToolError::Operation)?;
-        if staged
-            .as_mut()
-            .is_some_and(|file| file.write_all(&buffer[..wanted]).is_err())
-        {
-            staged = None;
+        let wanted = usize::try_from(remaining.min(32 * 1024)).unwrap_or(32 * 1024);
+        let mut buffer = vec![0u8; wanted];
+        if reader.read_exact(&mut buffer).await.is_err() || chunks.send(buffer).await.is_err() {
+            read = Err(ToolError::Operation);
+            break;
         }
         remaining -= wanted as u64;
     }
-    Ok(staged)
+    drop(chunks);
+    let staged = writer.await.map_err(|_| ToolError::Operation)?;
+    read.map(|()| staged)
 }
 
 // Seatbelt blocks Tokio's signal wake socket, so macOS closes stdin and polls try_wait when reaping.
@@ -2523,7 +2570,7 @@ mod tests {
         let lease = state.begin_build_cache(identity.clone()).unwrap();
         let candidate_bytes = lease.candidate_limit();
         BuildCacheSession {
-            lease,
+            lease: Arc::new(lease),
             transfer: BuildCacheTransfer {
                 identity: identity.clone(),
                 exclusions: Vec::new(),
@@ -2658,35 +2705,120 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn candidate_sync_failure_drains_the_archive_and_keeps_the_prior_archive() {
+    async fn candidate_sync_orders_publication_and_cancellation_keeps_the_prior_archive() {
         if crate::test_process::isolate_test() {
             return;
         }
         let temp = tempfile::tempdir().unwrap();
         let (state, identity) = cache_fixture(temp.path());
         let prior = captured_archive(temp.path(), &identity, b"prior");
-        let candidate = captured_archive(temp.path(), &identity, b"candidate");
+        let candidate = captured_archive(temp.path(), &identity, &vec![b'C'; 2 * 32 * 1024 + 1]);
         publish_archive(&state, &identity, &prior).await;
 
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
-        let mut stream = b"CACHE_CANDIDATE\n".to_vec();
-        stream.extend((candidate.len() as u64).to_le_bytes());
-        stream.extend(&candidate);
-        stream.extend(b"CACHE_DONE\n");
-        let mut reader = tokio::io::BufReader::new(stream.as_slice());
-        crate::fault::FaultPlan::fail_candidate_sync(&identity);
-        let outcome = receive_cache_candidate(&mut reader, &lease).await.unwrap();
-        assert!(matches!(outcome, CacheCandidate::Failed));
-        let mut trailer = String::new();
-        reader.read_line(&mut trailer).await.unwrap();
-        assert_eq!(trailer, "CACHE_DONE\n");
-        drop(lease);
+        for action in ["cancel", "timeout", "fail", "publish"] {
+            let session = cache_session(&state, &identity);
+            let mut stream = b"CACHE_CANDIDATE\n".to_vec();
+            stream.extend((candidate.len() as u64).to_le_bytes());
+            stream.extend(&candidate);
+            stream.extend(b"CACHE_DONE\n");
+            let mut reader = tokio::io::BufReader::new(stream.as_slice());
+            let (entered, release, finished) =
+                crate::fault::FaultPlan::gate_candidate_sync(&identity);
+            if action == "fail" {
+                crate::fault::FaultPlan::fail_candidate_sync(&identity);
+            }
+            let mut receive = Box::pin(receive_cache_candidate(&mut reader, &session.lease));
+            tokio::select! {
+                biased;
+                _ = &mut receive => panic!("candidate returned before sync: {action}"),
+                result = entered => {
+                    result.unwrap();
+                }
+            }
+            let (mut committed, _) = session.lease.archive().unwrap().unwrap();
+            let mut bytes = Vec::new();
+            committed.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, prior);
 
-        assert_eq!(committed_archive(&state, &identity), prior);
+            if matches!(action, "cancel" | "timeout") {
+                if action == "timeout" {
+                    assert!(
+                        tokio::time::timeout_at(tokio::time::Instant::now(), &mut receive)
+                            .await
+                            .is_err()
+                    );
+                }
+                drop(receive);
+                drop(session);
+                let reservation = state
+                    .path()
+                    .join("build-cache")
+                    .join(format!("reserve-{}.reserve", identity.token()));
+                let candidate_path = state
+                    .path()
+                    .join("build-cache")
+                    .join(format!("candidate-{}.arc", identity.token()));
+                assert!(reservation.exists(), "reservation released during {action}");
+                assert!(
+                    candidate_path.exists(),
+                    "candidate unlinked during {action}"
+                );
+                assert!(matches!(
+                    state.begin_build_cache(identity.clone()),
+                    Err(StoreError::BuildCacheBusy)
+                ));
+                let (_, held_capacity) = state
+                    .effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
+                    .unwrap();
+                release.send(()).unwrap();
+                finished.await.unwrap();
+                assert!(!reservation.exists(), "reservation retained after {action}");
+                assert!(
+                    !candidate_path.exists(),
+                    "candidate retained after {action}"
+                );
+                let (_, released_capacity) = state
+                    .effective_build_cache_bytes(&identity, MAX_BUILD_CACHE_BYTES)
+                    .unwrap();
+                assert!(released_capacity > held_capacity);
+                assert_eq!(committed_archive(&state, &identity), prior);
+                continue;
+            }
+            release.send(()).unwrap();
+            let outcome = receive.await.unwrap();
+            assert!(
+                outcome
+                    == if action == "fail" {
+                        CacheCandidate::Failed
+                    } else {
+                        CacheCandidate::Received
+                    },
+                "unexpected candidate outcome: {action}"
+            );
+            let mut trailer = String::new();
+            reader.read_line(&mut trailer).await.unwrap();
+            assert_eq!(trailer, "CACHE_DONE\n");
+            let mut observation = command_observation();
+            publish_cache_candidate(&mut observation, outcome, Some(session), far_deadline()).await;
+            assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+            assert_eq!(
+                observation.cache_update,
+                if action == "fail" {
+                    CacheUpdate::Failed
+                } else {
+                    CacheUpdate::Published
+                }
+            );
+            assert_eq!(
+                &committed_archive(&state, &identity),
+                if action == "fail" { &prior } else { &candidate }
+            );
+        }
     }
 
     struct FailAfter {
         remaining: usize,
+        flush_fails: bool,
     }
 
     impl Write for FailAfter {
@@ -2697,27 +2829,144 @@ mod tests {
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+            if self.flush_fails {
+                Err(std::io::Error::other("injected flush failure"))
+            } else {
+                Ok(())
+            }
         }
     }
 
     #[tokio::test]
-    async fn candidate_drain_consumes_the_archive_after_a_write_failure() {
-        let archive = b"ARCHIVE\nbytes";
-        let mut stream = archive.to_vec();
-        stream.extend(b"CACHE_DONE\n");
-        let mut reader = tokio::io::BufReader::new(stream.as_slice());
-        let staged = drain_candidate(
+    async fn candidate_read_error_waits_for_the_writer_to_stop() {
+        struct GatedWriter {
+            entered: Option<tokio::sync::oneshot::Sender<()>>,
+            release: std::sync::mpsc::Receiver<()>,
+            stopped: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+
+        impl Write for GatedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let _ = self.entered.take().unwrap().send(());
+                self.release
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(std::io::Error::other)?;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                panic!("truncated candidate reached flush");
+            }
+        }
+
+        impl Drop for GatedWriter {
+            fn drop(&mut self) {
+                let _ = self.stopped.take().unwrap().send(());
+            }
+        }
+
+        let (entered, writing) = tokio::sync::oneshot::channel();
+        let (release, gate) = std::sync::mpsc::sync_channel(1);
+        let (stopped, mut completion) = tokio::sync::oneshot::channel();
+        let archive = vec![b'A'; 32 * 1024];
+        let mut reader = archive.as_slice();
+        let mut receive = Box::pin(drain_candidate(
             &mut reader,
-            archive.len() as u64,
-            Some(FailAfter { remaining: 4 }),
-        )
-        .await
-        .unwrap();
-        assert!(staged.is_none());
-        let mut trailer = String::new();
-        reader.read_line(&mut trailer).await.unwrap();
-        assert_eq!(trailer, "CACHE_DONE\n");
+            archive.len() as u64 + 1,
+            move || {
+                Some(GatedWriter {
+                    entered: Some(entered),
+                    release: gate,
+                    stopped: Some(stopped),
+                })
+            },
+            |_| panic!("truncated candidate reached sync"),
+        ));
+        let early = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                biased;
+                result = &mut receive => Some(result),
+                result = writing => {
+                    result.unwrap();
+                    None
+                }
+            }
+        })
+        .await;
+        release.send(()).unwrap();
+        let early = early.unwrap();
+        let returned_early = early.is_some();
+        let result = match early {
+            Some(result) => result,
+            None => tokio::time::timeout(Duration::from_secs(5), receive)
+                .await
+                .unwrap(),
+        };
+        let stopped_before_return = completion.try_recv().is_ok();
+        if !stopped_before_return {
+            tokio::time::timeout(Duration::from_secs(5), completion)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert!(
+            !returned_early,
+            "read error returned while the writer was held"
+        );
+        assert!(
+            stopped_before_return,
+            "staging survived the read error return"
+        );
+        assert!(matches!(result, Err(ToolError::Operation)));
+    }
+
+    #[tokio::test]
+    async fn candidate_drain_keeps_framing_and_skips_sync_after_failures() {
+        let archive = vec![b'A'; 2 * 32 * 1024 + 1];
+        let reactor = std::thread::current().id();
+        for (create_fails, remaining, flush_fails, truncated) in [
+            (true, usize::MAX, false, false),
+            (false, 4, false, false),
+            (false, usize::MAX, true, false),
+            (false, usize::MAX, false, true),
+        ] {
+            let mut stream = archive.clone();
+            if truncated {
+                stream.pop();
+            } else {
+                stream.extend(b"CACHE_DONE\n");
+            }
+            let mut reader = tokio::io::BufReader::new(stream.as_slice());
+            let (synced, completion) = tokio::sync::oneshot::channel();
+            let staged = drain_candidate(
+                &mut reader,
+                archive.len() as u64,
+                move || {
+                    assert_ne!(std::thread::current().id(), reactor);
+                    (!create_fails).then_some(FailAfter {
+                        remaining,
+                        flush_fails,
+                    })
+                },
+                move |_| {
+                    let _ = synced.send(());
+                    true
+                },
+            )
+            .await;
+            assert!(
+                completion.await.is_err(),
+                "failed staging reached candidate sync"
+            );
+            if truncated {
+                assert!(matches!(staged, Err(ToolError::Operation)));
+                continue;
+            }
+            assert!(!staged.unwrap());
+            let mut trailer = String::new();
+            reader.read_line(&mut trailer).await.unwrap();
+            assert_eq!(trailer, "CACHE_DONE\n");
+        }
     }
 
     #[tokio::test]
@@ -2742,7 +2991,7 @@ mod tests {
         .await;
         assert_eq!(observation.cache_update, CacheUpdate::Published);
 
-        let lease = state.begin_build_cache(identity.clone()).unwrap();
+        let lease = Arc::new(state.begin_build_cache(identity.clone()).unwrap());
         // Occupies the candidate name, so the create_new staging step fails.
         drop(lease.candidate_writer().unwrap());
 

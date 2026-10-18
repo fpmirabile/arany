@@ -1,6 +1,6 @@
 use arany::{
     ApprovalInbox, EffectIntent, Event, RunCancellation, SessionId, StateRoot, Store, ToolApproval,
-    ToolCall, UnguardedPrompt,
+    ToolCall, UnguardedPrompt, now_ms,
 };
 use arany_cli::protocol::{methods::*, rpc::*};
 use serde_json::Value;
@@ -11,7 +11,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicI64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::{
     sync::{Notify, mpsc, oneshot},
@@ -32,6 +32,12 @@ struct State {
     closed: bool,
 }
 
+pub(super) struct Channel {
+    pub outbound: mpsc::Sender<Message>,
+    pub next_id: Arc<AtomicI64>,
+    pub withdrawals: bool,
+}
+
 pub(super) struct Approvals {
     state: Arc<Mutex<State>>,
     changed: Arc<Notify>,
@@ -44,8 +50,7 @@ impl Approvals {
         mut inbox: ApprovalInbox,
         mut cancel: RunCancellation,
         thread_id: SessionId,
-        outbound: mpsc::Sender<Message>,
-        next_id: Arc<AtomicI64>,
+        channel: Channel,
         mut finished: RunCancellation,
         started_at: Lookup,
     ) -> Self
@@ -53,6 +58,11 @@ impl Approvals {
         Lookup: Fn(EffectIntent) -> Started + Send + 'static,
         Started: Future<Output = Option<i64>> + Send,
     {
+        let Channel {
+            outbound,
+            next_id,
+            withdrawals,
+        } = channel;
         let state = Arc::new(Mutex::new(State::default()));
         let changed = Arc::new(Notify::new());
         let mut owner = Self {
@@ -83,14 +93,14 @@ impl Approvals {
                         deadline = None;
                     }
                     () = async { current.as_mut().expect("approval").abandoned().await }, if current.is_some() => {
-                        state.lock().expect("approval state").pending.take();
+                        withdraw(&state, &outbound, withdrawals);
                         current = None;
                         answer = None;
                         outgoing = None;
                         deadline = None;
                     }
                     () = async { tokio::time::sleep_until(deadline.expect("pending expiry")).await }, if deadline.is_some() => {
-                        state.lock().expect("approval state").pending.take();
+                        withdraw(&state, &outbound, withdrawals);
                         current = None;
                         answer = None;
                         outgoing = None;
@@ -150,7 +160,9 @@ impl Approvals {
             }
             let mut state = state.lock().expect("approval state");
             state.closed = true;
-            state.pending.take();
+            let pending = state.pending.take();
+            drop(state);
+            notify_withdrawal(pending, &outbound, withdrawals);
         }));
         owner
     }
@@ -205,13 +217,18 @@ impl Drop for Approvals {
     }
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
+fn withdraw(state: &Mutex<State>, output: &mpsc::Sender<Message>, enabled: bool) {
+    let pending = state.lock().expect("approval state").pending.take();
+    notify_withdrawal(pending, output, enabled);
+}
+
+fn notify_withdrawal(pending: Option<Pending>, output: &mpsc::Sender<Message>, enabled: bool) {
+    if enabled && let Some(pending) = pending.filter(|pending| pending.sent) {
+        let _ = output.try_send(Message::Notification(super::items::notification(
+            "$/cancel_request",
+            serde_json::json!({"requestId": pending.id}),
+        )));
+    }
 }
 
 pub(super) async fn started_at(
@@ -367,8 +384,11 @@ mod tests {
             inbox,
             RunCancellation::new(),
             SessionId::new(),
-            outbound,
-            Arc::new(AtomicI64::new(1)),
+            Channel {
+                outbound,
+                next_id: Arc::new(AtomicI64::new(1)),
+                withdrawals: false,
+            },
             RunCancellation::new(),
             |_| async { Some(1) },
         );
@@ -385,43 +405,55 @@ mod tests {
     #[tokio::test]
     async fn one_approval_is_pending_and_an_abandoned_ask_frees_the_slot() {
         let _deadline = crate::cli::serve::tests::deadline();
-        let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
-        let (outbound, mut output) = mpsc::channel(8);
-        let owner = Approvals::start(
-            inbox,
-            RunCancellation::new(),
-            SessionId::new(),
-            outbound,
-            Arc::new(AtomicI64::new(1)),
-            RunCancellation::new(),
-            |_| async { Some(1) },
-        );
-        let ask = |call| {
-            let approvals = approvals.clone();
-            tokio::spawn(async move {
-                arany::test_support::approval::ask(&approvals, &intent(call)).await
-            })
-        };
-        let first = ask(read());
-        let request = next_request(&mut output).await;
-        assert_eq!(request.id, RequestId::Integer(1));
-        assert!(!ask(read()).await.expect("second ask"));
-        assert!(output.try_recv().is_err());
-        owner.respond(request.id, Some(serde_json::json!({"decision":"accept"})));
-        assert!(first.await.expect("first ask"));
+        for withdrawals in [false, true] {
+            let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
+            let (outbound, mut output) = mpsc::channel(8);
+            let owner = Approvals::start(
+                inbox,
+                RunCancellation::new(),
+                SessionId::new(),
+                Channel {
+                    outbound,
+                    next_id: Arc::new(AtomicI64::new(1)),
+                    withdrawals,
+                },
+                RunCancellation::new(),
+                |_| async { Some(1) },
+            );
+            let ask = |call| {
+                let approvals = approvals.clone();
+                tokio::spawn(async move {
+                    arany::test_support::approval::ask(&approvals, &intent(call)).await
+                })
+            };
+            let first = ask(read());
+            let request = next_request(&mut output).await;
+            assert_eq!(request.id, RequestId::Integer(1));
+            assert!(!ask(read()).await.expect("second ask"));
+            assert!(output.try_recv().is_err());
+            owner.respond(request.id, Some(serde_json::json!({"decision":"accept"})));
+            assert!(first.await.expect("first ask"));
 
-        let abandoned = ask(read());
-        let request = next_request(&mut output).await;
-        assert_eq!(request.id, RequestId::Integer(2));
-        abandoned.abort();
-        let _ = abandoned.await;
-        let third = ask(read());
-        assert_eq!(next_request(&mut output).await.id, RequestId::Integer(3));
-        owner.respond(
-            RequestId::Integer(2),
-            Some(serde_json::json!({"decision":"accept"})),
-        );
-        owner.close();
-        assert!(!third.await.expect("third ask"));
+            let abandoned = ask(read());
+            let request = next_request(&mut output).await;
+            assert_eq!(request.id, RequestId::Integer(2));
+            abandoned.abort();
+            let _ = abandoned.await;
+            let third = ask(read());
+            if withdrawals {
+                let Some(Message::Notification(note)) = output.recv().await else {
+                    panic!("approval withdrawal")
+                };
+                assert_eq!(note.method, "$/cancel_request");
+                assert_eq!(note.params.unwrap()["requestId"], 2);
+            }
+            assert_eq!(next_request(&mut output).await.id, RequestId::Integer(3));
+            owner.respond(
+                RequestId::Integer(2),
+                Some(serde_json::json!({"decision":"accept"})),
+            );
+            owner.close();
+            assert!(!third.await.expect("third ask"));
+        }
     }
 }

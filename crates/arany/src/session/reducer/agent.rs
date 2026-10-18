@@ -38,8 +38,7 @@ pub(super) fn is_child_step(agent: &AgentView, record: &ProviderCallRecord) -> b
                 && agent
                     .tools
                     .last()
-                    .and_then(|tool| tool.observation.as_ref())
-                    .is_some_and(|observation| !observation.stops_run())))
+                    .is_some_and(ToolView::settled_without_stop)))
 }
 
 pub(super) fn names_child(view: &SessionView, run_id: RunId, agent_run_id: AgentRunId) -> bool {

@@ -1566,7 +1566,8 @@ mod payload_version_tests {
     fn superseded_hook_and_terminal_versions_are_rejected() {
         for (kind, old) in [
             ("HookFinished", 2),
-            ("AgentFinished", 7),
+            ("HookFinished", 3),
+            ("AgentFinished", 8),
             ("RunFinished", 7),
             ("ProviderCallRecorded", 7),
         ] {

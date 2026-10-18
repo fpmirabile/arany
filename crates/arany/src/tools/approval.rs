@@ -38,6 +38,7 @@ impl ApprovalMode {
 pub struct ToolApprovals {
     mode: watch::Sender<ApprovalMode>,
     sender: mpsc::Sender<ToolApproval>,
+    human_only: bool,
 }
 
 pub struct ApprovalInbox(mpsc::Receiver<ToolApproval>);
@@ -88,7 +89,23 @@ impl ToolApprovals {
     pub fn new(mode: ApprovalMode) -> (Self, ApprovalInbox) {
         let (sender, receiver) = mpsc::channel(1);
         let (mode, _) = watch::channel(mode);
-        (Self { mode, sender }, ApprovalInbox(receiver))
+        (
+            Self {
+                mode,
+                sender,
+                human_only: true,
+            },
+            ApprovalInbox(receiver),
+        )
+    }
+
+    pub fn without_human_only(mut self) -> Self {
+        self.human_only = false;
+        self
+    }
+
+    pub(crate) fn admits_human_only(&self, call: &ToolCall, hook_ask: bool) -> bool {
+        self.human_only || !(call.is_unguarded() || hook_ask)
     }
 
     pub fn mode(&self) -> ApprovalMode {
