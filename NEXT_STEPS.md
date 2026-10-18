@@ -26,7 +26,7 @@ Arany is a harness for multi-agent coding teams that can be trusted to work auto
 10. **Multi-call steps (Stage D)** after probe P2; copy Anthropic parallel `tool_use` with the journal's four-call cap.
 11. **C2 edit-only workers.** The bounded Claude-format definition loader and researcher selection are implemented ([execution](./docs/specs/execution.md#agent-definitions), [parser admission](./docs/specs/tools.md#agent-definition-parser-admission)); editor execution remains refused. The typed [worker journal/replay protocol](./docs/specs/execution.md#worker-journal-protocol) is implemented; runtime worker grants remain unavailable. Remaining slices: private edit targets and bounded handovers, one foreground worker with primary integration/verification, mixed/background waves, then explicit fresh-assignment ID resume. Keep accepted owner defaults in those specs. Native Linux/macOS parser execution, cancellation during parser work and no-host-execution evidence on the final head, plus real-model definition selection and full channel/telemetry canary evidence, remain unverified until their lanes run; synthetic corpora and compiled adapters alone do not establish those claims.
 12. **C3 command-capable views and the Supervisor as hook adapters.** Owner decision before signal enforcement: calibrate loop/probing/disproportion thresholds from shadow-mode corpus and dogfooding. Thresholds remain open, not implemented behavior.
-13. **ACP adapter** (`arany acp`) over the stdio protocol (Goose's `goose acp` shape) for Zed, JetBrains and Neovim, using the vocabulary boundary from item 8.
+13. **ACP remaining slices.** [Core text turns](./docs/specs/acp.md) use the existing serve loop. Continue in order: (2) guarded `--tools`, one-use permissions with human-only asks unavailable, rich prompts and uncertain Tool projection; (3) load/replay and resume; (4) modes/config options via serve settings; (5) session close/list; (6) closed budget stop reasons, plan projection and optional Goal controls/committed display. Keep client fs/terminal delegation and editor MCP execution unavailable. Revisit item 8's extraction trigger only under measured pressure.
 
 Dogfooding starts after item 2; the owner leads it when that point is reached. Every later item is exercised through real use and supplies the Supervisor's calibration data.
 
@@ -147,3 +147,7 @@ to the user's credential store or clipboard.
 These gates remain unverified until their named procedure completes. Specs and
 existing tests describe what must hold; neither implemented code nor an old
 passing run establishes broader support.
+
+### ACP editor evidence
+
+User-owned check: configure `arany acp` using the [setup guide](./docs/setup.md#use-an-acp-editor), then exercise a text turn, cancellation, restart and unavailable credentials in Zed on Linux and macOS, a JetBrains ACP client, and Neovim CodeCompanion or avante. Verify stdout isolation and the final committed answer against `arany show`. These native editor workflows remain unverified; synthetic protocol tests do not establish compatibility.

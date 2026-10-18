@@ -2889,3 +2889,111 @@ fn serve_rejects_unsupported_transport_and_terminal_input_before_state_admission
     );
     assert!(!state.exists());
 }
+
+#[test]
+fn acp_stdio_negotiates_reports_auth_required_and_exits_cleanly() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let input = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"arany-setup"}}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"session/new","params":{"cwd":workspace,"mcpServers":[]}})
+    );
+    let output = process::file_output(
+        Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .current_dir(&workspace)
+            .args([
+                "acp",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-5.4",
+                "--state-dir",
+            ])
+            .arg(&state),
+        Some(input.as_bytes()),
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/acp/schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let mut messages: Vec<serde_json::Value> = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    messages.sort_by_key(|message| message["id"].as_i64());
+    assert_eq!(messages.len(), 3);
+    assert!(messages.iter().all(|message| validator.is_valid(message)));
+    assert_eq!(messages[0]["result"]["protocolVersion"], 1);
+    for message in &messages[1..] {
+        assert_eq!(message["error"]["code"], -32000);
+        assert_eq!(message["error"]["data"]["reason"], "auth_required");
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            assert!(
+                arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        });
+}
+
+#[test]
+fn acp_refuses_tools_and_terminal_input_before_state_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let output = process::file_output(
+        Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .current_dir(root.path())
+            .args([
+                "acp",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-5.4",
+                "--tools",
+                "--state-dir",
+            ])
+            .arg(&state),
+        None,
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(!state.exists());
+    let (_master, slave) = process::cloexec_pty(None);
+    let output = Command::new(env!("CARGO_BIN_EXE_arany"))
+        .env_clear()
+        .current_dir(root.path())
+        .args([
+            "acp",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.4",
+            "--state-dir",
+        ])
+        .arg(&state)
+        .stdin(slave)
+        .bounded_output_with_input()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"error: acp requires piped stdin and stdout\n"
+    );
+    assert!(!state.exists());
+}
