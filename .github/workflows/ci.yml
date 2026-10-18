@@ -37,6 +37,64 @@ env:
   RUSTFLAGS: --cfg arany_ci
 
 jobs:
+  hygiene:
+    name: Linux hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_MACHETE_VERSION: 0.9.1
+      TYPOS_VERSION: 1.35.8
+      TAPLO_VERSION: 0.10.0
+      CARGO_TERM_COLOR: never
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install repository Rust toolchain
+        run: rustup show
+      - name: Install pinned tools and check hygiene
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          work="$(mktemp -d "$RUNNER_TEMP/hygiene.XXXXXX")"
+          output_limit=65536
+
+          run_bounded() {
+            local seconds="$1" label="$2"
+            shift 2
+            local -a statuses
+            set +e
+            timeout --signal=TERM --kill-after=10s "${seconds}s" "$@" 2>&1 |
+              head -c "$((output_limit + 1))" | tee "$work/$label.log"
+            statuses=("${PIPESTATUS[@]}")
+            set -e
+            if (( $(stat -c %s "$work/$label.log") > output_limit )); then
+              printf '\nhygiene: %s output exceeded %s bytes\n' "$label" "$output_limit" >&2
+              return 125
+            fi
+            for status in "${statuses[@]}"; do
+              (( status == 0 )) || return "$status"
+            done
+          }
+
+          run_bounded 540 install-machete cargo install --quiet --locked --version "$CARGO_MACHETE_VERSION" cargo-machete
+          run_bounded 540 install-typos cargo install --quiet --locked --version "$TYPOS_VERSION" typos-cli
+          run_bounded 540 install-taplo cargo install --quiet --locked --version "$TAPLO_VERSION" taplo-cli
+          run_bounded 30 machete-version cargo machete --version
+          run_bounded 30 typos-version typos --version
+          run_bounded 30 taplo-version taplo --version
+          if [[ "$(< "$work/machete-version.log")" != "$CARGO_MACHETE_VERSION" ||
+                "$(< "$work/typos-version.log")" != "typos-cli $TYPOS_VERSION" ||
+                "$(< "$work/taplo-version.log")" != "taplo $TAPLO_VERSION" ]]; then
+            printf 'hygiene: installed tool versions do not match the pins\n' >&2
+            exit 1
+          fi
+          run_bounded 120 machete cargo machete
+          run_bounded 120 typos typos
+          run_bounded 120 taplo taplo fmt --check
+
   changes:
     name: Detect code changes
     if: github.event_name != 'workflow_dispatch'
