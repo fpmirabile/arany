@@ -105,7 +105,7 @@ pub(super) struct RunLoop<'a> {
     routing: super::routing::CallRouter<'a>,
     session_id: SessionId,
     run_id: RunId,
-    goal_id: crate::session::GoalId,
+    goal_id: Option<crate::session::GoalId>,
     primary_id: AgentRunId,
     controls: LoopControls<'a>,
     ledger: &'a GoalLedger,
@@ -128,7 +128,7 @@ pub(super) struct LoopControls<'a> {
 pub(super) struct RunIdentity {
     pub(super) session_id: SessionId,
     pub(super) run_id: RunId,
-    pub(super) goal_id: crate::session::GoalId,
+    pub(super) goal_id: Option<crate::session::GoalId>,
     pub(super) primary_id: AgentRunId,
 }
 
@@ -160,6 +160,11 @@ impl<'a> RunLoop<'a> {
         }
     }
 
+    // Only a fork boundary hook runs without a Goal.
+    pub(super) fn goal(&self) -> Result<crate::session::GoalId, EngineError> {
+        self.goal_id.ok_or(EngineError::InvalidHistory)
+    }
+
     fn ledger(&self) -> &GoalLedger {
         self.ledger
     }
@@ -187,7 +192,7 @@ impl<'a> RunLoop<'a> {
             primary_active,
             other_agents_closed,
         ) = self.ledger().view(|view| -> Result<_, EngineError> {
-            let goal = view.goal(self.goal_id).ok_or(EngineError::InvalidHistory)?;
+            let goal = view.goal(self.goal()?).ok_or(EngineError::InvalidHistory)?;
             let run = view
                 .runs
                 .iter()
@@ -323,7 +328,7 @@ impl<'a> RunLoop<'a> {
                 .await?;
         }
         self.append(Event::GoalProviderCallReserved {
-            goal_id: self.goal_id,
+            goal_id: self.goal()?,
             run_id: self.run_id,
             agent_run_id,
             active_ceiling_ms: self.ledger().active_ceiling(pending_ms)?,
@@ -351,7 +356,7 @@ impl<'a> RunLoop<'a> {
             return Ok(());
         };
         self.append(Event::GoalSteeringNoteRecorded {
-            goal_id: self.goal_id,
+            goal_id: self.goal()?,
             run_id: self.run_id,
             text: text.clone(),
         })
@@ -412,7 +417,7 @@ impl<'a> RunLoop<'a> {
             )
             .await?;
         self.append(Event::GoalPlanContractRecorded {
-            goal_id: self.goal_id,
+            goal_id: self.goal()?,
             run_id: self.run_id,
             contract,
         })

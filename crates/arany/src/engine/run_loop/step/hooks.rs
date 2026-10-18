@@ -643,7 +643,7 @@ impl RunLoop<'_> {
     fn lifecycle_ceiling(&self, pending_ms: u64) -> Result<u64, EngineError> {
         let ceiling = self.ledger().active_ceiling(pending_ms)?;
         let remaining = self.ledger().view(|view| {
-            view.goal(self.goal_id).and_then(|goal| {
+            self.goal_id.and_then(|id| view.goal(id)).and_then(|goal| {
                 goal.effective_budget()
                     .max_active_ms
                     .map(|limit| limit.saturating_sub(goal.active_ms))

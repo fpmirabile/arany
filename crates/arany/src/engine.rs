@@ -1231,7 +1231,7 @@ impl Engine {
                 RunIdentity {
                     session_id: request.session_id,
                     run_id: request.run_id,
-                    goal_id,
+                    goal_id: Some(goal_id),
                     primary_id: request.agent_run_id,
                 },
                 controls,

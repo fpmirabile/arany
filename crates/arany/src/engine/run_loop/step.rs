@@ -1137,7 +1137,11 @@ impl RunLoop<'_> {
         let objective = if mode == ApprovalMode::Auto && self.ledger().admits(Action::Review) {
             Some(
                 self.ledger()
-                    .view(|view| view.goal(self.goal_id).map(|goal| goal.objective.clone()))?
+                    .view(|view| {
+                        self.goal_id
+                            .and_then(|id| view.goal(id))
+                            .map(|goal| goal.objective.clone())
+                    })?
                     .ok_or(EngineError::InvalidHistory)?,
             )
         } else {

@@ -127,7 +127,7 @@ impl RunLoop<'_> {
             )
             .await?;
         self.append(Event::GoalCompactionCallReserved {
-            goal_id: self.goal_id,
+            goal_id: self.goal()?,
             run_id: self.run_id,
             active_ceiling_ms: self.ledger().active_ceiling(0)?,
         })
@@ -399,7 +399,7 @@ impl RunLoop<'_> {
             )
             .await?;
         self.append(Event::GoalContextCompacted {
-            goal_id: self.goal_id,
+            goal_id: self.goal()?,
             run_id: self.run_id,
             covered_tool_count: window.covered_tool_count,
             record: record.clone(),

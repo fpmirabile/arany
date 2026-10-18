@@ -253,7 +253,7 @@ impl Engine {
             super::run_loop::RunIdentity {
                 session_id,
                 run_id: run.id,
-                goal_id: goal_id.unwrap_or_else(crate::session::GoalId::new),
+                goal_id,
                 primary_id,
             },
             super::run_loop::LoopControls {
