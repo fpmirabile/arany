@@ -995,12 +995,7 @@ async fn worker_ready(
         },
     )
     .await
-    .map_err(|_| {
-        ToolError::GuardBootstrap(BootstrapFailure {
-            stage: BootstrapStage::Handshake,
-            check: None,
-        })
-    })?
+    .map_err(|_| ToolError::GuardBootstrap(BootstrapFailure::at(BootstrapStage::Handshake)))?
 }
 
 async fn execute_worker(
