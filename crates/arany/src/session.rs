@@ -37,12 +37,12 @@ pub(crate) use events::{
     MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, STORE_ACTION_OVERHEAD_MS, payload_version,
 };
 pub(crate) use lineage::prefix_digest;
-pub(crate) use reducer::ForkInheritance;
 #[cfg(test)]
 pub(crate) use reducer::worker_tests::completed_fixture as worker_protocol_fixture;
 pub use reducer::{
     AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,
 };
+pub(crate) use reducer::{ForkInheritance, evidence_admitted, verification_passed};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionListItem {

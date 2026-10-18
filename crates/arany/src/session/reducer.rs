@@ -9,6 +9,7 @@ use crate::provider::AgentPhase;
 mod agent;
 mod worker;
 pub use worker::{WorkerState, WorkerView};
+pub(crate) use worker::{evidence_admitted, verification_passed};
 mod goal;
 mod run;
 mod session;

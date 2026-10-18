@@ -21,6 +21,7 @@ async fn worker_teams_completion_failure_caps_leases_background_waves_and_cancel
         "order",
         "fallback",
         "failure",
+        "conflict",
         "mixed",
         "c1_failure",
         "cap",

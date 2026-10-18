@@ -162,13 +162,23 @@ impl RunLoop<'_> {
         })
     }
 
-    pub(super) async fn run_children(
+    pub(super) fn run_children<'a>(
+        &'a self,
+        root_request: &'a mut ProviderRequest,
+        objectives: Vec<ChildAssignment>,
+        agent: Option<String>,
+        delegate_turn: ProviderTurn,
+    ) -> super::step::BoxedStep<'a, bool> {
+        Box::pin(self.run_children_inner(root_request, objectives, agent, delegate_turn))
+    }
+
+    async fn run_children_inner(
         &self,
         root_request: &mut ProviderRequest,
         objectives: Vec<ChildAssignment>,
         agent: Option<String>,
         delegate_turn: ProviderTurn,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         let count = objectives.len();
         let Some(Spawned {
             mut children,
@@ -178,7 +188,7 @@ impl RunLoop<'_> {
             .spawn_children(count, objectives.iter().any(|a| a.editor.is_some()))
             .await?
         else {
-            return self.settle_stopped_primary().await;
+            return self.settle_stopped_primary().await.map(|()| false);
         };
         let deadline = active_segment
             .as_ref()
@@ -280,11 +290,12 @@ impl RunLoop<'_> {
                 AbortReason::Budget | AbortReason::Cancelled | AbortReason::Paused => {
                     self.settle_stopped_primary().await
                 }
-            };
+            }
+            .map(|()| false);
         }
         if let Some((requests, turn)) = queue.primary_step.take() {
             let Some(request) = self.begin_tool_step(requests).await? else {
-                return self.fail_primary().await;
+                return self.fail_primary().await.map(|()| false);
             };
             if !Box::pin(self.execute_step(
                 Grant::Primary {
@@ -296,11 +307,11 @@ impl RunLoop<'_> {
             ))
             .await?
             {
-                return self.fail_primary().await;
+                return self.fail_primary().await.map(|()| false);
             }
             self.verify_workers().await?;
         }
-        self.synthesize(root_request).await
+        self.begin_synthesis(root_request).await
     }
 
     async fn spawn_children(
@@ -630,18 +641,6 @@ impl RunLoop<'_> {
                     _ => false,
                 };
             let step_disposition = if children[index].editor {
-                let valid_response = self.ledger().tokens_within_limit()
-                    && match &result {
-                        CallResult::Response(ProviderResponse {
-                            outcome: ProviderOutcome::Finish(f),
-                            ..
-                        }) => valid_finish(f, MAX_CHILD_RESULT_BYTES),
-                        CallResult::Response(ProviderResponse {
-                            outcome: ProviderOutcome::Tools(requests),
-                            ..
-                        }) => self.valid_child_tools(&children[index], requests),
-                        _ => false,
-                    };
                 self.append(Event::ProviderCallRecorded {
                     run_id: self.run_id,
                     agent_run_id: children[index].agent_run_id,
@@ -968,17 +967,16 @@ impl RunLoop<'_> {
         Ok(ChildStop::End(AgentDisposition::Failed))
     }
 
-    pub(super) async fn synthesize(
+    pub(super) async fn begin_synthesis(
         &self,
         root_request: &mut ProviderRequest,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         if !self.ledger().can_start_provider_call() {
-            return self.settle_stopped_primary().await;
+            return self.settle_stopped_primary().await.map(|()| false);
         }
         root_request.phase = AgentPhase::RootSynthesis;
         self.refresh_team_context(root_request)?;
-        // drive_primary reaches run_children, which reaches synthesize again.
-        Box::pin(self.drive_primary(root_request)).await
+        Ok(true)
     }
 
     fn refresh_team_context(&self, root: &mut ProviderRequest) -> Result<(), EngineError> {
@@ -1391,12 +1389,18 @@ impl RunLoop<'_> {
 
     fn valid_child_tools(&self, child: &ChildWork, requests: &[ToolRequest]) -> bool {
         matches!(requests, [request]
-            if request.plan_contract.is_none()
-                && child.tools.is_some()
-                && child.tool_calls_remaining > 0 && child.turns_remaining > 0
-                && request.call.valid()
-                && (if child.editor { self.proposed_editor(Some(child.agent_run_id)).and_then(|a| self.editor_grant(&a)).is_ok_and(|g| g.allows(&request.call)) } else { request.call.is_child_research() })
-                && child.definition.as_ref().is_none_or(|definition| definition.allows(&request.call)))
+        if request.plan_contract.is_none()
+            && child.tools.is_some()
+            && child.tool_calls_remaining > 0 && child.turns_remaining > 0
+            && request.call.valid()
+            && (if child.editor {
+                self.proposed_editor(Some(child.agent_run_id))
+                    .and_then(|a| self.editor_grant(&a))
+                    .is_ok_and(|g| g.allows(&request.call))
+            } else {
+                request.call.is_child_research()
+                    && child.definition.as_ref().is_none_or(|definition| definition.allows(&request.call))
+            }))
     }
 
     async fn finish_child(

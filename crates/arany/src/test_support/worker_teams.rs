@@ -27,6 +27,7 @@ struct TeamProvider {
     gates: [Semaphore; 8],
     active: AtomicUsize,
     maximum: AtomicUsize,
+    stale: Mutex<usize>,
 }
 
 struct ActiveCall<'a>(&'a AtomicUsize);
@@ -251,10 +252,21 @@ impl TeamProvider {
             .iter()
             .rposition(|s| s.requests.is_empty())
             .unwrap_or(0);
-        let observations: Vec<_> = tools.steps[boundary..]
+        let mut observations: Vec<_> = tools.steps[boundary..]
             .iter()
             .flat_map(|s| &s.observations)
             .collect();
+        let pending =
+            serde_json::from_str::<serde_json::Value>(&tools.catalog).unwrap()["pending_workers"]
+                .as_array()
+                .is_some_and(|p| !p.is_empty());
+        let mut stale = self.stale.lock().unwrap();
+        if pending && prior != 1 {
+            *stale = observations.len() + 1;
+            return tool_outcome(Self::read("notes/0"), None);
+        }
+        observations.drain(..(*stale).min(observations.len()));
+        drop(stale);
         if matches!(self.case, "leased_edit" | "background" | "command") && prior == 1 {
             return tool_outcome(
                 if self.case == "command" {
@@ -415,7 +427,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     )
     .unwrap();
     let budget = GoalBudget {
-        max_provider_calls: Some(120),
+        max_provider_calls: Some(64),
         max_tokens: (case == "tokens").then_some(1024),
         ..Default::default()
     };
@@ -433,6 +445,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         gates: std::array::from_fn(|_| Semaphore::new(0)),
         active: AtomicUsize::new(0),
         maximum: AtomicUsize::new(0),
+        stale: Mutex::new(0),
     });
     let mut input = request(&workspace, "Edit independent notes");
     input.include_paths.clear();
@@ -510,7 +523,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                 }
             }
         }
-    }.expect("team Run");
+    }.unwrap_or_else(|e| panic!("{case}: team Run: {e:?}"));
     drop(handle);
     assert!(result.stopped.is_none());
     assert!(

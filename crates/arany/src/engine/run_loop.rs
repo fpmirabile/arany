@@ -450,13 +450,20 @@ impl<'a> RunLoop<'a> {
         self.drive_primary(&mut root_request).await
     }
 
-    pub(super) async fn drive_primary(
+    pub(super) fn drive_primary<'b>(
+        &'b self,
+        root_request: &'b mut ProviderRequest,
+    ) -> step::BoxedStep<'b, ()> {
+        Box::pin(self.drive_primary_inner(root_request))
+    }
+
+    async fn drive_primary_inner(
         &self,
         root_request: &mut ProviderRequest,
     ) -> Result<(), EngineError> {
-        let phase = root_request.phase;
-        let planning = phase == AgentPhase::RootPlan;
         loop {
+            let phase = root_request.phase;
+            let planning = phase == AgentPhase::RootPlan;
             if self.pause_at_boundary() {
                 return self.settle_stopped_primary().await;
             }
@@ -541,9 +548,13 @@ impl<'a> RunLoop<'a> {
                     if self.pause_at_boundary() {
                         return self.settle_stopped_primary().await;
                     }
-                    return self
+                    if self
                         .run_children(root_request, delegation.children, delegation.agent, turn)
-                        .await;
+                        .await?
+                    {
+                        continue;
+                    }
+                    return Ok(());
                 }
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Tools(requests),

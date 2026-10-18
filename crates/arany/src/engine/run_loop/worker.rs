@@ -5,6 +5,7 @@ use crate::engine::EngineError;
 use crate::provider::{ChildAssignment, ProviderRequest};
 use crate::session::worker::*;
 use crate::session::{AgentDisposition, AgentRole, AgentRunId, ChildGrant, Event, GoalPhase};
+use crate::session::{evidence_admitted, verification_passed};
 use crate::tools::{
     Attestation, CacheUpdate, EffectIntent, ToolCall, ToolDisposition, ToolObservation, ToolRuntime,
 };
@@ -1043,6 +1044,7 @@ impl RunLoop<'_> {
             None
         };
         if let Some(reason) = reason {
+            self.admit_worker_action(0).await?;
             self.append(Event::WorkerStopObserved {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
@@ -1089,37 +1091,36 @@ impl RunLoop<'_> {
                     }
                     let mut contract = plan.clone();
                     contract.success_criterion = w.pins.request.criterion.clone();
-                    let mut state = contract.initial_success_state();
-                    let mut evidence = Vec::new();
-                    let recent: Vec<_> = run
+                    let mut evidence: Vec<u64> = run
                         .tools
                         .iter()
-                        .filter(|t| t.finished_sequence.is_some_and(|seq| seq > released))
-                        .rev()
-                        .take(8)
+                        .filter_map(|t| {
+                            let seq = t.finished_sequence.filter(|seq| *seq > released)?;
+                            t.observation
+                                .as_ref()
+                                .is_some_and(|o| evidence_admitted(&contract, o))
+                                .then_some(seq)
+                        })
                         .collect();
-                    for t in recent.into_iter().rev() {
-                        if let Some(seq) = t.finished_sequence.filter(|seq| *seq > released)
-                            && let Some(o) = &t.observation
-                        {
-                            contract.observe_success(&mut state, o);
-                            evidence.push(seq);
-                        }
-                    }
-                    if evidence.is_empty() || evidence.len() > 8 {
+                    evidence.drain(..evidence.len().saturating_sub(8));
+                    if evidence.is_empty() {
                         return None;
                     }
+                    let passed = verification_passed(&contract, run, released, &evidence).ok()?;
                     Some(WorkerVerification {
                         assignment_id: a.id,
                         criterion_digest: crate::tools::types::digest(
                             &serde_json::to_vec(&contract.success_criterion).expect("criterion"),
                         ),
-                        passed: contract.success_state_satisfied(&state),
+                        passed,
                         evidence,
                     })
                 })
                 .collect::<Vec<_>>()
         })?;
+        if !records.is_empty() {
+            self.admit_worker_action(0).await?;
+        }
         for record in records {
             self.append(Event::WorkerVerificationRecorded {
                 run_id: self.run_id,

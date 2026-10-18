@@ -209,6 +209,14 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 points.push((index, Action::BoundaryCompaction { goal: false }, None));
             }
             Event::GoalPlanContractRecorded { .. } => points.push((index, Action::Tool, None)),
+            Event::WorkerStopObserved { .. } => {
+                points.push((index, Action::Worker { chunks: 0 }, None));
+            }
+            Event::WorkerVerificationRecorded { .. }
+                if !matches!(previous, Some(Event::WorkerVerificationRecorded { .. })) =>
+            {
+                points.push((index, Action::Worker { chunks: 0 }, None));
+            }
             Event::ToolStarted {
                 agent_run_id,
                 intent,

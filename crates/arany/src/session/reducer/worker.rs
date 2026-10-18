@@ -1397,49 +1397,7 @@ pub(super) fn apply(
             let mut contract = verification_contract.ok_or(ReplayError::InvalidTransition)?;
             contract.success_criterion = criterion.clone();
             let run = current.runs.last().ok_or(ReplayError::InvalidTransition)?;
-            for seq in &v.evidence {
-                let t = run
-                    .tools
-                    .iter()
-                    .find(|t| t.finished_sequence == Some(*seq))
-                    .ok_or(ReplayError::InvalidTransition)?;
-                let o = t
-                    .observation
-                    .as_ref()
-                    .ok_or(ReplayError::InvalidTransition)?;
-                if *seq <= released
-                    || o.intent.target != EffectTarget::Workspace
-                    || matches!(o.intent.call, ToolCall::PrepareWorker { .. })
-                    || matches!(o.intent.call, ToolCall::ApplyChangeset { .. })
-                        && !matches!((&contract.success_criterion, &o.intent.call), (GoalSuccessCriterion::ToolCallSucceeded { call }, ToolCall::ApplyChangeset { source: ChangesetSource::CommandReceipt { .. } }) if matches!(call.as_ref(), ToolCall::Command { .. }))
-                {
-                    return Err(ReplayError::InvalidTransition);
-                }
-            }
-            let mut state = contract.initial_success_state();
-            for t in &run.tools {
-                let Some(seq) = t.finished_sequence.filter(|s| *s > released) else {
-                    continue;
-                };
-                let o = t
-                    .observation
-                    .as_ref()
-                    .ok_or(ReplayError::InvalidTransition)?;
-                if v.evidence.contains(&seq) {
-                    contract.observe_success(&mut state, o);
-                } else if o.intent.call.mutates() || o.intent.call.is_process() {
-                    state = contract.initial_success_state();
-                } else {
-                    let prior = state.clone();
-                    contract.observe_success(&mut state, o);
-                    if contract.success_state_satisfied(&state)
-                        && !contract.success_state_satisfied(&prior)
-                    {
-                        state = prior;
-                    }
-                }
-            }
-            if v.passed != contract.success_state_satisfied(&state) {
+            if v.passed != verification_passed(&contract, run, released, &v.evidence)? {
                 return Err(ReplayError::InvalidTransition);
             }
             let run = current
@@ -1452,6 +1410,58 @@ pub(super) fn apply(
     }
     Ok(())
 }
+pub(crate) fn evidence_admitted(
+    contract: &crate::session::GoalPlanContract,
+    o: &crate::tools::ToolObservation,
+) -> bool {
+    o.intent.target == EffectTarget::Workspace
+        && !matches!(o.intent.call, ToolCall::PrepareWorker { .. })
+        && (!matches!(o.intent.call, ToolCall::ApplyChangeset { .. })
+            || matches!((&contract.success_criterion, &o.intent.call), (GoalSuccessCriterion::ToolCallSucceeded { call }, ToolCall::ApplyChangeset { source: ChangesetSource::CommandReceipt { .. } }) if matches!(call.as_ref(), ToolCall::Command { .. })))
+}
+
+pub(crate) fn verification_passed(
+    contract: &crate::session::GoalPlanContract,
+    run: &RunView,
+    released: u64,
+    evidence: &[u64],
+) -> Result<bool, ReplayError> {
+    for seq in evidence {
+        let o = run
+            .tools
+            .iter()
+            .find(|t| t.finished_sequence == Some(*seq))
+            .and_then(|t| t.observation.as_ref())
+            .ok_or(ReplayError::InvalidTransition)?;
+        if *seq <= released || !evidence_admitted(contract, o) {
+            return Err(ReplayError::InvalidTransition);
+        }
+    }
+    let mut state = contract.initial_success_state();
+    for t in &run.tools {
+        let Some(seq) = t.finished_sequence.filter(|s| *s > released) else {
+            continue;
+        };
+        let o = t
+            .observation
+            .as_ref()
+            .ok_or(ReplayError::InvalidTransition)?;
+        if evidence.contains(&seq) {
+            contract.observe_success(&mut state, o);
+        } else if o.intent.call.mutates() || o.intent.call.is_process() {
+            state = contract.initial_success_state();
+        } else {
+            let prior = state.clone();
+            contract.observe_success(&mut state, o);
+            if contract.success_state_satisfied(&state) && !contract.success_state_satisfied(&prior)
+            {
+                state = prior;
+            }
+        }
+    }
+    Ok(contract.success_state_satisfied(&state))
+}
+
 fn valid_discard(run: &RunView, w: &WorkerView, d: &WorkerSettlement) -> bool {
     match d.reason {
         WorkerSettlementReason::Stopped => {
