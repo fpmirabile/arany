@@ -201,6 +201,7 @@ impl Fixture {
         (result, requests, humans)
     }
 
+    #[cfg(target_os = "linux")]
     async fn run_uncertain(&self, outcomes: Vec<ProviderOutcome>) -> usize {
         let provider = Arc::new(ScriptedProvider::new(outcomes));
         let mut input = request(&self.workspace, "Inspect and complete the task");
