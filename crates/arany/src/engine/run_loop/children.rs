@@ -38,11 +38,10 @@ pub(super) struct ChildWork {
 struct Spawned {
     children: Vec<ChildWork>,
     parallel: usize,
-    active_segment: ActiveSegment,
+    active_segment: Option<ActiveSegment>,
 }
 
 struct Drained {
-    results: Vec<Option<ChildResult>>,
     abort_reason: Option<AbortReason>,
     pending: VecDeque<usize>,
 }
@@ -52,10 +51,18 @@ struct ChildQueue {
     calls: JoinSet<crate::engine::routing::AttemptResult>,
     active: HashMap<Id, ActiveChild>,
     parallel: usize,
+    unspawned: VecDeque<ChildAssignment>,
+    definition: Option<String>,
+    tool_allowance: usize,
+    primary_step: Option<(Vec<ToolRequest>, ProviderTurn)>,
+    primary_pending: bool,
+    deferred_at: Option<usize>,
+    refusal: Option<&'static str>,
+    budget_stopped: bool,
 }
 
 struct ActiveChild {
-    index: usize,
+    index: Option<usize>,
     request: ProviderRequest,
 }
 
@@ -74,6 +81,14 @@ impl ChildQueue {
             calls: JoinSet::new(),
             active: HashMap::new(),
             parallel,
+            unspawned: VecDeque::new(),
+            definition: None,
+            tool_allowance: 0,
+            primary_step: None,
+            primary_pending: false,
+            deferred_at: None,
+            refusal: None,
+            budget_stopped: false,
         }
     }
 
@@ -109,53 +124,179 @@ impl RunLoop<'_> {
         if children.iter().any(|child| child.editor.is_some()) {
             return self.valid_editor_delegation(children, agent);
         }
+        self.wave_settled().unwrap_or(false)
+            && !matches!(self.controls.policy, CollaborationPolicy::Single)
+            && crate::provider::valid_assignments(children, agent)
+            && self
+                .ledger()
+                .view(|v| {
+                    v.runs.last().is_some_and(|r| {
+                        let attempts: usize = r
+                            .primary()
+                            .into_iter()
+                            .flat_map(|a| &a.provider_calls)
+                            .filter_map(|c| c.delegation.as_ref())
+                            .map(Vec::len)
+                            .sum();
+                        attempts + children.len()
+                            <= usize::from(self.controls.policy.max_children())
+                    })
+                })
+                .unwrap_or(false)
+            && children
+                .iter()
+                .all(|a| self.valid_research_assignment(a, agent))
+    }
+
+    pub(super) fn valid_research_assignment(
+        &self,
+        assignment: &ChildAssignment,
+        agent: Option<&str>,
+    ) -> bool {
         agent.is_none_or(|name| {
             self.definitions
                 .get()
-                .and_then(|registry| registry.get(name))
-                .is_some_and(|definition| !definition.editor())
-        }) && !matches!(self.controls.policy, CollaborationPolicy::Single)
-            && crate::provider::valid_assignments(children, agent)
-            && children.len() <= usize::from(self.controls.policy.max_children())
-            && children.iter().all(|assignment| {
-                assignment.profile.as_ref().is_none_or(|name| {
-                    self.routing
-                        .providers
-                        .roster
-                        .as_ref()
-                        .is_some_and(|roster| roster.snapshot.child_profiles.contains(name))
-                })
-            })
+                .and_then(|r| r.get(name))
+                .is_some_and(|d| !d.editor())
+        }) && assignment.profile.as_ref().is_none_or(|name| {
+            self.routing
+                .providers
+                .roster
+                .as_ref()
+                .is_some_and(|r| r.snapshot.child_profiles.contains(name))
+        })
     }
 
-    pub(super) async fn run_children(
+    pub(super) fn run_children<'a>(
+        &'a self,
+        root_request: &'a mut ProviderRequest,
+        objectives: Vec<ChildAssignment>,
+        agent: Option<String>,
+        delegate_turn: ProviderTurn,
+    ) -> super::step::BoxedStep<'a, bool> {
+        Box::pin(self.run_children_inner(root_request, objectives, agent, delegate_turn))
+    }
+
+    async fn run_children_inner(
         &self,
         root_request: &mut ProviderRequest,
         objectives: Vec<ChildAssignment>,
         agent: Option<String>,
         delegate_turn: ProviderTurn,
-    ) -> Result<(), EngineError> {
-        if objectives.iter().any(|child| child.editor.is_some()) {
-            return Box::pin(self.run_foreground_worker(root_request, objectives, delegate_turn))
-                .await;
-        }
+    ) -> Result<bool, EngineError> {
+        let count = objectives.len();
         let Some(Spawned {
             mut children,
             parallel,
-            active_segment,
-        }) = self.spawn_children(objectives, agent).await?
+            mut active_segment,
+        }) = self
+            .spawn_children(count, objectives.iter().any(|a| a.editor.is_some()))
+            .await?
         else {
-            return self.settle_stopped_primary().await;
+            return self.settle_stopped_primary().await.map(|()| false);
         };
-        let deadline = active_segment.deadline();
+        let deadline = active_segment
+            .as_ref()
+            .expect("delegation segment")
+            .deadline();
+        let eager = objectives.iter().all(|a| a.editor.is_none());
+        let mut queue = ChildQueue::new(0, parallel);
+        queue.unspawned = objectives.into();
+        queue.definition = agent;
+        queue.tool_allowance =
+            self.ledger()
+                .remaining_calls()
+                .map_or(MAX_CHILD_TOOL_CALLS, |remaining| {
+                    (usize::try_from(remaining)
+                        .unwrap_or(usize::MAX)
+                        .saturating_sub(count + 1)
+                        / 2
+                        / count)
+                        .min(MAX_CHILD_TOOL_CALLS)
+                });
+        if eager
+            && self
+                .spawn_researchers(
+                    &mut queue,
+                    &mut children,
+                    root_request,
+                    &mut active_segment,
+                    deadline,
+                )
+                .await?
+        {
+            return self.settle_stopped_primary().await.map(|()| false);
+        }
+        if let Some(tools) = root_request.input.tools.as_mut() {
+            tools.steps.push(ToolStep {
+                turn: delegate_turn.clone(),
+                requests: Vec::new(),
+                observations: Vec::new(),
+                facts: None,
+                steering_notes: Vec::new(),
+                calls_remaining: None,
+                hook_feedback: Default::default(),
+            });
+        }
+        let driven = self
+            .drive_children(
+                &mut children,
+                root_request,
+                &mut queue,
+                &mut active_segment,
+                deadline,
+            )
+            .await;
+        let drained = match driven {
+            Ok(drained) => drained,
+            Err(error) => return Err(queue.abort_with(error).await),
+        };
+        self.settle_delegation(
+            root_request,
+            children,
+            active_segment,
+            drained,
+            queue.primary_step.take(),
+            deadline,
+        )
+        .await
+    }
+
+    fn settle_delegation<'b>(
+        &'b self,
+        root_request: &'b mut ProviderRequest,
+        children: Vec<ChildWork>,
+        active_segment: Option<ActiveSegment>,
+        drained: Drained,
+        primary_step: Option<(Vec<ToolRequest>, ProviderTurn)>,
+        deadline: Instant,
+    ) -> super::step::BoxedStep<'b, bool> {
+        Box::pin(self.settle_delegation_inner(
+            root_request,
+            children,
+            active_segment,
+            drained,
+            primary_step,
+            deadline,
+        ))
+    }
+
+    async fn settle_delegation_inner(
+        &self,
+        root_request: &mut ProviderRequest,
+        mut children: Vec<ChildWork>,
+        mut active_segment: Option<ActiveSegment>,
+        drained: Drained,
+        primary_step: Option<(Vec<ToolRequest>, ProviderTurn)>,
+        deadline: Instant,
+    ) -> Result<bool, EngineError> {
         let Drained {
-            results,
             mut abort_reason,
             pending,
-        } = self
-            .drive_children(&mut children, root_request, parallel, deadline)
-            .await?;
-        self.settle_active_segment(active_segment)?;
+        } = drained;
+        if let Some(segment) = active_segment.take() {
+            self.settle_active_segment(segment)?;
+        }
         if matches!(abort_reason, Some(AbortReason::Paused)) {
             self.pause_at_boundary();
         }
@@ -166,21 +307,40 @@ impl RunLoop<'_> {
         if abort_reason.is_none() && self.ledger().active_time_exhausted() {
             abort_reason = Some(AbortReason::Budget);
         }
+        if abort_reason.is_none() && self.worker_stopped()? {
+            abort_reason = Some(AbortReason::Budget);
+        }
         if abort_reason.is_none() && !pending.is_empty() {
             abort_reason = Some(AbortReason::Failed);
         }
         if let Some(reason) = abort_reason {
+            if children.iter().any(|c| c.editor) {
+                self.observe_worker_stop().await?;
+            }
             for index in pending {
-                self.finish_child(
-                    children[index].agent_run_id,
-                    AgentDisposition::Cancelled,
-                    None,
-                    false,
-                )
-                .await?;
+                if children[index].editor {
+                    let completed = self
+                        .complete_worker(
+                            &mut children[index],
+                            None,
+                            deadline,
+                            !matches!(reason, AbortReason::Budget),
+                        )
+                        .await?;
+                    self.settle_worker_handover(root_request, &children[index], completed)
+                        .await?;
+                } else {
+                    self.finish_child(
+                        children[index].agent_run_id,
+                        AgentDisposition::Cancelled,
+                        None,
+                        false,
+                    )
+                    .await?;
+                }
             }
             if self.uncertain_hook()? {
-                return self.settle_stopped_primary().await;
+                return self.settle_stopped_primary().await.map(|()| false);
             }
             return match reason {
                 AbortReason::Failed if self.ledger().active_time_exhausted() => {
@@ -191,149 +351,238 @@ impl RunLoop<'_> {
                 AbortReason::Budget | AbortReason::Cancelled | AbortReason::Paused => {
                     self.settle_stopped_primary().await
                 }
-            };
+            }
+            .map(|()| false);
         }
-        self.synthesize(root_request, results, delegate_turn).await
+        if let Some((requests, turn)) = primary_step {
+            let Some(request) = self.begin_tool_step(requests).await? else {
+                return self.fail_primary().await.map(|()| false);
+            };
+            if !Box::pin(self.execute_step(
+                Grant::Primary {
+                    request: root_request,
+                    review_allowed: true,
+                },
+                request,
+                turn,
+            ))
+            .await?
+            {
+                return self.fail_primary().await.map(|()| false);
+            }
+            self.verify_workers().await?;
+        }
+        self.begin_synthesis(root_request).await
+    }
+
+    fn settled_agents(&self) -> Result<usize, EngineError> {
+        self.ledger().view(|v| {
+            v.runs.last().map_or(0, |r| {
+                r.agents
+                    .iter()
+                    .skip(1)
+                    .filter(|a| a.status != crate::session::AgentStatus::Active)
+                    .count()
+            })
+        })
+    }
+
+    async fn spawn_researchers(
+        &self,
+        queue: &mut ChildQueue,
+        children: &mut Vec<ChildWork>,
+        root_request: &mut ProviderRequest,
+        segment: &mut Option<ActiveSegment>,
+        deadline: Instant,
+    ) -> Result<bool, EngineError> {
+        while !queue.unspawned.is_empty() && !self.controls.cancellation.is_cancelled() {
+            let child = match self
+                .spawn_next_child(queue, root_request, segment, deadline)
+                .await
+            {
+                Ok(Some(child)) => child,
+                Ok(None) => break,
+                Err(error) => return Err(queue.abort_with(error).await),
+            };
+            queue.pending.push_back(children.len());
+            children.push(child);
+        }
+        if !self.controls.cancellation.is_cancelled() {
+            return Ok(false);
+        }
+        if let Some(segment) = segment.take() {
+            self.settle_active_segment(segment)?;
+        }
+        for child in children.iter() {
+            self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
+                .await?;
+        }
+        Ok(true)
     }
 
     async fn spawn_children(
         &self,
-        objectives: Vec<ChildAssignment>,
-        agent: Option<String>,
+        count: usize,
+        workers: bool,
     ) -> Result<Option<Spawned>, EngineError> {
-        let definition = agent
-            .as_ref()
-            .and_then(|name| self.definitions.get()?.get(name))
-            .cloned();
         let research = self.controls.tools.is_some();
-        let delegation = Action::Delegation {
-            children: objectives.len(),
+        let action = Action::Delegation {
+            children: count,
             research,
         };
-        if !self.ledger().admits(delegation) {
+        if !self.ledger().admits(action) {
             return Ok(None);
         }
-        let tool_allowance = if research {
-            self.ledger()
-                .remaining_calls()
-                .map_or(MAX_CHILD_TOOL_CALLS, |remaining| {
-                    // Each child keeps one call for its report, the primary one for synthesis; researchers share half the rest.
-                    let usable = usize::try_from(remaining)
-                        .unwrap_or(usize::MAX)
-                        .saturating_sub(objectives.len() + 1);
-                    (usable / 2 / objectives.len()).min(MAX_CHILD_TOOL_CALLS)
-                })
+        let capacity = if workers {
+            Action::Worker { chunks: 0 }
         } else {
-            0
+            action
         };
-        let research_template = self
-            .controls
-            .tools
-            .map(|runtime| runtime.research_context(tool_allowance))
-            .transpose()?;
-        let grant = if research {
-            ChildGrant::ReadOnly
-        } else {
-            ChildGrant::NoTools
-        };
+        self.journal
+            .admit(
+                self.session_id,
+                capacity.max_events_for_admitted(&self.routing.providers),
+                capacity.tool_observations(),
+            )
+            .await?;
         let parallel = self.ledger().provider_concurrency(
             usize::from(self.controls.concurrency)
-                .min(usize::from(self.controls.policy.max_children())),
+                .min(usize::from(self.controls.policy.max_children()))
+                .min(self.ledger().view(|v| {
+                    v.runs
+                        .last()
+                        .and_then(|r| r.config.as_ref())
+                        .and_then(|c| c.worker_policy.as_ref())
+                        .map_or(8, |p| usize::from(p.concurrency))
+                })?),
         );
-        let waves = objectives.len().div_ceil(parallel.max(1));
-        let active_bound = delegation_active_bound(
+        let bound = delegation_active_bound(
             research,
             self.routing
                 .providers
                 .child_chains()
                 .into_iter()
                 .flatten()
-                .map(|provider| provider.identity().limits.deadline)
+                .map(|p| p.identity().limits.deadline)
                 .max()
-                .expect("admitted child chain"),
-            waves,
+                .expect("child chain"),
+            count.div_ceil(parallel.max(1)),
         );
-        // Covers every child's calls, Tools and terminal facts plus the largest later admission, so a refusal precedes AgentSpawned.
-        self.journal
-            .admit(
-                self.session_id,
-                delegation.max_events_for_admitted(&self.routing.providers),
-                delegation.tool_observations(),
-            )
-            .await?;
-        let active_segment = match self.reserve_active_segment(active_bound) {
-            Ok(segment) => segment,
+        let segment = match self.reserve_active_segment(bound) {
+            Ok(s) => s,
             Err(EngineError::GoalBudgetExhausted) => return Ok(None),
-            Err(error) => return Err(error),
+            Err(e) => return Err(e),
         };
-        let mut children = Vec::with_capacity(objectives.len());
-        for (index, assignment) in objectives.into_iter().enumerate() {
-            let objective = assignment.objective;
-            let profile = assignment.profile.or_else(|| self.default_child_profile());
-            if self.controls.cancellation.is_cancelled() {
-                break;
-            }
-            let agent_run_id = AgentRunId::new();
-            self.append(Event::AgentSpawned {
-                profile,
-                assignment: None,
-                definition: agent.clone(),
-                run_id: self.run_id,
-                agent_run_id,
-                role: AgentRole::Child,
-                ordinal: index as u8 + 1,
-                objective: Some(objective.clone()),
-                grant: Some(grant),
-            })
-            .await?;
-            children.push(ChildWork {
-                agent_run_id,
-                objective,
-                stop_hook_feedback: Vec::new(),
-                turns_remaining: definition
-                    .as_ref()
-                    .map_or(MAX_CHILD_TURNS, |definition| definition.max_turns),
-                editor: false,
-                definition: definition.clone(),
-                tools: research_template.clone(),
-                tool_calls_remaining: tool_allowance,
-            });
-        }
-        if self.controls.cancellation.is_cancelled() {
-            self.settle_active_segment(active_segment)?;
-            for child in children {
-                self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
-                    .await?;
-            }
-            return Ok(None);
-        }
         Ok(Some(Spawned {
-            children,
+            children: Vec::with_capacity(count),
             parallel,
-            active_segment,
+            active_segment: Some(segment),
         }))
+    }
+
+    async fn spawn_next_child(
+        &self,
+        queue: &mut ChildQueue,
+        root: &mut ProviderRequest,
+        segments: &mut Option<ActiveSegment>,
+        deadline: Instant,
+    ) -> Result<Option<ChildWork>, EngineError> {
+        let Some(assignment) = queue.unspawned.pop_front() else {
+            return Ok(None);
+        };
+        if let Some(editor) = assignment.editor {
+            if let Some(s) = segments.take() {
+                self.settle_active_segment(s)?;
+            }
+            let mut child = self.begin_worker(root, editor).await?;
+            if let Some(child) = &mut child {
+                child.tool_calls_remaining = child.tool_calls_remaining.min(queue.tool_allowance);
+            }
+            *segments = match self
+                .reserve_active_segment(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(segment) => Some(segment),
+                Err(EngineError::GoalBudgetExhausted) => {
+                    queue.budget_stopped = true;
+                    None
+                }
+                Err(error) => return Err(error),
+            };
+            return Ok(child);
+        }
+        let definition = queue
+            .definition
+            .as_ref()
+            .and_then(|n| self.definitions.get()?.get(n))
+            .cloned();
+        let id = AgentRunId::new();
+        let research = self.controls.tools.is_some();
+        self.append(Event::AgentSpawned {
+            run_id: self.run_id,
+            agent_run_id: id,
+            role: AgentRole::Child,
+            ordinal: self
+                .ledger()
+                .view(|v| v.runs.last().expect("Run").agents.len())?
+                .try_into()
+                .map_err(|_| EngineError::CoordinatorFailed)?,
+            objective: Some(assignment.objective.clone()),
+            definition: queue.definition.clone(),
+            profile: assignment.profile.or_else(|| self.default_child_profile()),
+            grant: Some(if research {
+                ChildGrant::ReadOnly
+            } else {
+                ChildGrant::NoTools
+            }),
+            assignment: None,
+        })
+        .await?;
+        Ok(Some(ChildWork {
+            agent_run_id: id,
+            objective: assignment.objective,
+            turns_remaining: definition.as_ref().map_or(MAX_CHILD_TURNS, |d| d.max_turns),
+            definition,
+            editor: false,
+            stop_hook_feedback: Vec::new(),
+            tools: self
+                .controls
+                .tools
+                .map(|r| r.research_context(queue.tool_allowance))
+                .transpose()?,
+            tool_calls_remaining: queue.tool_allowance,
+        }))
+    }
+
+    fn drive_children<'a>(
+        &'a self,
+        children: &'a mut Vec<ChildWork>,
+        root_request: &'a mut ProviderRequest,
+        queue: &'a mut ChildQueue,
+        segments: &'a mut Option<ActiveSegment>,
+        deadline: Instant,
+    ) -> super::step::BoxedStep<'a, Drained> {
+        Box::pin(self.drive_children_inner(children, root_request, queue, segments, deadline))
     }
 
     #[expect(
         clippy::too_many_lines,
         reason = "Keep child retry and settlement ordering together"
     )]
-    async fn drive_children(
+    async fn drive_children_inner(
         &self,
-        children: &mut [ChildWork],
-        root_request: &ProviderRequest,
-        parallel: usize,
+        children: &mut Vec<ChildWork>,
+        root_request: &mut ProviderRequest,
+        queue: &mut ChildQueue,
+        segments: &mut Option<ActiveSegment>,
         deadline: Instant,
     ) -> Result<Drained, EngineError> {
-        let mut results = vec![None; children.len()];
-        let mut queue = ChildQueue::new(children.len(), parallel);
         if let Err(error) = self
-            .fill_slots(&mut queue, children, root_request, deadline)
+            .fill_slots(queue, children, root_request, segments, deadline)
             .await
         {
             return Err(queue.abort_with(error).await);
         }
-        let mut abort_reason = self.unstarted_abort(&queue);
+        let mut abort_reason = self.unstarted_abort(queue);
         let mut drain_deadline = None;
 
         while !queue.active.is_empty() {
@@ -355,7 +604,11 @@ impl RunLoop<'_> {
                 && Instant::now() < deadline
             {
                 let retried: Result<bool, EngineError> = async {
-                    let role = crate::provider::ProviderRole::Child;
+                    let role = if index.is_none() {
+                        crate::provider::ProviderRole::Primary
+                    } else {
+                        crate::provider::ProviderRole::Child
+                    };
                     let active = queue
                         .active
                         .get(&task_id)
@@ -412,6 +665,109 @@ impl RunLoop<'_> {
             queue.active.remove(&task_id);
             let result = result.result;
             self.settle_result(&result)?;
+            if index.is_none() {
+                let valid = self.ledger().tokens_within_limit()
+                    && matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tools(requests), .. }) if self.well_formed_tools(requests) && requests.iter().all(|r| r.call.is_process() || self.primary_lease_allows(&r.call)));
+                self.append(Event::ProviderCallRecorded {
+                    run_id: self.run_id,
+                    agent_run_id: self.primary_id,
+                    record: call_record(AgentPhase::RootSynthesis, &result, valid, None),
+                })
+                .await?;
+                match result {
+                    CallResult::Response(ProviderResponse {
+                        outcome: ProviderOutcome::Tools(requests),
+                        turn,
+                        ..
+                    }) if valid => {
+                        let process = requests.iter().any(|r| r.call.is_process());
+                        if process {
+                            queue.primary_step = Some((requests, turn));
+                        } else {
+                            if let Some(segment) = segments.take() {
+                                self.settle_active_segment(segment)?;
+                            }
+                            let request = self.begin_tool_step(requests).await?;
+                            let continues = if let Some(request) = request {
+                                match Box::pin(self.execute_step(
+                                    Grant::Primary {
+                                        request: root_request,
+                                        review_allowed: false,
+                                    },
+                                    request,
+                                    turn,
+                                ))
+                                .await
+                                {
+                                    Ok(continues) => continues,
+                                    Err(
+                                        EngineError::GoalBudgetExhausted
+                                        | EngineError::Tool(crate::tools::ToolError::Limit),
+                                    ) => {
+                                        queue.budget_stopped = true;
+                                        self.observe_worker_stop().await?;
+                                        true
+                                    }
+                                    Err(error) => return Err(error),
+                                }
+                            } else {
+                                false
+                            };
+                            if !continues {
+                                abort_reason = Some(AbortReason::Failed);
+                            }
+                            if !queue.budget_stopped {
+                                self.verify_workers().await?;
+                            }
+                            *segments = match self.reserve_active_segment(
+                                deadline.saturating_duration_since(Instant::now()),
+                            ) {
+                                Ok(segment) => Some(segment),
+                                Err(EngineError::GoalBudgetExhausted) => {
+                                    queue.budget_stopped = true;
+                                    None
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            queue.primary_pending = false;
+                        }
+                    }
+                    CallResult::Response(ProviderResponse { outcome, .. })
+                        if self.ledger().tokens_within_limit()
+                            && !self.controls.cancellation.is_cancelled() =>
+                    {
+                        queue.refusal = Some(match outcome {
+                            ProviderOutcome::Finish(_) => {
+                                "Finish deferred: workers are still active; answer again after they settle."
+                            }
+                            ProviderOutcome::Delegate(_) => {
+                                "Delegate refused: workers are still active."
+                            }
+                            ProviderOutcome::Tools(_) => {
+                                "Tool request refused: it was malformed or edits inside a live worker lease."
+                            }
+                        });
+                        queue.deferred_at = Some(self.settled_agents()?);
+                        queue.primary_pending = false;
+                    }
+                    _ => {
+                        abort_reason = Some(if self.controls.cancellation.is_cancelled() {
+                            AbortReason::Cancelled
+                        } else {
+                            AbortReason::Failed
+                        })
+                    }
+                }
+                if abort_reason.is_some() {
+                    queue.calls.abort_all();
+                    drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
+                } else {
+                    self.fill_slots(queue, children, root_request, segments, deadline)
+                        .await?;
+                }
+                continue;
+            }
+            let index = index.ok_or(EngineError::CoordinatorFailed)?;
             let valid_response = self.ledger().tokens_within_limit()
                 && match &result {
                     CallResult::Response(ProviderResponse {
@@ -424,31 +780,149 @@ impl RunLoop<'_> {
                     }) => self.valid_child_tools(&children[index], requests),
                     _ => false,
                 };
-            let step_disposition = match self
-                .settle_child_call(
-                    &mut children[index],
-                    &mut results[index],
-                    result,
-                    valid_response,
-                    &mut abort_reason,
-                    deadline,
-                )
-                .await
-            {
-                Ok(None) => {
-                    queue.pending.push_back(index);
-                    None
+            let step_disposition = if children[index].editor {
+                self.append(Event::ProviderCallRecorded {
+                    run_id: self.run_id,
+                    agent_run_id: children[index].agent_run_id,
+                    record: call_record(AgentPhase::ChildWork, &result, valid_response, None),
+                })
+                .await?;
+                self.ledger().child_call_finished()?;
+                let finish = match result {
+                    CallResult::Response(ProviderResponse {
+                        outcome: ProviderOutcome::Finish(f),
+                        turn,
+                        ..
+                    }) if valid_response && abort_reason.is_none() => {
+                        let child = &mut children[index];
+                        match Box::pin(self.worker_stop(child, &f, turn, deadline)).await? {
+                            ChildStop::Proceed => Some(f),
+                            ChildStop::Reprompt => {
+                                queue.pending.push_back(index);
+                                if let Err(error) = self
+                                    .fill_slots(queue, children, root_request, segments, deadline)
+                                    .await
+                                {
+                                    return Err(queue.abort_with(error).await);
+                                }
+                                continue;
+                            }
+                            ChildStop::End(_) => None,
+                        }
+                    }
+                    CallResult::Response(ProviderResponse {
+                        outcome: ProviderOutcome::Tools(mut requests),
+                        turn,
+                        ..
+                    }) if valid_response
+                        && abort_reason.is_none()
+                        && !self.observe_worker_stop().await? =>
+                    {
+                        let child = &mut children[index];
+                        let continues = match Box::pin(self.execute_step(
+                            Grant::Researcher { child, deadline },
+                            requests.pop().ok_or(EngineError::CoordinatorFailed)?,
+                            turn,
+                        ))
+                        .await
+                        {
+                            Ok(continues) => continues,
+                            Err(EngineError::Tool(crate::tools::ToolError::Limit)) => false,
+                            Err(EngineError::GoalBudgetExhausted) => {
+                                queue.budget_stopped = true;
+                                self.observe_worker_stop().await?;
+                                false
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
+                        let succeeded = self.ledger().view(|v| {
+                            v.runs
+                                .last()
+                                .and_then(|r| r.agents.iter().find(|a| a.id == child.agent_run_id))
+                                .and_then(|a| a.tools.last())
+                                .and_then(|t| t.observation.as_ref())
+                                .is_some_and(|o| {
+                                    o.disposition == crate::tools::ToolDisposition::Succeeded
+                                })
+                        })?;
+                        if continues && succeeded {
+                            queue.pending.push_back(index);
+                            if let Err(error) = self
+                                .fill_slots(queue, children, root_request, segments, deadline)
+                                .await
+                            {
+                                return Err(queue.abort_with(error).await);
+                            }
+                            continue;
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+                let completed = self
+                    .complete_worker(
+                        &mut children[index],
+                        finish,
+                        deadline,
+                        matches!(
+                            abort_reason,
+                            Some(AbortReason::Failed | AbortReason::Cancelled)
+                        ),
+                    )
+                    .await?;
+                if let Some(s) = segments.take() {
+                    self.settle_active_segment(s)?;
                 }
-                Ok(Some(disposition)) => Some(disposition),
-                Err(error) => return Err(queue.abort_with(error).await),
+                self.settle_worker_handover(root_request, &children[index], completed)
+                    .await?;
+                *segments = match self
+                    .reserve_active_segment(deadline.saturating_duration_since(Instant::now()))
+                {
+                    Ok(segment) => Some(segment),
+                    Err(EngineError::GoalBudgetExhausted) => {
+                        queue.budget_stopped = true;
+                        None
+                    }
+                    Err(error) => return Err(error),
+                };
+                Some(
+                    if self.actor_hook_requested_stop(children[index].agent_run_id)? {
+                        AgentDisposition::StoppedByHook
+                    } else {
+                        AgentDisposition::Finished
+                    },
+                )
+            } else {
+                match self
+                    .settle_child_call(
+                        &mut children[index],
+                        result,
+                        valid_response,
+                        &mut abort_reason,
+                        deadline,
+                    )
+                    .await
+                {
+                    Ok(None) => {
+                        queue.pending.push_back(index);
+                        None
+                    }
+                    Ok(Some(disposition)) => Some(disposition),
+                    Err(error) => return Err(queue.abort_with(error).await),
+                }
             };
             if abort_reason.is_none() {
-                abort_reason = if self.controls.cancellation.is_cancelled() {
+                abort_reason = if queue.budget_stopped {
+                    Some(AbortReason::Budget)
+                } else if self.controls.cancellation.is_cancelled() {
                     Some(AbortReason::Cancelled)
                 } else if self.pause_requested() {
                     Some(AbortReason::Paused)
                 } else if step_disposition == Some(AgentDisposition::StoppedByHook) {
                     Some(AbortReason::Hook)
+                } else if let Some(reason) = self.hook_abort()? {
+                    Some(reason)
                 } else if step_disposition == Some(AgentDisposition::Failed) {
                     Some(AbortReason::Failed)
                 } else if step_disposition == Some(AgentDisposition::Cancelled) {
@@ -467,25 +941,23 @@ impl RunLoop<'_> {
             }
             if abort_reason.is_none() {
                 if let Err(error) = self
-                    .fill_slots(&mut queue, children, root_request, deadline)
+                    .fill_slots(queue, children, root_request, segments, deadline)
                     .await
                 {
                     return Err(queue.abort_with(error).await);
                 }
-                abort_reason = self.unstarted_abort(&queue);
+                abort_reason = self.unstarted_abort(queue);
             }
         }
         Ok(Drained {
-            results,
             abort_reason,
-            pending: queue.pending,
+            pending: std::mem::take(&mut queue.pending),
         })
     }
 
     async fn settle_child_call(
         &self,
         child: &mut ChildWork,
-        result_slot: &mut Option<ChildResult>,
         result: CallResult,
         valid_response: bool,
         abort_reason: &mut Option<AbortReason>,
@@ -529,11 +1001,6 @@ impl RunLoop<'_> {
                     true,
                 )
                 .await?;
-                *result_slot = Some(ChildResult {
-                    objective: child.objective.clone(),
-                    summary: finish.summary,
-                    result: finish.result,
-                });
                 AgentDisposition::Finished
             }
             CallResult::Response(ProviderResponse {
@@ -702,179 +1169,256 @@ impl RunLoop<'_> {
         Ok(Some(()))
     }
 
-    pub(super) async fn synthesize(
+    pub(super) async fn worker_stop(
+        &self,
+        child: &mut ChildWork,
+        finish: &Finish,
+        turn: ProviderTurn,
+        deadline: Instant,
+    ) -> Result<ChildStop, EngineError> {
+        let stop = self
+            .run_subagent_stop(child, "editor", &finish.result, turn, deadline)
+            .await;
+        match stop {
+            Ok(Some(())) => Ok(ChildStop::Reprompt),
+            Ok(None) if !self.actor_hook_requested_stop(child.agent_run_id)? => {
+                Ok(ChildStop::Proceed)
+            }
+            Ok(None)
+            | Err(
+                EngineError::GoalBudgetExhausted
+                | EngineError::ContextTooLarge
+                | EngineError::Tool(crate::tools::ToolError::Uncertain),
+            ) => Ok(ChildStop::End(AgentDisposition::Failed)),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn hook_abort(&self) -> Result<Option<AbortReason>, EngineError> {
+        if self.uncertain_hook()? {
+            return Ok(Some(AbortReason::Failed));
+        }
+        if self.hook_requested_stop()? {
+            return Ok(Some(AbortReason::Hook));
+        }
+        let settled = self.ledger().view(|view| {
+            view.runs
+                .last()
+                .is_some_and(crate::session::RunView::hooks_settled)
+        })?;
+        Ok((!settled).then_some(AbortReason::Failed))
+    }
+
+    pub(super) async fn begin_synthesis(
         &self,
         root_request: &mut ProviderRequest,
-        results: Vec<Option<ChildResult>>,
-        delegate_turn: ProviderTurn,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         if !self.ledger().can_start_provider_call() {
-            return self.settle_stopped_primary().await;
+            return self.settle_stopped_primary().await.map(|()| false);
         }
         root_request.phase = AgentPhase::RootSynthesis;
-        root_request.input.child_results = results
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or(EngineError::CoordinatorFailed)?;
-        if let Some(tools) = root_request.input.tools.as_mut() {
-            let integrations = self.ledger().view(|view| {
-                view.runs
-                    .last()
-                    .into_iter()
-                    .flat_map(|run| &run.tools)
-                    .filter(|tool| {
-                        matches!(
-                            tool.intent.call,
-                            ToolCall::ApplyChangeset {
-                                source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
-                            }
-                        ) && tool.observation.is_some()
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })?;
-            tools.steps.push(ToolStep {
-                turn: delegate_turn,
-                requests: Vec::new(),
-                observations: integrations
+        self.refresh_team_context(root_request)?;
+        Ok(true)
+    }
+
+    fn refresh_team_context(&self, root: &mut ProviderRequest) -> Result<(), EngineError> {
+        let (reports, pending, integrations) = self.ledger().view(|v| {
+            let run = v.runs.last().expect("Run");
+            let proposals: Vec<_> = run.primary().into_iter().flat_map(|a| &a.provider_calls).filter_map(|c| c.delegation.as_ref()).flatten().collect();
+            let mut order = std::collections::HashMap::new();
+            for agent in run.agents.iter().skip(1) {
+                let index = proposals.iter().enumerate().find(|(i, p)| !order.values().any(|v| v == i) && match p {
+                    crate::worker::ChildAssignment::Editor { assignment } => agent.assignment.as_ref().is_some_and(|w| &w.pins.request == assignment.as_ref()),
+                    crate::worker::ChildAssignment::Researcher { objective, definition, profile } => agent.assignment.is_none() && agent.objective.as_ref() == Some(objective) && &agent.definition == definition && &agent.profile == profile,
+                }).map(|(index, _)| index).expect("spawn matches its proposal");
+                order.insert(agent.id, index);
+            }
+            let mut reports = run
+                .agents
+                .iter()
+                .skip(1)
+                .filter(|a| a.status != crate::session::AgentStatus::Active)
+                .map(|a| (order[&a.id], ChildResult {
+                    objective: a.objective.clone().unwrap_or_default(),
+                    summary: a
+                        .summary
+                        .clone()
+                        .unwrap_or_else(|| "Worker did not finish".into()),
+                    result: if let Some(w) = &a.assignment {
+                        let mut report = format!(
+                            "Worker {}: {:?}; integration: {:?}\n{}",
+                            a.id,
+                            w.outcome.as_ref().map(|(_, o)| o.disposition),
+                            w.integration.as_ref().map(|(_, i)| i.outcome),
+                            a.result
+                                .as_deref()
+                                .unwrap_or("Unpublished private work discarded")
+                        );
+                        let mut end = report.len().min(MAX_CHILD_RESULT_BYTES);
+                        while !report.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        report.truncate(end);
+                        report
+                    } else {
+                        a.result.clone().unwrap_or_default()
+                    },
+                }))
+                .collect::<Vec<_>>();
+            for tool in &run.tools {
+                if let ToolCall::PrepareWorker { preparation } = &tool.intent.call
+                    && preparation.purpose == crate::worker::WorkerDataPurpose::Base
+                    && !run.agents.iter().any(|a| a.id == preparation.assignment_id)
+                    && let Some(o) = &tool.observation
+                    && o.disposition != crate::tools::ToolDisposition::Succeeded {
+                    let index = proposals.iter().enumerate().find(|(i, p)| matches!(p, crate::worker::ChildAssignment::Editor { .. }) && !order.values().any(|v| v == i)).map(|(i, _)| i).expect("refused capture matches a proposal");
+                    order.insert(preparation.assignment_id, index);
+                    reports.push((index, ChildResult { objective: "Editor base preparation".into(), summary: "Assignment did not start".into(), result: format!("Assignment {}: {:?}; no private work or Workspace publication", preparation.assignment_id, o.disposition) }));
+                }
+            }
+            let pending = run
+                .agents
+                .iter()
+                .skip(1)
+                .filter(|a| a.status == crate::session::AgentStatus::Active)
+                .map(|a| a.id.to_string())
+                .collect::<Vec<_>>();
+            let wave = run.primary().into_iter().flat_map(|a| &a.provider_calls).filter(|c| c.delegation.is_some()).count();
+            let observations = run
+                .tools
+                .iter()
+                .filter(|t| {
+                    matches!(
+                        &t.intent.call,
+                        ToolCall::ApplyChangeset {
+                            source: crate::worker::ChangesetSource::WorkerHandover { assignment_id, .. }
+                        } if run.agents.iter().find(|a| a.id == *assignment_id).and_then(|a| a.assignment.as_ref()).is_some_and(|w| usize::from(w.pins.request.wave) == wave)
+                    )
+                })
+                .filter(|t| t.observation.is_some())
+                .cloned()
+                .collect::<Vec<_>>();
+            reports.sort_by_key(|(index, _)| *index);
+            (reports.into_iter().map(|(_, report)| report).collect::<Vec<_>>(), pending, observations)
+        })?;
+        root.input.child_results = reports;
+        if let Some(tools) = root.input.tools.as_mut() {
+            if let Some(step) = tools.steps.iter_mut().rev().find(|s| s.requests.is_empty()) {
+                step.observations = integrations
                     .iter()
                     .filter_map(|tool| tool.observation.clone())
-                    .collect(),
-                facts: None,
-                steering_notes: Vec::new(),
-                calls_remaining: None,
-                hook_feedback: integrations
+                    .collect();
+                step.hook_feedback = integrations
                     .iter()
                     .enumerate()
                     .filter_map(|(index, tool)| {
                         let feedback = tool.hook_feedback();
                         (!feedback.is_empty()).then_some((index, feedback))
                     })
-                    .collect(),
-            });
+                    .collect();
+            }
+            let mut catalog: serde_json::Value =
+                serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
+            if let Some(fields) = catalog.as_object_mut() {
+                fields.remove("last_answer_refused");
+            }
+            catalog["pending_workers"] = serde_json::json!(pending);
+            catalog["worker_coordination"] = serde_json::json!(
+                "While workers are pending, inspect or edit only paths outside their leases. Commands wait for lease quiescence. Finish or propose the next wave only after settlement and fresh primary verification."
+            );
+            tools.catalog = catalog.to_string();
         }
-        // drive_primary reaches run_children, which reaches synthesize again.
-        Box::pin(self.drive_primary(root_request)).await
+        Ok(())
     }
 
     // Honor pause before reporting an exhausted queued-child call budget.
     fn unstarted_abort(&self, queue: &ChildQueue) -> Option<AbortReason> {
-        if queue.pending.is_empty() {
-            None
-        } else if self.pause_requested() {
+        if self.pause_requested() {
             Some(AbortReason::Paused)
-        } else if !self.ledger().can_start_provider_call() {
+        } else if queue.budget_stopped {
+            Some(AbortReason::Budget)
+        } else if queue.pending.is_empty() && queue.unspawned.is_empty() {
+            None
+        } else if !self.ledger().can_start_provider_call()
+            || self.ledger().remaining_calls() == Some(0)
+        {
             Some(AbortReason::Budget)
         } else {
             None
         }
     }
 
-    async fn fill_slots(
+    fn fill_slots<'a>(
+        &'a self,
+        queue: &'a mut ChildQueue,
+        children: &'a mut Vec<ChildWork>,
+        root_request: &'a mut ProviderRequest,
+        segments: &'a mut Option<ActiveSegment>,
+        deadline: Instant,
+    ) -> super::step::BoxedStep<'a, ()> {
+        Box::pin(self.fill_slots_inner(queue, children, root_request, segments, deadline))
+    }
+
+    async fn fill_slots_inner(
         &self,
         queue: &mut ChildQueue,
-        children: &mut [ChildWork],
-        root_request: &ProviderRequest,
+        children: &mut Vec<ChildWork>,
+        root_request: &mut ProviderRequest,
+        segments: &mut Option<ActiveSegment>,
         deadline: Instant,
     ) -> Result<(), EngineError> {
         while queue.active.len() < self.ledger().provider_concurrency(queue.parallel)
             && !self.controls.cancellation.is_cancelled()
             && !self.pause_requested()
             && self.ledger().can_start_provider_call()
+            && self.ledger().remaining_calls() != Some(0)
+            && !queue.budget_stopped
+            && !self.worker_stopped()?
         {
-            let Some(index) = queue.pending.pop_front() else {
-                break;
+            if queue.pending.is_empty()
+                && self
+                    .fill_primary_slot(queue, root_request, deadline)
+                    .await?
+            {
+                continue;
+            }
+            let index = if let Some(index) = queue.pending.pop_front() {
+                index
+            } else {
+                let next = self
+                    .spawn_next_child(queue, root_request, segments, deadline)
+                    .await;
+                let Some(child) = (match next {
+                    Ok(child) => child,
+                    Err(EngineError::GoalBudgetExhausted) => {
+                        queue.budget_stopped = true;
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }) else {
+                    if queue.unspawned.is_empty() {
+                        break;
+                    } else {
+                        continue;
+                    }
+                };
+                let index = children.len();
+                children.push(child);
+                index
             };
             let child = &mut children[index];
-            let guidance = child.definition.as_ref().map_or_else(
-                || root_request.input.workspace_guidance.clone(),
-                |definition| {
-                    Some(format!(
-                        "{}\n\nAgent definition (untrusted assignment guidance):\n{}",
-                        root_request
-                            .input
-                            .workspace_guidance
-                            .as_deref()
-                            .unwrap_or_default(),
-                        definition.body
-                    ))
-                },
-            );
-            child.turns_remaining = child.turns_remaining.saturating_sub(1);
-            if child.turns_remaining == 0 {
-                child.tool_calls_remaining = 0;
-            }
-            if let Some(tools) = child.tools.as_mut() {
-                let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-                let room = runtime
-                    .result_capacity(
-                        tools.rendered_len()
-                            + guidance.as_ref().map_or(0, String::len)
-                            + CHILD_INTENT_RESERVE_BYTES,
-                        0,
-                    )
-                    .is_some_and(|capacity| capacity >= MIN_CHILD_RESULT_BYTES);
-                if !room {
-                    child.tool_calls_remaining = 0;
-                }
-                // Keep the request head frozen; later calls carry their remaining budget in the newest step.
-                match tools.steps.last_mut() {
-                    Some(step) => step.calls_remaining = Some(child.tool_calls_remaining),
-                    None => {
-                        tools.catalog = runtime
-                            .research_context(child.tool_calls_remaining)?
-                            .catalog;
-                        // Only the first call rebuilds the catalog; later calls keep this restriction.
-                        if let Some(definition) = &child.definition {
-                            restrict_catalog(tools, definition)?;
-                        }
-                    }
-                }
-            }
-            let cancellation = self.controls.cancellation.clone();
             let researcher = child.tools.is_some();
-            let root = &root_request.input;
-            let mut request = ProviderRequest {
-                session_id: self.session_id,
-                run_id: self.run_id,
-                agent_run_id: child.agent_run_id,
-                phase: AgentPhase::ChildWork,
-                collaboration: CollaborationPolicy::Single,
-                model: String::new(),
-                max_output_tokens: CHILD_OUTPUT_TOKEN_CAP,
-                input: RunInput {
-                    images: root
-                        .images
-                        .iter()
-                        .filter(|value| value.origin == crate::provider::ImageOrigin::Objective)
-                        .cloned()
-                        .collect(),
-                    goal_budget: Some(self.ledger().effective_budget()?),
-                    goal_plan_contract: if researcher {
-                        self.ledger().plan_contract()?
-                    } else {
-                        None
-                    },
-                    stop_hook_feedback: child.stop_hook_feedback.clone(),
-                    workspace_guidance: guidance,
-                    includes: root.includes.clone(),
-                    tools: child.tools.clone(),
-                    ..RunInput::new(
-                        if researcher {
-                            PromptRole::Researcher
-                        } else {
-                            PromptRole::ReadOnly
-                        },
-                        child.objective.clone(),
-                    )
-                },
-            };
+            let mut request = self.child_request(child, root_request)?;
+            let cancellation = self.controls.cancellation.clone();
             let provider = self.routing.bind(
                 crate::provider::ProviderRole::Child,
                 child.agent_run_id,
                 &mut request.model,
                 &mut request.max_output_tokens,
             )?;
+            if child.editor {
+                self.admit_worker_action(0).await?;
+            }
             self.reserve_provider_call(
                 child.agent_run_id,
                 Action::Child {
@@ -901,21 +1445,212 @@ impl RunLoop<'_> {
                 )
                 .await
             });
-            queue
-                .active
-                .insert(handle.id(), ActiveChild { index, request });
+            queue.active.insert(
+                handle.id(),
+                ActiveChild {
+                    index: Some(index),
+                    request,
+                },
+            );
         }
         Ok(())
     }
 
+    fn child_request(
+        &self,
+        child: &mut ChildWork,
+        root_request: &ProviderRequest,
+    ) -> Result<ProviderRequest, EngineError> {
+        let guidance = child.definition.as_ref().map_or_else(
+            || root_request.input.workspace_guidance.clone(),
+            |definition| {
+                Some(format!(
+                    "{}\n\nAgent definition (untrusted assignment guidance):\n{}",
+                    root_request
+                        .input
+                        .workspace_guidance
+                        .as_deref()
+                        .unwrap_or_default(),
+                    definition.body
+                ))
+            },
+        );
+        let guidance = if child.editor {
+            Some(format!(
+                "{}\n\nUntrusted worker assignment: {}",
+                guidance.as_deref().unwrap_or_default(),
+                serde_json::to_string(&self.proposed_editor(child.agent_run_id)?)
+                    .map_err(|_| EngineError::InvalidRequest)?
+            ))
+        } else {
+            guidance
+        };
+        child.turns_remaining = child.turns_remaining.saturating_sub(1);
+        if child.turns_remaining == 0 {
+            child.tool_calls_remaining = 0;
+        }
+        if let Some(tools) = child.tools.as_mut() {
+            let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
+            let room = runtime
+                .result_capacity(
+                    tools.rendered_len()
+                        + guidance.as_ref().map_or(0, String::len)
+                        + CHILD_INTENT_RESERVE_BYTES,
+                    0,
+                )
+                .is_some_and(|capacity| capacity >= MIN_CHILD_RESULT_BYTES);
+            if !room {
+                child.tool_calls_remaining = 0;
+            }
+            // Keep the request head frozen; later calls carry their remaining budget in the newest step.
+            match tools.steps.last_mut() {
+                Some(step) => step.calls_remaining = Some(child.tool_calls_remaining),
+                None => {
+                    if child.editor {
+                        let mut catalog: serde_json::Value =
+                            serde_json::from_str(&tools.catalog)
+                                .map_err(|_| EngineError::InvalidRequest)?;
+                        catalog["tool_calls_remaining"] =
+                            serde_json::json!(child.tool_calls_remaining);
+                        tools.catalog = catalog.to_string();
+                    } else {
+                        tools.catalog = runtime
+                            .research_context(child.tool_calls_remaining)?
+                            .catalog;
+                    }
+                    // Only the first call rebuilds the catalog; later calls keep this restriction.
+                    if !child.editor
+                        && let Some(definition) = &child.definition
+                    {
+                        restrict_catalog(tools, definition)?;
+                    }
+                }
+            }
+        }
+        let researcher = child.tools.is_some();
+        let root = &root_request.input;
+        let request = ProviderRequest {
+            session_id: self.session_id,
+            run_id: self.run_id,
+            agent_run_id: child.agent_run_id,
+            phase: AgentPhase::ChildWork,
+            collaboration: CollaborationPolicy::Single,
+            model: String::new(),
+            max_output_tokens: CHILD_OUTPUT_TOKEN_CAP,
+            input: RunInput {
+                images: root
+                    .images
+                    .iter()
+                    .filter(|value| value.origin == crate::provider::ImageOrigin::Objective)
+                    .cloned()
+                    .collect(),
+                goal_budget: Some(self.ledger().effective_budget()?),
+                goal_plan_contract: if researcher {
+                    self.ledger().plan_contract()?
+                } else {
+                    None
+                },
+                stop_hook_feedback: child.stop_hook_feedback.clone(),
+                workspace_guidance: guidance,
+                includes: root.includes.clone(),
+                tools: child.tools.clone(),
+                ..RunInput::new(
+                    if child.editor {
+                        PromptRole::Editor
+                    } else if researcher {
+                        PromptRole::Researcher
+                    } else {
+                        PromptRole::ReadOnly
+                    },
+                    child.objective.clone(),
+                )
+            },
+        };
+        Ok(request)
+    }
+
+    async fn fill_primary_slot(
+        &self,
+        queue: &mut ChildQueue,
+        root_request: &mut ProviderRequest,
+        deadline: Instant,
+    ) -> Result<bool, EngineError> {
+        if queue
+            .deferred_at
+            .is_some_and(|at| self.settled_agents().is_ok_and(|n| n > at))
+        {
+            queue.deferred_at = None;
+        }
+        if !queue.primary_pending
+            && queue.deferred_at.is_none()
+            && !queue.budget_stopped
+            && self.controls.tools.is_some()
+            && self.coordination_ready()?
+        {
+            self.refresh_team_context(root_request)?;
+            if let (Some(note), Some(tools)) =
+                (queue.refusal.take(), root_request.input.tools.as_mut())
+            {
+                let mut catalog: serde_json::Value = serde_json::from_str(&tools.catalog)
+                    .map_err(|_| EngineError::InvalidRequest)?;
+                catalog["last_answer_refused"] = serde_json::json!(note);
+                tools.catalog = catalog.to_string();
+            }
+            root_request.phase = AgentPhase::RootSynthesis;
+            let mut request = root_request.clone();
+            self.routing.bind(
+                crate::provider::ProviderRole::Primary,
+                self.primary_id,
+                &mut request.model,
+                &mut request.max_output_tokens,
+            )?;
+            self.admit_worker_action(0).await?;
+            self.reserve_provider_call(self.primary_id, self.primary_call(), 0)
+                .await?;
+            self.primary_context(root_request).await?;
+            request.input = root_request.input.clone();
+            let provider = self
+                .routing
+                .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
+            let attempt = request.clone();
+            let cancellation = self.controls.cancellation.clone();
+            let handle = queue.calls.spawn(async move {
+                crate::engine::routing::invoke_attempt(
+                    provider.as_ref(),
+                    attempt,
+                    deadline,
+                    cancellation,
+                    Some(crate::provider::ResponsePreview::new().0),
+                )
+                .await
+            });
+            queue.active.insert(
+                handle.id(),
+                ActiveChild {
+                    index: None,
+                    request,
+                },
+            );
+            queue.primary_pending = true;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn valid_child_tools(&self, child: &ChildWork, requests: &[ToolRequest]) -> bool {
         matches!(requests, [request]
-            if request.plan_contract.is_none()
-                && child.tools.is_some()
-                && child.tool_calls_remaining > 0
-                && request.call.valid()
-                && request.call.is_child_research()
-                && child.definition.as_ref().is_none_or(|definition| definition.allows(&request.call)))
+        if request.plan_contract.is_none()
+            && child.tools.is_some()
+            && child.tool_calls_remaining > 0 && child.turns_remaining > 0
+            && request.call.valid()
+            && (if child.editor {
+                self.proposed_editor(child.agent_run_id)
+                    .and_then(|a| self.editor_grant(&a))
+                    .is_ok_and(|g| g.allows(&request.call))
+            } else {
+                request.call.is_child_research()
+                    && child.definition.as_ref().is_none_or(|definition| definition.allows(&request.call))
+            }))
     }
 
     async fn finish_child(

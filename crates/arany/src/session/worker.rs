@@ -148,6 +148,10 @@ pub struct WorkerPolicy {
     pub data_bytes: u32,
 }
 impl WorkerPolicy {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        (64 * 1024 * 1024).min(256 * 1024 * 1024 / usize::from(self.concurrency))
+    }
+
     pub(crate) fn valid(&self) -> bool {
         self.parent_grant.valid()
             && (1..=8).contains(&self.concurrency)

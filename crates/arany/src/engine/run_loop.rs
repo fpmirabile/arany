@@ -111,9 +111,11 @@ pub(super) struct RunLoop<'a> {
     controls: LoopControls<'a>,
     ledger: &'a GoalLedger,
     hints: Option<&'a HintPublisher>,
-    worker_data_bytes: std::sync::OnceLock<u32>,
-    worker: tokio::sync::Mutex<Option<crate::tools::worker::View>>,
-    handover: std::sync::OnceLock<std::sync::Arc<[u8]>>,
+    worker_data_bytes: std::sync::Mutex<std::collections::HashMap<AgentRunId, u32>>,
+    worker_requests:
+        std::sync::Mutex<std::collections::HashMap<AgentRunId, crate::worker::EditorAssignment>>,
+    worker: tokio::sync::Mutex<std::collections::HashMap<AgentRunId, crate::tools::worker::View>>,
+    handover: std::sync::Mutex<std::collections::HashMap<AgentRunId, std::sync::Arc<[u8]>>>,
     definitions: std::sync::OnceLock<
         std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
     >,
@@ -152,9 +154,10 @@ impl<'a> RunLoop<'a> {
                 ledger,
                 publisher: hints,
             },
-            worker_data_bytes: std::sync::OnceLock::new(),
-            worker: tokio::sync::Mutex::new(None),
-            handover: std::sync::OnceLock::new(),
+            worker_data_bytes: Default::default(),
+            worker_requests: Default::default(),
+            worker: Default::default(),
+            handover: Default::default(),
             definitions: std::sync::OnceLock::new(),
             journal,
             session_id: identity.session_id,
@@ -316,7 +319,12 @@ impl<'a> RunLoop<'a> {
         pause: ActivePause,
         resume_at: Option<Instant>,
     ) -> Result<(), EngineError> {
-        self.settle_active_segment_at(pause.segment, pause.paused_at, resume_at)
+        let sampled_at = if self.ledger().providers_active() {
+            Instant::now()
+        } else {
+            pause.paused_at
+        };
+        self.settle_active_segment_at(pause.segment, sampled_at, resume_at)
     }
 
     async fn reserve_provider_call(
@@ -447,13 +455,20 @@ impl<'a> RunLoop<'a> {
         self.drive_primary(&mut root_request).await
     }
 
-    pub(super) async fn drive_primary(
+    pub(super) fn drive_primary<'b>(
+        &'b self,
+        root_request: &'b mut ProviderRequest,
+    ) -> step::BoxedStep<'b, ()> {
+        Box::pin(self.drive_primary_inner(root_request))
+    }
+
+    async fn drive_primary_inner(
         &self,
         root_request: &mut ProviderRequest,
     ) -> Result<(), EngineError> {
-        let phase = root_request.phase;
-        let planning = phase == AgentPhase::RootPlan;
         loop {
+            let phase = root_request.phase;
+            let planning = phase == AgentPhase::RootPlan;
             if self.pause_at_boundary() {
                 return self.settle_stopped_primary().await;
             }
@@ -478,7 +493,7 @@ impl<'a> RunLoop<'a> {
                     outcome: ProviderOutcome::Delegate(delegation),
                     ..
                 }) => (
-                    planning
+                    (planning || self.wave_settled()?)
                         && self.well_formed_delegation(
                             &delegation.children,
                             delegation.agent.as_deref(),
@@ -489,7 +504,8 @@ impl<'a> RunLoop<'a> {
                     outcome: ProviderOutcome::Tools(requests),
                     ..
                 }) => (
-                    self.well_formed_tools(requests),
+                    self.well_formed_tools(requests)
+                        && requests.iter().all(|r| self.primary_lease_allows(&r.call)),
                     self.ledger().admits(Action::Tool),
                 ),
                 _ => (false, true),
@@ -537,46 +553,77 @@ impl<'a> RunLoop<'a> {
                     if self.pause_at_boundary() {
                         return self.settle_stopped_primary().await;
                     }
-                    return self
+                    if self
                         .run_children(root_request, delegation.children, delegation.agent, turn)
-                        .await;
+                        .await?
+                    {
+                        continue;
+                    }
+                    return Ok(());
                 }
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Tools(requests),
                     turn,
                     ..
                 }) if valid_response => {
-                    if self.pause_at_boundary() {
-                        return self.settle_stopped_primary().await;
+                    if self
+                        .primary_tools(root_request, requests, turn, planning)
+                        .await?
+                    {
+                        continue;
                     }
-                    let Some(request) = self.begin_tool_step(requests).await? else {
-                        return self.fail_primary().await;
-                    };
-                    let grant = Grant::Primary {
-                        request: &mut *root_request,
-                        review_allowed: planning && self.ledger().admits(Action::Review),
-                    };
-                    match Box::pin(self.execute_step(grant, request, turn)).await {
-                        Ok(true) => {}
-                        Ok(false) if self.controls.cancellation.is_cancelled() => {
-                            return self.settle_stopped_primary().await;
-                        }
-                        Ok(false) if self.ledger().active_time_exhausted() => {
-                            return self.settle_stopped_primary().await;
-                        }
-                        Ok(false) => return self.fail_primary().await,
-                        Err(EngineError::GoalBudgetExhausted) => {
-                            return self.settle_stopped_primary().await;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                    Box::pin(self.verify_workers()).await?;
+                    return Ok(());
                 }
                 CallResult::Cancelled => return self.cancel_primary().await,
                 CallResult::Response(_) if budget_refused => return self.fail_for_budget().await,
                 _ => return self.fail_primary().await,
             }
         }
+    }
+
+    fn primary_tools<'b>(
+        &'b self,
+        root_request: &'b mut ProviderRequest,
+        requests: Vec<crate::ToolRequest>,
+        turn: crate::provider::ProviderTurn,
+        planning: bool,
+    ) -> step::BoxedStep<'b, bool> {
+        Box::pin(self.primary_tools_inner(root_request, requests, turn, planning))
+    }
+
+    async fn primary_tools_inner(
+        &self,
+        root_request: &mut ProviderRequest,
+        requests: Vec<crate::ToolRequest>,
+        turn: crate::provider::ProviderTurn,
+        planning: bool,
+    ) -> Result<bool, EngineError> {
+        if self.pause_at_boundary() {
+            return self.settle_stopped_primary().await.map(|()| false);
+        }
+        let Some(request) = self.begin_tool_step(requests).await? else {
+            return self.fail_primary().await.map(|()| false);
+        };
+        let grant = Grant::Primary {
+            request: &mut *root_request,
+            review_allowed: planning && self.ledger().admits(Action::Review),
+        };
+        match Box::pin(self.execute_step(grant, request, turn)).await {
+            Ok(true) => {}
+            Ok(false) if self.controls.cancellation.is_cancelled() => {
+                return self.settle_stopped_primary().await.map(|()| false);
+            }
+            Ok(false) if self.ledger().active_time_exhausted() => {
+                return self.settle_stopped_primary().await.map(|()| false);
+            }
+            Ok(false) => return self.fail_primary().await.map(|()| false),
+            Err(EngineError::GoalBudgetExhausted) => {
+                return self.settle_stopped_primary().await.map(|()| false);
+            }
+            Err(error) => return Err(error),
+        }
+        Box::pin(self.verify_workers()).await?;
+        Ok(true)
     }
 
     async fn stop_primary(
@@ -621,7 +668,33 @@ impl<'a> RunLoop<'a> {
         Ok(true)
     }
 
-    async fn invoke_primary(
+    async fn primary_context(&self, root: &mut ProviderRequest) -> Result<(), EngineError> {
+        self.record_steering_note(root).await?;
+        let facts = self.ledger().context_facts()?;
+        if let Some(feedback) = continuation_feedback(&mut root.input) {
+            feedback.facts = Some(facts);
+        } else {
+            match root
+                .input
+                .tools
+                .as_mut()
+                .and_then(|tools| tools.steps.last_mut())
+            {
+                Some(step) => step.facts = Some(facts),
+                None => root.input.goal_context_facts = Some(facts),
+            }
+        }
+        Ok(())
+    }
+
+    fn invoke_primary<'b>(
+        &'b self,
+        root: &'b mut ProviderRequest,
+    ) -> step::BoxedStep<'b, (CallResult, ActiveSegment)> {
+        Box::pin(self.invoke_primary_inner(root))
+    }
+
+    async fn invoke_primary_inner(
         &self,
         root: &mut ProviderRequest,
     ) -> Result<(CallResult, ActiveSegment), EngineError> {
@@ -645,21 +718,7 @@ impl<'a> RunLoop<'a> {
             }
             return Err(error);
         }
-        self.record_steering_note(root).await?;
-        let facts = self.ledger().context_facts()?;
-        if let Some(feedback) = continuation_feedback(&mut root.input) {
-            feedback.facts = Some(facts);
-        } else {
-            match root
-                .input
-                .tools
-                .as_mut()
-                .and_then(|tools| tools.steps.last_mut())
-            {
-                Some(step) => step.facts = Some(facts),
-                None => root.input.goal_context_facts = Some(facts),
-            }
-        }
+        self.primary_context(root).await?;
         let request = root.clone();
         let context = self
             .hints

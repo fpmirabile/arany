@@ -209,6 +209,14 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 points.push((index, Action::BoundaryCompaction { goal: false }, None));
             }
             Event::GoalPlanContractRecorded { .. } => points.push((index, Action::Tool, None)),
+            Event::WorkerStopObserved { .. } => {
+                points.push((index, Action::Worker { chunks: 0 }, None));
+            }
+            Event::WorkerVerificationRecorded { .. }
+                if !matches!(previous, Some(Event::WorkerVerificationRecorded { .. })) =>
+            {
+                points.push((index, Action::Worker { chunks: 0 }, None));
+            }
             Event::ToolStarted {
                 agent_run_id,
                 intent,
@@ -357,7 +365,7 @@ impl ForegroundWorkerProvider {
             .map(|a| a["digest"].clone())
             .and_then(|d| serde_json::from_value(d).ok())
             .unwrap_or([1; 32]);
-        let mut children = vec![crate::ChildAssignment {
+        let children = vec![crate::ChildAssignment {
             objective: "Edit the leased notes".into(),
             profile: None,
             editor: Some(Box::new(crate::worker::EditorAssignment {
@@ -374,19 +382,6 @@ impl ForegroundWorkerProvider {
                 supersedes: None,
             })),
         }];
-        if self.case == "background" {
-            children[0].editor.as_mut().unwrap().mode = crate::worker::WorkerMode::Background;
-        }
-        if self.case == "wave" {
-            children[0].editor.as_mut().unwrap().wave = 2;
-        }
-        if self.case == "mixed" {
-            children.push(crate::ChildAssignment {
-                editor: None,
-                objective: "Research".into(),
-                profile: None,
-            });
-        }
         crate::ProviderOutcome::Delegate(crate::Delegate {
             agent: None,
             children,

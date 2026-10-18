@@ -70,7 +70,7 @@ fn spec(mut parameters: Value, discriminator: &str) -> ToolSpec {
             "Complete the current task and report its observed result. A requested edit must first have an applied mutation result, or an actual blocking failure."
         }
         "delegate" => {
-            "Delegate research, or one offered foreground editor assignment. The primary integrates private edits and verifies the criterion before completing."
+            "Delegate a bounded team of researchers and offered editor assignments in the next settled wave. The primary integrates private edits and verifies the criterion before completing."
         }
         _ => by_name(&operation).expect("compiled operation").description,
     };

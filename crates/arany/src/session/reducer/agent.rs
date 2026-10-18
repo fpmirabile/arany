@@ -359,7 +359,9 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             if *role == AgentRole::Child
                 && run.agents[0]
                     .provider_calls
-                    .last()
+                    .iter()
+                    .rev()
+                    .find(|call| call.delegation.is_some())
                     .is_none_or(|call| call.disposition != ProviderCallDisposition::Delegated)
             {
                 return Err(ReplayError::InvalidTransition);

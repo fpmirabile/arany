@@ -643,7 +643,7 @@ impl ToolRuntime {
                     mcp_servers: self.config.mcp.iter().map(|s| s.name.clone()).collect(),
                     permission_mode: self.permissions().map(permissions::PermissionConfig::mode),
                 },
-                concurrency: 1,
+                concurrency: 4,
                 max_turns: 17,
                 max_tools: 16,
                 data_bytes: WORKER_DATA_BYTES as u32,
