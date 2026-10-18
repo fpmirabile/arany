@@ -34,11 +34,11 @@ Teams support read-only researchers (C1) and Run-scoped edit-only workers (C2) w
 
 ### Freeze until item 11 lands
 
-Item 11 (C2) has landed. Lifting this freeze is an owner decision; it stays in force until the owner records the lift here.
+Item 11 (C2) has landed. On 2026-10-18 the owner lifted this freeze for E4 checkpoints and for item 12 (C3 views and the Supervisor in shadow mode), accepting their plans; it stays in force for the rest of the list below until the owner lifts it.
 
-CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; the Supervisor as loop code; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
+CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
 
-- **E4 checkpoints and rewind.** Remain frozen until the owner lifts this freeze. Set exact per-file/per-Goal checkpoint quotas before implementation when the freeze lifts.
+- **E4 checkpoints and rewind.** Unfrozen by the owner on 2026-10-18 with the planned per-file, per-Goal and per-Session quotas and 30-day retention; the owning specs record them as each slice lands.
 
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1). API-key billing is a separate route; another harness's implementation or credentials do not authorize Arany access.
 
