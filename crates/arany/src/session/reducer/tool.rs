@@ -530,8 +530,12 @@ fn post_target<'a>(
     }
     let integrated = matches!(
         &integration.intent.call,
-        crate::tools::ToolCall::ApplyChangeset { source_intent_digest, .. }
-            if source_intent_digest == subject
+        crate::tools::ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt {
+                source_intent_digest,
+                ..
+            },
+        } if source_intent_digest == subject
     ) && last > 0
         && integration.observation.as_ref().is_some_and(|observation| {
             observation.disposition == crate::tools::ToolDisposition::Succeeded
