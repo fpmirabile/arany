@@ -2391,7 +2391,7 @@ async fn hook_post_tool_use_feedback_is_journaled_and_never_undoes() {
             "{script}"
         );
         let observation = &hook.outcome.as_ref().unwrap().observation;
-        if script.starts_with("rm ") {
+        if script.starts_with(": > ") {
             let result: Value = serde_json::from_str(&observation.output).unwrap();
             assert!(!result["changeset"]["files"].as_array().unwrap().is_empty());
         }
