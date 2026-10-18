@@ -1722,13 +1722,7 @@ impl Engine {
             Self::release_goal_workspace(leases, goal.id, workspace_identity);
             goal_status = status;
         }
-        if !matches!(
-            run.status,
-            crate::session::RunStatus::Finished
-                | crate::session::RunStatus::Failed
-                | crate::session::RunStatus::Cancelled
-                | crate::session::RunStatus::StoppedByHook
-        ) {
+        if !run.status.is_outcome() {
             return Err(EngineError::InvalidHistory);
         }
         Ok(RunTurn {

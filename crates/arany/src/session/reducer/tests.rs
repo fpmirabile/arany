@@ -5191,16 +5191,6 @@ mod goal_replay_tests {
     }
     #[test]
     fn lifecycle_hooks_replay_bind_call_subject_order_block_and_continuation() {
-        for (kind, old) in [
-            ("HookFinished", 2),
-            ("AgentFinished", 7),
-            ("RunFinished", 7),
-        ] {
-            assert!(matches!(
-                Event::decode(kind, old, "{}", None, None),
-                Err(ReplayError::UnknownEvent)
-            ));
-        }
         use crate::tools::permissions::{
             HookEvent, HookInvocation, HookOutcome, HookResult, compact_subject, stop_subject,
         };
@@ -5348,7 +5338,44 @@ mod goal_replay_tests {
                     reserve_child_call(goal, run, actor)
                 ));
                 assert!(rejected(&stopped_view, started.clone()));
+                assert!(rejected(
+                    &stopped_view,
+                    Event::AgentFinished {
+                        worker: None,
+                        run_id: run,
+                        agent_run_id: actor,
+                        disposition: AgentDisposition::Finished,
+                        summary: Some("done".into()),
+                        result: Some("done".into()),
+                    }
+                ));
+                assert!(rejected(
+                    &stopped_view,
+                    Event::RunFinished {
+                        run_id: run,
+                        disposition: RunDisposition::Failed,
+                        active_ms: 0,
+                    }
+                ));
+                if event == HookEvent::SubagentStop {
+                    let mut foreign = stopped_view.clone();
+                    foreign.runs[0]
+                        .lifecycle_hooks
+                        .iter_mut()
+                        .for_each(|hook| hook.invocation.intent.agent_run_id = AgentRunId::new());
+                    assert!(rejected(&foreign, terminal.clone()));
+                }
                 apply(&mut stopped_view, terminal).unwrap();
+                if event == HookEvent::SubagentStop {
+                    assert!(rejected(
+                        &stopped_view,
+                        Event::RunFinished {
+                            run_id: run,
+                            disposition: RunDisposition::StoppedByHook,
+                            active_ms: 0,
+                        }
+                    ));
+                }
                 assert_eq!(
                     stopped_view.runs[0]
                         .agents

@@ -137,6 +137,11 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
     store.close().await.unwrap();
     let engine =
         engine_support::open(StateRoot::admit(&state).unwrap(), EngineConfig::default()).unwrap();
+    let forked = engine
+        .fork_session(result.session_id, workspace.clone(), None)
+        .await
+        .unwrap();
+    assert_ne!(forked, result.session_id);
     let provider = Arc::new(ScriptedProvider::new(vec![
         arany::test_support::goals::finish_with("resumed"),
     ]));

@@ -360,15 +360,12 @@ async fn run_on_engine(
         .last()
         .filter(|run| **run == outcome.run)
         .ok_or("Run history unavailable or invalid")?;
-    let paused = interrupted
+    let paused = (interrupted || run.status == RunStatus::StoppedByHook)
         && view.goal(outcome.goal_id).is_some_and(|goal| {
             matches!(goal.status, GoalStatus::Running | GoalStatus::Interrupted)
         });
     let success = run.status == RunStatus::Finished && !paused;
-    if !matches!(
-        run.status,
-        RunStatus::Finished | RunStatus::Failed | RunStatus::Cancelled | RunStatus::StoppedByHook
-    ) {
+    if !run.status.is_outcome() {
         return Err("Run did not reach a terminal state".into());
     }
     let stdout = render_exec(run, &events, args.output.into(), new_session);
@@ -433,6 +430,7 @@ async fn run_on_engine(
             if run.status == RunStatus::StoppedByHook
                 && let Some(notice) = crate::presentation::run_feedback(run)
             {
+                receipt.push_str("error: ");
                 receipt.push_str(&notice);
                 receipt.push('\n');
             }
@@ -442,7 +440,7 @@ async fn run_on_engine(
         OutputArg::Jsonl => match run.status {
             RunStatus::Cancelled => "error: Run cancelled\n".into(),
             RunStatus::StoppedByHook => format!(
-                "{}\n",
+                "error: {}\n",
                 crate::presentation::run_feedback(run).unwrap_or_default()
             ),
             RunStatus::Failed => "error: Run failed\n".into(),

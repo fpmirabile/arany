@@ -2105,17 +2105,11 @@ async fn load_confirmed_outcome(
 }
 
 fn confirm_outcome(view: &SessionView, outcome: &RunOutcome) -> Result<(), String> {
-    if !view.runs.iter().any(|run| {
-        run.id == outcome.run.id
-            && run == &outcome.run
-            && matches!(
-                run.status,
-                RunStatus::Finished
-                    | RunStatus::Failed
-                    | RunStatus::Cancelled
-                    | RunStatus::StoppedByHook
-            )
-    }) {
+    if !view
+        .runs
+        .iter()
+        .any(|run| run.id == outcome.run.id && run == &outcome.run && run.status.is_outcome())
+    {
         return Err("Run history unavailable or invalid".into());
     }
     Ok(())

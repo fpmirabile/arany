@@ -646,7 +646,10 @@ async fn complete(
         }
         if !finalizing {
             summary.goal = Some(GoalSummary {
-                status: if run.status == arany::RunStatus::Cancelled {
+                status: if matches!(
+                    run.status,
+                    arany::RunStatus::Cancelled | arany::RunStatus::StoppedByHook
+                ) {
                     GoalStatus::Interrupted
                 } else {
                     GoalStatus::Running

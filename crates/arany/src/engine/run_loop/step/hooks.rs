@@ -92,11 +92,7 @@ impl HookFold {
                 observation: not_dispatched(
                     intent,
                     ToolDisposition::Denied,
-                    if self.stop == HookStop::Requested {
-                        "Hook stopped the Run; no operation was dispatched"
-                    } else {
-                        "Hook outcome uncertain; no operation was dispatched"
-                    },
+                    "Hook outcome uncertain; no operation was dispatched",
                 ),
                 refused: true,
                 active_time: None,

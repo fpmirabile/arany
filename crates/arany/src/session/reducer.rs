@@ -27,13 +27,13 @@ pub enum RunStatus {
 
 impl RunStatus {
     fn is_terminal(self) -> bool {
+        self == Self::Interrupted || self.is_outcome()
+    }
+
+    pub fn is_outcome(self) -> bool {
         matches!(
             self,
-            Self::Finished
-                | Self::Failed
-                | Self::Cancelled
-                | Self::Interrupted
-                | Self::StoppedByHook
+            Self::Finished | Self::Failed | Self::Cancelled | Self::StoppedByHook
         )
     }
 }
@@ -257,31 +257,25 @@ impl RunView {
         })
     }
 
-    pub fn hook_stop_reason(&self) -> Option<Option<&str>> {
+    fn stopped_hooks(&self) -> impl Iterator<Item = (&HookView, Option<&str>)> {
         self.lifecycle_hooks
             .iter()
             .chain(self.tools.iter().flat_map(|tool| &tool.hooks))
-            .find_map(|hook| match &hook.outcome.as_ref()?.result {
+            .filter_map(|hook| match &hook.outcome.as_ref()?.result {
                 crate::tools::permissions::HookResult::Stopped { reason } => {
-                    Some(reason.as_deref())
+                    Some((hook, reason.as_deref()))
                 }
                 _ => None,
             })
     }
 
+    pub fn hook_stop_reason(&self) -> Option<Option<&str>> {
+        self.stopped_hooks().next().map(|(_, reason)| reason)
+    }
+
     pub(crate) fn actor_stopped_by_hook(&self, agent: AgentRunId) -> bool {
-        self.lifecycle_hooks
-            .iter()
-            .chain(self.tools.iter().flat_map(|tool| &tool.hooks))
-            .any(|hook| {
-                hook.invocation.intent.agent_run_id == agent
-                    && hook.outcome.as_ref().is_some_and(|outcome| {
-                        matches!(
-                            outcome.result,
-                            crate::tools::permissions::HookResult::Stopped { .. }
-                        )
-                    })
-            })
+        self.stopped_hooks()
+            .any(|(hook, _)| hook.invocation.intent.agent_run_id == agent)
     }
 
     pub(crate) fn stop_hooks(&self, agent: AgentRunId) -> impl Iterator<Item = &HookView> {

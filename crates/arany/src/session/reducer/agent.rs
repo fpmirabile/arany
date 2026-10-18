@@ -682,8 +682,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             }
             if *disposition == AgentDisposition::StoppedByHook
                 && (!run.hooks_settled()
-                    || !run.actor_stopped_by_hook(*agent_run_id)
-                        && run.agents[index].role != AgentRole::Primary
+                    || (!run.actor_stopped_by_hook(*agent_run_id)
+                        && run.agents[index].role != AgentRole::Primary)
                     || run.hook_stop_reason().is_none())
             {
                 return Err(ReplayError::InvalidTransition);
