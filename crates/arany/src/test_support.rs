@@ -144,7 +144,7 @@ mod account_roots {
             match flock(&namespace, FlockOperation::NonBlockingLockExclusive) {
                 Ok(()) => break,
                 Err(rustix::io::Errno::WOULDBLOCK) if Instant::now() < deadline => {
-                    std::thread::yield_now()
+                    std::thread::sleep(Duration::from_millis(5))
                 }
                 Err(error) => return Err(error.into()),
             }
