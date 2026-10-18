@@ -748,7 +748,7 @@ async fn fallback_only_on_pre_output_call_failure_and_never_after_partial_output
             bindings,
             input(&workspace),
             RunControls {
-                progress: Some(RunProgress::with_previews()),
+                hints: Some(RunHints::with_previews()),
                 ..RunControls::default()
             },
         )
@@ -871,18 +871,11 @@ async fn assignment_profiles_keep_shared_first_routes_distinct_and_finish_in_ass
     request.policy = CollaborationPolicy::Team {
         max_active_children: 3,
     };
-    let mut progress = RunProgress::new();
-    let run = run_routed(
-        &engine,
-        bindings,
-        request,
-        RunControls {
-            progress: Some(progress.clone()),
-            ..Default::default()
-        },
-    );
+    let mut events = engine.subscribe();
+    let run = run_routed(&engine, bindings, request, RunControls::default());
     let release = async {
         let mut gates = HashMap::new();
+        let mut children = HashMap::new();
         for _ in 0..3 {
             let (objective, release) = starts.recv().await.unwrap();
             assert!(gates.insert(objective, release).is_none());
@@ -890,12 +883,23 @@ async fn assignment_profiles_keep_shared_first_routes_distinct_and_finish_in_ass
         for objective in ["C", "B", "A"] {
             gates.remove(objective).unwrap().send(()).unwrap();
             loop {
-                let update = progress.changed().await;
-                if update.run.agents.iter().any(|agent| {
-                    agent.objective.as_deref() == Some(objective)
-                        && agent.status == AgentStatus::Finished
-                }) {
-                    break;
+                let Some(arany::Tapped::Committed(event)) = events.next().await else {
+                    panic!("committed child completion");
+                };
+                match &event.event {
+                    Event::AgentSpawned {
+                        agent_run_id,
+                        objective: Some(objective),
+                        ..
+                    } => {
+                        children.insert(*agent_run_id, objective.clone());
+                    }
+                    Event::AgentFinished { agent_run_id, .. }
+                        if children.get(agent_run_id).map(String::as_str) == Some(objective) =>
+                    {
+                        break;
+                    }
+                    _ => {}
                 }
             }
         }

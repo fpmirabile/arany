@@ -1,5 +1,5 @@
+use super::hints::HintPublisher;
 use super::ledger::{Action, GoalLedger, duration_ms};
-use super::progress::ProgressPublisher;
 use super::{EngineError, RunCancellation, RunSteering, STORE_ACTION_OVERHEAD};
 use crate::journal::Journal;
 use crate::provider::{
@@ -109,7 +109,7 @@ pub(super) struct RunLoop<'a> {
     primary_id: AgentRunId,
     controls: LoopControls<'a>,
     ledger: &'a GoalLedger,
-    progress: Option<&'a ProgressPublisher>,
+    hints: Option<&'a HintPublisher>,
     definitions: std::sync::OnceLock<
         std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
     >,
@@ -139,14 +139,14 @@ impl<'a> RunLoop<'a> {
         identity: RunIdentity,
         controls: LoopControls<'a>,
         ledger: &'a GoalLedger,
-        progress: Option<&'a ProgressPublisher>,
+        hints: Option<&'a HintPublisher>,
     ) -> Self {
         Self {
             routing: super::routing::CallRouter {
                 providers,
                 journal,
                 ledger,
-                publisher: progress,
+                publisher: hints,
             },
             definitions: std::sync::OnceLock::new(),
             journal,
@@ -156,7 +156,7 @@ impl<'a> RunLoop<'a> {
             primary_id: identity.primary_id,
             controls,
             ledger,
-            progress,
+            hints,
         }
     }
 
@@ -334,9 +334,7 @@ impl<'a> RunLoop<'a> {
 
     fn primary_call(&self) -> Action {
         Action::ProviderCall {
-            previews: self
-                .progress
-                .is_some_and(ProgressPublisher::previews_enabled),
+            previews: self.hints.is_some_and(HintPublisher::previews_enabled),
             steering: self.controls.steering.is_some(),
         }
     }
@@ -638,8 +636,8 @@ impl<'a> RunLoop<'a> {
         }
         let request = root.clone();
         let context = self
-            .progress
-            .map(|progress| progress.preview_context(self.ledger, self.primary_id))
+            .hints
+            .map(|hints| hints.preview_context(self.ledger, self.primary_id))
             .transpose()?
             .flatten();
         let Some(context) = context else {
@@ -678,7 +676,7 @@ impl<'a> RunLoop<'a> {
                     if changed.is_err() { observing = false; continue; }
                     let text = checkpoint.filter(&receiver.borrow_and_update());
                     self.checkpoint(&text, &mut checkpoint, false).await?;
-                    self.progress.expect("preview owner").publish_preview(self.primary_id, call_index, Some(Arc::new(text)));
+                    self.hints.expect("preview owner").publish_preview(self.primary_id, call_index, Some(Arc::new(text)));
                 }
             }
         };
@@ -706,7 +704,7 @@ impl<'a> RunLoop<'a> {
         ) {
             self.checkpoint(&text, &mut checkpoint, true).await?;
         }
-        self.progress
+        self.hints
             .expect("preview owner")
             .publish_preview(self.primary_id, call_index, None);
         Ok((result, active_segment))
