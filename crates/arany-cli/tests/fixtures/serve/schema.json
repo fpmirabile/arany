@@ -837,6 +837,7 @@
         "goalUnavailable",
         "goalAdmissionUncertain",
         "goalBudgetExhausted",
+        "goalNotContinuable",
         "guardUnavailable",
         "sessionNotIdle",
         "forkNotAtRunBoundary",
