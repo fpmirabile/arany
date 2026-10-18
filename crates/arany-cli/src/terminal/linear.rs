@@ -96,6 +96,69 @@ impl LinearState {
         self.write_view(&mut io::stderr(), view, notice)
     }
 
+    pub(super) fn write_transcript(
+        &mut self,
+        writer: &mut impl Write,
+        view: &SessionView,
+    ) -> io::Result<()> {
+        const HEADING: &str = "Transcript details:";
+        const LIMIT_NOTICE: &str =
+            "Transcript detail limit reached; use show --output jsonl for the complete journal.";
+        let mut remaining = super::history::MAX_CLASSIC_HISTORY_BYTES
+            - (HEADING.len() + 1)
+            - (LIMIT_NOTICE.len() + 1);
+        if self.newline_pending || self.line_open {
+            writeln!(writer)?;
+            remaining -= 1;
+            self.newline_pending = false;
+            self.line_open = false;
+        }
+        writeln!(writer, "{HEADING}")?;
+        for run in view
+            .runs
+            .iter()
+            .rev()
+            .take(super::history::MAX_CLASSIC_HISTORY_RUNS)
+            .rev()
+        {
+            let mut parts = Vec::new();
+            if run.assistant_message.is_none()
+                && let Some(answer) = crate::presentation::display_answer(run)
+            {
+                parts.push(format!("Arany · incomplete:\n{answer}"));
+            }
+            parts.extend(
+                crate::presentation::display_commentary(run)
+                    .into_iter()
+                    .map(|(_, _, text)| format!("Arany · public commentary:\n{text}")),
+            );
+            if run
+                .display
+                .iter()
+                .any(|chunk| chunk.category == arany::DisplayCategory::Limit)
+            {
+                parts.push(arany::DISPLAY_LIMIT_TEXT.to_owned());
+            }
+            let parts = parts
+                .into_iter()
+                .chain(run.tools.iter().map(crate::presentation::tool_detail_text))
+                .chain(crate::presentation::supervisor_lines(run));
+            for text in parts {
+                let text = crate::presentation::escape_terminal(&text);
+                if text.len().saturating_add(1) > remaining {
+                    writeln!(writer, "{LIMIT_NOTICE}")?;
+                    return Ok(());
+                }
+                remaining = remaining.saturating_sub(text.len() + 1);
+                writeln!(writer, "{text}")?;
+            }
+        }
+        if view.runs.len() > super::history::MAX_CLASSIC_HISTORY_RUNS {
+            writeln!(writer, "{LIMIT_NOTICE}")?;
+        }
+        writer.flush()
+    }
+
     pub(super) fn write_help(&mut self, writer: &mut impl Write) -> io::Result<()> {
         if self.newline_pending || self.line_open {
             writeln!(writer)?;
@@ -775,6 +838,88 @@ mod tests {
             .write_agents(&mut refreshed, &model, false)
             .expect("progress redraw after partial choice");
         assert!(refreshed.starts_with(b"\nCurrent Run:"));
+
+        view.runs[0].supervisor =
+            crate::presentation::supervisor_fixture(view.runs[0].agents[0].id, 1);
+        let mut linear = LinearState::new("screen-reader");
+        let mut output = Vec::new();
+        linear.write_transcript(&mut output, &view).unwrap();
+        assert_eq!(output, b"Transcript details:\nSupervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken\n");
+        view.runs[0].supervisor =
+            crate::presentation::supervisor_fixture(view.runs[0].agents[0].id, 256);
+        let inspector = AgentInspectorModel::from_session(&view, 0, 120, false);
+        let mut inspected = Vec::new();
+        linear
+            .write_agents(&mut inspected, &inspector, false)
+            .unwrap();
+        let inspected = String::from_utf8(inspected).unwrap();
+        assert_eq!(inspected.matches("Supervisor (shadow):").count(), 256);
+        assert_eq!(inspected.matches("; no action taken").count(), 256);
+        assert!(inspected.contains("Supervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken; verdict limit reached\n"));
+        assert!(!inspected.contains(['\u{1b}', '\r']));
+        view.runs[0].supervisor =
+            crate::presentation::supervisor_fixture(view.runs[0].agents[0].id, 1);
+        view.runs = vec![view.runs[0].clone(); 17];
+        output.clear();
+        linear.write_transcript(&mut output, &view).unwrap();
+        let text = std::str::from_utf8(&output).unwrap();
+        assert_eq!(text.matches("Supervisor (shadow):").count(), 16);
+        assert!(text.ends_with(
+            "Transcript detail limit reached; use show --output jsonl for the complete journal.\n"
+        ));
+        for run in &mut view.runs {
+            run.supervisor = crate::presentation::supervisor_fixture(run.agents[0].id, 256);
+        }
+        output.clear();
+        linear.write_transcript(&mut output, &view).unwrap();
+        assert!(output.ends_with(
+            b"Transcript detail limit reached; use show --output jsonl for the complete journal.\n"
+        ));
+        assert!(output.len() <= super::super::history::MAX_CLASSIC_HISTORY_BYTES);
+        assert!(!output.contains(&0x1b));
+        assert!(!output.contains(&b'\r'));
+
+        for (run_count, line_open, newline_pending) in
+            [(17, false, false), (3, true, false), (17, false, true)]
+        {
+            let mut run = view.runs[0].clone();
+            run.supervisor = Default::default();
+            run.display.clear();
+            view.runs = vec![run; run_count];
+            for (index, run) in view.runs.iter_mut().rev().take(16).rev().enumerate() {
+                let text = match index {
+                    0 | 1 => "x".repeat(32_700),
+                    2 if run_count == 3 => "x".repeat(100),
+                    _ => continue,
+                };
+                run.display = text
+                    .as_bytes()
+                    .chunks(2048)
+                    .enumerate()
+                    .map(|(index, bytes)| arany::DisplayChunk {
+                        call_index: 0,
+                        phase: arany::AgentPhase::RootPlan,
+                        category: arany::DisplayCategory::Commentary,
+                        item: 0,
+                        offset: u32::try_from(index * 2048).unwrap(),
+                        text: std::str::from_utf8(bytes).unwrap().to_owned(),
+                    })
+                    .collect();
+            }
+            linear.line_open = line_open;
+            linear.newline_pending = newline_pending;
+            output.clear();
+            linear.write_transcript(&mut output, &view).unwrap();
+            assert!(
+                output.len() <= super::super::history::MAX_CLASSIC_HISTORY_BYTES,
+                "transcript exceeded byte limit: runs={run_count}, line_open={line_open}, newline_pending={newline_pending}, bytes={}",
+                output.len()
+            );
+            assert!(output.ends_with(
+                b"Transcript detail limit reached; use show --output jsonl for the complete journal.\n"
+            ));
+            assert_eq!(output.starts_with(b"\n"), line_open || newline_pending);
+        }
 
         view.runs.clear();
         view.created_sequence = 0;

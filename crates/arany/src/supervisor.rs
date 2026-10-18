@@ -285,8 +285,24 @@ pub struct SupervisorState {
     verdicts: u16,
     pending: Option<(RunId, AgentRunId, SupervisorVerdict)>,
     last_verdict: Option<(u64, u64)>,
+    recorded: Vec<(AgentRunId, SupervisorVerdict)>,
 }
 impl SupervisorState {
+    pub fn verdicts(&self) -> &[(AgentRunId, SupervisorVerdict)] {
+        &self.recorded
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn with_verdicts_for_test(recorded: Vec<(AgentRunId, SupervisorVerdict)>) -> Self {
+        assert!(recorded.len() <= usize::from(MAX_VERDICTS));
+        assert!(recorded.iter().all(|(_, verdict)| verdict.valid()));
+        Self {
+            verdicts: u16::try_from(recorded.len()).expect("bounded verdict count"),
+            recorded,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn pending_event(&self) -> Option<Event> {
         self.pending
             .as_ref()
@@ -322,6 +338,9 @@ impl SupervisorState {
                 return Err(ReplayError::InvalidTransition);
             }
             run.supervisor.pending = None;
+            run.supervisor
+                .recorded
+                .push((*agent_run_id, verdict.clone()));
             run.supervisor.verdicts += 1;
             run.supervisor.last_verdict = Some((envelope.sequence, verdict.subject_sequence));
             return Ok(true);

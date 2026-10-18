@@ -2964,6 +2964,11 @@ mod goal_replay_tests {
                 },
             );
             let pending = view.runs[0].supervisor.pending_event();
+            assert_eq!(
+                view.runs[0].supervisor.verdicts().len(),
+                verdict_count,
+                "pending verdicts are not display facts"
+            );
             if i == 0 {
                 let mut negative = view.clone();
                 let forged = Event::SupervisorVerdictRecorded {
@@ -3043,6 +3048,11 @@ mod goal_replay_tests {
                     assert_eq!(verdict.capped, verdict_count == 256);
                 }
                 append(&mut view, &mut envelopes, verdict.clone());
+                let (recorded_actor, recorded) = view.runs[0].supervisor.verdicts().last().unwrap();
+                assert_eq!(*recorded_actor, actor);
+                assert!(
+                    matches!(&verdict, Event::SupervisorVerdictRecorded { verdict, .. } if verdict == recorded)
+                );
                 assert!(
                     apply(&mut view.clone(), verdict).is_err(),
                     "duplicate verdict"
@@ -3050,6 +3060,7 @@ mod goal_replay_tests {
             }
         }
         assert_eq!(verdict_count, 256);
+        assert_eq!(view.runs[0].supervisor.verdicts().len(), 256);
         assert_eq!(
             SessionView::replay_open(session, &envelopes)
                 .unwrap()
