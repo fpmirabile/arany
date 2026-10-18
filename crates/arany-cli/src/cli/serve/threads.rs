@@ -26,6 +26,7 @@ pub(super) struct Threads {
     pub provider: Option<std::sync::Arc<dyn arany::Provider>>,
 }
 
+#[derive(Clone)]
 pub(super) struct LoadedThread {
     pub workspace: PathBuf,
     pub providers: AdmittedProviders,
@@ -182,7 +183,7 @@ impl Threads {
     }
 }
 
-fn read_store(state: &Path) -> Result<Store, Fault> {
+pub(super) fn read_store(state: &Path) -> Result<Store, Fault> {
     let root = StateRoot::open_existing(state)
         .map_err(arany::EngineError::from)
         .map_err(Fault::engine)?;
@@ -204,7 +205,7 @@ pub(super) async fn load_view(state: &Path, id: SessionId) -> Result<SessionView
     view.ok_or_else(|| Fault::engine(arany::EngineError::MissingSession))
 }
 
-async fn created_at_ms(state: &Path, id: SessionId) -> Result<i64, Fault> {
+pub(super) async fn created_at_ms(state: &Path, id: SessionId) -> Result<i64, Fault> {
     let store = read_store(state)?;
     let result = store.load_session(id).await;
     let closed = store.close().await;

@@ -2821,7 +2821,10 @@ fn serve_stdio_initializes_refuses_missing_credentials_and_exits_cleanly() {
             "turns_v1",
             "items_v1",
             "interrupt_receipt_v1",
-            "approvals_v1"
+            "approvals_v1",
+            "events_subscribe_v1",
+            "receipt_get_v1",
+            "thread_fork_v1"
         ])
     );
     assert_eq!(messages[1]["error"]["code"], -32001);

@@ -44,7 +44,7 @@ fn parse_v7(value: &str) -> Result<Uuid, &'static str> {
     Ok(id)
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionId(Uuid);
 

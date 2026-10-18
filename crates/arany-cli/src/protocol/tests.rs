@@ -101,6 +101,9 @@ fn every_conformance_message_validates_against_the_schema() {
         ("thread/start", json!({"cwd": "/workspace", "provider": "openai", "model": "model", "effort": "high", "permissionMode": "acceptEdits", "includePaths": ["/workspace/file"]}), json!({"thread": thread})),
         ("thread/resume", json!({"threadId": thread_id, "cwd": "/workspace", "provider": "custom:local", "model": "model"}), json!({"thread": thread, "turns": [turn.clone()]})),
         ("turn/start", json!({"threadId": thread_id, "input": [{"type": "text", "text": "Hello"}, {"type": "image", "mediaType": "image/png", "data": "aW1hZ2U="}], "goal": {"autonomous": false}}), json!({"turn": turn})),
+        ("thread/fork", json!({"threadId": thread_id, "cwd": "/workspace", "title": "Fork"}), json!({"thread": thread})),
+        ("events/subscribe", json!({"threadId": thread_id, "since": 0}), json!({"events": [], "nextSince": null})),
+        ("receipt/get", json!({"threadId": thread_id, "goalId": goal_id}), json!({"goal": {"id": goal_id, "status": "completed", "objective": "Hello", "budget": {"maxProviderCalls": 64, "maxTokens": null, "maxActiveMs": 1800000, "maxRuns": 16}, "usage": {"runs": 1, "providerCalls": 1, "activeMs": 1, "uncertainActiveMs": 0, "knownTokens": 0, "knownCachedTokens": 0, "tokenUsageUnknown": true}, "report": {"summary": "Done", "changes": [], "evidence": [], "unresolved": [], "cachedInputTokens": 0}}})),
         ("turn/interrupt", json!({"threadId": thread_id, "turnId": run_id}), json!({})),
     ].into_iter().enumerate() {
         let request = json!({"jsonrpc": "2.0", "id": index, "method": name, "params": params});
@@ -114,6 +117,9 @@ fn every_conformance_message_validates_against_the_schema() {
             "thread/resume" => {serde_json::from_value::<ThreadResumeParams>(params).unwrap();}
             "turn/start" => {serde_json::from_value::<TurnStartParams>(params).unwrap();}
             "turn/interrupt" => {serde_json::from_value::<TurnInterruptParams>(params).unwrap();}
+            "thread/fork" => {serde_json::from_value::<ThreadForkParams>(params).unwrap();}
+            "events/subscribe" => {serde_json::from_value::<EventsSubscribeParams>(params).unwrap();}
+            "receipt/get" => {serde_json::from_value::<ReceiptGetParams>(params).unwrap();}
             _ => unreachable!(),
         }
     }
@@ -131,6 +137,10 @@ fn every_conformance_message_validates_against_the_schema() {
         assert_eq!(serde_json::to_value(decoded).unwrap(), *item);
     }
     for (name, params) in [
+        (
+            "events/committed",
+            json!({"threadId": thread_id, "event": {"sequence": 1, "session_id": thread_id, "run_id": null, "agent_run_id": null, "kind": "SessionStarted", "event_version": 2, "payload": {"title": "Example"}, "created_at_ms": 1}}),
+        ),
         ("initialized", json!({})),
         ("thread/started", json!({"thread": thread})),
         ("turn/started", json!({"threadId": thread_id, "turn": turn})),
@@ -251,6 +261,37 @@ fn protocol_params_reject_unknown_fields_unsupported_modes_and_input_overflow() 
     assert!(serde_json::from_value::<TurnStartParams>(params).is_ok());
     assert!(
         serde_json::from_value::<ApprovalResult>(json!({"decision": "acceptForSession"})).is_err()
+    );
+    let thread = "019a0011-2233-7444-8555-667788990000";
+    for since in [json!(-1), json!(1.5), Value::Null, json!("1")] {
+        assert!(
+            serde_json::from_value::<EventsSubscribeParams>(
+                json!({"threadId":thread,"since":since})
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        serde_json::from_value::<EventsSubscribeParams>(
+            json!({"threadId":thread,"since":u64::MAX})
+        )
+        .is_ok()
+    );
+    assert!(
+        serde_json::from_value::<EventsSubscribeParams>(
+            json!({"threadId":thread,"since":0,"extra":true})
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ReceiptGetParams>(
+            json!({"threadId":thread,"goalId":thread,"path":"/private"})
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ThreadForkParams>(json!({"threadId":thread,"cwd":"relative"}))
+            .is_err()
     );
 }
 

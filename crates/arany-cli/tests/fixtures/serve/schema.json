@@ -194,6 +194,7 @@
       "type": "object"
     },
     "EventLine": {
+      "additionalProperties": false,
       "properties": {
         "agent_run_id": {
           "type": [
@@ -270,6 +271,22 @@
       ],
       "type": "object"
     },
+    "EventsCommittedNotification": {
+      "additionalProperties": false,
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/EventLine"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "event"
+      ],
+      "type": "object"
+    },
     "EventsResyncNotification": {
       "additionalProperties": false,
       "properties": {
@@ -293,6 +310,49 @@
       "required": [
         "missed",
         "lastSequence"
+      ],
+      "type": "object"
+    },
+    "EventsSubscribeParams": {
+      "additionalProperties": false,
+      "properties": {
+        "since": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "since"
+      ],
+      "type": "object"
+    },
+    "EventsSubscribeResult": {
+      "additionalProperties": false,
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/$defs/EventLine"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "nextSince": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "events",
+        "nextSince"
       ],
       "type": "object"
     },
@@ -866,6 +926,198 @@
       ],
       "type": "string"
     },
+    "ReceiptBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "maxActiveMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxProviderCalls": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxRuns": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "maxRuns"
+      ],
+      "type": "object"
+    },
+    "ReceiptGetParams": {
+      "additionalProperties": false,
+      "properties": {
+        "goalId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "goalId"
+      ],
+      "type": "object"
+    },
+    "ReceiptGetResult": {
+      "additionalProperties": false,
+      "properties": {
+        "goal": {
+          "$ref": "#/$defs/ReceiptGoal"
+        }
+      },
+      "required": [
+        "goal"
+      ],
+      "type": "object"
+    },
+    "ReceiptGoal": {
+      "additionalProperties": false,
+      "properties": {
+        "budget": {
+          "$ref": "#/$defs/ReceiptBudget"
+        },
+        "id": {
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReceiptReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/GoalStatus"
+        },
+        "usage": {
+          "$ref": "#/$defs/ReceiptUsage"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "objective",
+        "budget",
+        "usage"
+      ],
+      "type": "object"
+    },
+    "ReceiptReport": {
+      "additionalProperties": false,
+      "properties": {
+        "cachedInputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "changes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "unresolved": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "summary",
+        "changes",
+        "evidence",
+        "unresolved",
+        "cachedInputTokens"
+      ],
+      "type": "object"
+    },
+    "ReceiptUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "activeMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "knownCachedTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "knownTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providerCalls": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tokenUsageUnknown": {
+          "type": "boolean"
+        },
+        "uncertainActiveMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "runs",
+        "providerCalls",
+        "activeMs",
+        "uncertainActiveMs",
+        "knownTokens",
+        "knownCachedTokens",
+        "tokenUsageUnknown"
+      ],
+      "type": "object"
+    },
     "Request": {
       "additionalProperties": false,
       "properties": {
@@ -956,6 +1208,30 @@
         "title",
         "workspace",
         "createdAtMs"
+      ],
+      "type": "object"
+    },
+    "ThreadForkParams": {
+      "additionalProperties": false,
+      "properties": {
+        "cwd": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "threadId",
+        "cwd"
       ],
       "type": "object"
     },
@@ -1332,12 +1608,36 @@
   "$ref": "#/$defs/Message",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "methods": {
+    "events/subscribe": {
+      "params": {
+        "$ref": "#/$defs/EventsSubscribeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/EventsSubscribeResult"
+      }
+    },
     "initialize": {
       "params": {
         "$ref": "#/$defs/InitializeParams"
       },
       "result": {
         "$ref": "#/$defs/InitializeResult"
+      }
+    },
+    "receipt/get": {
+      "params": {
+        "$ref": "#/$defs/ReceiptGetParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ReceiptGetResult"
+      }
+    },
+    "thread/fork": {
+      "params": {
+        "$ref": "#/$defs/ThreadForkParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ThreadResult"
       }
     },
     "thread/resume": {
@@ -1374,6 +1674,11 @@
     }
   },
   "notifications": {
+    "events/committed": {
+      "params": {
+        "$ref": "#/$defs/EventsCommittedNotification"
+      }
+    },
     "events/resync": {
       "params": {
         "$ref": "#/$defs/EventsResyncNotification"
