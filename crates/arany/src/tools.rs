@@ -19,6 +19,7 @@ pub(crate) mod toolchains;
 pub(crate) mod types;
 mod unguarded;
 pub(crate) mod unguarded_rules;
+pub(crate) mod worker;
 mod workspace;
 
 #[cfg(test)]
@@ -135,6 +136,8 @@ pub(crate) struct PermissionSnapshot {
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
     config: Config,
+    worker: Option<std::sync::Arc<worker::Action>>,
+    handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
     permissions: Option<PermissionSnapshot>,
     unguarded_rules: Option<unguarded_rules::ExactCommandRules>,
@@ -405,6 +408,8 @@ impl ToolRuntime {
         Ok(Self {
             definitions: std::sync::Arc::new(definitions),
             config,
+            worker: None,
+            handover: None,
             permissions,
             unguarded_rules,
             queue_progress: None,
@@ -561,6 +566,30 @@ impl ToolRuntime {
         match call.facts().site {
             Site::InProcess | Site::Unguarded => Duration::ZERO,
             Site::Guard => guard::RESERVATION_OVERHEAD,
+        }
+    }
+
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        expect(
+            dead_code,
+            reason = "Internal integration transport precedes Engine editor admission"
+        )
+    )]
+    pub(crate) async fn apply_worker_handover(
+        &self,
+        intent: EffectIntent,
+        bytes: std::sync::Arc<[u8]>,
+        cancellation: Cancellation,
+    ) -> ToolObservation {
+        if let Err(error) = worker::decode_handover(&intent, &bytes, &self.config) {
+            return unstarted_observation(intent, error);
+        }
+        let mut runtime = self.clone();
+        runtime.handover = Some(bytes);
+        match guard::execute(&runtime, &intent, cancellation).await {
+            Ok(observation) => observation,
+            Err(error) => uncertain_observation(intent, error, CacheUpdate::NotApplicable),
         }
     }
 

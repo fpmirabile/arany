@@ -1475,6 +1475,7 @@ mod payload_version_tests {
                 approved: true,
                 hook_restriction: None,
                 hooks: 0,
+                narrowed: false,
             },
         };
         for event in [&started, &verdict] {
@@ -1491,7 +1492,7 @@ mod payload_version_tests {
             ));
         }
         assert_eq!(payload_version("ToolStarted"), Some(10));
-        assert_eq!(payload_version("ToolPermissionDecided"), Some(3));
+        assert_eq!(payload_version("ToolPermissionDecided"), Some(4));
     }
 
     #[test]

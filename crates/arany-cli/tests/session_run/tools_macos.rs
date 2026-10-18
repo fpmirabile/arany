@@ -2038,7 +2038,7 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
             intent.limits.resource_profile = ToolResourceProfile::LinuxKernel;
         }
         let mut task_value = json!({"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
-            "intent":intent,"definition":null,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")});
+            "intent":intent,"definition":null,"worker":null,"handover":null,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")});
         if case == "catalogue_tamper" {
             task_value["system_programs"] =
                 json!({"programs":[["/bin/launchctl",[0,0,0,0,0,0,0]]]});

@@ -36,6 +36,8 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         git: None,
     };
     let runtime = ToolRuntime {
+        worker: None,
+        handover: None,
         definitions: Default::default(),
         permissions: None,
         unguarded_rules: None,
@@ -2046,6 +2048,8 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
     use std::path::PathBuf;
 
     let runtime = |config: Config| ToolRuntime {
+        worker: None,
+        handover: None,
         definitions: Default::default(),
         permissions: None,
         unguarded_rules: None,
@@ -2155,6 +2159,8 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         "git": program,
     });
     let runtime = ToolRuntime {
+        worker: None,
+        handover: None,
         definitions: Default::default(),
         permissions: None,
         unguarded_rules: None,
@@ -2210,9 +2216,11 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
     assert!(rendered == expected, "{rendered}");
 }
 
-fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::ToolRuntime {
+pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::ToolRuntime {
     let root = super::fs::open_directory(workspace).unwrap();
     super::ToolRuntime {
+        worker: None,
+        handover: None,
         definitions: Default::default(),
         permissions: None,
         unguarded_rules: None,
