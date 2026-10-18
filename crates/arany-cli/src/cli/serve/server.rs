@@ -57,7 +57,7 @@ impl Fault {
         }
     }
     pub fn engine(error: EngineError) -> Self {
-        let reason = engine_reason(&error);
+        let reason = Reason::from(&error);
         Self {
             code: if matches!(error, EngineError::Busy) {
                 -32600
@@ -78,49 +78,6 @@ impl Fault {
                 data: self.reason.map(|reason| ErrorData { reason }),
             },
         })
-    }
-}
-
-fn engine_reason(error: &EngineError) -> Reason {
-    match error {
-        EngineError::IncompatibleProviderChain => Reason::IncompatibleProviderChain,
-        EngineError::RosterSelectionMismatch | EngineError::InvalidRequest => {
-            Reason::InvalidRequest
-        }
-        EngineError::MissingSession => Reason::MissingSession,
-        EngineError::NoSessionForWorkspace => Reason::NoSessionForWorkspace,
-        EngineError::TooManySessions => Reason::TooManySessions,
-        EngineError::SessionBusy => Reason::SessionBusy,
-        EngineError::WorkspaceBusy => Reason::WorkspaceBusy,
-        EngineError::GoalUnavailable => Reason::GoalUnavailable,
-        EngineError::GoalAdmissionUncertain => Reason::GoalAdmissionUncertain,
-        EngineError::GoalBudgetExhausted => Reason::GoalBudgetExhausted,
-        EngineError::GoalNotContinuable => Reason::GoalNotContinuable,
-        EngineError::Busy => Reason::Busy,
-        EngineError::GuardUnavailable => Reason::GuardUnavailable,
-        EngineError::SessionNotIdle => Reason::SessionNotIdle,
-        EngineError::ForkNotAtRunBoundary => Reason::ForkNotAtRunBoundary,
-        EngineError::WorkspaceMismatch => Reason::WorkspaceMismatch,
-        EngineError::InvalidWorkspacePath => Reason::InvalidWorkspacePath,
-        EngineError::InputNotRegular => Reason::InputNotRegular,
-        EngineError::InputTooLarge => Reason::InputTooLarge,
-        EngineError::InputNotUtf8 => Reason::InputNotUtf8,
-        EngineError::MissingInclude => Reason::MissingInclude,
-        EngineError::TooManyIncludes => Reason::TooManyIncludes,
-        EngineError::StateOverlap => Reason::StateOverlap,
-        EngineError::WorkspaceUnavailable => Reason::WorkspaceUnavailable,
-        EngineError::InvalidHistory => Reason::InvalidHistory,
-        EngineError::ContextTooLarge => Reason::ContextTooLarge,
-        EngineError::ImagesNotAdmitted => Reason::ImagesNotAdmitted,
-        EngineError::CompactionInputEmpty => Reason::CompactionInputEmpty,
-        EngineError::CompactionBlockedByHook => Reason::CompactionBlockedByHook,
-        EngineError::CompactionInputTooLarge => Reason::CompactionInputTooLarge,
-        EngineError::CompactionNotIdle => Reason::CompactionNotIdle,
-        EngineError::CancellationDrainTimeout => Reason::CancellationDrainTimeout,
-        EngineError::CoordinatorFailed => Reason::CoordinatorFailed,
-        EngineError::CancelledBeforeStart => Reason::CancelledBeforeStart,
-        EngineError::Store(_) => Reason::Store,
-        EngineError::Tool(_) => Reason::Tool,
     }
 }
 

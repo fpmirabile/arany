@@ -80,7 +80,8 @@ pub(crate) struct RunTrace {
     compaction_requested: Option<ProviderIdentity>,
     run_end: Option<(TraceOutcome, SystemTime)>,
     goal_end: Option<(GoalStatus, SystemTime)>,
-    unguarded: Vec<crate::session::ToolView>,
+    unguarded_pending: HashMap<[u8; 32], bool>,
+    unguarded_completed: u64,
 }
 
 struct AgentSpan {
@@ -216,7 +217,8 @@ impl Telemetry {
             compaction_requested: None,
             run_end: None,
             goal_end: None,
-            unguarded: Vec::new(),
+            unguarded_pending: HashMap::new(),
+            unguarded_completed: 0,
         })
     }
 
@@ -341,10 +343,14 @@ impl RunTrace {
     }
 
     fn unguarded_effects(&self) -> i64 {
-        self.unguarded
-            .iter()
-            .filter(|tool| tool.ran_unguarded())
-            .count() as i64
+        saturating_i64(
+            self.unguarded_completed.saturating_add(
+                self.unguarded_pending
+                    .values()
+                    .filter(|approved| **approved)
+                    .count() as u64,
+            ),
+        )
     }
 
     fn run_id(&self) -> Option<RunId> {
@@ -514,33 +520,25 @@ impl RunTrace {
                 ..
             } => self.provider_call(*agent_run_id, record, at),
             Event::ToolStarted { intent, .. } if intent.call.is_unguarded() => {
-                self.unguarded.push(crate::session::ToolView {
-                    checkpoint: None,
-                    intent: intent.clone(),
-                    observation: None,
-                    review_call_index: None,
-                    permission_verdict: None,
-                    hooks: Vec::new(),
-                    hook_sequence: None,
-                    finished_sequence: None,
-                });
+                self.unguarded_pending.insert(intent.digest(), false);
             }
             Event::ToolPermissionDecided { verdict, .. } => {
-                if let Some(tool) = self
-                    .unguarded
-                    .iter_mut()
-                    .find(|tool| tool.intent.digest() == verdict.intent_digest)
-                {
-                    tool.permission_verdict = Some(verdict.clone());
+                if let Some(approved) = self.unguarded_pending.get_mut(&verdict.intent_digest) {
+                    *approved = verdict.approved;
                 }
             }
             Event::ToolFinished { observation, .. } => {
-                if let Some(tool) = self
-                    .unguarded
-                    .iter_mut()
-                    .find(|tool| tool.intent == observation.intent)
+                if observation.intent.call.is_unguarded()
+                    && self
+                        .unguarded_pending
+                        .remove(&observation.intent.digest())
+                        .is_some()
+                    && (matches!(
+                        observation.attestation,
+                        Some(crate::tools::Attestation::Unguarded(_))
+                    ) || observation.disposition == crate::tools::ToolDisposition::Uncertain)
                 {
-                    tool.observation = Some(observation.clone());
+                    self.unguarded_completed = self.unguarded_completed.saturating_add(1);
                 }
             }
             Event::AgentFinished {
