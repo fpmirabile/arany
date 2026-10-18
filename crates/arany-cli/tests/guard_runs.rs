@@ -27,6 +27,20 @@ mod permissions;
 #[path = "guard_runs/unguarded.rs"]
 mod unguarded;
 
+fn tool_report(observation: Option<&arany::ToolObservation>) -> String {
+    observation.map_or_else(
+        || "no observation".to_owned(),
+        |observation| {
+            let failure = arany::test_support::recorded_tool_failure(observation.intent.id)
+                .unwrap_or_else(|| "no recorded failure".to_owned());
+            format!(
+                "{:?} {:?} [{failure}]",
+                observation.disposition, observation.output
+            )
+        },
+    )
+}
+
 #[test]
 fn account_path_uses_the_private_binary_fixture() {
     let root = arany::test_support::isolate_account_root();
