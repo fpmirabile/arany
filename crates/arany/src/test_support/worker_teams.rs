@@ -940,6 +940,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
     std::fs::write(workspace.join("notes/0"), b"resume base").unwrap();
     std::fs::write(state.join("tools.json"), br#"{"version":1,"workspace_paths":["docs","notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
     if checkpoint.is_none() {
+        std::fs::create_dir_all(workspace.join("docs")).unwrap();
         use std::os::unix::fs::PermissionsExt;
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
         let command = serde_json::json!({"name":"sh","executable":shell,"sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]});
