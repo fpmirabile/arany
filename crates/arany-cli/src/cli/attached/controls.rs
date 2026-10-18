@@ -1227,6 +1227,7 @@ mod tests {
 
         let run_id = RunId::new();
         view.runs.push(RunView {
+            supervisor: Default::default(),
             workers: Default::default(),
             id: run_id,
             objective: "Current objective".into(),
@@ -1267,6 +1268,7 @@ mod tests {
             "Task: working · 1 agent · details: /agents"
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
+            supervisor: None,
             worker_policy: None,
             agent_definitions: None,
             roster: None,
