@@ -165,11 +165,7 @@ impl GoalView {
                     run.tools
                         .iter()
                         .chain(run.agents.iter().flat_map(|agent| agent.tools.iter()))
-                        .all(|tool| {
-                            tool.observation
-                                .as_ref()
-                                .is_some_and(|observation| !observation.stops_run())
-                        })
+                        .all(ToolView::settled_without_stop)
                 })
         })
     }
@@ -239,10 +235,29 @@ pub struct ToolView {
     pub observation: Option<crate::tools::ToolObservation>,
     pub review_call_index: Option<u32>,
     pub permission_verdict: Option<crate::tools::permissions::PermissionVerdict>,
+    pub hooks: Vec<HookView>,
     pub finished_sequence: Option<u64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HookView {
+    pub invocation: crate::tools::permissions::HookInvocation,
+    pub outcome: Option<crate::tools::permissions::HookOutcome>,
+}
+
 impl ToolView {
+    // A hook whose outcome is unknown stops the Run exactly like an uncertain Tool.
+    pub(crate) fn settled_without_stop(&self) -> bool {
+        self.observation
+            .as_ref()
+            .is_some_and(|observation| !observation.stops_run())
+            && !self.hooks.iter().any(|hook| {
+                hook.outcome
+                    .as_ref()
+                    .is_none_or(|outcome| outcome.observation.stops_run())
+            })
+    }
+
     /// A host run that may have had effects: attested or uncertain, or approved without a recorded outcome.
     pub fn ran_unguarded(&self) -> bool {
         self.intent.call.is_unguarded()
@@ -336,11 +351,11 @@ fn is_tool_continuation(run: &RunView, agent: &AgentView, record: &ProviderCallR
                         .is_some_and(|call| call.phase == record.phase)
         })
         && run.tools.last().is_some_and(|tool| {
-            tool.observation.as_ref().is_some_and(|observation| {
-                !observation.stops_run()
-                    && observed_command_changeset(observation)
+            tool.settled_without_stop()
+                && tool.observation.as_ref().is_some_and(|observation| {
+                    observed_command_changeset(observation)
                         .is_none_or(|changeset| changeset.files.is_empty())
-            })
+                })
         })
         && requested_tool_total(agent).checked_sub(model_tool_count(run)) == Some(0)
 }
@@ -642,7 +657,12 @@ impl SessionView {
                 Event::ToolFinished { observation, .. }
                     if observation.intent.call.is_goal_plan_prelude()
             )
-            && !matches!(&envelope.event, Event::ToolPermissionDecided { .. })
+            && !matches!(
+                &envelope.event,
+                Event::ToolPermissionDecided { .. }
+                    | Event::HookStarted { .. }
+                    | Event::HookFinished { .. }
+            )
             && !matches!(
                 &envelope.event,
                 Event::GoalResumed { goal_id } if *goal_id == awaiting
@@ -688,7 +708,9 @@ impl SessionView {
             | Event::AgentFinished { .. } => agent::apply(current, &envelope.event)?,
             Event::ToolStarted { .. }
             | Event::ToolFinished { .. }
-            | Event::ToolPermissionDecided { .. } => tool::apply(current, &envelope.event, prior)?,
+            | Event::ToolPermissionDecided { .. }
+            | Event::HookStarted { .. }
+            | Event::HookFinished { .. } => tool::apply(current, &envelope.event, prior)?,
         }
         current.last_sequence = prior;
         Ok(())

@@ -175,8 +175,50 @@ impl Event {
                     Err(ReplayError::InvalidPayload)
                 }
             }
+            Self::HookStarted {
+                run_id,
+                agent_run_id,
+                hook,
+            } => {
+                if hook.event == crate::tools::permissions::HookEvent::PreToolUse
+                    && hook.intent.valid()
+                    && matches!(hook.intent.call, crate::tools::ToolCall::Command { .. })
+                    && hook.intent.run_id == *run_id
+                    && hook.intent.agent_run_id == *agent_run_id
+                    && hook.subject_digest != [0; 32]
+                    && hook.input_digest != [0; 32]
+                {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
+            Self::HookFinished {
+                run_id,
+                agent_run_id,
+                outcome,
+            } => {
+                let observation = &outcome.observation;
+                if observation.valid()
+                    && matches!(
+                        observation.intent.call,
+                        crate::tools::ToolCall::Command { .. }
+                    )
+                    && !(observation.cache_update == crate::tools::CacheUpdate::NotAttempted
+                        && observation.disposition == crate::tools::ToolDisposition::Succeeded)
+                    && observation.intent.run_id == *run_id
+                    && observation.intent.agent_run_id == *agent_run_id
+                    && outcome.result.valid_for(observation)
+                {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
             Self::ToolPermissionDecided { verdict, .. } => {
-                use crate::tools::permissions::{Decision, PermissionSource};
+                use crate::tools::permissions::{
+                    Decision, MAX_HOOKS_PER_OCCURRENCE, PermissionSource,
+                };
                 if verdict.intent_digest != [0; 32]
                     && matches!(
                         verdict.basis,
@@ -184,7 +226,23 @@ impl Event {
                             | PermissionSource::Mode
                             | PermissionSource::PinnedGrant
                             | PermissionSource::ExactCommandRule
+                            | PermissionSource::Hook
                     )
+                    && usize::from(verdict.hooks) <= MAX_HOOKS_PER_OCCURRENCE
+                    && (verdict.basis != PermissionSource::Hook
+                        || verdict.hook_restriction == Some(verdict.decision)
+                            && verdict.decision != Decision::Allow)
+                    && match verdict.hook_restriction {
+                        None | Some(Decision::Allow) => verdict.hook_restriction.is_none(),
+                        Some(Decision::Ask) => {
+                            verdict.hooks > 0
+                                && verdict.source != PermissionSource::AiReview
+                                && matches!(verdict.decision, Decision::Ask | Decision::Deny)
+                        }
+                        Some(Decision::Deny) => verdict.decision == Decision::Deny,
+                    }
+                    && (verdict.source != PermissionSource::Hook
+                        || verdict.decision == Decision::Deny)
                     && (verdict.decision != Decision::Deny || !verdict.approved)
                     && match verdict.decision {
                         Decision::Ask => matches!(

@@ -96,8 +96,8 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 | `ToolFinished` | 10 |
 | `ToolStarted` | 9 |
 | `AgentSpawned`, `GoalStarted`, `GoalFinished`, `RunFinished`, `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
-| `ToolPermissionDecided` | 2 |
-| `ProviderFallbackUsed` | 1 |
+| `ToolPermissionDecided` | 3 |
+| `ProviderFallbackUsed`, `HookStarted`, `HookFinished` | 1 |
 | All other supported Event kinds | 6 |
 
 Active time is journaled per Run and per action-start ceiling as [Goals](./goals.md#lifecycle-budgets-and-recovery) defines; there are no per-action active-time Events. Required fields and nullable fields are explicit, including Goal linkage and budgets, Run configuration and its active deadline, Provider provenance, pinned Tool resource values and the required Tool cache-update outcome. Reading unsupported stored formats or missing fields rejects without conversion, automatic deletion or an optimistic projection. Replay rejects an accepted task without a valid Goal linkage; no unlinked legacy Run path or compatibility projection exists. The additive Run-scoped `GoalSteeringNoteRecorded` Event is part of payload version 6 and is accepted only inside the open primary provider reservation, as [Goals](./goals.md#steering-notes-and-pause) defines. A child Tool without its finished observation is interrupted history and blocks explicit resume. Attached startup offers the [explicit history reset](./terminal.md#setup-and-account-choices); it discards history rather than converting or admitting an unsupported format. Each Provider call record also journals `requested_tools` (one per declared model Tool request) and the cache-read and cache-creation usage beside the input total.

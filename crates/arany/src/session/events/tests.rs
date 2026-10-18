@@ -1446,6 +1446,8 @@ mod payload_version_tests {
                 basis: crate::tools::permissions::PermissionSource::ExactCommandRule,
                 source: crate::tools::permissions::PermissionSource::ExactCommandRule,
                 approved: true,
+                hook_restriction: None,
+                hooks: 0,
             },
         };
         for event in [&started, &verdict] {
@@ -1462,7 +1464,7 @@ mod payload_version_tests {
             ));
         }
         assert_eq!(payload_version("ToolStarted"), Some(9));
-        assert_eq!(payload_version("ToolPermissionDecided"), Some(2));
+        assert_eq!(payload_version("ToolPermissionDecided"), Some(3));
     }
 
     #[test]

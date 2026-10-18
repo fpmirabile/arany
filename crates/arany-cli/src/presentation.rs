@@ -84,8 +84,35 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         summary.push_str(match verdict.source {
             arany::permissions::PermissionSource::Rule => " · permission deny rule",
             arany::permissions::PermissionSource::PinnedGrant => " · pinned grant denial",
+            arany::permissions::PermissionSource::Hook => " · hook denial",
             _ => " · permission mode denial",
         });
+    }
+    let hook_results = tool.hooks.iter().filter_map(|hook| hook.outcome.as_ref());
+    let (mut unknown, mut failed) = (false, false);
+    for outcome in hook_results {
+        if matches!(
+            outcome.observation.disposition,
+            arany::ToolDisposition::Uncertain | arany::ToolDisposition::Cancelled
+        ) || outcome.observation.disposition == arany::ToolDisposition::Failed
+            && outcome.observation.attestation.is_none()
+        {
+            unknown = true;
+        } else if matches!(
+            outcome.result,
+            arany::permissions::HookResult::Ignored {
+                why: arany::permissions::HookIgnoreReason::NonZeroExit
+                    | arany::permissions::HookIgnoreReason::InvalidJson
+                    | arany::permissions::HookIgnoreReason::NotCompleted
+            }
+        ) {
+            failed = true;
+        }
+    }
+    if unknown {
+        summary.push_str(" · hook outcome unknown");
+    } else if failed {
+        summary.push_str(" · hook failed (non-blocking)");
     }
     summary
 }
@@ -1428,6 +1455,7 @@ mod git_summary_tests {
                 observation: None,
                 review_call_index: None,
                 permission_verdict: None,
+                hooks: Vec::new(),
                 finished_sequence: None,
             };
             assert_eq!(tool_summary(&tool), expected);
@@ -1467,6 +1495,7 @@ mod enforcement_tests {
                 enforcement_cause: Some(arany::EnforcementCause::FilesystemDenied),
             }),
             permission_verdict: None,
+            hooks: Vec::new(),
             review_call_index: None,
             finished_sequence: Some(1),
         };
@@ -1563,6 +1592,7 @@ mod unguarded_tests {
             intent,
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: None,
         }
     }

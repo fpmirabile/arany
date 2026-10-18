@@ -221,7 +221,17 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 .min()
                 .unwrap_or(events.len())
         });
-        let observed = end - index;
+        // Admission reserves two Events per matched hook on top of the Tool's own.
+        let hook_events = events[*index..end]
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.event,
+                    Event::HookStarted { .. } | Event::HookFinished { .. }
+                )
+            })
+            .count();
+        let observed = end - index - hook_events;
         let providers = events[..=*index]
             .iter()
             .rev()

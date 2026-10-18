@@ -324,6 +324,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 observation: Some(observed),
                 review_call_index: None,
                 permission_verdict: None,
+                hooks: Vec::new(),
                 finished_sequence: Some(3),
             },
             ToolView {
@@ -338,6 +339,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
                 observation: None,
                 review_call_index: None,
                 permission_verdict: None,
+                hooks: Vec::new(),
                 finished_sequence: None,
             },
         ],
@@ -378,6 +380,7 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
             observation: Some(observed),
             review_call_index: None,
             permission_verdict: None,
+            hooks: Vec::new(),
             finished_sequence: Some(3),
         }
     };
