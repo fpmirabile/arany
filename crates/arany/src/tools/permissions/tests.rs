@@ -1,3 +1,4 @@
+use super::hooks::parse_output;
 use super::*;
 use crate::tools::{CommandChangeset, FileChange, FileVersion};
 use serde_json::{Value, json};
@@ -1052,4 +1053,252 @@ fn auto_mode_never_routes_an_unguarded_command_to_ai_review() {
     let evaluated = parsed.evaluate(&unguarded);
     assert_eq!(evaluated.0, Decision::Ask);
     assert_eq!(evaluated.2, Some(crate::tools::ApprovalMode::Request));
+}
+
+fn deny_with(reason: Option<&str>) -> HookResult {
+    HookResult::Restricted {
+        decision: Decision::Deny,
+        reason: reason.map(str::to_owned),
+    }
+}
+
+fn ignored(why: HookIgnoreReason) -> HookResult {
+    HookResult::Ignored { why }
+}
+
+#[test]
+fn hook_output_parsing_copies_peer_exit_codes_and_json_precedence() {
+    let specific = |fields: Value| {
+        let mut output = json!({"hookEventName": "PreToolUse"});
+        output
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        json!({"hookSpecificOutput": output}).to_string()
+    };
+    let ask = HookResult::Restricted {
+        decision: Decision::Ask,
+        reason: Some("why".into()),
+    };
+    for (exit, stdout, stderr, expected) in [
+        (Some(0), String::new(), "", HookResult::Passed),
+        (Some(0), "plain text".into(), "", HookResult::Passed),
+        (Some(0), "{broken".into(), "", HookResult::Passed),
+        (Some(0), "{}".into(), "", HookResult::Passed),
+        (
+            Some(0),
+            specific(json!({"permissionDecision": "deny", "permissionDecisionReason": "no"})),
+            "",
+            deny_with(Some("no")),
+        ),
+        (
+            Some(0),
+            specific(json!({"permissionDecision": "ask", "permissionDecisionReason": "why"})),
+            "",
+            ask,
+        ),
+        (
+            Some(0),
+            specific(json!({"permissionDecision": "allow"})),
+            "",
+            ignored(HookIgnoreReason::AllowIsNoOp),
+        ),
+        (
+            Some(0),
+            specific(json!({"permissionDecision": "defer"})),
+            "",
+            ignored(HookIgnoreReason::InvalidJson),
+        ),
+        (
+            Some(0),
+            json!({"hookSpecificOutput": {"hookEventName": "PostToolUse", "permissionDecision": "deny"}})
+                .to_string(),
+            "",
+            ignored(HookIgnoreReason::InvalidJson),
+        ),
+        (
+            Some(0),
+            json!({"hookSpecificOutput": "deny"}).to_string(),
+            "",
+            ignored(HookIgnoreReason::InvalidJson),
+        ),
+        (
+            Some(0),
+            json!({"decision": "block", "reason": "stop"}).to_string(),
+            "",
+            deny_with(Some("stop")),
+        ),
+        (
+            Some(0),
+            specific(json!({"permissionDecision": "allow", "updatedInput": {"path": "/"}})),
+            "",
+            deny_with(Some("hook input update does not narrow")),
+        ),
+        (
+            Some(0),
+            specific(json!({"permissionDecision": "deny", "updatedInput": {}})),
+            "",
+            deny_with(None),
+        ),
+        (Some(0), format!("{}{}", "[".repeat(64), "]".repeat(64)), "", HookResult::Passed),
+        (
+            Some(0),
+            json!({"continue": false, "stopReason": "halt"}).to_string(),
+            "",
+            deny_with(Some("halt")),
+        ),
+        (Some(2), "{}".into(), "blocked\nby policy", deny_with(Some("blockedby policy"))),
+        (Some(2), String::new(), "", deny_with(None)),
+        (Some(1), String::new(), "oops", ignored(HookIgnoreReason::NonZeroExit)),
+        (None, String::new(), "", ignored(HookIgnoreReason::NonZeroExit)),
+    ] {
+        assert_eq!(
+            parse_output(exit, &stdout, stderr),
+            expected,
+            "{exit:?} {stdout}"
+        );
+    }
+    let hostile = specific(json!({
+        "permissionDecision": "deny",
+        "permissionDecisionReason": format!("\u{1b}[31m{}\u{7}\n", "é".repeat(2000)),
+    }));
+    let HookResult::Restricted {
+        reason: Some(reason),
+        ..
+    } = parse_output(Some(0), &hostile, "")
+    else {
+        panic!("a deny carries its reason");
+    };
+    assert!(reason.len() <= MAX_HOOK_REASON_BYTES && reason.starts_with("[31m"));
+    assert!(!reason.chars().any(char::is_control));
+}
+
+#[test]
+fn hook_results_only_narrow_and_validate_against_their_observation() {
+    assert_eq!(HookResult::Passed.restriction(), Decision::Allow);
+    assert_eq!(
+        ignored(HookIgnoreReason::AllowIsNoOp).restriction(),
+        Decision::Allow
+    );
+    assert_eq!(deny_with(None).restriction(), Decision::Deny);
+    let allow = HookResult::Restricted {
+        decision: Decision::Allow,
+        reason: None,
+    };
+    let run = crate::session::RunId::new();
+    let agent = crate::session::AgentRunId::new();
+    let mut observation = crate::tools::ToolObservation {
+        intent: crate::tools::EffectIntent {
+            id: uuid::Uuid::now_v7(),
+            run_id: run,
+            agent_run_id: agent,
+            policy_digest: [1; 32],
+            enforcement_digest: [1; 32],
+            workspace_device: 1,
+            workspace_inode: 1,
+            call: command("sh", &["-c", "true"]),
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        },
+        disposition: crate::tools::ToolDisposition::Denied,
+        enforcement_cause: None,
+        output: "x".into(),
+        attestation: None,
+        cache_update: crate::tools::CacheUpdate::NotApplicable,
+    };
+    assert!(ignored(HookIgnoreReason::NotCompleted).valid_for(&observation));
+    assert!(!HookResult::Passed.valid_for(&observation));
+    observation.disposition = crate::tools::ToolDisposition::Limit;
+    let limited = deny_with(Some("hook limit reached"));
+    assert!(limited.valid_for(&observation));
+    assert!(!HookResult::Passed.valid_for(&observation));
+    assert!(!allow.valid_for(&observation));
+    let result = |exit: i32, stdout: &str| {
+        serde_json::to_string(&json!({"exit_code": exit, "stdout": stdout, "stderr": "no", "changeset": {"files": []}}))
+            .unwrap()
+    };
+    observation.disposition = crate::tools::ToolDisposition::Failed;
+    observation.attestation = Some(crate::tools::Attestation::for_site(&observation.intent));
+    observation.output = result(2, "");
+    assert!(deny_with(Some("no")).valid_for(&observation));
+    assert!(!HookResult::Passed.valid_for(&observation));
+    observation.output = result(0, "");
+    assert!(HookResult::Passed.valid_for(&observation));
+    assert!(!deny_with(Some("no")).valid_for(&observation));
+    observation.output = "not CommandResult JSON".into();
+    assert_eq!(
+        HookResult::from_observation(&observation),
+        ignored(HookIgnoreReason::NotCompleted)
+    );
+    assert!(ignored(HookIgnoreReason::NotCompleted).valid_for(&observation));
+    let overlong = deny_with(Some(&"x".repeat(MAX_HOOK_REASON_BYTES + 1)));
+    assert!(!overlong.valid_for(&observation));
+}
+
+#[test]
+fn hook_stdin_is_closed_bounded_and_host_path_free() {
+    let call = ToolCall::Write {
+        path: "notes/a.txt".into(),
+        expected_digest: None,
+        content: "x".repeat(super::super::types::MAX_TOOL_ARGUMENT_BYTES / 2),
+    };
+    let id = uuid::Uuid::now_v7();
+    let input =
+        pre_tool_use_input("session", PermissionMode::AcceptEdits, &call, id).expect("fits");
+    let value: Value = serde_json::from_str(&input).unwrap();
+    let mut fields: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
+    fields.sort();
+    assert_eq!(
+        fields,
+        [
+            "cwd",
+            "hook_event_name",
+            "permission_mode",
+            "session_id",
+            "tool_input",
+            "tool_name",
+            "tool_use_id"
+        ]
+    );
+    assert_eq!(value["cwd"], "/workspace");
+    assert_eq!(value["hook_event_name"], "PreToolUse");
+    assert_eq!(value["permission_mode"], "acceptEdits");
+    assert_eq!(value["tool_name"], "Write");
+    assert_eq!(value["tool_input"]["path"], "notes/a.txt");
+    assert_eq!(value["tool_use_id"], id.to_string());
+    assert!(input.len() <= MAX_HOOK_INPUT_BYTES);
+    assert!(!input.contains("permissions.json"));
+}
+
+#[test]
+fn hook_matching_is_bounded_ordered_and_fails_closed() {
+    let handlers = |count: usize| {
+        let hooks: Vec<_> = (0..count)
+            .map(|index| json!({"type": "command", "command": format!("h{index}")}))
+            .collect();
+        PermissionConfig::parse(
+            &serde_json::to_vec(&json!({"hooks": {"PreToolUse": [
+                {"matcher": "Read", "hooks": hooks},
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "other"}]},
+            ]}}))
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let eight = handlers(8);
+    let matched = eight.matched_pre_tool_use(&read("a")).unwrap();
+    assert_eq!(matched.len(), 8);
+    assert_eq!(matched[3].2.command(), "h3");
+    assert_eq!((matched[3].0, matched[3].1), (0, 3));
+    assert!(matches!(
+        handlers(9).matched_pre_tool_use(&read("a")),
+        Err(ConfigError::Limit(_))
+    ));
+    assert!(
+        handlers(9)
+            .matched_pre_tool_use(&write("a"))
+            .unwrap()
+            .is_empty()
+    );
 }

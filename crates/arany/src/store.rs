@@ -49,7 +49,9 @@ fn event_payload_limit(kind: &str, version: i64) -> usize {
     match kind {
         "MessageAccepted" if payload_version(kind) == Some(version) => MAX_MESSAGE_ACCEPTED_BYTES,
         "GoalStarted" if payload_version(kind) == Some(version) => MAX_GOAL_STARTED_BYTES,
-        "ToolFinished" if payload_version(kind) == Some(version) => MAX_TOOL_FINISHED_BYTES,
+        "ToolFinished" | "HookFinished" if payload_version(kind) == Some(version) => {
+            MAX_TOOL_FINISHED_BYTES
+        }
         _ => MAX_EVENT_BYTES,
     }
 }

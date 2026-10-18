@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 const CAPTURE_BYTES: usize = 48 * 1024;
-const TASK_BYTES_CAP: usize = 96 * 1024;
+pub(super) const TASK_BYTES_CAP: usize = 96 * 1024;
 // Only a task carrying one base64 agent definition file may exceed the common cap.
 const DEFINITION_TASK_BYTES: usize = (64 * 1024_usize).div_ceil(3) * 4;
 pub(super) const RUNTIME_ROOT: &str = "/usr";
@@ -78,6 +78,8 @@ struct Task {
     config: Config,
     intent: EffectIntent,
     cache: Option<BuildCacheTransfer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hook_stdin: Option<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     definition: Option<String>,
     #[cfg(target_os = "linux")]
@@ -543,6 +545,35 @@ fn attest_runtime_mounts(
     Ok(())
 }
 
+// Whether the complete Guard task of this intent encodes within the task ceiling.
+pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        profile::Namespaces::read().is_ok_and(|parent_namespaces| {
+            encode_task(&Task {
+                config: runtime.config.clone(),
+                intent: intent.clone(),
+                cache: None,
+                hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
+                definition: None,
+                parent_namespaces,
+            })
+            .is_ok()
+        })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Task::new(runtime, intent, None)
+            .and_then(|task| encode_task(&task))
+            .is_ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (runtime, intent);
+        false
+    }
+}
+
 pub(super) async fn execute(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -954,6 +985,7 @@ pub(super) struct GuardContext<'a> {
     pub(super) root: &'a Path,
     pub(super) workspace: &'a Path,
     pub(super) skill: Option<Vec<u8>>,
+    pub(super) hook_stdin: Option<&'a str>,
     pub(super) definition: Option<Vec<u8>>,
     runtime_started: Option<std::time::Instant>,
     #[cfg(target_os = "linux")]
@@ -1006,6 +1038,10 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
         || !task.config.allows(&task.intent.call)
         || task.intent.enforcement_digest != task.enforcement_digest()?
         || task.intent.limits.resource_profile != ToolLimits::default().resource_profile
+        || task.hook_stdin.as_ref().is_some_and(|stdin| {
+            stdin.len() > super::permissions::MAX_HOOK_INPUT_BYTES
+                || !matches!(task.intent.call, ToolCall::Command { .. })
+        })
     {
         return Err(ToolError::Configuration);
     }
@@ -1201,6 +1237,7 @@ pub(super) fn helper_main() -> ExitCode {
             root: &root,
             workspace,
             skill,
+            hook_stdin: task.hook_stdin.as_deref(),
             definition,
             runtime_started,
             #[cfg(target_os = "linux")]
@@ -1434,6 +1471,7 @@ mod tests {
             config,
             intent: intent(call),
             cache: None,
+            hook_stdin: None,
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
             #[cfg(target_os = "linux")]
             parent_namespaces: profile::Namespaces::read().unwrap(),
@@ -1491,6 +1529,7 @@ mod tests {
             config,
             intent: intent(call.clone()),
             cache: None,
+            hook_stdin: None,
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
             parent_namespaces: profile::Namespaces::read().unwrap(),
         };
@@ -2258,6 +2297,7 @@ mod tests {
                     use_count: 1,
                 },
                 cache: None,
+                hook_stdin: None,
                 #[cfg(target_os = "linux")]
                 parent_namespaces: profile::Namespaces::read().unwrap(),
                 #[cfg(target_os = "macos")]

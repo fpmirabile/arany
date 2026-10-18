@@ -518,6 +518,7 @@ impl RunTrace {
                     observation: None,
                     review_call_index: None,
                     permission_verdict: None,
+                    hooks: Vec::new(),
                     finished_sequence: None,
                 });
             }
@@ -1016,6 +1017,8 @@ impl From<&Event> for TraceEventKind {
             | Event::ProviderCallRecorded { .. }
             | Event::ToolStarted { .. }
             | Event::ToolPermissionDecided { .. }
+            | Event::HookStarted { .. }
+            | Event::HookFinished { .. }
             | Event::ToolFinished { .. }
             | Event::AgentFinished { .. }
             | Event::MessageCommitted { .. }

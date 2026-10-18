@@ -1739,6 +1739,7 @@ done
             context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
             queue_progress: None,
             active_action_gate: None,
+            hook_stdin: None,
             cache_state: None,
             config: crate::tools::config::Config {
                 version: 1,
@@ -2977,6 +2978,7 @@ done
                     definition: None,
                     config: runtime.config.clone(),
                     cache: None,
+                    hook_stdin: None,
                     intent: EffectIntent {
                         id: uuid::Uuid::now_v7(),
                         run_id: crate::session::RunId::default(),
