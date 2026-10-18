@@ -288,7 +288,6 @@ mod goal_replay_tests {
         }
     }
 
-    /// Links one Run, accepts its message and spawns its primary AgentRun.
     fn start_run(
         goal_id: GoalId,
         run_id: RunId,
@@ -329,7 +328,6 @@ mod goal_replay_tests {
         ]
     }
 
-    /// Completes the Run that `start_run` opened, and with it the Goal.
     fn complete_run_and_goal(
         goal_id: GoalId,
         run_id: RunId,
@@ -384,7 +382,6 @@ mod goal_replay_tests {
         ]
     }
 
-    /// Cancels the Run that `start_run` opened; its Goal stays open and paused.
     fn cancel_run(run_id: RunId, agent_run_id: AgentRunId) -> Vec<Event> {
         vec![
             Event::AgentFinished {
@@ -2816,7 +2813,6 @@ mod goal_replay_tests {
         assert!(apply_child_spawn(&mut session_with_tools(true), ChildGrant::NoTools).is_err());
     }
 
-    /// Applies one Event at the next sequence, as the Store would.
     fn apply(view: &mut SessionView, event: Event) -> Result<(), ReplayError> {
         let (run_id, agent_run_id) = event.scope();
         let sequence = view.last_sequence + 1;
@@ -2847,7 +2843,6 @@ mod goal_replay_tests {
         }
     }
 
-    /// A delegated Tool Run with one spawned `ReadOnly` child; returns (goal, run, child) ids.
     fn research_session() -> (SessionView, GoalId, RunId, AgentRunId) {
         let mut view = delegated_session(0);
         view.runs[0].config = Some(config(
@@ -2882,7 +2877,6 @@ mod goal_replay_tests {
         }
     }
 
-    /// Whether `event` is rejected when applied after the accepted prefix in `view`.
     fn rejected(view: &SessionView, event: Event) -> bool {
         apply(&mut view.clone(), event).is_err()
     }
@@ -3776,7 +3770,6 @@ mod goal_replay_tests {
         );
     }
 
-    /// A tool-enabled primary AgentRun with no provider calls, under a Goal with or without its plan.
     fn primary_tool_session(planned: bool) -> (SessionView, GoalId, RunId, AgentRunId) {
         let mut view = delegated_session(0);
         view.runs[0].config = Some(config(CollaborationPolicy::Single, true));
@@ -5042,7 +5035,6 @@ mod goal_replay_tests {
         apply(&mut view, continuation).expect("all declared requests observed");
     }
 
-    /// A planned Goal whose completed two-request step has a compaction call reserved.
     fn compacting_session() -> (SessionView, GoalId, RunId) {
         let (mut view, goal, run, agent) = primary_tool_session(true);
         let (first, second) = (
@@ -5067,7 +5059,6 @@ mod goal_replay_tests {
         (view, goal, run)
     }
 
-    /// A Failed compaction record covering the first `count` Tools, ending at the last of them.
     fn covering_compaction(view: &SessionView, goal: GoalId, run: RunId, count: u32) -> Event {
         let covered = &view.runs[0].tools[count as usize - 1];
         Event::GoalContextCompacted {

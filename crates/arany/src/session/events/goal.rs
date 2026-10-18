@@ -84,7 +84,6 @@ impl GoalBudget {
                 .is_none_or(|limit| !usage.token_usage_unknown && usage.known_tokens < limit)
     }
 
-    /// No next Run is admissible, or the remaining active time cannot cover one Store action.
     pub(crate) fn spent(&self, usage: GoalUsage) -> bool {
         !self.admits_next_run(usage)
             || self.max_active_ms.is_some_and(|limit| {

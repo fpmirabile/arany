@@ -36,7 +36,6 @@ fn request(model: &str, phase: AgentPhase, input: RunInput) -> ProviderRequest {
     }
 }
 
-/// A Tool-enabled primary request with a pinned Goal budget.
 pub(crate) fn primary_request(model: &str) -> ProviderRequest {
     request(
         model,
@@ -49,7 +48,6 @@ pub(crate) fn primary_request(model: &str) -> ProviderRequest {
     )
 }
 
-/// A request without Tools that carries every untrusted input class.
 pub(crate) fn read_only_request(model: &str) -> ProviderRequest {
     let mut request = request(
         model,
@@ -127,7 +125,6 @@ fn intent(call: crate::tools::ToolCall) -> crate::tools::EffectIntent {
     }
 }
 
-/// A successful observation of `call`, attested by the site its operation runs at.
 pub(crate) fn observation(
     call: crate::tools::ToolCall,
     output: &str,
@@ -144,7 +141,6 @@ pub(crate) fn observation(
     }
 }
 
-/// The step a decoded Tool response opens once its single request has been observed.
 pub(crate) fn observed_step(
     response: super::ProviderResponse,
     output: &str,

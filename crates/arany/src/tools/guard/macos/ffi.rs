@@ -516,7 +516,6 @@ unsafe extern "C" {
     ) -> libc::c_int;
 }
 
-/// Spawns `program` into `coalition` and reaps it on success; returns the `posix_spawn` errno.
 #[cfg(test)]
 pub(super) fn spawn_in_coalition(program: &CStr, coalition: u64) -> Result<(), i32> {
     let mut attributes = MaybeUninit::<libc::posix_spawnattr_t>::uninit();
@@ -551,7 +550,6 @@ pub(super) fn spawn_in_coalition(program: &CStr, coalition: u64) -> Result<(), i
     }
 }
 
-/// Arms the fixture watchdog and ignores the inherited SIGXCPU action.
 #[cfg(test)]
 pub(super) fn ignore_cpu_signal_with_watchdog(seconds: u32) -> bool {
     // The watchdog and disposition are process-wide and retain no borrowed memory.
@@ -561,7 +559,6 @@ pub(super) fn ignore_cpu_signal_with_watchdog(seconds: u32) -> bool {
     }
 }
 
-/// Returns the errno of a rejected `KERN_PROCARGS2` size query for `pid`.
 #[cfg(test)]
 pub(super) fn process_arguments_errno(pid: i32) -> Option<i32> {
     let mut query = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
@@ -582,7 +579,6 @@ pub(super) fn process_arguments_errno(pid: i32) -> Option<i32> {
         .flatten()
 }
 
-/// Issues a denied syscall with an invalid descriptor and null arguments; returns its errno when it fails.
 #[cfg(test)]
 pub(super) fn invalid_argument_syscall_errno(syscall: i32) -> Option<i32> {
     assert!(super::COMMAND_DENIED_SYSCALLS.contains(&syscall));

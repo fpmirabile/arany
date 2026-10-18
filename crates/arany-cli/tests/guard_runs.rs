@@ -1472,7 +1472,6 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
     });
 }
 
-/// How the step's Tool grant and approvals are configured.
 #[derive(Clone, Copy)]
 struct StepSetup {
     write: bool,
@@ -1484,7 +1483,6 @@ const READ_ONLY: StepSetup = StepSetup {
     approvals: None,
 };
 
-/// The Events of one Run with a single Tool step, with each Tool intent's sizing and outcome.
 async fn tool_step_events(
     policy: CollaborationPolicy,
     outcomes: Vec<ProviderOutcome>,
@@ -1573,8 +1571,7 @@ async fn tool_step_events(
         .collect()
 }
 
-/// The Tool catalog's platform command contract differs on macOS, so only Linux pins exact
-/// result sizes.
+// macOS has a different command contract, so only Linux pins exact result sizes.
 fn platform_events(events: &str) -> String {
     if !cfg!(target_os = "macos") {
         return events.to_owned();
