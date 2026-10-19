@@ -35,7 +35,6 @@ Implemented C2 decisions are owned by [Execution](../../docs/specs/execution.md#
 | Private Session artifacts and bounded grilling | Research and plan data need durable inspection without writing proposal files into the user's repository. | B6/E2 |
 | Headless RPI requires an explicit plan-approval flag | Scriptable `exec` retains its upfront grant; recommended grilling answers become visible assumptions. | E10 |
 | Engine activity plus bounded progress notes, without checklists | Journaled activity supplies progress without model calls; notes explain intent without replacing receipts. | E7 |
-| Private pre-images and reverse changesets for rewind | Explicit digest-checked restoration preserves drift detection and avoids Git ghost commits. Command and MCP effects stay explicitly non-rewindable. | E4 |
 | Per-folder user authorization before project rules can request commits | Repository text can guide conventions but cannot grant itself host Git authority. Remote and disruptive writes retain explicit human gates. | E6 |
 | One-use Supervisor overrides | A recorded user decision can calibrate a signal without silently changing configuration. | E5 |
 | Proxy-only registry fetch, followed by offline builds | Dependency retrieval needs a narrow public-registry grant without letting project scripts use the network. | A6 |
@@ -44,8 +43,7 @@ Implemented C2 decisions are owned by [Execution](../../docs/specs/execution.md#
 
 Follow the [plan's open-question routing](./README.md#open-questions):
 [roadmap item 6](../../NEXT_STEPS.md#pursue-in-order) owns RPI exhaustion and Auto
-authority, item 12 owns Supervisor threshold calibration, and the
-[E4 freeze entry](../../NEXT_STEPS.md#frozen-areas) owns checkpoint quotas.
+authority and item 12 owns Supervisor threshold calibration.
 Native build and team measurements remain roadmap evidence, not design proof.
 Multiple supervisors and cross-Session memory require a demonstrated need
 before expanding this scope.

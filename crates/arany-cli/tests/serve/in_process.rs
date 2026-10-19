@@ -123,6 +123,293 @@ fn scripted() -> Arc<ScriptedProvider> {
         .with_profile("openai", "gpt-5.4"),
     )
 }
+
+#[cfg(unix)]
+#[test]
+#[cfg_attr(not(arany_ci), ignore)]
+fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_blocks_uncertain() {
+    use arany::test_support::goals::finish_with;
+    use arany::test_support::scenario::tool_outcome;
+    use sha2::{Digest, Sha256};
+    let _gate = crate::test_process::NATIVE_GATE.lock().unwrap();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    arany::test_support::isolate_account_root();
+    for case in [
+        "success",
+        "drift",
+        "kept",
+        "overwrite",
+        "uncertain",
+        "bounds",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join("src/a"), "original").unwrap();
+        let state = root.path().join("state");
+        let binary = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("arany");
+        let engine = Engine::open(
+            StateRoot::admit(&state).unwrap(),
+            EngineConfig {
+                guard_executable: Some(binary),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        private_json(
+            &state.join("tools.json"),
+            json!({"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}),
+        );
+        let digest = Sha256::digest(b"original")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let plan = arany::GoalPlanContract {
+            mission: "Change files".into(),
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            paths: vec!["src/a".into(), "src/b".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/a".into(),
+                content: "changed".into(),
+            },
+            budget: arany::GoalBudget::default(),
+        };
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![
+                tool_outcome(
+                    arany::ToolCall::Write {
+                        path: "src/a".into(),
+                        expected_digest: Some(digest),
+                        content: "changed".into(),
+                    },
+                    Some(Box::new(plan)),
+                ),
+                tool_outcome(
+                    arany::ToolCall::Write {
+                        path: "src/b".into(),
+                        expected_digest: None,
+                        content: "new".into(),
+                    },
+                    None,
+                ),
+                finish_with("Changed"),
+            ])
+            .with_profile("openai", "gpt-5.4"),
+        );
+        let mut submission = arany::test_support::scenario::request(&workspace, "Change files");
+        submission.include_paths.clear();
+        let source = arany::test_support::engine::run_with(
+            &engine,
+            &provider,
+            submission,
+            arany::RunControls {
+                tools: arany::ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        engine.close().await.unwrap();
+        let thread = source.session_id;
+        let run = source.run.id;
+        if case == "uncertain" {
+            let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
+            let events = store.load_session(thread).await.unwrap();
+            store.close().await.unwrap();
+            let cut = root.path().join("uncertain-state");
+            let store = Store::open(StateRoot::admit(&cut).unwrap()).unwrap();
+            for event in events {
+                let stop = matches!(event.event, Event::ToolStarted { .. });
+                store.append(thread, event.event).await.unwrap();
+                if stop {
+                    break;
+                }
+            }
+            store.close().await.unwrap();
+            std::fs::copy(state.join("tools.json"), cut.join("tools.json")).unwrap();
+            let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+            let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+            let client = async {
+                input.send(initialize()).await.unwrap();
+                next(&mut output).await;
+                input.send(request(6,"thread/resume",json!({"threadId":thread,"cwd":workspace,"provider":"openai","model":"gpt-5.4","tools":true}))).await.unwrap();
+                next(&mut output).await;
+                input
+                    .send(request(
+                        10,
+                        "thread/rewind/preview",
+                        json!({"threadId":thread,"turnId":run}),
+                    ))
+                    .await
+                    .unwrap();
+                let preview = next(&mut output).await["result"].clone();
+                assert_eq!(preview["restore"], json!(["conversation"]));
+                assert!(
+                    preview["blockers"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!("uncertainPublication"))
+                );
+                input.send(request(11,"thread/rewind",json!({"threadId":thread,"previewToken":preview["previewToken"],"restore":"code"}))).await.unwrap();
+                assert_eq!(
+                    next(&mut output).await["error"]["data"]["reason"],
+                    "rewindBlocked"
+                );
+                input.send(ClientMessage::Eof).await.unwrap();
+            };
+            let native = Engine::open(
+                StateRoot::open_existing(&cut).unwrap(),
+                EngineConfig {
+                    guard_executable: Some(
+                        std::env::current_exe()
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .join("arany"),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let (result, ()) = tokio::join!(
+                server::run_with_threads(
+                    native,
+                    cut,
+                    inbound,
+                    outbound,
+                    threads::Threads::with_provider(scripted())
+                ),
+                client
+            );
+            result.unwrap();
+            continue;
+        }
+        if matches!(case, "drift" | "kept" | "overwrite") {
+            std::fs::write(workspace.join("src/a"), "external").unwrap();
+        }
+        let (before, _) = closed_view(&state, thread).await;
+        let native = Engine::open(
+            StateRoot::open_existing(&state).unwrap(),
+            EngineConfig {
+                guard_executable: Some(
+                    std::env::current_exe()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .join("arany"),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+        let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+        let client = async {
+            input.send(initialize()).await.unwrap();
+            next(&mut output).await;
+            input.send(request(6,"thread/resume",json!({"threadId":thread,"cwd":workspace,"provider":"openai","model":"gpt-5.4","tools":true}))).await.unwrap();
+            next(&mut output).await;
+            input
+                .send(request(
+                    10,
+                    "thread/rewind/preview",
+                    json!({"threadId":thread,"turnId":run}),
+                ))
+                .await
+                .unwrap();
+            let preview = next(&mut output).await["result"].clone();
+            assert_eq!(preview["files"].as_array().unwrap().len(), 2, "{case}");
+            let mut params =
+                json!({"threadId":thread,"previewToken":preview["previewToken"],"restore":"code"});
+            if case == "kept" {
+                params["kept"] = json!(["src/a"]);
+            }
+            if case == "bounds" {
+                params["kept"] = json!((0..65).map(|n| format!("src/{n:02}")).collect::<Vec<_>>());
+            }
+            if case == "overwrite" {
+                params["overwrite"] = json!(["src/a"]);
+                input
+                    .send(request(11, "thread/rewind", params.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    next(&mut output).await["error"]["data"]["reason"],
+                    "overwriteConfirmationRequired"
+                );
+                assert_eq!(std::fs::read(workspace.join("src/a")).unwrap(), b"external");
+                params["confirmOverwrite"] = json!(true);
+            }
+            input
+                .send(request(11, "thread/rewind", params))
+                .await
+                .unwrap();
+            let result = next(&mut output).await;
+            if matches!(case, "drift" | "bounds") {
+                assert_eq!(
+                    result["error"]["data"]["reason"],
+                    if case == "drift" {
+                        "rewindBlocked"
+                    } else {
+                        "invalidParams"
+                    }
+                );
+            } else {
+                assert_eq!(
+                    result["result"]["rewind"]["outcome"], "restored",
+                    "{case}: {result}"
+                );
+            }
+            input.send(ClientMessage::Eof).await.unwrap();
+        };
+        let (result, ()) = tokio::join!(
+            server::run_with_threads(
+                native,
+                state.clone(),
+                inbound,
+                outbound,
+                threads::Threads::with_provider(scripted())
+            ),
+            client
+        );
+        result.unwrap();
+        let (after, view) = closed_view(&state, thread).await;
+        if matches!(case, "drift" | "bounds") {
+            assert_eq!(after, before);
+            assert!(workspace.join("src/b").exists());
+        } else {
+            assert_eq!(
+                std::fs::read(workspace.join("src/a")).unwrap(),
+                if case == "kept" {
+                    b"external".as_slice()
+                } else {
+                    b"original".as_slice()
+                }
+            );
+            assert!(!workspace.join("src/b").exists());
+            assert_eq!(
+                view.rewinds.operations.last().unwrap().outcome(),
+                arany::rewind::RewindOutcome::Restored
+            );
+        }
+    }
+    });
+}
+
 async fn closed_view(
     state: &std::path::Path,
     id: arany::SessionId,
@@ -132,6 +419,210 @@ async fn closed_view(
     let view = store.load_view(id).await.unwrap().unwrap();
     store.close().await.unwrap();
     (events, view)
+}
+
+#[tokio::test]
+async fn rewind_preview_tokens_bind_thread_head_expiry_and_fork_without_replaying_effects() {
+    let _deadline = deadline();
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![
+            arany::test_support::goals::finish_with("First"),
+            arany::test_support::goals::finish_with("Second"),
+        ])
+        .with_profile("openai", "gpt-5.4"),
+    );
+    let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+    let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+    let client = async {
+        input.send(initialize()).await.unwrap();
+        next(&mut output).await;
+        input.send(thread_start(&workspace)).await.unwrap();
+        let started = next(&mut output).await;
+        let thread = started["result"]["thread"]["id"].clone();
+        next(&mut output).await;
+        let mut runs = Vec::new();
+        for prompt in ["First prompt", "Second prompt"] {
+            input
+                .send(request(
+                    3,
+                    "turn/start",
+                    json!({"threadId":thread,"input":[{"type":"text","text":prompt}]}),
+                ))
+                .await
+                .unwrap();
+            runs.push(next(&mut output).await["result"]["turn"]["id"].clone());
+            while next(&mut output).await["method"] != "turn/completed" {}
+        }
+        for (params, reason) in [
+            (
+                json!({"threadId":arany::SessionId::new(),"turnId":runs[0]}),
+                "threadNotLoaded",
+            ),
+            (
+                json!({"threadId":thread,"turnId":arany::RunId::new()}),
+                "invalidParams",
+            ),
+        ] {
+            input
+                .send(request(10, "thread/rewind/preview", params))
+                .await
+                .unwrap();
+            assert_eq!(next(&mut output).await["error"]["data"]["reason"], reason);
+        }
+        input
+            .send(request(
+                10,
+                "thread/rewind/preview",
+                json!({"threadId":thread,"turnId":runs[1]}),
+            ))
+            .await
+            .unwrap();
+        let preview = next(&mut output).await["result"].clone();
+        assert_eq!(preview["restore"], json!(["conversation"]));
+        assert_eq!(preview["blockers"], json!(["noWriteGrant"]));
+        input.send(request(12,"thread/start",json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4","collaboration":"single"}))).await.unwrap();
+        let foreign = next(&mut output).await["result"]["thread"]["id"].clone();
+        next(&mut output).await;
+        input.send(request(11,"thread/rewind",json!({"threadId":foreign,"previewToken":preview["previewToken"],"restore":"conversation"}))).await.unwrap();
+        assert_eq!(
+            next(&mut output).await["error"]["data"]["reason"],
+            "previewExpired"
+        );
+        input
+            .send(request(
+                11,
+                "thread/rewind",
+                json!({"threadId":thread,"previewToken":"wrong","restore":"conversation"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next(&mut output).await["error"]["data"]["reason"],
+            "previewExpired"
+        );
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::time::resume();
+        input.send(request(11,"thread/rewind",json!({"threadId":thread,"previewToken":preview["previewToken"],"restore":"conversation"}))).await.unwrap();
+        assert_eq!(
+            next(&mut output).await["error"]["data"]["reason"],
+            "previewExpired"
+        );
+        input
+            .send(request(
+                10,
+                "thread/rewind/preview",
+                json!({"threadId":thread,"turnId":runs[1]}),
+            ))
+            .await
+            .unwrap();
+        let token = next(&mut output).await["result"]["previewToken"].clone();
+        let source: arany::SessionId = serde_json::from_value(thread.clone()).unwrap();
+        let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
+        store
+            .append(
+                source,
+                Event::SessionRenamed {
+                    title: "Changed head".into(),
+                },
+            )
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        input
+            .send(request(
+                11,
+                "thread/rewind",
+                json!({"threadId":thread,"previewToken":token,"restore":"conversation"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next(&mut output).await["error"]["data"]["reason"],
+            "previewExpired"
+        );
+        input
+            .send(request(
+                10,
+                "thread/rewind/preview",
+                json!({"threadId":thread,"turnId":runs[1]}),
+            ))
+            .await
+            .unwrap();
+        let token = next(&mut output).await["result"]["previewToken"].clone();
+        let (before, _) = closed_view(&state, source).await;
+        input
+            .send(request(
+                11,
+                "thread/rewind",
+                json!({"threadId":thread,"previewToken":token,"restore":"conversation"}),
+            ))
+            .await
+            .unwrap();
+        let restored = next(&mut output).await["result"].clone();
+        assert_eq!(restored["rewind"]["outcome"], "restored");
+        assert_eq!(restored["conversation"]["prompt"], "Second prompt");
+        let fork: arany::SessionId =
+            serde_json::from_value(restored["thread"]["id"].clone()).unwrap();
+        assert_ne!(fork, source);
+        assert_eq!(next(&mut output).await["method"], "thread/started");
+        let (after, _) = closed_view(&state, source).await;
+        assert_eq!(before, after);
+        let (_, view) = closed_view(&state, fork).await;
+        assert_eq!(view.runs.len(), 1);
+        assert_eq!(view.runs[0].objective, "First prompt");
+        assert!(view.goals.is_empty());
+        input
+            .send(request(
+                11,
+                "thread/rewind",
+                json!({"threadId":thread,"previewToken":token,"restore":"conversation"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next(&mut output).await["error"]["data"]["reason"],
+            "previewExpired"
+        );
+        input
+            .send(request(
+                10,
+                "thread/rewind/preview",
+                json!({"threadId":thread,"turnId":runs[0]}),
+            ))
+            .await
+            .unwrap();
+        let token = next(&mut output).await["result"]["previewToken"].clone();
+        input
+            .send(request(
+                11,
+                "thread/rewind",
+                json!({"threadId":thread,"previewToken":token,"restore":"conversation"}),
+            ))
+            .await
+            .unwrap();
+        let first = next(&mut output).await["result"].clone();
+        assert!(first.get("thread").is_none());
+        assert_eq!(first["conversation"]["threadId"], Value::Null);
+        assert_eq!(first["conversation"]["prompt"], "First prompt");
+        input.send(ClientMessage::Eof).await.unwrap();
+    };
+    let (result, ()) = tokio::join!(
+        server::run_with_threads(
+            engine(&state),
+            state.clone(),
+            inbound,
+            outbound,
+            threads::Threads::with_provider(provider.clone())
+        ),
+        client
+    );
+    result.unwrap();
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
 }
 fn canonicalize(value: &mut Value, thread: &str, run: &str, goal: &str, workspace: &str) {
     match value {
@@ -501,6 +992,25 @@ async fn waiting_turn(stop: TurnStop) {
         } else if matches!(stop, TurnStop::Eof) {
             input.send(ClientMessage::Eof).await.unwrap();
         } else {
+            for (method, params) in [
+                (
+                    "thread/rewind/preview",
+                    json!({"threadId":thread,"turnId":run}),
+                ),
+                (
+                    "thread/rewind",
+                    json!({"threadId":thread,"previewToken":"unused","restore":"conversation"}),
+                ),
+            ] {
+                input.send(request(40, method, params)).await.unwrap();
+                loop {
+                    let message = next(&mut output).await;
+                    if message["id"] == 40 {
+                        assert_eq!(message["error"]["data"]["reason"], "busy");
+                        break;
+                    }
+                }
+            }
             input
                 .send(request(
                     4,

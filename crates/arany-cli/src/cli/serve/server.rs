@@ -154,6 +154,7 @@ pub(in crate::cli) async fn run_configured(
     let engine = Arc::new(engine);
     let mut committed = engine.subscribe();
     let mut history = super::history::History::default();
+    let mut rewind_preview = None::<super::rewind::Pending>;
     let mut active: Option<ActiveTurn> = None;
     let mut workers = tokio::task::JoinSet::<Result<arany::RunResult, EngineError>>::new();
     let next_server_id = Arc::new(std::sync::atomic::AtomicI64::new(1));
@@ -221,6 +222,69 @@ pub(in crate::cli) async fn run_configured(
                             return Err(Fault::state(Reason::NotInitialized));
                         }
                         match request.method.as_str() {
+                            "thread/rewind/preview" => {
+                                if active.is_some() {
+                                    return Err(Fault::state(Reason::Busy));
+                                }
+                                rewind_preview = None;
+                                let (result, pending) = super::rewind::preview(
+                                    &engine,
+                                    &state,
+                                    &threads,
+                                    params(request.params)?,
+                                )
+                                .await?;
+                                encode_line(&response(id.clone(), &result))
+                                    .map_err(|_| Fault::engine(EngineError::ContextTooLarge))?;
+                                rewind_preview = Some(pending);
+                                Ok(Some(json!(result)))
+                            }
+                            "thread/rewind" => {
+                                if active.is_some() {
+                                    return Err(Fault::state(Reason::Busy));
+                                }
+                                // Reserve the maximal bounded receipt before any mutation or fork.
+                                encode_line(&response(id.clone(), "x".repeat(256 * 1024)))
+                                    .map_err(|_| Fault::engine(EngineError::ContextTooLarge))?;
+                                let cancellation = RunCancellation::new();
+                                let mut restoration = Box::pin(super::rewind::restore(
+                                    &engine,
+                                    &state,
+                                    &mut threads,
+                                    &mut rewind_preview,
+                                    params(request.params)?,
+                                    cancellation.clone(),
+                                ));
+                                let result = loop {
+                                    tokio::select! {
+                                        result = restoration.as_mut() => break result?,
+                                        message = inbound.recv(), if !shutdown => match message {
+                                            None | Some(ClientMessage::Eof) => {
+                                                cancellation.cancel();
+                                                shutdown = true;
+                                                stopping.send_replace(true);
+                                            }
+                                            Some(ClientMessage::Message(Message::Request(request))) => {
+                                                send(&outbound, Fault::state(Reason::Busy).message(Some(request.id))).await.map_err(internal)?;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                };
+                                send(&outbound, response(id.clone(), &result))
+                                    .await
+                                    .map_err(internal)?;
+                                if let Some(thread) = result.thread {
+                                    emit(
+                                        &outbound,
+                                        &opt_out,
+                                        notification("thread/started", ThreadResult { thread }),
+                                    )
+                                    .await
+                                    .map_err(internal)?;
+                                }
+                                Ok(None)
+                            }
                             "events/subscribe" | "receipt/get" | "thread/fork" => {
                                 history
                                     .dispatch(
@@ -259,6 +323,12 @@ pub(in crate::cli) async fn run_configured(
                             }
                             "thread/unsubscribe" => {
                                 let input: ThreadUnsubscribeParams = params(request.params)?;
+                                if rewind_preview
+                                    .as_ref()
+                                    .is_some_and(|p| p.belongs_to(input.thread_id))
+                                {
+                                    rewind_preview = None;
+                                }
                                 if let Some(turn) =
                                     active.as_mut().filter(|t| t.thread_id == input.thread_id)
                                 {
@@ -324,6 +394,7 @@ pub(in crate::cli) async fn run_configured(
                                 if active.is_some() {
                                     return Err(Fault::state(Reason::Busy));
                                 }
+                                rewind_preview = None;
                                 let loaded = threads
                                     .map
                                     .get(&input.thread_id)

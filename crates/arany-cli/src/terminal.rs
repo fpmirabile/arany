@@ -29,6 +29,8 @@ mod composer;
 mod history;
 mod input;
 mod linear;
+mod rewind;
+pub use rewind::RewindPanelError;
 mod view;
 use agents::{AgentPanel, PanelUpdate};
 use backend::TerminalBackend;

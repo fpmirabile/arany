@@ -173,6 +173,12 @@ pub struct RewindState {
     pub(crate) prefix: super::lineage::PrefixHasher,
 }
 
+impl RewindState {
+    pub fn prefix_digest(&self) -> [u8; 32] {
+        self.prefix.digest()
+    }
+}
+
 impl PartialEq for RewindState {
     fn eq(&self, other: &Self) -> bool {
         self.checkpoints == other.checkpoints && self.operations == other.operations

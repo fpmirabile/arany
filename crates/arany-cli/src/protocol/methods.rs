@@ -19,7 +19,171 @@ pub const CAPABILITIES: &[&str] = &[
     "thread_settings_update_v1",
     "thread_unsubscribe_v1",
     "thread_list_v1",
+    "thread_rewind_v1",
 ];
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadRewindPreviewParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[schemars(with = "String")]
+    pub turn_id: RunId,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RewindRestore {
+    Code,
+    Conversation,
+    Both,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadRewindParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[serde(deserialize_with = "client_string")]
+    #[schemars(length(max = 256))]
+    pub preview_token: String,
+    pub restore: RewindRestore,
+    #[serde(default, deserialize_with = "rewind_paths")]
+    #[schemars(length(max = 64))]
+    pub kept: Vec<String>,
+    #[serde(default, deserialize_with = "rewind_paths")]
+    #[schemars(length(max = 64))]
+    pub overwrite: Vec<String>,
+    #[serde(default)]
+    pub confirm_overwrite: bool,
+}
+
+fn rewind_paths<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let paths = Vec::<String>::deserialize(deserializer)?;
+    if paths.len() > 64
+        || paths.iter().any(|p| p.is_empty() || p.len() > 4096)
+        || paths.windows(2).any(|p| p[0] >= p[1])
+    {
+        return Err(D::Error::custom("invalid rewind selections"));
+    }
+    Ok(paths)
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RewindFilePreview {
+    pub path: String,
+    pub state: RewindFileState,
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RewindFileState {
+    Restore,
+    Delete,
+    Recreate,
+    Drifted,
+    HistoryDrift,
+    Unavailable,
+    Unsafe,
+    OutsideGrant,
+    Kept,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RewindBlocker {
+    UncertainPublication,
+    NoWriteGrant,
+    GuardUnavailable,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RewindNonRewindable {
+    pub sequence: u64,
+    pub effect: RewindEffect,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RewindEffect {
+    UnguardedCommand,
+    Mcp,
+    Cache,
+    Directory,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadRewindPreviewResult {
+    pub checkpoint: RewindCheckpoint,
+    pub restore: Vec<RewindRestore>,
+    #[schemars(length(max = 2048))]
+    pub files: Vec<RewindFilePreview>,
+    pub blockers: Vec<RewindBlocker>,
+    pub non_rewindable: Vec<RewindNonRewindable>,
+    pub preview_token: String,
+    pub expires_at_ms: i64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RewindCheckpoint {
+    pub kind: RewindCheckpointKind,
+    pub id: String,
+    pub sequence: u64,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RewindCheckpointKind {
+    Run,
+    Rewind,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadRewindResult {
+    pub rewind: RewindReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<Thread>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<RewindConversation>,
+    pub notices: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RewindReceipt {
+    pub id: Option<String>,
+    pub outcome: RewindResultOutcome,
+    #[schemars(length(max = 32))]
+    pub conflicts: Vec<String>,
+    pub conflict_count: u32,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RewindResultOutcome {
+    Restored,
+    Conflict,
+    Denied,
+    Failed,
+    Cancelled,
+    Uncertain,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RewindConversation {
+    #[schemars(with = "Option<String>")]
+    pub thread_id: Option<SessionId>,
+    pub prompt: Option<String>,
+    pub images_omitted: bool,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

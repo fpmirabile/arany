@@ -57,7 +57,7 @@ impl FileVersion {
         self.bytes_with_limit(MAX_CHANGESET_BYTES)
     }
 
-    pub(crate) fn bytes_with_limit(&self, limit: usize) -> Option<Vec<u8>> {
+    pub fn bytes_with_limit(&self, limit: usize) -> Option<Vec<u8>> {
         if !valid_digest(&self.sha256) || self.content.len() > limit.div_ceil(3) * 4 {
             return None;
         }

@@ -34,11 +34,9 @@ Teams support read-only researchers (C1) and Run-scoped edit-only workers (C2) w
 
 ### Frozen areas
 
-On 2026-10-18 the owner lifted this freeze for E4 checkpoints and for item 12 (C3 views and the Supervisor in shadow mode), accepting their plans; it stays in force for the rest of the list below until the owner lifts it.
+The owner lifted this freeze for item 12 (C3 views and the Supervisor in shadow mode), accepting its plan; it stays in force for the rest of the list below until the owner lifts it.
 
 CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
-
-- **E4 checkpoints and rewind.** Capture is specified in [Tools](./docs/specs/tools.md#checkpoints-and-rewind). Remaining slices: conversation fork, then terminal and serve surfaces. Planner and v1 rewind replay facts are specified in [Session replay](./docs/specs/session.md#rewind-planning-and-replay); guarded code restore is specified in Tools. Native Linux/macOS capture and guarded rewind journeys (including APFS case aliases), the 1.5 MiB Guard stack canary, and private-state Store/Engine tests and rewind crash-prefix gates require the lead's unsandboxed verification; no native support claim follows from compilation.
 
 - **Deferred Anthropic consumer subscriptions.** Native Claude-plan access is missing and user-deferred behind the [route/authorization gate](./docs/research/subscription-provider-routes-2026-10.md#decision-boundary-for-beta-1). API-key billing is a separate route; another harness's implementation or credentials do not authorize Arany access.
 
@@ -50,7 +48,7 @@ CI stays green; no new features, spec sections or evidence gates for: terminal v
 - Goose -> `acp` subprocess adapter and `serve` loopback auth (`X-Secret-Key`, explicit allowed origins).
 - OpenHands -> sandbox-on-demand workspace adapter shape for a future container-backed Guard; `RemoteConversation` as the model for a remote client.
 - Aider -> repo map as a bounded, digest-pinned include (later).
-- Cline/Roo -> copy Cline/Roo's restore choices and compare.
+- Cline/Roo -> Restore files / conversation / both, with per-file Compare in the preview.
 
 ## Architecture follow-ups
 
@@ -62,6 +60,7 @@ Guard internals until the owner lifts it.
 
 ## Terminal continuity evidence
 
+- On disposable projects, the owner runs native Linux/macOS capture and guarded rewind journeys (including APFS case aliases and the 1.5 MiB Guard stack canary), private-state Store/Engine and rewind crash-prefix gates, and `rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_blocks_uncertain`. Local private-state failures require outside-sandbox verification. With explicit live usage consent, exercise `/rewind`, Esc Esc, code/conversation/both, Compare, both drift choices and partial/Uncertain receipts after real edits. Review those panels at narrow widths in Classic/Fullscreen on macOS and Linux, and with real screen readers. These native, live and assistive-technology claims remain unverified; compilation and synthetic frames establish none of them. Contracts: [Terminal](./docs/specs/terminal.md#rewind), [Serve](./docs/specs/serve.md#rewind), [Tools](./docs/specs/tools.md#checkpoints-and-rewind).
 - Exercise classic scrollback, narrow resize/reflow, temporary details, idle `/settings` chat-view transitions and a 200-line streamed response in a real macOS emulator and native Linux terminals, including under WSL2. Synthetic macOS PTYs prove controlled cursor ownership, transcript insertion and restoration; they do not emulate scrollback or prove other OS support.
 - With explicit usage consent, repeat OpenAI, Anthropic, ChatGPT and exact-custom streaming conformance against actual selected accounts/endpoints. Offline fixtures prove protocol/lifecycle behavior, not live compatibility. Keep incomplete answers outside future context and confirm recovery after cancellation/crash.
 - Manual lane: **macOS attached steering and pause** remains unverified; verify note delivery to synthesis, controls while a note waits and `/goal pause` at the next boundary in Classic and Fullscreen. Linux owners run in `Linux Tests (debug)`, `Linux Tests (release)`, `Native Linux Guard and tmux (x86_64)` and `Native Linux Guard and tmux (arm64)`.

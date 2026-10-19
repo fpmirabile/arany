@@ -980,7 +980,13 @@
         "tool",
         "providerUnavailable",
         "providerRejected",
-        "invalidSelection"
+        "invalidSelection",
+        "previewExpired",
+        "rewindBlocked",
+        "rewindTooLarge",
+        "conversationRewindLimit",
+        "overwriteConfirmationRequired",
+        "humanConfirmationRequired"
       ],
       "type": "string"
     },
@@ -1227,6 +1233,191 @@
         "result"
       ],
       "type": "object"
+    },
+    "RewindBlocker": {
+      "enum": [
+        "uncertainPublication",
+        "noWriteGrant",
+        "guardUnavailable"
+      ],
+      "type": "string"
+    },
+    "RewindCheckpoint": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RewindCheckpointKind"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "RewindCheckpointKind": {
+      "enum": [
+        "run",
+        "rewind"
+      ],
+      "type": "string"
+    },
+    "RewindConversation": {
+      "additionalProperties": false,
+      "properties": {
+        "imagesOmitted": {
+          "type": "boolean"
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "imagesOmitted"
+      ],
+      "type": "object"
+    },
+    "RewindEffect": {
+      "enum": [
+        "unguardedCommand",
+        "mcp",
+        "cache",
+        "directory"
+      ],
+      "type": "string"
+    },
+    "RewindFilePreview": {
+      "additionalProperties": false,
+      "properties": {
+        "added": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "removed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/RewindFileState"
+        }
+      },
+      "required": [
+        "path",
+        "state"
+      ],
+      "type": "object"
+    },
+    "RewindFileState": {
+      "enum": [
+        "restore",
+        "delete",
+        "recreate",
+        "drifted",
+        "historyDrift",
+        "unavailable",
+        "unsafe",
+        "outsideGrant",
+        "kept"
+      ],
+      "type": "string"
+    },
+    "RewindNonRewindable": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "$ref": "#/$defs/RewindEffect"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sequence",
+        "effect"
+      ],
+      "type": "object"
+    },
+    "RewindReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "conflictCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "conflicts": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": "array"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/RewindResultOutcome"
+        }
+      },
+      "required": [
+        "outcome",
+        "conflicts",
+        "conflictCount"
+      ],
+      "type": "object"
+    },
+    "RewindRestore": {
+      "enum": [
+        "code",
+        "conversation",
+        "both"
+      ],
+      "type": "string"
+    },
+    "RewindResultOutcome": {
+      "enum": [
+        "restored",
+        "conflict",
+        "denied",
+        "failed",
+        "cancelled",
+        "uncertain"
+      ],
+      "type": "string"
     },
     "TextInput": {
       "oneOf": [
@@ -1502,6 +1693,152 @@
       "required": [
         "thread",
         "turns"
+      ],
+      "type": "object"
+    },
+    "ThreadRewindParams": {
+      "additionalProperties": false,
+      "properties": {
+        "confirmOverwrite": {
+          "default": false,
+          "type": "boolean"
+        },
+        "kept": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "overwrite": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "previewToken": {
+          "maxLength": 256,
+          "type": "string"
+        },
+        "restore": {
+          "$ref": "#/$defs/RewindRestore"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "previewToken",
+        "restore"
+      ],
+      "type": "object"
+    },
+    "ThreadRewindPreviewParams": {
+      "additionalProperties": false,
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "ThreadRewindPreviewResult": {
+      "additionalProperties": false,
+      "properties": {
+        "blockers": {
+          "items": {
+            "$ref": "#/$defs/RewindBlocker"
+          },
+          "type": "array"
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/RewindCheckpoint"
+        },
+        "expiresAtMs": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/RewindFilePreview"
+          },
+          "maxItems": 2048,
+          "type": "array"
+        },
+        "nonRewindable": {
+          "items": {
+            "$ref": "#/$defs/RewindNonRewindable"
+          },
+          "type": "array"
+        },
+        "previewToken": {
+          "type": "string"
+        },
+        "restore": {
+          "items": {
+            "$ref": "#/$defs/RewindRestore"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "checkpoint",
+        "restore",
+        "files",
+        "blockers",
+        "nonRewindable",
+        "previewToken",
+        "expiresAtMs"
+      ],
+      "type": "object"
+    },
+    "ThreadRewindResult": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RewindConversation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "notices": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rewind": {
+          "$ref": "#/$defs/RewindReceipt"
+        },
+        "thread": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Thread"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "rewind",
+        "notices"
       ],
       "type": "object"
     },
@@ -1943,6 +2280,22 @@
       },
       "result": {
         "$ref": "#/$defs/ThreadResumeResult"
+      }
+    },
+    "thread/rewind": {
+      "params": {
+        "$ref": "#/$defs/ThreadRewindParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ThreadRewindResult"
+      }
+    },
+    "thread/rewind/preview": {
+      "params": {
+        "$ref": "#/$defs/ThreadRewindPreviewParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ThreadRewindPreviewResult"
       }
     },
     "thread/settings/update": {

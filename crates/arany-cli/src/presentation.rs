@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthStr;
 
 mod agents;
 mod model;
+pub mod rewind;
 pub(crate) use agents::AgentInspectorModel;
 pub(crate) use model::{DraftAction, PresentationModel};
 pub(crate) use model::{

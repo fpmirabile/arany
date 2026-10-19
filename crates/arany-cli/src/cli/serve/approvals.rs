@@ -266,6 +266,8 @@ fn lines(intent: &EffectIntent, unguarded: Option<&UnguardedPrompt>) -> Vec<Stri
     }
 }
 
+// Keep fetch_update for the Rust 1.88 minimum.
+#[allow(deprecated)]
 fn request(
     thread_id: SessionId,
     approval: &ToolApproval,

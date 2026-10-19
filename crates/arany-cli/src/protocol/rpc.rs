@@ -130,18 +130,25 @@ pub enum Reason {
     ProviderUnavailable,
     ProviderRejected,
     InvalidSelection,
+    PreviewExpired,
+    RewindBlocked,
+    RewindTooLarge,
+    ConversationRewindLimit,
+    OverwriteConfirmationRequired,
+    HumanConfirmationRequired,
 }
 
 impl From<&arany::EngineError> for Reason {
     fn from(error: &arany::EngineError) -> Self {
         match error {
             arany::EngineError::IncompatibleProviderChain => Reason::IncompatibleProviderChain,
-            arany::EngineError::ConversationRewindLimit
-            | arany::EngineError::RewindBlocked
-            | arany::EngineError::RewindPreviewExpired
-            | arany::EngineError::RewindTooLarge
-            | arany::EngineError::RosterSelectionMismatch
-            | arany::EngineError::InvalidRequest => Reason::InvalidRequest,
+            arany::EngineError::ConversationRewindLimit => Reason::ConversationRewindLimit,
+            arany::EngineError::RewindBlocked => Reason::RewindBlocked,
+            arany::EngineError::RewindPreviewExpired => Reason::PreviewExpired,
+            arany::EngineError::RewindTooLarge => Reason::RewindTooLarge,
+            arany::EngineError::RosterSelectionMismatch | arany::EngineError::InvalidRequest => {
+                Reason::InvalidRequest
+            }
             arany::EngineError::MissingSession => Reason::MissingSession,
             arany::EngineError::NoSessionForWorkspace => Reason::NoSessionForWorkspace,
             arany::EngineError::TooManySessions => Reason::TooManySessions,
