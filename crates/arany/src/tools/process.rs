@@ -4,6 +4,8 @@ use super::guard::{GuardContext, capture, payload, spawn_before};
 use super::types::{CommandResult, ToolCall, valid_name, valid_relative};
 use serde_json::{Value, json};
 
+const WORKER_CAPTURE_RESULT_BYTES: usize = 512;
+
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
         ToolCall::Command { program, args, cwd } => valid_command(program, args, cwd),
@@ -55,7 +57,24 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         .find(|value| &value.name == program)
         .ok_or(ToolError::Configuration)?;
     #[cfg(target_os = "linux")]
-    let before = super::fs::command_snapshot(site.workspace)?;
+    let before = if site.intent.target == crate::session::worker::EffectTarget::Workspace {
+        Some(super::fs::command_snapshot(site.workspace)?)
+    } else {
+        None
+    };
+    #[cfg(target_os = "macos")]
+    let args = args
+        .iter()
+        .map(|arg| {
+            if let Ok(relative) = std::path::Path::new(arg).strip_prefix("/workspace") {
+                site.workspace.join(relative).to_string_lossy().into_owned()
+            } else {
+                arg.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    #[cfg(target_os = "macos")]
+    let args = &args;
     let mut command = payload(
         definition,
         args,
@@ -64,6 +83,8 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         &site.config.runtime_grants,
         site.intent.limits.cache_bytes > 0,
     )?;
+    command.current_dir(site.workspace.join(cwd));
+    command.env("ARANY_TOOL_WORKSPACE", site.workspace);
     command.stdin(if site.hook_stdin.is_some() {
         std::process::Stdio::piped()
     } else {
@@ -92,14 +113,37 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     #[cfg(target_os = "linux")]
     let changeset = {
         site.stop_descendants().await?;
-        super::fs::command_changeset(site.workspace, &before)?
+        match before {
+            Some(before) => super::fs::command_changeset(site.workspace, &before)?,
+            None => super::types::CommandChangeset::default(),
+        }
     };
     #[cfg(not(target_os = "linux"))]
     let changeset = super::types::CommandChangeset::default();
+    let stdout = String::from_utf8(out).map_err(|_| ToolError::Operation)?;
+    let stderr = String::from_utf8(err).map_err(|_| ToolError::Operation)?;
+    if matches!(
+        site.intent.target,
+        crate::session::worker::EffectTarget::WorkerView { .. }
+    ) {
+        let output = serde_json::to_string(&crate::session::worker::WorkerCommandResult {
+            exit_code: status.code(),
+            stdout,
+            stderr,
+            private_capture: crate::session::worker::PrivateCapture::None {},
+        })
+        .map_err(|_| ToolError::Operation)?;
+        if output.len()
+            > (site.intent.limits.result_bytes as usize).saturating_sub(WORKER_CAPTURE_RESULT_BYTES)
+        {
+            return Err(ToolError::Limit);
+        }
+        return Ok(output);
+    }
     let output = CommandResult {
         exit_code: status.code(),
-        stdout: String::from_utf8(out).map_err(|_| ToolError::Operation)?,
-        stderr: String::from_utf8(err).map_err(|_| ToolError::Operation)?,
+        stdout,
+        stderr,
         changeset,
     };
     if !output.valid() {

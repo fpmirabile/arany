@@ -99,6 +99,9 @@ pub(crate) fn supervisor_fixture(
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     use arany::{ToolCall, ToolDisposition};
     let operation = match &tool.intent.call {
+        ToolCall::ApplyChangeset {
+            source: arany::worker::ChangesetSource::Rewind { .. },
+        } => "Rewind publication".into(),
         ToolCall::PrepareWorker { .. } => "Worker data preparation".into(),
         ToolCall::ApplyChangeset {
             source: arany::worker::ChangesetSource::WorkerHandover { .. },

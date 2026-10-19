@@ -153,8 +153,8 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 | Event kind | Current payload version |
 |---|---|
 | `RunStarted` | 16 |
-| `ToolFinished` | 15 |
-| `ToolStarted` | 11 |
+| `ToolFinished` | 16 |
+| `ToolStarted` | 12 |
 | `AgentSpawned` | 11 |
 | `AgentFinished` | 10 |
 | `ProviderCallRecorded` | 9 |
@@ -166,6 +166,8 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 | `HookStarted` | 3 |
 | `HookFinished` | 6 |
 | All other supported Event kinds | 6 |
+
+The internal worker-command Guard target and shared-read cache restore reuse these exact payloads; they add no stored fields, variants or version bump. Unsupported prior payload versions still reject without modifying their bytes. Strict replay consumes only the committed intent, receipt, capture and seal; it never reconstructs an image, restores a cache or executes a command. The model-facing worker-command refusal and command-criterion exemption remain as specified above.
 
 Active time is journaled per Run and per action-start ceiling as [Goals](./goals.md#lifecycle-budgets-and-recovery) defines; lifecycle hook Events carry required nullable `active_ceiling_ms` and `boundary_active_ms` fields: `HookStarted` records the ceiling in a Run too, and an idle `PreCompact` hook reserves and settles time between Runs of an open Goal (settlement is clamped to its ceiling). A crash leaves a lifecycle hook open and unsettled: the next Run interrupts it as it does an open Tool hook, and it blocks Goal resume. ToolFinished requires the nullable [checkpoint outcome](./tools.md#checkpoints-and-rewind); previous versions and missing fields reject unchanged. Successful Workspace Write/Edit output also records required nullable `before` (digest, byte length, executable bit), resulting digest, byte length and executable bit; missing facts reject unchanged. These metadata stay out of model-facing Tool output. Required fields and nullable fields are explicit, including Goal linkage and budgets, Run configuration and its active deadline, Provider provenance, pinned Tool resource values and the required Tool cache-update outcome. Reading unsupported stored formats or missing fields rejects without conversion, automatic deletion or an optimistic projection. Replay rejects an accepted task without a valid Goal linkage; no unlinked legacy Run path or compatibility projection exists. The additive Run-scoped `GoalSteeringNoteRecorded` Event is part of payload version 6 and is accepted only inside the open primary provider reservation, as [Goals](./goals.md#steering-notes-and-pause) defines. A child Tool without its finished observation is interrupted history; [Goal recovery](./goals.md#worker-accounting-and-verification) permits only the contained private-editor exception. Attached startup offers the [explicit history reset](./terminal.md#setup-and-account-choices); it discards history rather than converting or admitting an unsupported format. Each Provider call record also journals `requested_tools` (one per declared model Tool request) and the cache-read and cache-creation usage beside the input total.
 

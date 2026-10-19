@@ -542,6 +542,11 @@ pub struct WorkerVerification {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ChangesetSource {
+    Rewind {
+        plan_digest: [u8; 32],
+        bytes: u32,
+        sha256: [u8; 32],
+    },
     CommandReceipt {
         source_intent_digest: [u8; 32],
         changeset: crate::tools::CommandChangeset,
@@ -555,6 +560,16 @@ pub enum ChangesetSource {
 impl ChangesetSource {
     pub(crate) fn valid(&self) -> bool {
         match self {
+            Self::Rewind {
+                plan_digest,
+                bytes,
+                sha256,
+            } => {
+                *plan_digest != [0; 32]
+                    && *sha256 != [0; 32]
+                    && *bytes > 0
+                    && (*bytes as usize) <= WORKER_DATA_BYTES
+            }
             Self::CommandReceipt {
                 source_intent_digest,
                 changeset,
@@ -703,6 +718,41 @@ pub(crate) fn decode_data(
     bytes: &[u8],
     purpose: WorkerDataPurpose,
 ) -> Result<WorkerDataFacts, ReplayError> {
+    decode_data_inner(bytes, purpose, WORKER_CONTENT_BYTES, false)
+}
+
+pub(crate) fn decode_rewind_data(bytes: &[u8]) -> Result<WorkerDataFacts, ReplayError> {
+    let facts = decode_data_inner(
+        bytes,
+        WorkerDataPurpose::Handover,
+        2 * WORKER_CONTENT_BYTES,
+        true,
+    )?;
+    if let WorkerDataFacts::Changes(files) = &facts {
+        for before in [true, false] {
+            let size: usize = files
+                .iter()
+                .map(
+                    |file| match if before { &file.before } else { &file.after } {
+                        WorkerBaseVersion::File { bytes, .. } => *bytes as usize,
+                        _ => 0,
+                    },
+                )
+                .sum();
+            if size > WORKER_CONTENT_BYTES {
+                return Err(ReplayError::InvalidPayload);
+            }
+        }
+    }
+    Ok(facts)
+}
+
+fn decode_data_inner(
+    bytes: &[u8],
+    purpose: WorkerDataPurpose,
+    content_limit: usize,
+    rewind: bool,
+) -> Result<WorkerDataFacts, ReplayError> {
     if bytes.is_empty() || bytes.len() > purpose.limit() {
         return Err(ReplayError::InvalidPayload);
     }
@@ -752,8 +802,9 @@ pub(crate) fn decode_data(
         .collect();
     for (i, file) in changeset.files.iter().enumerate() {
         if !writable_path(&file.path)
-            || matches!((&file.before, &file.after), (None, None))
-            || matches!((&file.before, &file.after), (Some(a),Some(b)) if a.sha256 == b.sha256 && a.executable == b.executable)
+            || !rewind && matches!((&file.before, &file.after), (None, None))
+            || !rewind
+                && matches!((&file.before, &file.after), (Some(a),Some(b)) if a.sha256 == b.sha256 && a.executable == b.executable)
             || changeset.files[..i]
                 .iter()
                 .zip(&lowered)
@@ -787,7 +838,7 @@ pub(crate) fn decode_data(
                 total = total
                     .checked_add(content.len())
                     .ok_or(ReplayError::InvalidPayload)?;
-                if total > WORKER_CONTENT_BYTES {
+                if total > content_limit {
                     return Err(ReplayError::InvalidPayload);
                 }
                 Ok(WorkerBaseVersion::File {

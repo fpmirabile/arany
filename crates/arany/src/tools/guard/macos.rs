@@ -215,6 +215,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     }
     let mut bytes = b"arany-macos-guard-v15:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go".to_vec();
     bytes.extend_from_slice(b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling");
+    bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-workspace-grant");
     for kind in [ProfileKind::File, ProfileKind::Command, ProfileKind::Git] {
         bytes.extend_from_slice(SeatbeltProfile::new(kind).text.as_bytes());
@@ -911,7 +912,7 @@ impl Task {
             handover: runtime
                 .handover
                 .as_ref()
-                .and_then(|_| super::super::worker::handover_ref(intent).cloned()),
+                .and_then(|_| super::super::worker::handover_ref(intent)),
             workspace: runtime.workspace.clone(),
             guard_executable: runtime.guard_executable.clone(),
             system_programs: if intent.call.is_process() {

@@ -24,9 +24,11 @@ fn batch(session: SessionId, goal: GoalId, run: RunId, sequence: u64, content: &
     Batch {
         capture: Capture {
             session,
-            goal,
-            run,
-            intent_id: uuid::Uuid::now_v7(),
+            owner: CaptureOwner::Tool {
+                goal,
+                run,
+                intent_id: uuid::Uuid::now_v7(),
+            },
             files: vec![("file".into(), content.to_vec())],
         },
         sequence,
@@ -45,9 +47,7 @@ fn capture(root: &StateRoot, batch: impl std::borrow::Borrow<Batch>, now: i64) -
 fn clone_capture(capture: &Capture) -> Capture {
     Capture {
         session: capture.session,
-        goal: capture.goal,
-        run: capture.run,
-        intent_id: capture.intent_id,
+        owner: capture.owner,
         files: capture.files.clone(),
     }
 }
@@ -137,7 +137,10 @@ fn checkpoints_every_logical_quota_accepts_boundary_and_evicts_first_overflow() 
         for sequence in 1..=3 {
             let captured = batch(session, goal, RunId::new(), sequence, &[sequence as u8]);
             if sequence == 1 {
-                oldest = Some(captured.run);
+                let CaptureOwner::Tool { run, .. } = captured.owner else {
+                    unreachable!()
+                };
+                oldest = Some(run);
             }
             assert_eq!(
                 capture_inner(&root, &captured, sequence as i64, limits).unwrap(),
@@ -179,8 +182,11 @@ fn checkpoints_current_run_and_whole_publication_are_protected() {
     assert_eq!(count(&root, "SELECT MIN(tool_sequence) FROM refs"), 1);
     let empty = SessionId::new();
     next.session = empty;
-    next.run = RunId::new();
-    next.goal = GoalId::new();
+    next.owner = CaptureOwner::Tool {
+        run: RunId::new(),
+        goal: GoalId::new(),
+        intent_id: uuid::Uuid::now_v7(),
+    };
     next.files = vec![("a".into(), vec![1]), ("b".into(), vec![2])];
     let limits = Limits { refs: 1, ..LIMITS };
     assert!(matches!(
@@ -482,9 +488,11 @@ async fn checkpoints_prune_notices_survive_discarded_captures_until_journal_comm
         };
         let request = |intent_id, files| Capture {
             session: f.session,
-            goal: f.goal,
-            run: f.run,
-            intent_id,
+            owner: CaptureOwner::Tool {
+                goal: f.goal,
+                run: f.run,
+                intent_id,
+            },
             files,
         };
         let discarded = store

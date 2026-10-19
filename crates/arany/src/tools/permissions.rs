@@ -622,7 +622,9 @@ impl Rule {
             }
             ToolCall::Skill { name, .. } => pattern.is_match(name),
             ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
+                source:
+                    crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                    | crate::session::worker::ChangesetSource::Rewind { .. },
             } => paths.map_or(decision != Decision::Allow, |paths| {
                 if decision == Decision::Allow {
                     !paths.is_empty()

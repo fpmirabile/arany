@@ -59,6 +59,7 @@ pub(super) fn check_available() -> Result<(), ToolError> {
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     let mut bytes = b"arany-guard-v15:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
     bytes.extend_from_slice(b";worker-private-image-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling");
+    bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
@@ -833,7 +834,9 @@ fn guard_config<'a>(
     runtime: &'a ToolRuntime,
     intent: &EffectIntent,
 ) -> std::borrow::Cow<'a, super::Config> {
-    if runtime.worker.is_some() || matches!(intent.call, ToolCall::ParseAgentDefinition { .. }) {
+    if runtime.worker.is_some() && !intent.call.is_process()
+        || matches!(intent.call, ToolCall::ParseAgentDefinition { .. })
+    {
         std::borrow::Cow::Owned(super::parser_config(&runtime.config))
     } else {
         std::borrow::Cow::Borrowed(&runtime.config)
@@ -846,7 +849,15 @@ fn prepare_seed(
     config: &super::Config,
     intent: &EffectIntent,
 ) -> Result<(std::path::PathBuf, cap_std::fs::Dir), ToolError> {
-    permit.prepare_seed(workspace, config, intent.call.is_process())
+    permit.prepare_seed(
+        workspace,
+        config,
+        intent.call.is_process()
+            && !matches!(
+                intent.target,
+                crate::session::worker::EffectTarget::WorkerView { .. }
+            ),
+    )
 }
 
 async fn worker_input<W: tokio::io::AsyncWrite + Unpin, R: tokio::io::AsyncBufRead + Unpin>(
@@ -905,7 +916,7 @@ fn task_bytes(
         handover: runtime
             .handover
             .as_ref()
-            .and_then(|_| super::super::worker::handover_ref(intent).cloned()),
+            .and_then(|_| super::super::worker::handover_ref(intent)),
         config: runtime.config.clone(),
         intent: intent.clone(),
         cache,
@@ -1018,31 +1029,32 @@ pub(super) async fn execute_inner(
             .await
             .map_err(|_| ToolError::Operation)?;
         drop(stdin);
-        let (observation, candidate) = if let Some(session) = cache.as_ref() {
-            let observation = super::read_observation_line(&mut stdout, intent).await?;
-            let update_deadline = super::cache_transfer_deadline(
-                intent,
-                active_window.map(|window| window.completion_deadline),
-            );
-            let candidate = match tokio::time::timeout_at(
-                update_deadline,
-                super::receive_cache_candidate(&mut stdout, &session.lease),
-            )
-            .await
-            {
-                Ok(Ok(candidate)) => candidate,
-                Ok(Err(_)) | Err(_) => super::CacheCandidate::Uncertain,
+        let (observation, candidate) =
+            if let Some(session) = cache.as_ref().filter(|_| runtime.worker.is_none()) {
+                let observation = super::read_observation_line(&mut stdout, intent).await?;
+                let update_deadline = super::cache_transfer_deadline(
+                    intent,
+                    active_window.map(|window| window.completion_deadline),
+                );
+                let candidate = match tokio::time::timeout_at(
+                    update_deadline,
+                    super::receive_cache_candidate(&mut stdout, &session.lease),
+                )
+                .await
+                {
+                    Ok(Ok(candidate)) => candidate,
+                    Ok(Err(_)) | Err(_) => super::CacheCandidate::Uncertain,
+                };
+                if candidate == super::CacheCandidate::Uncertain {
+                    return Ok((observation, candidate));
+                }
+                (observation, candidate)
+            } else {
+                (
+                    read_effect_observation(&mut stdout, runtime, intent).await?,
+                    super::CacheCandidate::Received,
+                )
             };
-            if candidate == super::CacheCandidate::Uncertain {
-                return Ok((observation, candidate));
-            }
-            (observation, candidate)
-        } else {
-            (
-                read_effect_observation(&mut stdout, runtime, intent).await?,
-                super::CacheCandidate::Received,
-            )
-        };
         if !child
             .wait()
             .await

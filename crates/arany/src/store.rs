@@ -22,8 +22,10 @@ use replay::{
 pub use state::HistoryReset;
 #[cfg(test)]
 pub(crate) use state::capture_archive;
-pub(crate) use state::checkpoints::Capture as CheckpointCapture;
 pub use state::checkpoints::CheckpointReset;
+pub(crate) use state::checkpoints::{
+    Capture as CheckpointCapture, CaptureOwner as CheckpointOwner,
+};
 pub(crate) use state::{
     BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock,
     WorkspaceRunLock, archive_size_with_limit,
@@ -338,18 +340,22 @@ impl Store {
                             } else {
                                 append(&mut connection, &mut hot_session, session_id, *event)
                             };
-                            if let Ok(envelope) = &result
-                                && let Event::ToolFinished {
-                                    run_id,
-                                    checkpoint: Some(checkpoint),
-                                    ..
-                                } = &envelope.event
-                                && let Some(pruned) = checkpoint.pruned_before_run
-                            {
-                                if pending_prunes.get(&session_id).is_some_and(|pending| pending <= &pruned) {
-                                    pending_prunes.remove(&session_id);
+                            if let Ok(envelope) = &result {
+                                let notice = match &envelope.event {
+                                    Event::ToolFinished { run_id, checkpoint: Some(checkpoint), .. } => Some((Some(*run_id), checkpoint)),
+                                    Event::WorkspaceRewindFinished { record } => record.checkpoint.as_ref().map(|checkpoint| (None, checkpoint)),
+                                    _ => None,
+                                };
+                                if let Some((run, checkpoint)) = notice
+                                    && let Some(pruned) = checkpoint.pruned_before_run
+                                {
+                                    if pending_prunes.get(&session_id).is_some_and(|pending| pending <= &pruned) {
+                                        pending_prunes.remove(&session_id);
+                                    }
+                                    if run.is_some() {
+                                        pruning_notified_run = run;
+                                    }
                                 }
-                                pruning_notified_run = Some(*run_id);
                             }
                             #[cfg(any(test, feature = "test-support"))]
                             let result = match result {
@@ -437,16 +443,25 @@ impl Store {
                             let result = if read_only {
                                 Err(StoreError::ReadOnly)
                             } else {
-                                let started = connection.query_row(
-                                    "SELECT MAX(sequence) FROM events WHERE session_id=?1 AND run_id=?2 AND kind='ToolStarted' AND json_extract(payload,'$.intent.id')=?3",
-                                    rusqlite::params![capture.session.to_string(), capture.run.to_string(), capture.intent_id.to_string()],
-                                    |row| row.get::<_, Option<i64>>(0),
-                                );
+                                let (started, run) = match capture.owner {
+                                    CheckpointOwner::Tool { run, intent_id, .. } => (
+                                        connection.query_row(
+                                            "SELECT MAX(sequence) FROM events WHERE session_id=?1 AND run_id=?2 AND kind='ToolStarted' AND json_extract(payload,'$.intent.id')=?3",
+                                            rusqlite::params![capture.session.to_string(), run.to_string(), intent_id.to_string()],
+                                            |row| row.get::<_, Option<i64>>(0),
+                                        ), Some(run)),
+                                    CheckpointOwner::Rewind { rewind_id } => (
+                                        connection.query_row(
+                                            "SELECT MAX(sequence) FROM events WHERE session_id=?1 AND kind='WorkspaceRewindStarted' AND json_extract(payload,'$.rewind_id')=?2",
+                                            rusqlite::params![capture.session.to_string(), rewind_id.to_string()],
+                                            |row| row.get::<_, Option<i64>>(0),
+                                        ), None),
+                                };
                                 let Ok(Some(started)) = started else {
                                     let _ = reply.send(Err(StoreError::InvalidHistory));
                                     continue;
                                 };
-                                let (run, session) = (capture.run, capture.session);
+                                let session = capture.session;
                                 let mut checkpoint = state::checkpoints::capture(
                                     &root, capture, u64::try_from(started).unwrap_or_default(),
                                     i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX),
@@ -458,7 +473,7 @@ impl Store {
                                 }
                                 checkpoint.pruned_before_run = pending_prunes.get(&session)
                                     .copied()
-                                    .filter(|_| pruning_notified_run != Some(run));
+                                    .filter(|_| run.is_none() || pruning_notified_run != run);
                                 Ok(checkpoint)
                             };
                             let _ = reply.send(result);

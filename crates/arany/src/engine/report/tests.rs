@@ -954,7 +954,7 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
         report
             .unresolved
             .iter()
-            .any(|line| line.contains("Workspace rewind"))
+            .any(|line| line.contains("Workspace rewind") && line.contains("\"src/a\""))
     );
     assert!(serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES);
     assert!(!goal.success_criterion_satisfied);

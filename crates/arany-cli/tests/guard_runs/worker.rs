@@ -260,6 +260,34 @@ pub(super) async fn worker_case(case: &'static str) {
         .runs
         .first()
         .unwrap_or_else(|| panic!("{case}: no run in session view"));
+    if case == "success" {
+        let publication = run
+            .tools
+            .iter()
+            .find(|tool| {
+                matches!(
+                    tool.intent.call,
+                    arany::ToolCall::ApplyChangeset {
+                        source: arany::worker::ChangesetSource::WorkerHandover { .. }
+                    }
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            publication.checkpoint.as_ref().unwrap().status,
+            arany::CheckpointStatus::Captured
+        );
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        assert_eq!(
+            store
+                .checkpoint_blob(Sha256::digest(b"original a").into())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(b"original a".as_slice())
+        );
+        store.close().await.unwrap();
+    }
     let worker = run
         .agents
         .iter()
