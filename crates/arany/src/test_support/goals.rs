@@ -380,6 +380,7 @@ impl ForegroundWorkerProvider {
             objective: "Edit the leased notes".into(),
             profile: None,
             editor: Some(Box::new(crate::worker::EditorAssignment {
+                commands: Vec::new(),
                 definition: "editor".into(),
                 definition_digest: digest,
                 mission: "Edit the leased notes".into(),

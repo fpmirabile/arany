@@ -29,7 +29,18 @@ pub(super) fn apply(
         let definition_mode = super::definition_mode(run, *agent_run_id)?;
         let restrictions = super::mode_restrictions(run, *agent_run_id)?;
         let unguarded = observation.intent.call.is_unguarded();
-        if configured || definition_mode.is_some() || unguarded {
+        let refused_command = matches!(
+            observation.intent.target,
+            crate::session::worker::EffectTarget::WorkerView { .. }
+        ) && matches!(
+            observation.intent.call,
+            crate::tools::ToolCall::Command { .. }
+        ) && observation.disposition == crate::tools::ToolDisposition::Denied
+            && observation.attestation.is_none()
+            && pending_tool(run, *agent_run_id)?
+                .permission_verdict
+                .is_none();
+        if (configured || definition_mode.is_some() || unguarded) && !refused_command {
             let tool = pending_tool(run, *agent_run_id)?;
             let verdict = tool
                 .permission_verdict

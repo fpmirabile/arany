@@ -214,6 +214,7 @@ fn cache_update_label(update: arany::CacheUpdate) -> Option<&'static str> {
     use arany::CacheUpdate;
     match update {
         CacheUpdate::NotApplicable => None,
+        CacheUpdate::Discarded => Some("private cache discarded"),
         CacheUpdate::NotAttempted => Some("cache not attempted"),
         CacheUpdate::Published => Some("cache saved"),
         CacheUpdate::Rejected => Some("cache not saved (limit)"),
@@ -240,7 +241,10 @@ pub fn render_cache_update_feedback(run: &RunView) -> Option<&'static str> {
             }
             CacheUpdate::Rejected => rejected = true,
             CacheUpdate::Failed => failed = true,
-            CacheUpdate::NotApplicable | CacheUpdate::NotAttempted | CacheUpdate::Published => {}
+            CacheUpdate::NotApplicable
+            | CacheUpdate::NotAttempted
+            | CacheUpdate::Published
+            | CacheUpdate::Discarded => {}
         }
     }
     if failed {

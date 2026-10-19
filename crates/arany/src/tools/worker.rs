@@ -361,6 +361,7 @@ impl View {
 
     pub(crate) fn target(&self) -> EffectTarget {
         EffectTarget::WorkerView {
+            cache_generation: None,
             assignment_id: self.assignment,
             base_digest: self.base_digest,
             revision: self.revision,
@@ -1138,6 +1139,7 @@ mod tests {
 
     fn grant() -> WorkerGrant {
         WorkerGrant {
+            commands: Vec::new(),
             read_paths: vec![".".into()],
             write_paths: vec!["owned".into()],
             tools: vec![
@@ -1224,6 +1226,32 @@ mod tests {
             bytes: candidate.data.len() as u32,
             sha256: digest(&candidate.data),
         }
+    }
+
+    #[tokio::test]
+    async fn private_target_command_protocol_remains_explicitly_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = runtime(temp.path());
+        let mut intent = runtime.intent(
+            crate::session::RunId::new(),
+            AgentRunId::new(),
+            ToolCall::Command {
+                program: "check".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+        );
+        intent.target = EffectTarget::WorkerView {
+            assignment_id: intent.agent_run_id,
+            base_digest: [1; 32],
+            revision: 0,
+            cache_generation: None,
+        };
+        let observation = runtime.execute(intent, Cancellation::new()).await;
+        assert_eq!(observation.disposition, ToolDisposition::Denied);
+        assert!(observation.attestation.is_none());
+        assert!(observation.output == crate::tools::WORKER_COMMANDS_REFUSED);
+        assert!(observation.valid());
     }
 
     #[test]
@@ -1369,6 +1397,7 @@ mod tests {
                 1 => invalid.target = EffectTarget::Workspace,
                 2 => {
                     invalid.target = EffectTarget::WorkerView {
+                        cache_generation: None,
                         assignment_id: view.assignment,
                         base_digest: [9; 32],
                         revision: 0,
@@ -1376,6 +1405,7 @@ mod tests {
                 }
                 3 => {
                     invalid.target = EffectTarget::WorkerView {
+                        cache_generation: None,
                         assignment_id: view.assignment,
                         base_digest: view.base_digest,
                         revision: 1,

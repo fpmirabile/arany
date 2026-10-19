@@ -194,6 +194,7 @@ mod tests {
     #[test]
     fn foreground_editor_wire_is_closed_scoped_and_checks_nested_credential_reflection() {
         let assignment = crate::session::worker::EditorAssignment {
+            commands: Vec::new(),
             definition: "editor".into(),
             definition_digest: [1; 32],
             mission: "Edit notes".into(),
