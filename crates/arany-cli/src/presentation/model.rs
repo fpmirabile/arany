@@ -1008,6 +1008,7 @@ mod tests {
             ),
         ] {
             view.runs[0].failure = Some(cause);
+            view.runs[0].agents[0].provider_calls.clear();
             assert_eq!(
                 run_feedback(&view.runs[0]).unwrap(),
                 format!(

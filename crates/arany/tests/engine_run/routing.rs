@@ -1089,19 +1089,23 @@ async fn invalid_last_assignment_rejects_the_whole_plan_without_spawns_or_repair
             let workspace = temp.path().join("workspace");
             std::fs::create_dir(&workspace).unwrap();
             let state = temp.path().join("state");
-            let primary = route(ScriptedProvider::new(vec![ProviderOutcome::Delegate(
-                Delegate {
-                    agent: None,
-                    children: vec![
-                        arany::ChildAssignment {
-                            editor: None,
-                            objective: "Valid first".into(),
-                            profile: None,
-                        },
-                        bad,
-                    ],
-                },
-            )]));
+            let primary = route(ScriptedProvider::new(
+                (0..3)
+                    .map(|_| {
+                        ProviderOutcome::Delegate(Delegate {
+                            agent: None,
+                            children: vec![
+                                arany::ChildAssignment {
+                                    editor: None,
+                                    objective: "Valid first".into(),
+                                    profile: None,
+                                },
+                                bad.clone(),
+                            ],
+                        })
+                    })
+                    .collect(),
+            ));
             let child = route(ScriptedProvider::new(vec![finish("forbidden dispatch")]));
             let mut bindings = routes(&primary);
             bindings.roles.child = vec![child.clone()];
@@ -1120,7 +1124,7 @@ async fn invalid_last_assignment_rejects_the_whole_plan_without_spawns_or_repair
             engine.close().await.unwrap();
             let (events, view) = reopen(&state, result.session_id).await;
             assert_eq!(view.runs[0].agents.len(), 1);
-            assert_eq!(primary.requests.lock().unwrap().len(), 1);
+            assert_eq!(primary.requests.lock().unwrap().len(), 3);
             assert!(child.requests.lock().unwrap().is_empty());
             assert!(!events.iter().any(|event| matches!(
                 event.event,
@@ -1129,10 +1133,13 @@ async fn invalid_last_assignment_rejects_the_whole_plan_without_spawns_or_repair
                     ..
                 }
             )));
-            assert_eq!(
-                view.runs[0].agents[0].provider_calls[0].disposition,
-                ProviderCallDisposition::InvalidResponse
+            assert!(
+                view.runs[0].agents[0]
+                    .provider_calls
+                    .iter()
+                    .all(|call| { call.disposition == ProviderCallDisposition::InvalidResponse })
             );
+            assert_eq!(view.runs[0].failure, Some(arany::RunFailure::RefusalLimit));
         }
     }
 }

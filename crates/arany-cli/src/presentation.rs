@@ -588,16 +588,19 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
         RunStatus::Failed => {
             let budget_stop = run.failure == Some(arany::RunFailure::BudgetExhausted);
             if let Some(reason) = run.failure.and_then(run_failure_notice) {
-                let detail = if run.failure == Some(arany::RunFailure::ProposalRefused) {
-                    run.agents
-                        .iter()
-                        .find(|agent| agent.role == arany::AgentRole::Primary)
-                        .and_then(|agent| agent.provider_calls.last())
-                        .and_then(|call| call.refusal.as_ref())
-                        .map(|refusal| refusal_notice(refusal.cause))
-                        .unwrap_or(reason)
-                } else {
-                    reason
+                let last_refusal = run
+                    .agents
+                    .iter()
+                    .find(|agent| agent.role == arany::AgentRole::Primary)
+                    .and_then(|agent| agent.provider_calls.last())
+                    .and_then(|call| call.refusal.as_ref())
+                    .map(|refusal| refusal_notice(refusal.cause));
+                let detail = match (run.failure, last_refusal) {
+                    (Some(arany::RunFailure::ProposalRefused), Some(cause)) => cause.to_owned(),
+                    (Some(arany::RunFailure::RefusalLimit), Some(cause)) => {
+                        format!("{reason} {cause}")
+                    }
+                    _ => reason.to_owned(),
                 };
                 return Some(format!(
                     "Error: Run failed. {detail} No answer was committed. Use /agents to inspect this Run."

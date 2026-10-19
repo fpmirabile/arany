@@ -392,7 +392,7 @@ impl TeamProvider {
                 return tool_outcome(Self::read(&path), None);
             }
         }
-        if matches!(self.case, "cap" | "hard_cap") && prior == 9 {
+        if matches!(self.case, "cap" | "hard_cap") && prior >= 9 {
             return self.delegation(request, 2);
         }
         finish_with("Primary verified team")
