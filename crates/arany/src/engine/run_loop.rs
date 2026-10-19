@@ -120,6 +120,7 @@ pub(super) struct RunLoop<'a> {
     definitions: std::sync::OnceLock<
         std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
     >,
+    active_time_floor: std::sync::atomic::AtomicBool,
 }
 
 pub(super) struct LoopControls<'a> {
@@ -160,6 +161,7 @@ impl<'a> RunLoop<'a> {
             worker: Default::default(),
             handover: Default::default(),
             definitions: std::sync::OnceLock::new(),
+            active_time_floor: std::sync::atomic::AtomicBool::new(false),
             journal,
             session_id: identity.session_id,
             run_id: identity.run_id,
@@ -661,7 +663,7 @@ impl<'a> RunLoop<'a> {
             }
             Ok(false) => {
                 return self
-                    .fail_primary(RunFailure::ToolStopped)
+                    .fail_primary(self.tool_stop_cause())
                     .await
                     .map(|()| false);
             }
@@ -1129,7 +1131,27 @@ impl<'a> RunLoop<'a> {
         match definition_stop(stopped, !self.ledger().can_start_provider_call()) {
             DefinitionStop::Settle => self.settle_stopped_primary().await,
             DefinitionStop::Budget => self.fail_for_budget().await,
-            DefinitionStop::Fail => self.fail_primary(RunFailure::DefinitionInvalid).await,
+            DefinitionStop::Fail => {
+                let cause = if self.take_active_time_floor() {
+                    RunFailure::BudgetExhausted
+                } else {
+                    RunFailure::DefinitionInvalid
+                };
+                self.fail_primary(cause).await
+            }
+        }
+    }
+
+    fn take_active_time_floor(&self) -> bool {
+        self.active_time_floor
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn tool_stop_cause(&self) -> RunFailure {
+        if self.take_active_time_floor() {
+            RunFailure::BudgetExhausted
+        } else {
+            RunFailure::ToolStopped
         }
     }
 

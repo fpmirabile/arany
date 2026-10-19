@@ -587,11 +587,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {
             let budget_stop = run.failure == Some(arany::RunFailure::BudgetExhausted);
-            if let Some(reason) = run
-                .failure
-                .filter(|_| !budget_stop)
-                .and_then(run_failure_notice)
-            {
+            if let Some(reason) = run.failure.and_then(run_failure_notice) {
                 let detail = if run.failure == Some(arany::RunFailure::ProposalRefused) {
                     run.agents
                         .iter()
@@ -683,9 +679,10 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
 fn run_failure_notice(cause: arany::RunFailure) -> Option<&'static str> {
     use arany::RunFailure;
     Some(match cause {
-        RunFailure::ProviderCall | RunFailure::ToolStopped => return None,
+        RunFailure::ProviderCall | RunFailure::ToolStopped | RunFailure::BudgetExhausted => {
+            return None;
+        }
         RunFailure::ProposalRefused => "Arany refused the proposed operation before dispatch.",
-        RunFailure::BudgetExhausted => "The Goal budget refused the next action.",
         RunFailure::DefinitionInvalid => "An agent definition could not be loaded.",
         RunFailure::PlanAdmission => {
             "Arany could not admit the proposed plan. The proposed action did not run."
