@@ -71,19 +71,11 @@ fn checkpoint(
     answered: &mut PtyResponses,
     label: &str,
     bytes: &[u8],
+    needles: &[&[u8]],
 ) {
     let from = transcript.len();
     input.write_all(bytes).expect("chat input");
-    wait_for(
-        output,
-        input,
-        transcript,
-        answered,
-        from,
-        &[b"\x1b[?25h"],
-        label,
-    );
-    thread::sleep(Duration::from_millis(300));
+    wait_for(output, input, transcript, answered, from, needles, label);
     pump(output, input, transcript, answered);
     assert_eq!(
         mouse_modes_on(transcript),
@@ -161,6 +153,7 @@ fn fullscreen_chat_keeps_mouse_reporting_off_at_every_returned_checkpoint() {
         &mut answered,
         "picker close",
         b"\r",
+        &[b"\x1b[?25h\x1b[22;3H"],
     );
     checkpoint(
         &mut output,
@@ -169,6 +162,7 @@ fn fullscreen_chat_keeps_mouse_reporting_off_at_every_returned_checkpoint() {
         &mut answered,
         "draft redraw",
         b"x",
+        &[b"\x1b[?25h\x1b[22;4H"],
     );
     checkpoint(
         &mut output,
@@ -177,6 +171,7 @@ fn fullscreen_chat_keeps_mouse_reporting_off_at_every_returned_checkpoint() {
         &mut answered,
         "draft cleared",
         b"\x7f",
+        &[b"\x1b[?25h\x1b[22;3H"],
     );
     let from = transcript.len();
     input.write_all(b"/resume\r").expect("open picker");
@@ -199,6 +194,7 @@ fn fullscreen_chat_keeps_mouse_reporting_off_at_every_returned_checkpoint() {
         &mut answered,
         "picker escape",
         b"\x1b",
+        &[b"\x1b[?25h\x1b[22;3H"],
     );
 
     let original_mode = std::fs::metadata(&state).expect("State mode").permissions();
@@ -211,6 +207,10 @@ fn fullscreen_chat_keeps_mouse_reporting_off_at_every_returned_checkpoint() {
         &mut answered,
         "listing error",
         b"/resume\r",
+        &[
+            b"state directory unavailable or unsafe",
+            b"\x1b[?25h\x1b[22;3H",
+        ],
     );
     std::fs::set_permissions(&state, original_mode).expect("restore State mode");
     checkpoint(
@@ -220,6 +220,7 @@ fn fullscreen_chat_keeps_mouse_reporting_off_at_every_returned_checkpoint() {
         &mut answered,
         "error cleared",
         b"y",
+        &[b"\x1b[?25h\x1b[22;4H"],
     );
 
     input.write_all(b"\x7f/exit\r").expect("exit");
