@@ -5,13 +5,21 @@ use crate::session::{
     RunDisposition, RunId, SessionDefaults, SessionId, SessionListItem, SessionView,
     WorkspaceIdentity, prefix_digest, validate_compaction_references,
 };
-use rusqlite::{Connection, types::ValueRef};
+use rusqlite::{Connection, Row, types::ValueRef};
 use std::collections::HashMap;
 use std::str::FromStr;
 
 pub(super) const MAX_SESSION_EVENTS: usize = 10_000;
 const MAX_FORK_DEPTH: usize = 8;
 const MAX_DISCOVERED_SESSIONS: usize = 65_536;
+pub(super) const RUN_OWNER_SQL: &str =
+    "SELECT DISTINCT session_id FROM events WHERE run_id=?1 LIMIT 2";
+pub(super) const SESSION_EVENTS_SQL: &str = "SELECT sequence,
+            length(CAST(session_id AS BLOB)),
+            length(CAST(kind AS BLOB)),
+            length(CAST(payload AS BLOB)),
+            session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+     FROM events WHERE session_id=?1 ORDER BY sequence LIMIT ?2";
 
 struct SessionHead {
     title: String,
@@ -41,17 +49,28 @@ pub(super) fn session_for_run(
     connection: &Connection,
     run_id: RunId,
 ) -> Result<Option<SessionId>, StoreError> {
-    let mut selected = None;
-    scan_all_events(connection, |envelope| {
-        if envelope.run_id == Some(run_id) {
-            if selected.is_some_and(|id| id != envelope.session_id) {
+    if connection.is_autocommit() {
+        validate_history(connection)?;
+    }
+    let mut statement = connection.prepare(RUN_OWNER_SQL)?;
+    let mut rows = statement.query([run_id.to_string()])?;
+    let owner = rows
+        .next()?
+        .map(|row| {
+            let raw = row
+                .get_ref(0)?
+                .as_str()
+                .map_err(|_| StoreError::InvalidHistory)?;
+            if raw.len() != 36 {
                 return Err(StoreError::InvalidHistory);
             }
-            selected = Some(envelope.session_id);
-        }
-        Ok(())
-    })?;
-    Ok(selected)
+            raw.parse().map_err(|_| StoreError::InvalidHistory)
+        })
+        .transpose()?;
+    if rows.next()?.is_some() {
+        return Err(StoreError::InvalidHistory);
+    }
+    Ok(owner)
 }
 
 pub(super) fn latest_session_id(
@@ -518,22 +537,44 @@ fn load_session_events(
     session_id: SessionId,
 ) -> Result<Vec<EventEnvelope>, StoreError> {
     let mut selected = Vec::new();
-    scan_all_events(connection, |envelope| {
-        if envelope.session_id == session_id {
+    if connection.is_autocommit() {
+        scan_all_events(connection, |envelope| {
+            if envelope.session_id == session_id {
+                if selected.len() == MAX_SESSION_EVENTS {
+                    return Err(StoreError::ReplayLimit);
+                }
+                selected.push(envelope);
+            }
+            Ok(())
+        })?;
+    } else {
+        let mut statement = connection.prepare(SESSION_EVENTS_SQL)?;
+        let mut rows = statement.query(rusqlite::params![
+            session_id.to_string(),
+            (MAX_SESSION_EVENTS + 1) as i64,
+        ])?;
+        while let Some(row) = rows.next()? {
             if selected.len() == MAX_SESSION_EVENTS {
                 return Err(StoreError::ReplayLimit);
             }
-            selected.push(envelope);
+            selected.push(decode_event(row)?);
         }
-        Ok(())
-    })?;
+    }
     Ok(selected)
+}
+
+pub(super) fn validate_history(connection: &Connection) -> Result<(), StoreError> {
+    scan_all_events(connection, |_| Ok(()))
 }
 
 fn scan_all_events(
     connection: &Connection,
     mut on_event: impl FnMut(EventEnvelope) -> Result<(), StoreError>,
 ) -> Result<(), StoreError> {
+    // Global validation precedes write admission; transaction reads must stay indexed.
+    if !connection.is_autocommit() {
+        return Err(StoreError::InvalidHistory);
+    }
     let mut statement = connection.prepare(
         "SELECT sequence,
                 length(CAST(session_id AS BLOB)),
@@ -550,62 +591,65 @@ fn scan_all_events(
             return Err(StoreError::InvalidHistory);
         }
         expected = expected.checked_add(1).ok_or(StoreError::InvalidHistory)?;
-        let id_bytes: i64 = row.get(1)?;
-        let kind_bytes: i64 = row.get(2)?;
-        let payload_bytes: i64 = row.get(3)?;
-        if id_bytes != 36 || !(1..=32).contains(&kind_bytes) {
-            return Err(StoreError::InvalidHistory);
-        }
-        let raw_id = row
-            .get_ref(4)?
-            .as_str()
-            .map_err(|_| StoreError::InvalidHistory)?;
-        let id = SessionId::from_str(raw_id).map_err(|_| StoreError::InvalidHistory)?;
-        let run_id = match row.get_ref(5)? {
-            ValueRef::Null => None,
-            ValueRef::Text(raw) if raw.len() == 36 => Some(
-                RunId::from_str(std::str::from_utf8(raw).map_err(|_| StoreError::InvalidHistory)?)
-                    .map_err(|_| StoreError::InvalidHistory)?,
-            ),
-            _ => return Err(StoreError::InvalidHistory),
-        };
-        let agent_run_id = match row.get_ref(6)? {
-            ValueRef::Null => None,
-            ValueRef::Text(raw) if raw.len() == 36 => Some(
-                AgentRunId::from_str(
-                    std::str::from_utf8(raw).map_err(|_| StoreError::InvalidHistory)?,
-                )
-                .map_err(|_| StoreError::InvalidHistory)?,
-            ),
-            _ => return Err(StoreError::InvalidHistory),
-        };
-        let kind = row
-            .get_ref(7)?
-            .as_str()
-            .map_err(|_| StoreError::InvalidHistory)?;
-        let version: i64 = row.get(8)?;
-        if !(1..=event_payload_limit(kind, version) as i64).contains(&payload_bytes) {
-            return Err(StoreError::InvalidHistory);
-        }
-        let payload = row
-            .get_ref(9)?
-            .as_str()
-            .map_err(|_| StoreError::InvalidHistory)?;
-        let event = Event::decode(kind, version, payload, run_id, agent_run_id)?;
-        let created_at_ms: i64 = row.get(10)?;
-        if created_at_ms < 0 {
-            return Err(StoreError::InvalidHistory);
-        }
-        on_event(EventEnvelope {
-            sequence: u64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?,
-            session_id: id,
-            run_id,
-            agent_run_id,
-            event,
-            created_at_ms,
-        })?;
+        on_event(decode_event(row)?)?;
     }
     Ok(())
+}
+
+fn decode_event(row: &Row<'_>) -> Result<EventEnvelope, StoreError> {
+    let sequence: i64 = row.get(0)?;
+    let id_bytes: i64 = row.get(1)?;
+    let kind_bytes: i64 = row.get(2)?;
+    let payload_bytes: i64 = row.get(3)?;
+    if id_bytes != 36 || !(1..=32).contains(&kind_bytes) {
+        return Err(StoreError::InvalidHistory);
+    }
+    let raw_id = row
+        .get_ref(4)?
+        .as_str()
+        .map_err(|_| StoreError::InvalidHistory)?;
+    let id = SessionId::from_str(raw_id).map_err(|_| StoreError::InvalidHistory)?;
+    let run_id = match row.get_ref(5)? {
+        ValueRef::Null => None,
+        ValueRef::Text(raw) if raw.len() == 36 => Some(
+            RunId::from_str(std::str::from_utf8(raw).map_err(|_| StoreError::InvalidHistory)?)
+                .map_err(|_| StoreError::InvalidHistory)?,
+        ),
+        _ => return Err(StoreError::InvalidHistory),
+    };
+    let agent_run_id = match row.get_ref(6)? {
+        ValueRef::Null => None,
+        ValueRef::Text(raw) if raw.len() == 36 => Some(
+            AgentRunId::from_str(std::str::from_utf8(raw).map_err(|_| StoreError::InvalidHistory)?)
+                .map_err(|_| StoreError::InvalidHistory)?,
+        ),
+        _ => return Err(StoreError::InvalidHistory),
+    };
+    let kind = row
+        .get_ref(7)?
+        .as_str()
+        .map_err(|_| StoreError::InvalidHistory)?;
+    let version: i64 = row.get(8)?;
+    if !(1..=event_payload_limit(kind, version) as i64).contains(&payload_bytes) {
+        return Err(StoreError::InvalidHistory);
+    }
+    let payload = row
+        .get_ref(9)?
+        .as_str()
+        .map_err(|_| StoreError::InvalidHistory)?;
+    let event = Event::decode(kind, version, payload, run_id, agent_run_id)?;
+    let created_at_ms: i64 = row.get(10)?;
+    if created_at_ms < 0 {
+        return Err(StoreError::InvalidHistory);
+    }
+    Ok(EventEnvelope {
+        sequence: u64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?,
+        session_id: id,
+        run_id,
+        agent_run_id,
+        event,
+        created_at_ms,
+    })
 }
 
 pub(super) fn supervisor_corpus(

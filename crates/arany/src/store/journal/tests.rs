@@ -445,6 +445,83 @@ fn forged_rewind_workspace_identity_is_rejected_on_append_and_replay() {
 }
 
 #[test]
+fn fork_write_queries_search_indexes() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connection = Connection::open(temp.path().join(DATABASE_FILE)).unwrap();
+    connection.execute_batch(SCHEMA_SQL).unwrap();
+    let transaction = begin_write(&mut connection, None).unwrap();
+    for (sql, index) in [
+        (super::super::replay::RUN_OWNER_SQL, Some("events_by_run")),
+        (
+            super::super::replay::SESSION_EVENTS_SQL,
+            Some("events_by_session"),
+        ),
+        (NEXT_SEQUENCE_SQL, None),
+    ] {
+        let mut statement = transaction
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let parameters = vec!["0"; statement.parameter_count()];
+        let plan = statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| {
+                step.starts_with("SEARCH events") && index.is_none_or(|index| step.contains(index))
+            }),
+            "indexed search for {sql}: {plan:?}"
+        );
+        assert!(
+            plan.iter().all(|step| !step.starts_with("SCAN events")),
+            "no whole-table scan for {sql}: {plan:?}"
+        );
+    }
+    assert_eq!(
+        super::super::replay::session_for_run(&transaction, crate::session::RunId::new()).unwrap(),
+        None
+    );
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn fork_rejects_ambiguous_run_owners() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connection = Connection::open(temp.path().join(DATABASE_FILE)).unwrap();
+    connection.execute_batch(SCHEMA_SQL).unwrap();
+    let f = crate::session::worker_protocol_fixture();
+    let mut hot = None;
+    for event in &f.events {
+        append(&mut connection, &mut hot, f.session, event.clone()).unwrap();
+    }
+    let (_, view) = resolve_view(&connection, f.session, 0, &mut 0).unwrap();
+    let run = view.unwrap().runs.last().unwrap().clone();
+    let sequence = run.finished_sequence.unwrap();
+    assert_eq!(
+        prepare_fork(&mut connection, f.session, Some(sequence))
+            .unwrap()
+            .source_session_id,
+        f.session
+    );
+    connection
+        .execute(
+            "INSERT INTO events
+         SELECT (SELECT MAX(sequence) + 1 FROM events), ?1, run_id, agent_run_id, kind,
+                event_version, payload, created_at_ms
+         FROM events WHERE run_id=?2 ORDER BY sequence LIMIT 1",
+            params![SessionId::new().to_string(), run.id.to_string()],
+        )
+        .unwrap();
+    assert!(matches!(
+        prepare_fork(&mut connection, f.session, Some(sequence)),
+        Err(StoreError::InvalidHistory)
+    ));
+}
+
+#[test]
 fn earlier_fork_revalidates_prepared_prefix_and_event_capacity_before_writing() {
     let temp = tempfile::tempdir().unwrap();
     let root = StateRoot::admit(&temp.path().join("state")).unwrap();

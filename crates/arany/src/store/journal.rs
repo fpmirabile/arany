@@ -15,6 +15,35 @@ mod tests;
 const ADMISSION_HEADROOM_BYTES: i64 = 4 * 1024 * 1024;
 const EVENT_SQLITE_OVERHEAD_PAGES: i64 = 16;
 const MAX_HOT_SESSION_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
+const NEXT_SEQUENCE_SQL: &str = "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events";
+
+const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
+            CREATE TABLE events (
+                sequence INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                run_id TEXT,
+                agent_run_id TEXT,
+                kind TEXT NOT NULL,
+                event_version INTEGER NOT NULL CHECK (event_version >= 1),
+                payload TEXT NOT NULL CHECK (json_valid(payload)),
+                created_at_ms INTEGER NOT NULL
+            ) STRICT;
+            CREATE INDEX events_by_session ON events (session_id, sequence);
+            CREATE INDEX events_by_run ON events (run_id, sequence) WHERE run_id IS NOT NULL;
+            CREATE TABLE provider_evidence (
+                profile_name TEXT PRIMARY KEY,
+                profile_digest BLOB NOT NULL CHECK(length(profile_digest) = 32),
+                addresses TEXT NOT NULL CHECK(json_valid(addresses)),
+                checked_at_ms INTEGER NOT NULL,
+                expires_at_ms INTEGER NOT NULL
+            ) STRICT;
+            CREATE TABLE native_provider_evidence (
+                fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
+                checked_at_ms INTEGER NOT NULL,
+                expires_at_ms INTEGER NOT NULL
+            ) STRICT;
+            PRAGMA user_version=4;
+            COMMIT;";
 
 pub(super) struct HotSession {
     session_id: SessionId,
@@ -25,6 +54,27 @@ pub(super) struct HotSession {
     global_sequence: u64,
 }
 
+fn begin_write<'a>(
+    connection: &'a mut Connection,
+    cached: Option<&HotSession>,
+) -> Result<Transaction<'a>, StoreError> {
+    let data_version: i64 = connection.query_row("PRAGMA data_version", [], |row| row.get(0))?;
+    let next_sequence: i64 = connection.query_row(NEXT_SEQUENCE_SQL, [], |row| row.get(0))?;
+    if cached.is_none_or(|cache| {
+        cache.data_version != data_version
+            || cache.global_sequence.checked_add(1) != u64::try_from(next_sequence).ok()
+    }) {
+        super::replay::validate_history(connection)?;
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current_version: i64 =
+        transaction.query_row("PRAGMA data_version", [], |row| row.get(0))?;
+    if current_version != data_version {
+        return Err(StoreError::InvalidHistory);
+    }
+    Ok(transaction)
+}
+
 pub(super) fn admit_operation(
     connection: &mut Connection,
     session_id: SessionId,
@@ -32,7 +82,7 @@ pub(super) fn admit_operation(
     tool_observations: usize,
     run_start: bool,
 ) -> Result<(), StoreError> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction = begin_write(connection, None)?;
     admit_in_transaction(
         &transaction,
         session_id,
@@ -142,35 +192,7 @@ pub(super) fn open_connection(root: &StateRoot, read_only: bool) -> Result<Conne
         }
     }
     match version {
-        0 if !read_only => connection.execute_batch(
-            "BEGIN IMMEDIATE;
-            CREATE TABLE events (
-                sequence INTEGER PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                run_id TEXT,
-                agent_run_id TEXT,
-                kind TEXT NOT NULL,
-                event_version INTEGER NOT NULL CHECK (event_version >= 1),
-                payload TEXT NOT NULL CHECK (json_valid(payload)),
-                created_at_ms INTEGER NOT NULL
-            ) STRICT;
-            CREATE INDEX events_by_session ON events (session_id, sequence);
-            CREATE INDEX events_by_run ON events (run_id, sequence) WHERE run_id IS NOT NULL;
-            CREATE TABLE provider_evidence (
-                profile_name TEXT PRIMARY KEY,
-                profile_digest BLOB NOT NULL CHECK(length(profile_digest) = 32),
-                addresses TEXT NOT NULL CHECK(json_valid(addresses)),
-                checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
-            ) STRICT;
-            CREATE TABLE native_provider_evidence (
-                fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
-                checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
-            ) STRICT;
-            PRAGMA user_version=4;
-            COMMIT;",
-        )?,
+        0 if !read_only => connection.execute_batch(SCHEMA_SQL)?,
         4 => {}
         _ => return Err(StoreError::InvalidHistory),
     }
@@ -184,7 +206,7 @@ pub(super) fn append(
     event: Event,
 ) -> Result<EventEnvelope, StoreError> {
     let cached = hot_session.take();
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction = begin_write(connection, cached.as_ref())?;
     let (envelope, next_cache) = append_in_transaction(&transaction, cached, session_id, event)?;
     #[cfg(all(test, target_os = "linux"))]
     crash_tests::before_commit();
@@ -204,11 +226,7 @@ fn append_in_transaction(
         return Err(StoreError::StorageFull);
     }
     let data_version: i64 = transaction.query_row("PRAGMA data_version", [], |row| row.get(0))?;
-    let sequence: i64 = transaction.query_row(
-        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events",
-        [],
-        |row| row.get(0),
-    )?;
+    let sequence: i64 = transaction.query_row(NEXT_SEQUENCE_SQL, [], |row| row.get(0))?;
     let sequence = u64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?;
     let cached = cached.filter(|cache| {
         cache.session_id == session_id
@@ -349,7 +367,7 @@ pub(super) fn prepare_fork(
     source_session_id: SessionId,
     source_sequence: Option<u64>,
 ) -> Result<ForkLineage, StoreError> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction = begin_write(connection, None)?;
     let (mut events, view) = resolve_view(&transaction, source_session_id, 0, &mut 0)?;
     let view = view.ok_or(StoreError::InvalidHistory)?;
     let (owner, run_id, sequence) = if let Some(sequence) = source_sequence {
@@ -426,7 +444,7 @@ pub(super) fn fork_at(
     boundary: ForkLineage,
     title: String,
 ) -> Result<SessionId, StoreError> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction = begin_write(connection, None)?;
     validate_fork(&transaction, boundary)?;
     let id = SessionId::new();
     append_in_transaction(&transaction, None, id, fork_event(boundary, title))?;
