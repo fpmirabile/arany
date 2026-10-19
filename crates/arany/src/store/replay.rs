@@ -5,7 +5,7 @@ use crate::session::{
     RunDisposition, RunId, SessionDefaults, SessionId, SessionListItem, SessionView,
     WorkspaceIdentity, prefix_digest, validate_compaction_references,
 };
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Row};
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -40,6 +40,14 @@ pub(super) const LANE_SQL: &str = raw_select!(
     "WHERE session_id = ?1 AND sequence > ?2 AND sequence <= ?3 ORDER BY sequence ASC LIMIT 256"
 );
 const LIST_EVENT_CHUNK: usize = 256;
+pub(super) const RUN_OWNER_SQL: &str =
+    "SELECT DISTINCT session_id FROM events WHERE run_id=?1 LIMIT 2";
+pub(super) const SESSION_EVENTS_SQL: &str = "SELECT sequence,
+            length(CAST(session_id AS BLOB)),
+            length(CAST(kind AS BLOB)),
+            length(CAST(payload AS BLOB)),
+            session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+     FROM events WHERE session_id=?1 ORDER BY sequence LIMIT ?2";
 
 struct SessionHead {
     title: String,
@@ -69,17 +77,28 @@ pub(super) fn session_for_run(
     connection: &Connection,
     run_id: RunId,
 ) -> Result<Option<SessionId>, StoreError> {
-    let mut selected = None;
-    scan_all_events(connection, |envelope| {
-        if envelope.run_id == Some(run_id) {
-            if selected.is_some_and(|id| id != envelope.session_id) {
+    if connection.is_autocommit() {
+        validate_history(connection)?;
+    }
+    let mut statement = connection.prepare(RUN_OWNER_SQL)?;
+    let mut rows = statement.query([run_id.to_string()])?;
+    let owner = rows
+        .next()?
+        .map(|row| {
+            let raw = row
+                .get_ref(0)?
+                .as_str()
+                .map_err(|_| StoreError::InvalidHistory)?;
+            if raw.len() != 36 {
                 return Err(StoreError::InvalidHistory);
             }
-            selected = Some(envelope.session_id);
-        }
-        Ok(())
-    })?;
-    Ok(selected)
+            raw.parse().map_err(|_| StoreError::InvalidHistory)
+        })
+        .transpose()?;
+    if rows.next()?.is_some() {
+        return Err(StoreError::InvalidHistory);
+    }
+    Ok(owner)
 }
 
 pub(super) fn latest_session_id(
@@ -707,16 +726,34 @@ fn load_session_events(
     session_id: SessionId,
 ) -> Result<Vec<EventEnvelope>, StoreError> {
     let mut selected = Vec::new();
-    scan_all_events(connection, |envelope| {
-        if envelope.session_id == session_id {
+    if connection.is_autocommit() {
+        scan_all_events(connection, |envelope| {
+            if envelope.session_id == session_id {
+                if selected.len() == MAX_SESSION_EVENTS {
+                    return Err(StoreError::ReplayLimit);
+                }
+                selected.push(envelope);
+            }
+            Ok(())
+        })?;
+    } else {
+        let mut statement = connection.prepare(SESSION_EVENTS_SQL)?;
+        let mut rows = statement.query(rusqlite::params![
+            session_id.to_string(),
+            (MAX_SESSION_EVENTS + 1) as i64,
+        ])?;
+        while let Some(row) = rows.next()? {
             if selected.len() == MAX_SESSION_EVENTS {
                 return Err(StoreError::ReplayLimit);
             }
-            selected.push(envelope);
+            selected.push(decode_event(row)?);
         }
-        Ok(())
-    })?;
+    }
     Ok(selected)
+}
+
+pub(super) fn validate_history(connection: &Connection) -> Result<(), StoreError> {
+    scan_all_events(connection, |_| Ok(()))
 }
 
 fn scan_all_events(
@@ -738,6 +775,10 @@ fn scan_events(
                 session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
          FROM events";
     if filter.is_empty() {
+        // Global validation precedes write admission; transaction reads must stay indexed.
+        if !connection.is_autocommit() {
+            return Err(StoreError::InvalidHistory);
+        }
         let mut statement = connection.prepare(&format!("{COLUMNS} ORDER BY sequence"))?;
         let mut rows = statement.query([])?;
         let mut expected = 1_i64;
@@ -747,7 +788,7 @@ fn scan_events(
                 return Err(StoreError::InvalidHistory);
             }
             expected = expected.checked_add(1).ok_or(StoreError::InvalidHistory)?;
-            on_event(read_envelope(row)?)?;
+            on_event(decode_event(row)?)?;
         }
         return Ok(());
     }
@@ -880,10 +921,6 @@ impl RawRow {
     }
 }
 
-fn read_envelope(row: &rusqlite::Row<'_>) -> Result<EventEnvelope, StoreError> {
-    raw_row(row)?.decode()
-}
-
 #[cfg(test)]
 thread_local! {
     pub(super) static BEFORE_DECODE: std::cell::RefCell<Option<Box<dyn Fn()>>> =
@@ -897,6 +934,10 @@ fn before_decode() {
             hook();
         }
     });
+}
+
+fn decode_event(row: &Row<'_>) -> Result<EventEnvelope, StoreError> {
+    raw_row(row)?.decode()
 }
 
 pub(super) fn supervisor_corpus(

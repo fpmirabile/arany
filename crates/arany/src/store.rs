@@ -2,7 +2,7 @@ use crate::provider::evidence::{
     EvidenceOp, EvidenceRecord, NativeEvidenceRecord, ProviderEvidenceRecord,
 };
 use crate::session::{
-    Event, EventEnvelope, ReplayError, RunId, SessionId, SessionPage, SessionView,
+    Event, EventEnvelope, ForkLineage, ReplayError, RunId, SessionId, SessionPage, SessionView,
     WorkspaceIdentity, payload_version,
 };
 use std::io;
@@ -70,6 +70,8 @@ pub enum StoreError {
     InvalidStateDirectory,
     #[error("state directory is not private")]
     StateNotPrivate,
+    #[error("target is not a committed Run boundary")]
+    ForkNotAtRunBoundary,
     #[error("state storage is full")]
     StorageFull,
     #[error("Session has an active operation")]
@@ -231,6 +233,16 @@ enum Request {
         limit: usize,
         watermark: Option<u64>,
         reply: oneshot::Sender<Result<(SessionPage, u64), StoreError>>,
+    },
+    PrepareFork {
+        source_session_id: SessionId,
+        source_sequence: Option<u64>,
+        reply: oneshot::Sender<Result<ForkLineage, StoreError>>,
+    },
+    ForkAt {
+        boundary: ForkLineage,
+        title: String,
+        reply: oneshot::Sender<Result<SessionId, StoreError>>,
     },
     Fork {
         source_session_id: SessionId,
@@ -425,6 +437,16 @@ impl Store {
                                 replay::MAX_LIST_SCAN_EVENTS,
                                 watermark,
                             ));
+                        }
+                        Request::PrepareFork { source_session_id, source_sequence, reply } => {
+                            let _ = reply.send(journal::prepare_fork(&mut connection, source_session_id, source_sequence));
+                        }
+                        Request::ForkAt { boundary, title, reply } => {
+                            hot_session = None;
+                            let result = if read_only { Err(StoreError::ReadOnly) } else {
+                                journal::fork_at(&mut connection, boundary, title)
+                            };
+                            let _ = reply.send(result);
                         }
                         Request::Fork {
                             source_session_id,
@@ -709,6 +731,32 @@ impl Store {
             after,
             limit,
             watermark,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn prepare_fork(
+        &self,
+        source_session_id: SessionId,
+        source_sequence: Option<u64>,
+    ) -> Result<ForkLineage, StoreError> {
+        self.call(|reply| Request::PrepareFork {
+            source_session_id,
+            source_sequence,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn fork_at(
+        &self,
+        boundary: ForkLineage,
+        title: String,
+    ) -> Result<SessionId, StoreError> {
+        self.call(|reply| Request::ForkAt {
+            boundary,
+            title,
             reply,
         })
         .await

@@ -30,11 +30,12 @@ pub use diagnostics::{
 #[cfg(feature = "test-support")]
 pub use engine::Action;
 pub use engine::{
-    DisplayUpdate, Engine, EngineConfig, EngineError, GoalRequest, RewindFile, RewindIssue,
-    RewindPreview, RewindRequest, RunCancellation, RunControls, RunFuture, RunHandle, RunHints,
-    RunOutcome, RunPreview, RunRequest, RunResult, RunSteering, SteeringRefused, ToolGrant,
-    continue_session, create_session, fork_session, list_sessions, list_sessions_page,
-    rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
+    ConversationRewind, ConversationRewindOutcome, DisplayUpdate, Engine, EngineConfig,
+    EngineError, GoalRequest, RewindBothResult, RewindFile, RewindIssue, RewindPreview,
+    RewindRequest, RunCancellation, RunControls, RunFuture, RunHandle, RunHints, RunOutcome,
+    RunPreview, RunRequest, RunResult, RunSteering, SteeringRefused, ToolGrant, continue_session,
+    create_session, fork_session, list_sessions, list_sessions_page, rename_session,
+    resume_session, set_session_defaults, validate_workspace_inputs,
 };
 #[cfg(feature = "test-support")]
 pub use fault::FaultPlan;

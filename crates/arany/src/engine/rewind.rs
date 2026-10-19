@@ -5,8 +5,8 @@ use crate::session::rewind::{
     RewindPlan, RewindStarted,
 };
 use crate::session::{
-    AgentRunId, Checkpoint, CheckpointReason, CheckpointStatus, Event, RunId, SessionId,
-    SessionView,
+    AgentRunId, Checkpoint, CheckpointReason, CheckpointStatus, Event, ForkLineage, RunId,
+    SessionDefaults, SessionId, SessionView,
 };
 use crate::tools::{
     Attestation, EffectIntent, FileChange, FileVersion, ToolCall, ToolDisposition, ToolRuntime,
@@ -14,6 +14,40 @@ use crate::tools::{
 use crate::worker::{ChangesetSource, WorkerChangeset};
 use std::path::PathBuf;
 use std::time::Duration;
+
+#[derive(Debug)]
+pub struct ConversationRewind {
+    pub session_id: Option<SessionId>,
+    pub defaults: SessionDefaults,
+    pub prompt: Option<String>,
+    pub images_omitted: bool,
+}
+
+#[derive(Debug)]
+pub enum ConversationRewindOutcome {
+    Restored(Box<ConversationRewind>),
+    Unchanged,
+    Failed(EngineError),
+}
+
+#[derive(Debug)]
+pub struct RewindBothResult {
+    pub code: RewindFinished,
+    pub conversation: ConversationRewindOutcome,
+}
+
+struct PreparedConversation {
+    boundary: Option<ForkLineage>,
+    conversation: ConversationRewind,
+}
+
+pub(super) fn fork_error(error: crate::store::StoreError) -> EngineError {
+    match error {
+        crate::store::StoreError::ReplayLimit => EngineError::ConversationRewindLimit,
+        crate::store::StoreError::ForkNotAtRunBoundary => EngineError::ForkNotAtRunBoundary,
+        other => other.into(),
+    }
+}
 
 pub struct RewindRequest {
     pub session_id: SessionId,
@@ -72,6 +106,93 @@ struct Prepared {
 }
 
 impl Engine {
+    pub async fn rewind_conversation(
+        &self,
+        session: SessionId,
+        workspace: PathBuf,
+        before_run: RunId,
+    ) -> Result<ConversationRewind, EngineError> {
+        let _slot = self.claim()?;
+        let mut lock = self.lock_session(session)?;
+        let view = self
+            .journal
+            .store()
+            .load_view(session)
+            .await?
+            .ok_or(EngineError::MissingSession)?;
+        lock.keep();
+        let _ancestors = self.lock_lineage(&view).await?;
+        let identity = WorkspaceInputs::admit_identity(&workspace, &self.state)?;
+        ensure_session_workspace(&view, identity)?;
+        let prepared = self.prepare_conversation(&view, before_run).await?;
+        self.finish_conversation(prepared).await
+    }
+
+    async fn prepare_conversation(
+        &self,
+        view: &SessionView,
+        before_run: RunId,
+    ) -> Result<PreparedConversation, EngineError> {
+        if view.runs.last().is_some_and(|run| {
+            matches!(
+                run.status,
+                crate::RunStatus::Active | crate::RunStatus::Pending
+            )
+        }) {
+            return Err(EngineError::SessionNotIdle);
+        }
+        let index = view
+            .runs
+            .iter()
+            .position(|run| run.id == before_run)
+            .filter(|_| {
+                view.rewinds.checkpoints.iter().any(|target| {
+                    matches!(target, CheckpointTarget::Run { run_id, .. } if *run_id == before_run)
+                })
+            })
+            .ok_or(EngineError::ForkNotAtRunBoundary)?;
+        let boundary = if index == 0 {
+            None
+        } else {
+            let sequence = view.runs[index - 1]
+                .finished_sequence
+                .ok_or(EngineError::ForkNotAtRunBoundary)?;
+            Some(
+                self.journal
+                    .store()
+                    .prepare_fork(view.id, Some(sequence))
+                    .await
+                    .map_err(fork_error)?,
+            )
+        };
+        let selected = &view.runs[index];
+        Ok(PreparedConversation {
+            boundary,
+            conversation: ConversationRewind {
+                session_id: None,
+                defaults: view.defaults.clone(),
+                prompt: (selected.objective.len() <= 8 * 1024).then(|| selected.objective.clone()),
+                images_omitted: !selected.images.is_empty(),
+            },
+        })
+    }
+
+    async fn finish_conversation(
+        &self,
+        mut prepared: PreparedConversation,
+    ) -> Result<ConversationRewind, EngineError> {
+        if let Some(boundary) = prepared.boundary {
+            prepared.conversation.session_id = Some(
+                self.journal
+                    .store()
+                    .fork_at(boundary, "Forked Session".into())
+                    .await
+                    .map_err(fork_error)?,
+            );
+        }
+        Ok(prepared.conversation)
+    }
+
     pub async fn rewind_preview(
         &self,
         request: RewindRequest,
@@ -106,6 +227,23 @@ impl Engine {
         preview: RewindPreview,
         cancellation: RunCancellation,
     ) -> Result<RewindFinished, EngineError> {
+        Ok(self.rewind_inner(preview, cancellation, false).await?.code)
+    }
+
+    pub async fn rewind_both(
+        &self,
+        preview: RewindPreview,
+        cancellation: RunCancellation,
+    ) -> Result<RewindBothResult, EngineError> {
+        self.rewind_inner(preview, cancellation, true).await
+    }
+
+    async fn rewind_inner(
+        &self,
+        preview: RewindPreview,
+        cancellation: RunCancellation,
+        both: bool,
+    ) -> Result<RewindBothResult, EngineError> {
         let _slot = self.claim()?;
         if !preview.can_restore() {
             return Err(EngineError::RewindBlocked);
@@ -134,6 +272,18 @@ impl Engine {
             .state
             .lock_workspace(identity)
             .map_err(workspace_error)?;
+        let conversation = if both {
+            let CheckpointTarget::Run { run_id, .. } = preview.request.target else {
+                return Err(EngineError::ForkNotAtRunBoundary);
+            };
+            let prepared = self.prepare_conversation(&view, run_id).await?;
+            self.journal
+                .admit(session, 2 + usize::from(prepared.boundary.is_some()), 0)
+                .await?;
+            Some(prepared)
+        } else {
+            None
+        };
         let expected = preview.started;
         let permissions_digest = preview.permissions_digest;
         let prepared = tokio::time::timeout(
@@ -156,14 +306,27 @@ impl Engine {
         }
         started.rewind_id = expected.rewind_id;
         started.expires_at_ms = expected.expires_at_ms;
-        self.publish_rewind(
-            session,
-            started,
-            prepared.runtime,
-            prepared.changeset,
-            cancellation,
-        )
-        .await
+        let code = self
+            .publish_rewind(
+                session,
+                started,
+                prepared.runtime,
+                prepared.changeset,
+                cancellation.clone(),
+            )
+            .await?;
+        let conversation = match conversation {
+            Some(prepared)
+                if code.outcome == RewindOutcome::Restored && !cancellation.is_cancelled() =>
+            {
+                match self.finish_conversation(prepared).await {
+                    Ok(conversation) => ConversationRewindOutcome::Restored(Box::new(conversation)),
+                    Err(error) => ConversationRewindOutcome::Failed(error),
+                }
+            }
+            _ => ConversationRewindOutcome::Unchanged,
+        };
+        Ok(RewindBothResult { code, conversation })
     }
 
     async fn publish_rewind(
