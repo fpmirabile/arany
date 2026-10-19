@@ -222,11 +222,7 @@ impl Corpus {
         }
     }
 
-    pub(crate) fn finish(
-        self,
-        view: &SessionView,
-        events: &[EventEnvelope],
-    ) -> Result<String, CorpusError> {
+    pub(crate) fn finish(self, view: &SessionView) -> Result<String, CorpusError> {
         let runs: Vec<_> = view.runs.iter().enumerate().map(|(i, r)| {
             let outcome = match r.status {
                 crate::RunStatus::Finished => "completed",
@@ -238,8 +234,7 @@ impl Corpus {
             json!({"run_ordinal":i + 1, "outcome":outcome, "policy":r.config.as_ref().and_then(|c| c.supervisor.as_ref()).map(|p| json!({"evaluator":p.evaluator, "window":p.window, "floors":p.floors, "candidates":p.candidates}))})
         }).collect();
         let goals: Vec<_> = view.goals.iter().enumerate().map(|(i, g)| {
-            let exhausted = events.iter().any(|e| matches!(&e.event, Event::GoalFinished { goal_id, exhausted: true, .. } if *goal_id == g.id));
-            json!({"goal_ordinal":i + 1, "outcome":if exhausted { "budget_exhausted" } else { g.status.as_str() }, "run_ordinals":g.run_ids.iter().filter_map(|id| view.runs.iter().position(|r| r.id == *id).map(|n| n + 1)).collect::<Vec<_>>()})
+            json!({"goal_ordinal":i + 1, "outcome":if g.budget_closed { "budget_exhausted" } else { g.status.as_str() }, "run_ordinals":g.run_ids.iter().filter_map(|id| view.runs.iter().position(|r| r.id == *id).map(|n| n + 1)).collect::<Vec<_>>()})
         }).collect();
         let header = json!({"format":"arany.supervisor.corpus.v1", "evaluator":1, "session_ordinal":1, "runs":runs, "goals":goals});
         encode(&header, &self.records, self.count)

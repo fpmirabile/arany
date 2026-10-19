@@ -626,5 +626,5 @@ pub(super) fn supervisor_corpus(
         Some(&mut corpus),
     )?
     .ok_or(crate::supervisor::CorpusError::NotFound)?;
-    corpus.finish(&view, &events)
+    corpus.finish(&view)
 }

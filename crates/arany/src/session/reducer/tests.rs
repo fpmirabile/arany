@@ -3024,7 +3024,7 @@ mod goal_replay_tests {
                     SessionView::replay_for_corpus(session, &envelopes, None, &mut corpus)
                         .unwrap()
                         .unwrap();
-                let output = corpus.finish(&interrupted, &envelopes).unwrap();
+                let output = corpus.finish(&interrupted).unwrap();
                 let last: serde_json::Value =
                     serde_json::from_str(output.lines().last().unwrap()).unwrap();
                 assert_eq!(last["features"]["loop"]["repeat_identical"], 3);
@@ -3149,7 +3149,7 @@ mod goal_replay_tests {
         let closed = SessionView::replay_for_corpus(session, &envelopes, None, &mut corpus)
             .unwrap()
             .unwrap();
-        let output = corpus.finish(&closed, &envelopes).unwrap();
+        let output = corpus.finish(&closed).unwrap();
         let lines: Vec<serde_json::Value> = output
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
@@ -3167,7 +3167,7 @@ mod goal_replay_tests {
         let reopened = SessionView::replay_for_corpus(session, &envelopes, None, &mut second)
             .unwrap()
             .unwrap();
-        let second = second.finish(&reopened, &envelopes).unwrap();
+        let second = second.finish(&reopened).unwrap();
         let second: Vec<serde_json::Value> = second
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
@@ -3230,7 +3230,7 @@ mod goal_replay_tests {
                 SessionView::replay_for_corpus(session, &terminal_events, None, &mut corpus)
                     .unwrap()
                     .unwrap();
-            let output = corpus.finish(&closed, &terminal_events).unwrap();
+            let output = corpus.finish(&closed).unwrap();
             assert!(!output.contains("private-failure-canary"));
             let records: Vec<serde_json::Value> = output
                 .lines()
