@@ -2826,9 +2826,14 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
                 send(&mut writer, json!(4), "session/set_mode", json!({"sessionId":session,"modeId":if live_edits {"acceptEdits"} else {"auto"}})).await;
                 let mut updates = 0;
                 let mut seen = Vec::new();
+                let mut omitted = 0_usize;
                 loop {
                     let switched = next(&mut reader).await;
-                    seen.push(switched.to_string().chars().take(256).collect::<String>());
+                    if seen.len() < 32 {
+                        seen.push(switched.to_string().chars().take(256).collect::<String>());
+                    } else {
+                        omitted = omitted.saturating_add(1);
+                    }
                     if switched["id"] == 4 {
                         assert_eq!(switched["result"], json!({}));
                         break;
@@ -2841,9 +2846,10 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
                             projections += 1;
                         }
                         _ => panic!(
-                            "mode switch must leave the pending approval unanswered: {:?}; seen since switch: {:?}",
+                            "mode switch must leave the pending approval unanswered: {:?}; seen since switch: {:?}; omitted: {}",
                             switched.to_string().chars().take(2048).collect::<String>(),
-                            seen
+                            seen,
+                            omitted
                         ),
                     }
                 }
