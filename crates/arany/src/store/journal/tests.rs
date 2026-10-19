@@ -681,10 +681,13 @@ fn listing_waits_past_the_old_bound_for_a_committing_writer_then_reports_busy() 
     connection
         .execute_batch("BEGIN EXCLUSIVE")
         .expect("writer commit lock");
+    let (started, ready) = std::sync::mpsc::sync_channel(0);
     let listing = std::thread::spawn(move || {
+        started.send(()).expect("listing started");
         let page = list_session_page(&reader, mine, None, 10, usize::MAX, None);
         (page, reader)
     });
+    ready.recv().expect("listing started before commit");
     std::thread::sleep(std::time::Duration::from_millis(600));
     connection.execute_batch("COMMIT").expect("commit");
     let (page, reader) = listing.join().expect("listing thread");

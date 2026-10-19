@@ -118,7 +118,7 @@ The [Provider roster contract](./provider.md#named-roster-presets) owns the subm
 - History, titles, fork lineage and snapshots are sensitive derived state. Resume never promotes them to authority, and Provider state cannot be the only recovery path.
 - Attached draft preflight reads Workspace input locally before Session materialization, with no Events, disclosure or Tool authority; it does not replace fresh Run admission.
 
-SQLite opens with no-follow and defensive settings, `trusted_schema` off, rollback journaling, `synchronous=EXTRA`, a 250 ms busy timeout and the declared page cap. Read-only inspection creates no file, directory or journal. One owner thread serves a bounded channel of 64 requests; a closed channel is a store failure, never a successful append. Provider evidence tables are derived caches, never Events: malformed or future-dated rows are unavailable.
+SQLite opens with no-follow and defensive settings, `trusted_schema` off, rollback journaling, `synchronous=EXTRA`, the [listing read and writer busy bounds](./serve.md#methods) and the declared page cap. Read-only inspection creates no file, directory or journal. One owner thread serves a bounded channel of 64 requests; a closed channel is a store failure, never a successful append. Provider evidence tables are derived caches, never Events: malformed or future-dated rows are unavailable.
 
 ## Acceptance scenarios and evidence owners
 
