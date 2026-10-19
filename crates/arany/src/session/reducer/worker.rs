@@ -8,7 +8,9 @@ pub struct WorkerState {
     pub stop: Option<(u64, WorkerStopReason)>,
     pub data: Vec<SealedWorkerData>,
     pending: Option<PendingData>,
+    capture: Option<CommandCapture>,
 }
+type CommandCapture = (AgentRunId, uuid::Uuid, WorkerDataRef);
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingData {
     actor: AgentRunId,
@@ -37,6 +39,7 @@ pub struct WorkerView {
     pub released: Option<u64>,
     pub verification: Option<(u64, WorkerVerification)>,
     pub interrupted: bool,
+    pub gate_continuations: u8,
 }
 impl WorkerView {
     pub(super) fn new(pins: WorkerAssignment) -> Self {
@@ -51,6 +54,7 @@ impl WorkerView {
             released: None,
             verification: None,
             interrupted: false,
+            gate_continuations: 0,
         }
     }
     pub(crate) fn settled(&self) -> bool {
@@ -192,6 +196,7 @@ impl RunView {
 impl WorkerState {
     pub(super) fn clear_pending(&mut self) {
         self.pending = None;
+        self.capture = None;
     }
     fn sealed(&self, reference: &WorkerDataRef) -> Result<&SealedWorkerData, ReplayError> {
         self.data
@@ -226,11 +231,18 @@ fn tool(run: &RunView, actor: AgentRunId) -> Option<&ToolView> {
     }
 }
 fn quiescent(run: &RunView) -> bool {
+    if pending_command_capture(run).is_some() {
+        return false;
+    }
     run.tools
         .iter()
         .chain(run.agents.iter().flat_map(|a| &a.tools))
         .all(|t| t.observation.is_some())
 }
+fn pending_command_capture(run: &RunView) -> Option<CommandCapture> {
+    run.workers.capture.clone()
+}
+
 fn sealed_changes<'a>(
     run: &'a RunView,
     reference: &WorkerDataRef,
@@ -472,6 +484,12 @@ fn validate_request(
             )
         || request.max_turns > definition.max_turns
         || request.max_turns > policy.max_turns
+        || !valid_commands(&request.commands)
+        || request.commands.iter().any(|c| {
+            !policy.parent_grant.commands.contains(c)
+                || !plan.commands.contains(c)
+                || !definition.allows_worker_tool(WorkerTool::Command)
+        })
         || request
             .lease
             .iter()
@@ -592,6 +610,8 @@ pub(super) fn validate_spawn(view: &SessionView, event: &Event) -> Result<(), Re
             if run.workers.stop.is_some()
                 || !p.grant.within(&policy.parent_grant)
                 || p.grant.write_paths != p.request.lease
+                || p.cache_generation == Some([0; 32])
+                || p.grant.commands != p.request.commands
                 || !p.grant.read_paths.iter().all(|l| within(l, &plan.paths))
                 || p.policy_digest != receipt.config_digest
                 || p.permissions_digest != receipt.permissions_digest
@@ -677,6 +697,7 @@ pub(super) fn child_tool_admissible(
         return false;
     };
     let target = EffectTarget::WorkerView {
+        cache_generation: w.pins.cache_generation,
         assignment_id: id,
         base_digest: w.pins.base.sha256,
         revision: w.revision,
@@ -688,10 +709,7 @@ pub(super) fn child_tool_admissible(
         || intent.policy_digest != w.pins.policy_digest
         || a.status != AgentStatus::Active
         || a.tools.iter().any(|t| {
-            t.intent.id == intent.id
-                || t.observation
-                    .as_ref()
-                    .is_some_and(|o| o.disposition != ToolDisposition::Succeeded)
+            t.intent.id == intent.id || t.observation.as_ref().is_some_and(private_failure)
         })
     {
         return false;
@@ -826,6 +844,17 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
         record,
         ..
     } = event
+        && record.failure_reason
+            == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
+        && (record.phase != AgentPhase::ChildWork || worker(run, *agent_run_id).is_err())
+    {
+        return Err(ReplayError::InvalidTransition);
+    }
+    if let Event::ProviderCallRecorded {
+        agent_run_id,
+        record,
+        ..
+    } = event
         && matches!(
             record.failure_reason,
             Some(
@@ -844,7 +873,9 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
     {
         return Err(ReplayError::InvalidTransition);
     }
-    if run.workers.pending.is_some() && starts_team_work(event) {
+    if (run.workers.pending.is_some() || pending_command_capture(run).is_some())
+        && (starts_team_work(event) || matches!(event, Event::HookStarted { .. }))
+    {
         return Err(ReplayError::InvalidTransition);
     }
     if unrecorded_integration(run) && starts_team_work(event) {
@@ -885,11 +916,16 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
             || matches!(event, Event::GoalProviderCallReserved { .. })
                 && a.tools.last().is_some_and(|t| t.observation.is_none());
         if w.outcome.is_some()
-            || a.tools.iter().any(|t| {
-                t.observation
-                    .as_ref()
-                    .is_some_and(|o| o.disposition != ToolDisposition::Succeeded)
-            })
+            || matches!(event, Event::GoalProviderCallReserved { .. })
+                && !reviewing
+                && w.gate_continuations >= 3
+                && a.provider_calls.last().is_some_and(|c| {
+                    c.failure_reason
+                        == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
+                })
+            || a.tools
+                .iter()
+                .any(|t| t.observation.as_ref().is_some_and(private_failure))
             || !reviewing
                 && !matches!(event, Event::ProviderCallRecorded { .. })
                 && a.provider_calls
@@ -919,6 +955,13 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                 .and_then(|c| c.worker_policy.as_ref())
                 .ok_or(ReplayError::InvalidTransition)?
                 .max_tools;
+            if record.failure_reason
+                == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
+                && (!criterion_gated(&w_criterion(run, *agent_run_id)?)
+                    || !private_criterion_evidence(run, *agent_run_id)?.is_empty())
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
             if record.disposition == ProviderCallDisposition::ToolRequested
                 && (super::agent::child_tool_requests(a) >= usize::from(max_tools)
                     || a.provider_calls
@@ -988,6 +1031,40 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
             observation: o,
             ..
         } => {
+            if matches!(o.intent.target, EffectTarget::WorkerView { .. })
+                && matches!(o.intent.call, ToolCall::Command { .. })
+            {
+                if o.attestation.is_some()
+                    && !matches!(o.attestation, Some(Attestation::WorkerCommand { .. }))
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                if let Ok(result) = serde_json::from_str::<WorkerCommandResult>(&o.output) {
+                    if let PrivateCapture::Sealed { data } = result.private_capture {
+                        let w = worker(run, *agent_run_id)?;
+                        let used: u64 = run
+                            .workers
+                            .data
+                            .iter()
+                            .filter(|d| d.reference.assignment_id == *agent_run_id)
+                            .map(|d| u64::from(d.reference.bytes))
+                            .sum();
+                        if w.revision >= 16
+                            || used + u64::from(data.bytes) > u64::from(w.pins.data_bytes)
+                            || o.disposition != ToolDisposition::Succeeded
+                            || !o.attested_for(&o.intent)
+                            || data.assignment_id != *agent_run_id
+                            || data.first_sequence <= view.last_sequence + 1
+                            || data.seal_sequence <= data.first_sequence
+                            || run.workers.data.iter().any(|d| d.reference == data)
+                        {
+                            return Err(ReplayError::InvalidTransition);
+                        }
+                    }
+                } else if o.attestation.is_some() {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
             if let Some(Attestation::WorkerData { data, .. }) = &o.attestation {
                 let sealed = run.workers.sealed(data)?;
                 if sealed.tool != o.intent.id
@@ -1055,6 +1132,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
             if o.disposition == ToolDisposition::Succeeded
                 && matches!(o.intent.target, EffectTarget::WorkerView { .. })
                 && o.intent.call.mutates()
+                && !matches!(o.intent.call, ToolCall::Command { .. })
                 && !matches!(o.attestation, Some(Attestation::WorkerMutation { .. }))
             {
                 return Err(ReplayError::InvalidTransition);
@@ -1112,6 +1190,11 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                     o.disposition,
                     WorkerDisposition::Ready | WorkerDisposition::NoChange
                 ) {
+                    if criterion_gated(&w_criterion(run, *agent_run_id)?)
+                        && private_criterion_evidence(run, *agent_run_id)?.is_empty()
+                    {
+                        return Err(ReplayError::InvalidTransition);
+                    }
                     let data = o.data.as_ref().ok_or(ReplayError::InvalidTransition)?;
                     if data.assignment_id != *agent_run_id || !matches!(data.purpose, WorkerDataPurpose::Handover | WorkerDataPurpose::Mutation)
                         || !a.tools.last().is_some_and(|t| matches!(t.observation.as_ref().and_then(|o| o.attestation.as_ref()), Some(Attestation::WorkerData { data: d, .. }) if d == data)) { return Err(ReplayError::InvalidTransition); }
@@ -1213,6 +1296,23 @@ pub(super) fn after_event(
         return Ok(());
     };
     match event {
+        Event::GoalProviderCallReserved { agent_run_id, .. }
+            if run
+                .agents
+                .iter()
+                .find(|a| a.id == *agent_run_id)
+                .is_some_and(|a| {
+                    a.assignment.is_some()
+                        && a.provider_calls.last().is_some_and(|c| {
+                            c.failure_reason
+                                == Some(
+                                    crate::provider::ProviderFailureReason::CriterionNotMetInView,
+                                )
+                        })
+                }) =>
+        {
+            worker_mut(run, *agent_run_id)?.gate_continuations += 1;
+        }
         Event::ToolFinished {
             agent_run_id,
             observation: o,
@@ -1229,6 +1329,16 @@ pub(super) fn after_event(
             }
             if o.disposition != ToolDisposition::Succeeded {
                 run.workers.pending = None;
+            }
+            if matches!(o.intent.call, ToolCall::Command { .. })
+                && matches!(o.intent.target, EffectTarget::WorkerView { .. })
+                && o.disposition == ToolDisposition::Succeeded
+                && let Ok(WorkerCommandResult {
+                    private_capture: PrivateCapture::Sealed { data },
+                    ..
+                }) = serde_json::from_str(&o.output)
+            {
+                run.workers.capture = Some((o.intent.agent_run_id, o.intent.id, data));
             }
             if let Some(Attestation::WorkerMutation { mutation, .. }) = &o.attestation {
                 let changes = sealed_changes(run, &mutation.data)?.to_vec();
@@ -1304,10 +1414,20 @@ pub(super) fn apply(
             run.workers.stop = Some((sequence, record.reason));
         }
         Event::WorkerDataChunk { record: c, .. } => {
+            let command = pending_command_capture(run);
             let t = tool(run, actor)
-                .filter(|t| t.observation.is_none())
+                .filter(|t| {
+                    t.observation.is_none()
+                        || command.as_ref().is_some_and(|(a, id, data)| {
+                            *a == actor
+                                && *id == t.intent.id
+                                && data.assignment_id == c.assignment_id
+                        })
+                })
                 .ok_or(ReplayError::InvalidTransition)?;
-            if t.intent.id != c.tool_id {
+            if t.intent.id != c.tool_id
+                || matches!(t.intent.call, ToolCall::Command { .. }) && command.is_none()
+            {
                 return Err(ReplayError::InvalidTransition);
             }
             let (max_bytes, max_chunks) = if let ToolCall::PrepareWorker { preparation } =
@@ -1325,7 +1445,8 @@ pub(super) fn apply(
                 let w = worker(run, actor)?;
                 if c.assignment_id != actor
                     || c.purpose != WorkerDataPurpose::Mutation
-                    || !t.intent.call.mutates()
+                    || !(t.intent.call.mutates()
+                        || matches!(t.intent.call, ToolCall::Command { .. }))
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
@@ -1405,6 +1526,12 @@ pub(super) fn apply(
             {
                 return Err(ReplayError::InvalidTransition);
             }
+            let command = pending_command_capture(run);
+            if let Some((a, id, data)) = &command
+                && (*a != actor || *id != s.tool_id || data != &s.data)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
             let facts = decode_data(&p.bytes, p.purpose)?;
             run.workers.data.push(SealedWorkerData {
                 reference: s.data.clone(),
@@ -1412,6 +1539,30 @@ pub(super) fn apply(
                 facts,
             });
             run.workers.pending = None;
+            if command.is_some() {
+                run.workers.capture = None;
+                let changes = valid_delta(run, actor, &s.data, false)?;
+                if changes.is_empty() {
+                    return Err(ReplayError::InvalidTransition);
+                }
+                let w = worker_mut(run, actor)?;
+                w.revision = w
+                    .revision
+                    .checked_add(1)
+                    .filter(|r| *r <= 16)
+                    .ok_or(ReplayError::InvalidTransition)?;
+                for change in changes {
+                    if let Some(old) = w.overlay.iter_mut().find(|f| f.path == change.path) {
+                        old.after = change.after;
+                    } else {
+                        w.overlay.push(change);
+                    }
+                }
+                w.overlay.sort_by(|a, b| a.path.cmp(&b.path));
+                if w.overlay.len() > WORKER_FILES {
+                    return Err(ReplayError::InvalidTransition);
+                }
+            }
         }
         Event::WorkerHandoverRecorded { record: h, .. } => {
             let w = worker(run, h.assignment_id)?;
@@ -1421,6 +1572,7 @@ pub(super) fn apply(
                 || w.released.is_some()
                 || w.discarded.is_some()
                 || w.pins.base.sha256 != h.base_digest
+                || h.criterion_evidence != private_criterion_evidence(run, h.assignment_id)?
                 || w.outcome.as_ref().is_none_or(|(_, o)| {
                     o.disposition != WorkerDisposition::Ready || o.data.as_ref() != Some(&h.data)
                 })
@@ -1657,4 +1809,126 @@ fn valid_discard(run: &RunView, w: &WorkerView, d: &WorkerSettlement) -> bool {
                 )
         }),
     }
+}
+
+fn private_failure(o: &crate::tools::ToolObservation) -> bool {
+    o.disposition != ToolDisposition::Succeeded
+        && !(matches!(o.intent.call, ToolCall::Command { .. })
+            && !matches!(
+                o.disposition,
+                ToolDisposition::Uncertain | ToolDisposition::Cancelled
+            )
+            && o.cache_update != crate::tools::CacheUpdate::Uncertain)
+}
+
+// Command criteria are verified by the primary after integration until worker commands execute.
+pub(crate) fn criterion_gated(criterion: &GoalSuccessCriterion) -> bool {
+    !matches!(criterion, GoalSuccessCriterion::ToolCallSucceeded { call } if matches!(call.as_ref(), ToolCall::Command { .. }))
+}
+
+pub(crate) fn criterion_unmet_in_view(run: &RunView, id: AgentRunId) -> Result<bool, ReplayError> {
+    Ok(criterion_gated(&w_criterion(run, id)?) && private_criterion_evidence(run, id)?.is_empty())
+}
+
+fn w_criterion(run: &RunView, id: AgentRunId) -> Result<GoalSuccessCriterion, ReplayError> {
+    Ok(worker(run, id)?.pins.request.criterion.clone())
+}
+
+pub(crate) fn private_criterion_evidence(
+    run: &RunView,
+    id: AgentRunId,
+) -> Result<Vec<u64>, ReplayError> {
+    let w = worker(run, id)?;
+    let a = run
+        .agents
+        .iter()
+        .find(|a| a.id == id)
+        .ok_or(ReplayError::InvalidTransition)?;
+    if pending_command_capture(run).is_some() {
+        return Ok(Vec::new());
+    }
+    for t in a.tools.iter().rev() {
+        let Some(o) = t.observation.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let EffectTarget::WorkerView { revision, .. } = o.intent.target else {
+            continue;
+        };
+        let effective_revision = match &o.attestation {
+            Some(Attestation::WorkerMutation { mutation, .. }) => mutation.next_revision,
+            Some(Attestation::WorkerCommand { .. }) => {
+                let result: WorkerCommandResult =
+                    serde_json::from_str(&o.output).map_err(|_| ReplayError::InvalidTransition)?;
+                revision
+                    + u32::from(matches!(
+                        result.private_capture,
+                        PrivateCapture::Sealed { .. }
+                    ))
+            }
+            _ => revision,
+        };
+        if effective_revision != w.revision {
+            continue;
+        }
+        if o.disposition == ToolDisposition::Succeeded && o.attested_for(&o.intent) {
+            let passed = match &w.pins.request.criterion {
+                GoalSuccessCriterion::ToolCallSucceeded { call } if o.intent.call == **call => {
+                    if matches!(o.intent.call, ToolCall::Command { .. }) {
+                        serde_json::from_str::<WorkerCommandResult>(&o.output).is_ok_and(|r| {
+                            r.exit_code == Some(0)
+                                && !matches!(r.private_capture, PrivateCapture::Rejected { .. })
+                        })
+                    } else {
+                        true
+                    }
+                }
+                GoalSuccessCriterion::WorkspaceFileDigest { path, sha256 } => {
+                    private_file_digest(run, w, o, path).as_ref() == Some(sha256)
+                }
+                GoalSuccessCriterion::WorkspaceFileContent { path, content } => {
+                    private_file_digest(run, w, o, path).as_ref()
+                        == Some(&crate::tools::types::hex_digest(content.as_bytes()))
+                }
+                _ => false,
+            };
+            if passed {
+                return Ok(vec![
+                    t.finished_sequence.ok_or(ReplayError::InvalidTransition)?,
+                ]);
+            }
+        }
+        if o.intent.call.mutates() || o.intent.call.is_process() {
+            break;
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn private_file_digest(
+    run: &RunView,
+    w: &WorkerView,
+    o: &crate::tools::ToolObservation,
+    path: &str,
+) -> Option<String> {
+    if matches!(&o.intent.call, ToolCall::PrepareWorker { preparation } if preparation.purpose == WorkerDataPurpose::Handover)
+    {
+        let version = w
+            .overlay
+            .iter()
+            .find(|f| f.path == path)
+            .map(|f| f.after.clone())
+            .or_else(|| base_version(manifest(run, w).ok()?, path))?;
+        return match version {
+            WorkerBaseVersion::File { sha256, .. } => Some(sha256),
+            _ => None,
+        };
+    }
+    if !matches!(&o.intent.call, ToolCall::Read { path: p, .. } if p == path) {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&o.output)
+        .ok()?
+        .get("sha256")?
+        .as_str()
+        .map(str::to_owned)
 }

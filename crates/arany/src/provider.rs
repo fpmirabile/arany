@@ -568,13 +568,14 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
                         "definition":{"type":"string","enum":[agent["name"]]},
                         "definition_digest":{"type":"array","items":{"type":"integer"},"description":format!("Exact admitted digest: {}",agent["digest"])},
                         "mission":{"type":"string"}, "direction":{"type":"string"},
+                        "commands":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":64},"description":"Sorted unique admitted offline command names; worker commands are not available yet."},
                         "lease":{"type":"array","items":{"type":"string"},"description":"Sorted nonoverlapping ASCII relative files or subtrees within the Goal plan and parent grant."},
                         "criterion":criterion,
                         "mode":{"type":"string","enum":modes},
                         "max_turns":{"type":"integer","description":format!("At most {}",agent["max_turns"])},
                         "wave":{"type":"integer","minimum":1,"maximum":8},
                         "resumes":{"type":["string", "null"], "description":"Exact terminal historical child ID in this Goal for a fresh assignment with bounded source context; never resumes private state or authority."}, "supersedes":{"type":["string", "null"]}
-                    }, "required":["definition","definition_digest","mission","direction","lease","criterion","mode","max_turns","wave","resumes","supersedes"],"additionalProperties":false}
+                    }, "required":["definition","definition_digest","mission","direction","lease","commands","criterion","mode","max_turns","wave","resumes","supersedes"],"additionalProperties":false}
                 },"required":["objective","profile","editor"],"additionalProperties":false
             }));
         }
@@ -875,6 +876,7 @@ pub enum ProviderFailureReason {
     WorkerFinishDeferred,
     WorkerDelegateRefused,
     WorkerToolRefused,
+    CriterionNotMetInView,
 }
 
 impl ProviderError {

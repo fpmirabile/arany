@@ -687,7 +687,8 @@ async fn native_file_journey_helper() {
             arany::Attestation::Unguarded(_) => panic!("macOS journeys never run unguarded"),
             arany::Attestation::WorkerRead { .. }
             | arany::Attestation::WorkerMutation { .. }
-            | arany::Attestation::WorkerData { .. } => {
+            | arany::Attestation::WorkerData { .. }
+            | arany::Attestation::WorkerCommand { .. } => {
                 panic!("macOS journeys never run worker Tools")
             }
         }

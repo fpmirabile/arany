@@ -45,12 +45,16 @@ pub(crate) use reducer::rewind_tests::{
     finished as rewind_finished_fixture, started as rewind_started_fixture,
 };
 #[cfg(test)]
-pub(crate) use reducer::worker_tests::completed_fixture as worker_protocol_fixture;
+pub(crate) use reducer::worker_tests::{
+    completed_command_fixture as worker_command_protocol_fixture,
+    completed_fixture as worker_protocol_fixture,
+};
 pub use reducer::{
     AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,
 };
 pub(crate) use reducer::{
-    ForkInheritance, coordination_ready, evidence_admitted, verification_passed, wave_settled,
+    ForkInheritance, coordination_ready, criterion_unmet_in_view, evidence_admitted,
+    private_criterion_evidence, verification_passed, wave_settled,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

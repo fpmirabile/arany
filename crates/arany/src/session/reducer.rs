@@ -9,7 +9,10 @@ use crate::provider::AgentPhase;
 mod agent;
 mod worker;
 pub use worker::{WorkerState, WorkerView};
-pub(crate) use worker::{coordination_ready, evidence_admitted, verification_passed, wave_settled};
+pub(crate) use worker::{
+    coordination_ready, criterion_unmet_in_view, evidence_admitted, private_criterion_evidence,
+    verification_passed, wave_settled,
+};
 mod goal;
 mod rewind;
 #[cfg(test)]

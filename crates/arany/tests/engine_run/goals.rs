@@ -5610,6 +5610,7 @@ async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable
             objective: "Edit notes".into(),
             profile: None,
             editor: Some(Box::new(EditorAssignment {
+                commands: Vec::new(),
                 definition: "editor".into(),
                 definition_digest: [1; 32],
                 mission: "Edit notes".into(),
