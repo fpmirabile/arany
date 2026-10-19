@@ -70,7 +70,7 @@ fn begin_write<'a>(
     let current_version: i64 =
         transaction.query_row("PRAGMA data_version", [], |row| row.get(0))?;
     if current_version != data_version {
-        return Err(StoreError::InvalidHistory);
+        return Err(StoreError::HistoryChanged);
     }
     Ok(transaction)
 }

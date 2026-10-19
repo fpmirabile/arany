@@ -60,8 +60,11 @@ fn append_refuses_event_past_replay_limit() {
 #[test]
 fn other_connection_changes_invalidate_hot_history() {
     let temp = tempfile::tempdir().expect("private test root");
-    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
-    let mut connection = open_connection(&root, false).expect("file-backed store");
+    let path = temp.path().join(DATABASE_FILE);
+    let mut connection = Connection::open(&path).expect("file-backed store");
+    connection
+        .execute_batch(SCHEMA_SQL)
+        .expect("journal schema");
     let mut hot_session = None;
     let session_id = SessionId::new();
     append(
@@ -79,7 +82,7 @@ fn other_connection_changes_invalidate_hot_history() {
     .expect("first Event");
     assert!(hot_session.is_some());
 
-    let second = Connection::open(root.path().join(DATABASE_FILE)).expect("second connection");
+    let second = Connection::open(&path).expect("second connection");
     let other_id = SessionId::new();
     let other_start = Event::SessionStarted {
         title: "Other".into(),
@@ -100,6 +103,42 @@ fn other_connection_changes_invalidate_hot_history() {
             ],
         )
         .expect("other committed Session");
+    thread_local! {
+        static WRITER: std::cell::RefCell<Option<Connection>> = const { std::cell::RefCell::new(None) };
+    }
+    second
+        .execute_batch("BEGIN IMMEDIATE; UPDATE events SET created_at_ms=1 WHERE sequence=2;")
+        .expect("pending other writer");
+    WRITER.with(|writer| *writer.borrow_mut() = Some(second));
+    connection
+        .busy_handler(Some(|attempt| {
+            attempt == 0
+                && WRITER.with(|writer| {
+                    writer
+                        .borrow()
+                        .as_ref()
+                        .expect("pending other writer")
+                        .execute_batch("COMMIT")
+                        .is_ok()
+                })
+        }))
+        .expect("commit other writer when BEGIN IMMEDIATE blocks");
+    let refused = append(
+        &mut connection,
+        &mut hot_session,
+        session_id,
+        Event::SessionRenamed {
+            title: "Racing".into(),
+        },
+    );
+    connection.busy_handler(None).expect("remove test handler");
+    let second = WRITER.with(|writer| writer.borrow_mut().take()).unwrap();
+    assert!(
+        matches!(refused, Err(StoreError::HistoryChanged)),
+        "expected HistoryChanged, got {refused:?}"
+    );
+    assert!(hot_session.is_none());
+    assert!(connection.is_autocommit());
     let committed = append(
         &mut connection,
         &mut hot_session,
