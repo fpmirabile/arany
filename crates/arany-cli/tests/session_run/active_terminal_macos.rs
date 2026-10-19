@@ -523,11 +523,19 @@ fn read_until_consent(
             Err(error) => panic!("native consent read: {error}"),
         }
         crate::process::decline_workspace_consent(&mut suggested_input, transcript, &mut consent);
-        assert!(
-            Instant::now() < deadline,
-            "native consent missing: {context}"
-        );
-        assert!(child.child().try_wait().unwrap().is_none());
+        let status = child.child().try_wait().unwrap();
+        if Instant::now() >= deadline {
+            let start = transcript.len().saturating_sub(512);
+            let tail = String::from_utf8_lossy(&transcript[start..])
+                .chars()
+                .flat_map(char::escape_default)
+                .collect::<String>();
+            panic!(
+                "native consent missing: {context}; child={:?}; transcript_tail={tail}",
+                status
+            );
+        }
+        assert!(status.is_none(), "native consent child exited: {context}");
         thread::yield_now();
     }
 }
