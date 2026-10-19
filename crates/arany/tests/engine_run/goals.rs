@@ -2956,9 +2956,8 @@ async fn plan_exhausted_by_its_own_call_is_refused_and_the_goal_continues() {
         arany::test_support::scenario::plan_outcome(plan),
         finish_with("done without a plan"),
     ])
-    .with_before_call(0, || {
-        std::thread::sleep(std::time::Duration::from_millis(20))
-    });
+    .with_clock_advance_before_call(0, Duration::from_secs(1));
+    let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let outcome = run_with(
@@ -2975,6 +2974,14 @@ async fn plan_exhausted_by_its_own_call_is_refused_and_the_goal_continues() {
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
+    {
+        let calls = requests.lock().expect("Provider requests");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[1].input.last_answer_refused.as_ref().map(|r| r.cause),
+            Some(arany::ProposalRefusalCause::PlanBudgetSpent)
+        );
+    }
     let (events, view) = replayed(&state_path, outcome.session_id).await;
     assert!(
         view.goal(outcome.goal_id)
@@ -2987,6 +2994,14 @@ async fn plan_exhausted_by_its_own_call_is_refused_and_the_goal_continues() {
             .iter()
             .any(|e| matches!(e.event, Event::GoalPlanContractRecorded { .. }))
     );
+    let refusals: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::ProviderCallRecorded { record, .. } => record.refusal.as_ref().map(|r| r.cause),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(refusals, [arany::ProposalRefusalCause::PlanBudgetSpent]);
 }
 
 #[tokio::test]
