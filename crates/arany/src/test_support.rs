@@ -496,6 +496,10 @@ pub async fn exercise_private_guard_command(
                 if case == "nonzero" {
                     assert_eq!(result.exit_code, Some(7));
                     assert_eq!(result.private_capture, PrivateCapture::None {});
+                } else if cfg!(target_os = "macos") && case == "link" {
+                    // macOS ships `ln` as a hard link, which the single-link system catalogue refuses.
+                    assert_eq!(result.exit_code, Some(127), "{case}: {result:?}");
+                    assert_eq!(result.private_capture, PrivateCapture::None {});
                 } else {
                     assert_eq!(
                         result.private_capture,
