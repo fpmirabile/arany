@@ -79,6 +79,8 @@ struct ActiveChild {
 }
 
 enum AbortReason {
+    PlanAdmission,
+    ToolContextFull,
     Failed,
     Hook,
     Budget,
@@ -133,32 +135,38 @@ impl RunLoop<'_> {
         &self,
         children: &[ChildAssignment],
         agent: Option<&str>,
-    ) -> bool {
-        if children.iter().any(|child| child.editor.is_some()) {
-            return self.valid_editor_delegation(children, agent);
-        }
-        self.wave_settled().unwrap_or(false)
-            && !matches!(self.controls.policy, CollaborationPolicy::Single)
-            && crate::provider::valid_assignments(children, agent)
-            && self
-                .ledger()
-                .view(|v| {
-                    v.runs.last().is_some_and(|r| {
-                        let attempts: usize = r
-                            .primary()
-                            .into_iter()
-                            .flat_map(|a| &a.provider_calls)
-                            .filter_map(|c| c.delegation.as_ref())
-                            .map(Vec::len)
-                            .sum();
-                        attempts + children.len()
-                            <= usize::from(self.controls.policy.max_children())
+    ) -> Result<(), super::ProposalRefusalCause> {
+        let valid = if children.iter().any(|child| child.editor.is_some()) {
+            self.valid_editor_delegation(children, agent)
+        } else {
+            self.wave_settled().unwrap_or(false)
+                && !matches!(self.controls.policy, CollaborationPolicy::Single)
+                && crate::provider::valid_assignments(children, agent)
+                && self
+                    .ledger()
+                    .view(|v| {
+                        v.runs.last().is_some_and(|r| {
+                            let attempts: usize = r
+                                .primary()
+                                .into_iter()
+                                .flat_map(|a| &a.provider_calls)
+                                .filter_map(|c| c.delegation.as_ref())
+                                .map(Vec::len)
+                                .sum();
+                            attempts + children.len()
+                                <= usize::from(self.controls.policy.max_children())
+                        })
                     })
-                })
-                .unwrap_or(false)
-            && children
-                .iter()
-                .all(|a| self.valid_research_assignment(a, agent))
+                    .unwrap_or(false)
+                && children
+                    .iter()
+                    .all(|a| self.valid_research_assignment(a, agent))
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(super::ProposalRefusalCause::DelegateInvalid)
+        }
     }
 
     pub(super) fn valid_research_assignment(
@@ -365,7 +373,13 @@ impl RunLoop<'_> {
                 AbortReason::Failed if self.ledger().active_time_exhausted() => {
                     self.settle_stopped_primary().await
                 }
-                AbortReason::Failed => self.fail_primary().await,
+                AbortReason::Failed => self.fail_primary(super::RunFailure::ProviderCall).await,
+                AbortReason::PlanAdmission => {
+                    self.fail_primary(super::RunFailure::PlanAdmission).await
+                }
+                AbortReason::ToolContextFull => {
+                    self.fail_primary(super::RunFailure::ToolContextFull).await
+                }
                 AbortReason::Hook => self.finish_hook_stop().await,
                 AbortReason::Budget | AbortReason::Cancelled | AbortReason::Paused => {
                     self.settle_stopped_primary().await
@@ -375,9 +389,12 @@ impl RunLoop<'_> {
         }
         if let Some((requests, turn)) = primary_step {
             let Some(request) = self.begin_tool_step(requests).await? else {
-                return self.fail_primary().await.map(|()| false);
+                return self
+                    .fail_primary(super::RunFailure::PlanAdmission)
+                    .await
+                    .map(|()| false);
             };
-            if !Box::pin(self.execute_step(
+            let continues = Box::pin(self.execute_step(
                 Grant::Primary {
                     request: root_request,
                     review_allowed: true,
@@ -385,9 +402,22 @@ impl RunLoop<'_> {
                 request,
                 turn,
             ))
-            .await?
-            {
-                return self.fail_primary().await.map(|()| false);
+            .await;
+            let continues = match continues {
+                Ok(continues) => continues,
+                Err(EngineError::ContextTooLarge) => {
+                    return self
+                        .fail_primary(super::RunFailure::ToolContextFull)
+                        .await
+                        .map(|()| false);
+                }
+                Err(error) => return Err(error),
+            };
+            if !continues {
+                return self
+                    .fail_primary(super::RunFailure::ProviderCall)
+                    .await
+                    .map(|()| false);
             }
             self.verify_workers().await?;
         }
@@ -708,8 +738,8 @@ impl RunLoop<'_> {
                 let valid = self.ledger().tokens_within_limit()
                     && abort_reason.is_none()
                     && !queue.budget_stopped
-                    && matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tools(requests), .. }) if self.well_formed_tools(requests) && requests.iter().all(|r| r.call.is_process() || self.primary_lease_allows(&r.call)));
-                let mut record = call_record(AgentPhase::RootSynthesis, &result, valid, None);
+                    && matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tools(requests), .. }) if self.well_formed_tools(requests).is_ok() && requests.iter().all(|r| r.call.is_process() || self.primary_lease_allows(&r.call).is_ok()));
+                let mut record = call_record(AgentPhase::RootSynthesis, &result, valid, None, None);
                 if !valid
                     && self.ledger().tokens_within_limit()
                     && !self.controls.cancellation.is_cancelled()
@@ -747,7 +777,11 @@ impl RunLoop<'_> {
                                 self.settle_active_segment(segment)?;
                             }
                             let request = match self.begin_tool_step(requests).await {
-                                Ok(request) => request,
+                                Ok(Some(request)) => Some(request),
+                                Ok(None) => {
+                                    abort_reason = Some(AbortReason::PlanAdmission);
+                                    None
+                                }
                                 Err(
                                     EngineError::GoalBudgetExhausted
                                     | EngineError::Tool(crate::tools::ToolError::Limit),
@@ -778,13 +812,20 @@ impl RunLoop<'_> {
                                         self.observe_worker_stop().await?;
                                         true
                                     }
+                                    Err(EngineError::ContextTooLarge) => {
+                                        abort_reason = Some(AbortReason::ToolContextFull);
+                                        true
+                                    }
                                     Err(error) => return Err(error),
                                 }
                             } else {
                                 queue.budget_stopped
                             };
                             if !continues {
-                                abort_reason = self.hook_abort()?.or(Some(AbortReason::Failed));
+                                abort_reason = self
+                                    .hook_abort()?
+                                    .or(abort_reason)
+                                    .or(Some(AbortReason::Failed));
                             }
                             if !queue.budget_stopped {
                                 self.verify_workers().await?;
@@ -864,6 +905,7 @@ impl RunLoop<'_> {
                     AgentPhase::ChildWork,
                     &result,
                     valid_response && !gate_failed,
+                    None,
                     None,
                 );
                 if gate_failed {
@@ -1122,7 +1164,7 @@ impl RunLoop<'_> {
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id,
-            record: call_record(AgentPhase::ChildWork, &result, valid_response, None),
+            record: call_record(AgentPhase::ChildWork, &result, valid_response, None, None),
         })
         .await?;
         if matches!(abort_reason, Some(AbortReason::Hook)) || self.hook_abort()?.is_some() {

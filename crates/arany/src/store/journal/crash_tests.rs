@@ -61,6 +61,7 @@ fn terminal_event(run_id: RunId) -> Event {
     Event::RunFinished {
         run_id,
         disposition: RunDisposition::Failed,
+        failure: Some(crate::session::RunFailure::ProviderCall),
         active_ms: 0,
     }
 }

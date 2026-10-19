@@ -102,6 +102,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         }
     }));
     let run = RunView {
+        failure: None,
         supervisor: Default::default(),
         workers: Default::default(),
         id: run_id,
@@ -706,6 +707,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
     assert!(tool.ran_unguarded());
     let goal_id = GoalId::new();
     let run = RunView {
+        failure: None,
         supervisor: Default::default(),
         workers: Default::default(),
         id: run_id,

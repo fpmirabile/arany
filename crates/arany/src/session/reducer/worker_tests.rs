@@ -164,6 +164,7 @@ impl Fixture {
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens: None,
                 wire_provenance: None,
+                refusal: None,
                 failure_reason: None,
             },
         });
@@ -461,6 +462,7 @@ impl Fixture {
         self.push(Event::RunFinished {
             run_id: self.run,
             disposition: RunDisposition::Finished,
+            failure: None,
             active_ms: 0,
         });
     }
@@ -1463,6 +1465,7 @@ fn worker_protocol_private_loss_is_local_and_c1_failure_remains_fatal() {
                         output_tokens: Some(0),
                         cache_read_input_tokens: None,
                         cache_creation_input_tokens: None,
+                        refusal: None,
                         failure_reason: None,
                         wire_provenance: None,
                     },
@@ -1506,7 +1509,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
     let expected = [
         ("RunStarted", 16),
         ("AgentSpawned", 11),
-        ("ProviderCallRecorded", 9),
+        ("ProviderCallRecorded", 10),
         ("AgentFinished", 10),
         ("ToolStarted", 12),
         ("ToolFinished", 16),
@@ -2573,6 +2576,7 @@ fn worker_protocol_background_workers_let_the_primary_continue_before_release() 
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens: None,
                 wire_provenance: None,
+                refusal: None,
                 failure_reason: None,
             },
         };
@@ -2642,6 +2646,7 @@ fn worker_protocol_lineage_accepts_only_released_children_of_the_goal() {
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens: None,
                 wire_provenance: None,
+                refusal: None,
                 failure_reason: None,
             },
         };

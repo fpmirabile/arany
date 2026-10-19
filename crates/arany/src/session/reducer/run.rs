@@ -43,6 +43,7 @@ pub(super) fn apply(
                 status: RunStatus::Pending,
                 accepted_sequence: prior,
                 finished_sequence: None,
+                failure: None,
                 tools: Vec::new(),
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
@@ -133,6 +134,7 @@ pub(super) fn apply(
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens: None,
                 wire_provenance: None,
+                refusal: None,
                 failure_reason: None,
             };
             let valid_phase = primary.provider_calls.is_empty()
@@ -198,12 +200,14 @@ pub(super) fn apply(
             run.assistant_message = Some(text.clone());
         }
         Event::RunFinished {
+            failure,
             run_id,
             disposition,
             active_ms,
         } => {
             let run = active_run(current, *run_id)?;
-            if run.agents.is_empty()
+            if (*disposition == RunDisposition::Failed) != failure.is_some()
+                || run.agents.is_empty()
                 || run
                     .agents
                     .iter()
@@ -244,6 +248,7 @@ pub(super) fn apply(
                 _ => return Err(ReplayError::InvalidTransition),
             };
             run.finished_sequence = Some(prior);
+            run.failure = *failure;
             if let Some(goal) = current
                 .goals
                 .iter_mut()

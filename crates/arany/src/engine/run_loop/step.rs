@@ -256,7 +256,13 @@ impl RunLoop<'_> {
                             .await?;
                         return Ok(false);
                     }
-                    Err(SizingRefusal::Unavailable) => return Ok(false),
+                    Err(SizingRefusal::Unavailable) => {
+                        return if matches!(grant, Grant::Primary { .. }) {
+                            Err(EngineError::ContextTooLarge)
+                        } else {
+                            Ok(false)
+                        };
+                    }
                 };
             let command = matches!(intent.call, ToolCall::Command { .. })
                 && matches!(intent.target, crate::worker::EffectTarget::Workspace);
@@ -856,7 +862,7 @@ impl RunLoop<'_> {
     }
 
     fn plan_allows(&self, call: &ToolCall) -> bool {
-        self.primary_lease_allows(call)
+        self.primary_lease_allows(call).is_ok()
             && (matches!(
                 call,
                 ToolCall::ApplyChangeset {
@@ -865,8 +871,12 @@ impl RunLoop<'_> {
             ) || self.ledger().allows_tool(call))
     }
 
-    pub(super) fn primary_lease_allows(&self, call: &ToolCall) -> bool {
-        self.ledger()
+    pub(super) fn primary_lease_allows(
+        &self,
+        call: &ToolCall,
+    ) -> Result<(), super::ProposalRefusalCause> {
+        let allowed = self
+            .ledger()
             .view(|v| {
                 v.runs.last().is_some_and(|r| {
                     let leases = r
@@ -889,7 +899,12 @@ impl RunLoop<'_> {
                     }
                 })
             })
-            .unwrap_or(false)
+            .unwrap_or(false);
+        if allowed {
+            Ok(())
+        } else {
+            Err(super::ProposalRefusalCause::LeaseOverlap)
+        }
     }
 
     fn review_will_run(
@@ -1896,7 +1911,7 @@ impl RunLoop<'_> {
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id: intent.agent_run_id,
-            record: call_record(AgentPhase::ToolReview, &result, valid, None),
+            record: call_record(AgentPhase::ToolReview, &result, valid, None, None),
         })
         .await?;
         if let Some(active_segment) = active_segment {

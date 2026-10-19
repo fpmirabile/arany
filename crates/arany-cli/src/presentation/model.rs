@@ -484,6 +484,7 @@ mod tests {
             status: RunStatus::Active,
             accepted_sequence: 2,
             finished_sequence: None,
+            failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
@@ -837,6 +838,7 @@ mod tests {
                 input_tokens: reported.then_some(123),
                 output_tokens: None,
                 wire_provenance: None,
+                refusal: None,
                 failure_reason: None,
                 requested_tools: 0,
                 cache_read_input_tokens: None,
@@ -863,9 +865,7 @@ mod tests {
             ),
             (
                 ProviderCallDisposition::InvalidResponse,
-                Some(
-                    "Provider returned an incompatible response. Check the selected model and effort.",
-                ),
+                Some("Arany rejected the response during outcome validation."),
             ),
             (
                 ProviderCallDisposition::OutputLimit,
@@ -904,6 +904,110 @@ mod tests {
                 "{disposition:?}"
             );
         }
+        for (cause, expected) in [
+            (
+                arany::ProposalRefusalCause::InvalidArguments,
+                "Arany refused invalid operation arguments. The proposed action did not run.",
+            ),
+            (
+                arany::ProposalRefusalCause::Phase,
+                "Arany refused an operation unavailable in this phase. The proposed action did not run.",
+            ),
+            (
+                arany::ProposalRefusalCause::PlanMissing,
+                "Arany refused the operation because its required plan was missing. The proposed action did not run.",
+            ),
+            (
+                arany::ProposalRefusalCause::PlanInvalid,
+                "Arany refused an invalid or changed plan. The proposed action did not run.",
+            ),
+            (
+                arany::ProposalRefusalCause::PlanBudgetOutsideGoal,
+                "Arany refused a plan budget outside the Goal budget. The proposed action did not run.",
+            ),
+            (
+                arany::ProposalRefusalCause::PlanBudgetSpent,
+                "Arany refused a plan budget already spent by this Run. The proposed action did not run.",
+            ),
+            (
+                arany::ProposalRefusalCause::PlanScopeExcludesCall,
+                "Arany refused an operation outside the plan scope. The proposed action did not run.",
+            ),
+            (
+                arany::ProposalRefusalCause::PlanOutsideGrant,
+                "Arany refused a plan outside the admitted grant. The proposed action did not run.",
+            ),
+            (
+                arany::ProposalRefusalCause::ArgumentBytes,
+                "Arany refused operation arguments above the byte limit. The proposed action did not run.",
+            ),
+            (
+                arany::ProposalRefusalCause::LeaseOverlap,
+                "Arany refused an operation overlapping an active worker lease. The proposed action did not run.",
+            ),
+            (
+                arany::ProposalRefusalCause::NotOffered,
+                "Arany refused an operation that was not offered. The proposed action did not run.",
+            ),
+            (
+                arany::ProposalRefusalCause::FinishInvalid,
+                "Arany refused an invalid Finish answer.",
+            ),
+            (
+                arany::ProposalRefusalCause::DelegateInvalid,
+                "Arany refused an invalid delegation. No children were started for it.",
+            ),
+        ] {
+            let run = &mut view.runs[0];
+            run.failure = Some(arany::RunFailure::ProposalRefused);
+            let mut call = record(ProviderCallDisposition::InvalidResponse);
+            call.failure_reason = Some(arany::ProviderFailureReason::ProposalRefused);
+            call.refusal = Some(arany::ProposalRefusal {
+                operation: "arany_write".into(),
+                cause,
+            });
+            run.agents[0].provider_calls = vec![call];
+            let copy = run_feedback(run).expect("refusal feedback");
+            assert_eq!(
+                copy,
+                format!(
+                    "Error: Run failed. {expected} No answer was committed. Use /agents to inspect this Run."
+                ),
+                "{cause:?}"
+            );
+            assert!(!copy.contains("Provider"));
+        }
+        for (cause, expected) in [
+            (
+                arany::RunFailure::PlanAdmission,
+                "Arany could not admit the proposed plan. The proposed action did not run.",
+            ),
+            (
+                arany::RunFailure::ToolContextFull,
+                "Tool continuation could not fit in the available context.",
+            ),
+            (
+                arany::RunFailure::WorkersUnverified,
+                "Worker results have not passed verification.",
+            ),
+            (
+                arany::RunFailure::CriterionUnmet,
+                "The plan's success criterion was not met.",
+            ),
+            (
+                arany::RunFailure::RefusalLimit,
+                "The same proposed operation was refused three times.",
+            ),
+        ] {
+            view.runs[0].failure = Some(cause);
+            assert_eq!(
+                run_feedback(&view.runs[0]).unwrap(),
+                format!(
+                    "Error: Run failed. {expected} No answer was committed. Use /agents to inspect this Run."
+                )
+            );
+        }
+        view.runs[0].failure = None;
         use arany::ProviderFailureReason;
         for (reason, disposition, message) in [
             (

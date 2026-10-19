@@ -586,6 +586,22 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {
+            if let Some(reason) = run.failure.and_then(run_failure_notice) {
+                let detail = if run.failure == Some(arany::RunFailure::ProposalRefused) {
+                    run.agents
+                        .iter()
+                        .find(|agent| agent.role == arany::AgentRole::Primary)
+                        .and_then(|agent| agent.provider_calls.last())
+                        .and_then(|call| call.refusal.as_ref())
+                        .map(|refusal| refusal_notice(refusal.cause))
+                        .unwrap_or(reason)
+                } else {
+                    reason
+                };
+                return Some(format!(
+                    "Error: Run failed. {detail} No answer was committed. Use /agents to inspect this Run."
+                ));
+            }
             let reason = run
                 .agents
                 .iter()
@@ -654,9 +670,83 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
     }
 }
 
+fn run_failure_notice(cause: arany::RunFailure) -> Option<&'static str> {
+    use arany::RunFailure;
+    Some(match cause {
+        RunFailure::ProviderCall => return None,
+        RunFailure::ProposalRefused => "Arany refused the proposed operation before dispatch.",
+        RunFailure::PlanAdmission => {
+            "Arany could not admit the proposed plan. The proposed action did not run."
+        }
+        RunFailure::ToolContextFull => "Tool continuation could not fit in the available context.",
+        RunFailure::WorkersUnverified => "Worker results have not passed verification.",
+        RunFailure::CriterionUnmet => "The plan's success criterion was not met.",
+        RunFailure::RefusalLimit => "The same proposed operation was refused three times.",
+    })
+}
+
+fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
+    use arany::ProposalRefusalCause::*;
+    match cause {
+        InvalidArguments => {
+            "Arany refused invalid operation arguments. The proposed action did not run."
+        }
+        Phase => {
+            "Arany refused an operation unavailable in this phase. The proposed action did not run."
+        }
+        PlanMissing => {
+            "Arany refused the operation because its required plan was missing. The proposed action did not run."
+        }
+        PlanInvalid => "Arany refused an invalid or changed plan. The proposed action did not run.",
+        PlanBudgetOutsideGoal => {
+            "Arany refused a plan budget outside the Goal budget. The proposed action did not run."
+        }
+        PlanBudgetSpent => {
+            "Arany refused a plan budget already spent by this Run. The proposed action did not run."
+        }
+        PlanScopeExcludesCall => {
+            "Arany refused an operation outside the plan scope. The proposed action did not run."
+        }
+        PlanOutsideGrant => {
+            "Arany refused a plan outside the admitted grant. The proposed action did not run."
+        }
+        ArgumentBytes => {
+            "Arany refused operation arguments above the byte limit. The proposed action did not run."
+        }
+        LeaseOverlap => {
+            "Arany refused an operation overlapping an active worker lease. The proposed action did not run."
+        }
+        NotOffered => {
+            "Arany refused an operation that was not offered. The proposed action did not run."
+        }
+        FinishInvalid => "Arany refused an invalid Finish answer.",
+        DelegateInvalid => "Arany refused an invalid delegation. No children were started for it.",
+    }
+}
+
 fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
     use arany::ProviderFailureReason;
     match (call.disposition, call.failure_reason) {
+        (
+            ProviderCallDisposition::InvalidResponse,
+            Some(ProviderFailureReason::ProposalRefused),
+        ) => {
+            return call
+                .refusal
+                .as_ref()
+                .map(|refusal| refusal_notice(refusal.cause));
+        }
+        (
+            ProviderCallDisposition::InvalidResponse,
+            Some(
+                ProviderFailureReason::WorkerFinishDeferred
+                | ProviderFailureReason::WorkerDelegateRefused
+                | ProviderFailureReason::WorkerToolRefused
+                | ProviderFailureReason::CriterionNotMetInView,
+            ),
+        ) => {
+            return Some("Arany refused the proposed worker coordination outcome.");
+        }
         (ProviderCallDisposition::Rejected, Some(ProviderFailureReason::AccountAccess)) => {
             return Some(
                 "Provider denied account access. Check the selected account and model permissions.",
@@ -719,7 +809,7 @@ fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
             "Provider rejected the request. Check the selected account, model, and usage limits."
         }
         ProviderCallDisposition::InvalidResponse => {
-            "Provider returned an incompatible response. Check the selected model and effort."
+            "Arany rejected the response during outcome validation."
         }
         ProviderCallDisposition::OutputLimit => "Provider response exceeded Arany's output limit.",
         ProviderCallDisposition::TimedOut => "Provider call timed out.",
@@ -1030,6 +1120,7 @@ mod exec_jsonl_tests {
             status: RunStatus::Finished,
             accepted_sequence: 8,
             finished_sequence: Some(8),
+            failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
@@ -1265,6 +1356,7 @@ mod tests {
             status: RunStatus::Finished,
             accepted_sequence: 0,
             finished_sequence: None,
+            failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
@@ -1796,6 +1888,7 @@ mod unguarded_tests {
             status: arany::RunStatus::Finished,
             accepted_sequence: 1,
             finished_sequence: Some(2),
+            failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,

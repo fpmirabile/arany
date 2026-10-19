@@ -571,7 +571,7 @@ pub fn completion_boundary_cases() -> [CompletionBoundaryCase; 11] {
                 result: "Unaccepted result".into(),
             })),
             ProviderCallDisposition::InvalidResponse,
-            None,
+            Some(crate::ProviderFailureReason::ProposalRefused),
         ),
         (
             "accepted finish",

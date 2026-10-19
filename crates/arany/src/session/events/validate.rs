@@ -452,7 +452,17 @@ impl Event {
                     Err(ReplayError::InvalidPayload)
                 }
             }
-            Self::RunFinished { .. } => Ok(()),
+            Self::RunFinished {
+                disposition,
+                failure,
+                ..
+            } => {
+                if (*disposition == super::RunDisposition::Failed) == failure.is_some() {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
         }
     }
 }

@@ -598,6 +598,8 @@ impl Segment {
 
     fn finish(mut self, disposition: RunDisposition, goal: Option<&GoalView>) {
         self.commit(Event::RunFinished {
+            failure: (disposition == RunDisposition::Failed)
+                .then_some(crate::session::RunFailure::ProviderCall),
             run_id: self.run_id,
             disposition,
             active_ms: 1,
@@ -662,6 +664,7 @@ fn provider_record(
         cache_read_input_tokens: None,
         cache_creation_input_tokens: None,
         wire_provenance: None,
+        refusal: None,
         failure_reason: None,
     }
 }

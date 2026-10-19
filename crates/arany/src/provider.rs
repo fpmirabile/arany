@@ -876,6 +876,7 @@ pub(crate) enum ProviderFailureClass {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderFailureReason {
+    ProposalRefused,
     AccountAccess,
     UsageLimit,
     UsageTemporarilyUnavailable,

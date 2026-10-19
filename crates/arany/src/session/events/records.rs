@@ -336,6 +336,54 @@ pub enum RunDisposition {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RunFailure {
+    ProviderCall,
+    ProposalRefused,
+    PlanAdmission,
+    ToolContextFull,
+    WorkersUnverified,
+    CriterionUnmet,
+    RefusalLimit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalRefusalCause {
+    InvalidArguments,
+    Phase,
+    PlanMissing,
+    PlanInvalid,
+    PlanBudgetOutsideGoal,
+    PlanBudgetSpent,
+    PlanScopeExcludesCall,
+    PlanOutsideGrant,
+    ArgumentBytes,
+    LeaseOverlap,
+    NotOffered,
+    FinishInvalid,
+    DelegateInvalid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalRefusal {
+    pub operation: String,
+    pub cause: ProposalRefusalCause,
+}
+
+impl ProposalRefusal {
+    fn valid(&self) -> bool {
+        matches!(self.operation.as_str(), "finish" | "delegate")
+            || self.operation.strip_prefix("arany_").is_some_and(|name| {
+                crate::tools::catalog::ALL
+                    .iter()
+                    .any(|facts| facts.name == name)
+            })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CompactionFailure {
     ProviderUnavailable,
     ProviderRejected,
@@ -494,6 +542,8 @@ pub struct ProviderCallRecord {
     pub wire_provenance: Option<crate::provider::ProviderWireProvenance>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub failure_reason: Option<crate::provider::ProviderFailureReason>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub refusal: Option<ProposalRefusal>,
 }
 
 impl ProviderCallRecord {
@@ -512,6 +562,13 @@ impl ProviderCallRecord {
             || self.delegation.as_ref().is_some_and(|plan| {
                 plan.is_empty() || plan.len() > 8 || plan.iter().any(|a| !a.valid())
             })
+            || (self.failure_reason
+                == Some(crate::provider::ProviderFailureReason::ProposalRefused))
+                != self.refusal.is_some()
+            || self
+                .refusal
+                .as_ref()
+                .is_some_and(|refusal| !refusal.valid())
             || self.requested_tools > MAX_STEP_TOOL_CALLS
             || (self.disposition == ProviderCallDisposition::ToolRequested)
                 != (self.requested_tools > 0)
@@ -568,6 +625,7 @@ impl ProviderCallRecord {
                             | ProviderFailureReason::WorkerDelegateRefused
                             | ProviderFailureReason::WorkerToolRefused
                             | ProviderFailureReason::CriterionNotMetInView
+                            | ProviderFailureReason::ProposalRefused
                     )
                 )
             })

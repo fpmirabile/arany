@@ -114,6 +114,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             input_tokens: None,
             output_tokens: None,
             wire_provenance: None,
+            refusal: None,
             failure_reason: None,
             requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
             cache_read_input_tokens: None,
@@ -228,6 +229,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Finished,
+            failure: None,
             active_ms: 0,
         },
     ];
@@ -552,6 +554,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             Event::RunFinished {
                 run_id: run,
                 disposition: RunDisposition::Failed,
+                failure: Some(arany::RunFailure::ProviderCall),
                 active_ms: 0,
             },
         ]);
@@ -733,6 +736,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
+            failure: Some(arany::RunFailure::ProviderCall),
             active_ms: 0,
         },
     ]);
@@ -779,6 +783,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
+            failure: Some(arany::RunFailure::ProviderCall),
             active_ms: 0,
         },
     ]);
@@ -967,6 +972,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
+            failure: Some(arany::RunFailure::ProviderCall),
             active_ms: 0,
         },
     ]);

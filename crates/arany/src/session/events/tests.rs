@@ -764,7 +764,7 @@ mod account_default_tests {
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
         assert_eq!(payload_version("RunStarted"), Some(16));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(9));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(10));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
@@ -979,6 +979,7 @@ mod provider_call_tests {
             cache_read_input_tokens: Some(40),
             cache_creation_input_tokens: Some(20),
             wire_provenance: None,
+            refusal: None,
             failure_reason: None,
         };
         assert!(record.validate().is_ok());
@@ -1051,6 +1052,7 @@ mod provider_call_tests {
             input_tokens: Some(100),
             output_tokens: Some(10),
             wire_provenance: None,
+            refusal: None,
             failure_reason: None,
             requested_tools: 0,
             cache_read_input_tokens: None,
@@ -1181,6 +1183,7 @@ mod provider_call_tests {
                     input_tokens: None,
                     output_tokens: None,
                     wire_provenance: None,
+                    refusal: None,
                     failure_reason: Some(reason),
                     requested_tools: 0,
                     cache_read_input_tokens: None,
@@ -1738,6 +1741,7 @@ mod payload_version_tests {
             Event::RunFinished {
                 run_id: run,
                 disposition: RunDisposition::Finished,
+                failure: None,
                 active_ms: 1_234,
             },
             Event::GoalProviderCallReserved {
@@ -1764,7 +1768,7 @@ mod payload_version_tests {
             let version = match event {
                 Event::RunStarted { .. } => 16,
                 Event::ToolStarted { .. } => 12,
-                Event::RunFinished { .. } => 8,
+                Event::RunFinished { .. } => 9,
                 _ => 7,
             };
             assert_eq!(event.version(), version, "{}", event.kind());
@@ -2077,4 +2081,95 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         Err(ReplayError::InvalidPayload)
     ));
     assert_eq!(payload_version("RunStarted"), Some(16));
+}
+
+#[test]
+fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings() {
+    use crate::provider::ProviderFailureReason;
+    let run_id = Some(RunId::new());
+    let agent_id = Some(AgentRunId::new());
+    assert_eq!(payload_version("ProviderCallRecorded"), Some(10));
+    assert_eq!(payload_version("RunFinished"), Some(9));
+    let record = ProviderCallRecord {
+        delegation: None,
+        phase: crate::provider::AgentPhase::RootPlan,
+        disposition: ProviderCallDisposition::InvalidResponse,
+        requested_tools: 0,
+        response_id: None,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        wire_provenance: None,
+        failure_reason: Some(ProviderFailureReason::ProposalRefused),
+        refusal: Some(ProposalRefusal {
+            operation: "arany_write".into(),
+            cause: ProposalRefusalCause::PlanMissing,
+        }),
+    };
+    let valid = serde_json::to_value(record).unwrap();
+    let decode_call = |value: &serde_json::Value, version| {
+        Event::decode(
+            "ProviderCallRecorded",
+            version,
+            &value.to_string(),
+            run_id,
+            agent_id,
+        )
+    };
+    assert!(decode_call(&valid, 10).is_ok());
+    assert!(decode_call(&valid, 9).is_err());
+    for (field, value) in [
+        ("refusal", serde_json::Value::Null),
+        ("failure_reason", serde_json::Value::Null),
+        ("failure_reason", serde_json::json!("response_contract")),
+        ("disposition", serde_json::json!("finished")),
+        (
+            "refusal",
+            serde_json::json!({"operation":"PRIVATE_ARGUMENT", "cause":"plan_missing"}),
+        ),
+        (
+            "refusal",
+            serde_json::json!({"operation":"arany_write", "cause":"unknown"}),
+        ),
+        (
+            "refusal",
+            serde_json::json!({"operation":"arany_write", "cause":"plan_missing", "arguments":"PRIVATE_ARGUMENT"}),
+        ),
+    ] {
+        let mut invalid = valid.clone();
+        invalid[field] = value;
+        assert!(decode_call(&invalid, 10).is_err(), "field {field}");
+    }
+    let mut missing = valid.clone();
+    missing.as_object_mut().unwrap().remove("refusal");
+    assert!(decode_call(&missing, 10).is_err());
+    for (disposition, failure, accepted) in [
+        ("failed", serde_json::json!("proposal_refused"), true),
+        ("failed", serde_json::Value::Null, false),
+        ("finished", serde_json::json!("proposal_refused"), false),
+        ("cancelled", serde_json::json!("provider_call"), false),
+        ("stopped_by_hook", serde_json::json!("provider_call"), false),
+        ("failed", serde_json::json!("unknown"), false),
+        ("finished", serde_json::Value::Null, true),
+    ] {
+        let value =
+            serde_json::json!({"disposition":disposition, "failure":failure, "active_ms":0});
+        assert_eq!(
+            Event::decode("RunFinished", 9, &value.to_string(), run_id, None).is_ok(),
+            accepted,
+            "{disposition}"
+        );
+        assert!(Event::decode("RunFinished", 8, &value.to_string(), run_id, None).is_err());
+    }
+    assert!(
+        Event::decode(
+            "RunFinished",
+            9,
+            r#"{"disposition":"failed","active_ms":0}"#,
+            run_id,
+            None
+        )
+        .is_err()
+    );
 }
