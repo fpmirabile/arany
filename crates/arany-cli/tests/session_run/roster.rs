@@ -5,6 +5,32 @@ use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio};
 const TERMINAL_REQUIRED: &[u8] =
     b"error: attached mode requires terminal stdin and stderr; use arany exec for pipes\n";
 
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn drain_attached_output(
+    reader: &mut impl std::io::Read,
+    destination: &mut Vec<u8>,
+    channel: &str,
+) -> bool {
+    use std::io::ErrorKind;
+
+    loop {
+        let mut bytes = [0; 4096];
+        match reader.read(&mut bytes) {
+            Ok(0) => return true,
+            Ok(count) => {
+                assert!(destination.len() + count <= 64 * 1024, "bounded {channel}");
+                destination.extend_from_slice(&bytes[..count]);
+            }
+            Err(error)
+                if matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) =>
+            {
+                return false;
+            }
+            Err(error) => panic!("{channel} read: {error}"),
+        }
+    }
+}
+
 fn tempdir() -> tempfile::TempDir {
     #[cfg(target_os = "macos")]
     {
@@ -262,8 +288,7 @@ fn attached_leg_macos(
 ) -> (arany::SessionId, arany::GoalId) {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::{
-        io::{Read, Write},
-        os::unix::process::CommandExt,
+        io::Write,
         str::FromStr,
         thread,
         time::{Duration, Instant},
@@ -297,17 +322,7 @@ fn attached_leg_macos(
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::piped())
         .stderr(Stdio::from(slave));
-    // SAFETY: the pre-exec closure calls only async-signal-safe session and terminal syscalls.
-    unsafe {
-        command.pre_exec(|| {
-            if nix::libc::setsid() == -1
-                || nix::libc::ioctl(0, nix::libc::TIOCSCTTY.into(), 0) == -1
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    super::active_terminal::own_terminal(&mut command);
     let child = command.spawn().unwrap();
     drop(command);
     let (mut child, mut master, mut input) =
@@ -321,27 +336,6 @@ fn attached_leg_macos(
     let mut stdout_bytes = Vec::new();
     let mut consent_declined = false;
     let deadline = Instant::now() + Duration::from_secs(120);
-    fn drain(reader: &mut impl Read, destination: &mut Vec<u8>, channel: &str) {
-        loop {
-            let mut bytes = [0; 4096];
-            match reader.read(&mut bytes) {
-                Ok(0) => break,
-                Ok(count) => {
-                    assert!(destination.len() + count <= 64 * 1024, "bounded {channel}");
-                    destination.extend_from_slice(&bytes[..count]);
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    break;
-                }
-                Err(error) => panic!("attached output read: {error}"),
-            }
-        }
-    }
     fn transcript_tail(bytes: &[u8]) -> String {
         let end = bytes.len().min(4096);
         let start = bytes.len().saturating_sub(2048).max(end);
@@ -364,8 +358,8 @@ fn attached_leg_macos(
             .collect()
     }
     let mut pump = |input: &mut std::fs::File, transcript: &mut Vec<u8>| {
-        drain(&mut master, transcript, "attached PTY transcript");
-        drain(&mut output, &mut stdout_bytes, "attached stdout");
+        drain_attached_output(&mut master, transcript, "attached PTY transcript");
+        drain_attached_output(&mut output, &mut stdout_bytes, "attached stdout");
         assert!(stdout_bytes.is_empty(), "attached roster writes to stdout");
         crate::process::decline_workspace_consent(input, transcript, &mut consent_declined);
         assert!(
@@ -424,24 +418,7 @@ fn attached_leg_macos(
         captured.status
     );
     let stdout_deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let mut bytes = [0; 4096];
-        match output.read(&mut bytes) {
-            Ok(0) => break,
-            Ok(count) => {
-                assert!(
-                    stdout_bytes.len() + count <= 64 * 1024,
-                    "bounded attached stdout"
-                );
-                stdout_bytes.extend_from_slice(&bytes[..count]);
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                ) => {}
-            Err(error) => panic!("attached stdout drain: {error}"),
-        }
+    while !drain_attached_output(&mut output, &mut stdout_bytes, "attached stdout") {
         assert!(
             Instant::now() < stdout_deadline,
             "attached stdout did not close"
@@ -563,8 +540,6 @@ fn attached_pty_refusal(
 ) {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::{
-        io::Read,
-        os::unix::process::CommandExt,
         thread,
         time::{Duration, Instant},
     };
@@ -599,17 +574,7 @@ fn attached_pty_refusal(
         .stdin(Stdio::from(slave.try_clone().unwrap()))
         .stdout(Stdio::piped())
         .stderr(Stdio::from(slave));
-    // SAFETY: the pre-exec closure calls only async-signal-safe session and terminal syscalls.
-    unsafe {
-        command.pre_exec(|| {
-            if nix::libc::setsid() == -1
-                || nix::libc::ioctl(0, nix::libc::TIOCSCTTY.into(), 0) == -1
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    super::active_terminal::own_terminal(&mut command);
     let child = command.spawn().unwrap();
     drop(command);
     let (mut child, mut master, mut input) =
@@ -624,50 +589,8 @@ fn attached_pty_refusal(
     let mut consent_declined = false;
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
-        loop {
-            let mut chunk = [0; 4096];
-            match master.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(count) => {
-                    assert!(
-                        transcript.len() + count <= 64 * 1024,
-                        "bounded attached PTY"
-                    );
-                    transcript.extend_from_slice(&chunk[..count]);
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    break;
-                }
-                Err(error) => panic!("attached PTY read: {error}"),
-            }
-        }
-        loop {
-            let mut chunk = [0; 4096];
-            match stdout.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(count) => {
-                    assert!(
-                        stdout_bytes.len() + count <= 64 * 1024,
-                        "bounded attached stdout"
-                    );
-                    stdout_bytes.extend_from_slice(&chunk[..count]);
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    break;
-                }
-                Err(error) => panic!("attached stdout read: {error}"),
-            }
-        }
+        drain_attached_output(&mut master, &mut transcript, "attached PTY");
+        drain_attached_output(&mut stdout, &mut stdout_bytes, "attached stdout");
         crate::process::decline_workspace_consent(&mut input, &transcript, &mut consent_declined);
         if transcript
             .windows(b"Do you trust this folder?".len())
@@ -693,22 +616,8 @@ fn attached_pty_refusal(
         .windows(refusal.len())
         .any(|part| part == refusal)
     {
-        let mut chunk = [0; 4096];
-        match master.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(count) => {
-                assert!(
-                    transcript.len() + count <= 64 * 1024,
-                    "bounded attached PTY"
-                );
-                transcript.extend_from_slice(&chunk[..count]);
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                ) => {}
-            Err(error) => panic!("attached refusal read: {error}"),
+        if drain_attached_output(&mut master, &mut transcript, "attached PTY") {
+            break;
         }
         assert!(Instant::now() < deadline, "attached roster refusal missing");
         thread::yield_now();
@@ -728,24 +637,7 @@ fn attached_pty_refusal(
     );
     assert_eq!(output.status.code(), Some(1));
     let stdout_deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let mut chunk = [0; 4096];
-        match stdout.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(count) => {
-                assert!(
-                    stdout_bytes.len() + count <= 64 * 1024,
-                    "bounded attached stdout"
-                );
-                stdout_bytes.extend_from_slice(&chunk[..count]);
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                ) => {}
-            Err(error) => panic!("attached stdout drain: {error}"),
-        }
+    while !drain_attached_output(&mut stdout, &mut stdout_bytes, "attached stdout") {
         assert!(
             Instant::now() < stdout_deadline,
             "attached stdout did not close"

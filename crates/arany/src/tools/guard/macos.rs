@@ -520,7 +520,7 @@ fn system_program_metadata_in(
             .ok_or(ToolError::Path)?,
     )?;
     let metadata = file.metadata().map_err(|_| ToolError::Path)?;
-    if !system_file(
+    if !crate::tools::fs::macos_system_file(
         metadata.is_file(),
         metadata.uid(),
         metadata.nlink(),
@@ -533,10 +533,6 @@ fn system_program_metadata_in(
 
 fn system_directory(uid: u32, mode: u32) -> bool {
     uid == 0 && mode & 0o022 == 0
-}
-
-fn system_file(is_file: bool, uid: u32, nlink: u64, mode: u32) -> bool {
-    is_file && uid == 0 && nlink == 1 && mode & 0o6022 == 0
 }
 
 fn unprivileged_helper() -> Result<(), ToolError> {
@@ -763,7 +759,7 @@ impl SystemPrograms {
                 let metadata = entry
                     .metadata()
                     .map_err(|_| ToolError::ProtectionUnavailable)?;
-                if !system_file(
+                if !crate::tools::fs::macos_system_file(
                     metadata.is_file(),
                     metadata.uid(),
                     metadata.nlink(),

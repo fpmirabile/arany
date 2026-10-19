@@ -493,12 +493,11 @@ fn validate_rust_sysroot(path: &Path) -> std::path::PathBuf {
     canonical
 }
 
-fn assert_apple_runtime_baseline(root: &Path) {
+fn assert_apple_runtime_baseline(root: &Path, sdk: &Path) {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
 
-    let sdk_settings =
-        Path::new("/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/SDKSettings.plist");
+    let sdk_settings = sdk.join("SDKSettings.plist");
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
@@ -1146,7 +1145,6 @@ edition = "2021"
 "#,
     );
     const APPLE_COMPILER: &str = "/Library/Developer/CommandLineTools/usr";
-    const APPLE_SDK: &str = "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk";
     let permissions = arany::WorkspacePermissions::open(&workspace)
         .unwrap()
         .prepare_profile_selection();
@@ -1164,15 +1162,16 @@ edition = "2021"
         .expect("physical Apple Command Line Tools compiler candidate");
     let sdk = choices
         .iter()
-        .find(|option| option.group == "macOS SDK" && option.path == Path::new(APPLE_SDK))
-        .expect("physical versioned macOS 26.5 SDK candidate");
+        .find(|option| option.group == "macOS SDK" && option.detected)
+        .expect("physical versioned macOS SDK candidate");
     assert!(rust.detected && compiler.detected && sdk.detected);
     setup_context("Apple runtime baseline probes", || {
-        assert_apple_runtime_baseline(root)
+        assert_apple_runtime_baseline(root, &sdk.path)
     });
     assert_eq!(rust.version.as_deref(), versioned_name.to_str());
     assert_eq!(compiler.version, None);
-    assert_eq!(sdk.version.as_deref(), Some("26.5"));
+    assert!(sdk.version.is_some());
+    let apple_sdk = sdk.path.to_str().unwrap();
     let rust_token = rust.token.clone();
     let compiler_token = compiler.token.clone();
     let sdk_token = sdk.token.clone();
@@ -1193,7 +1192,7 @@ edition = "2021"
         args: vec![
             "-c".into(),
             format!(
-                "set -eu; if {{ IFS= read -r _; }} < '{APPLE_SDK}/SDKSettings.plist' 2>/dev/null; then exit 41; fi; if '{APPLE_COMPILER}/bin/clang' --version >/dev/null 2>&1; then exit 42; fi; printf 'unselected-apple-runtimes-denied\\n'"
+                "set -eu; if {{ IFS= read -r _; }} < '{apple_sdk}/SDKSettings.plist' 2>/dev/null; then exit 41; fi; if '{APPLE_COMPILER}/bin/clang' --version >/dev/null 2>&1; then exit 42; fi; printf 'unselected-apple-runtimes-denied\\n'"
             ),
         ],
         cwd: String::new(),

@@ -2232,10 +2232,10 @@ mod insert_rows_tests {
             terminal
         }
 
+        let answer = (1..=200)
+            .map(|line| format!("native answer {line:03}"))
+            .collect::<Vec<_>>();
         for width in [65, 40] {
-            let answer = (1..=200)
-                .map(|line| format!("native answer {line:03}"))
-                .collect::<Vec<_>>();
             let mut terminal = fixture(80, 24, &answer);
             let before = text_rows(terminal.backend().scrollback())
                 .into_iter()
@@ -2267,6 +2267,53 @@ mod insert_rows_tests {
                 assert!(rows.iter().all(|row| !row.contains("stale composer")));
             }
         }
+
+        let mut height_shrunk = fixture(80, 24, &answer);
+        let cursor = height_shrunk.backend().cursor_position();
+        height_shrunk.backend_mut().resize(80, 20);
+        height_shrunk
+            .backend_mut()
+            .set_cursor_position((cursor.x, cursor.y.min(19)))
+            .unwrap();
+        let before = text_rows(height_shrunk.backend().scrollback())
+            .into_iter()
+            .chain(text_rows(height_shrunk.backend().buffer()))
+            .filter(|row| row.starts_with("native answer "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            before, answer,
+            "transcript survives backend 24-to-20 resize"
+        );
+        resize_classic(&mut height_shrunk, 2, || TestBackend::new(1, 1)).unwrap();
+        let rows = text_rows(height_shrunk.backend().scrollback())
+            .into_iter()
+            .chain(text_rows(height_shrunk.backend().buffer()))
+            .collect::<Vec<_>>();
+        let actual = rows
+            .iter()
+            .filter(|row| row.starts_with("native answer "))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(actual, answer, "native transcript after height-only shrink");
+
+        let mut short = fixture(80, 8, &answer);
+        assert_eq!(short.get_frame().area().height, 8);
+        short.backend_mut().resize(80, 24);
+        resize_classic(&mut short, 2, || TestBackend::new(1, 1)).unwrap();
+        assert_eq!(short.get_frame().area().height, 12);
+        let rows = text_rows(short.backend().scrollback())
+            .into_iter()
+            .chain(text_rows(short.backend().buffer()))
+            .collect::<Vec<_>>();
+        let actual = rows
+            .iter()
+            .filter(|row| row.starts_with("native answer "))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual, answer,
+            "native transcript after short-screen recovery"
+        );
     }
 
     struct Sink(Rc<RefCell<Vec<u8>>>);

@@ -48,7 +48,7 @@ core-foundation.workspace = true
 security-framework.workspace = true
 
 [target.'cfg(target_os = "macos")'.build-dependencies]
-cc = "=1.5.1"
+cc.workspace = true
 
 [dev-dependencies]
 arany = { path = ".", features = ["test-support"] }

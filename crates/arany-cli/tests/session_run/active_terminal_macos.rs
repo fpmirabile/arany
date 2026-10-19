@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn own_terminal(command: &mut Command) {
+pub(super) fn own_terminal(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     // The child has an admitted PTY on fd 0; only async-signal-safe syscalls run before exec.
     unsafe {

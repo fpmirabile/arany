@@ -740,11 +740,12 @@ fn system_executable(file: std::fs::File) -> bool {
     use std::os::unix::fs::MetadataExt;
 
     file.metadata().is_ok_and(|metadata| {
-        metadata.is_file()
-            && metadata.uid() == 0
-            && metadata.nlink() == 1
-            && metadata.mode() & 0o6022 == 0
-            && metadata.mode() & 0o111 != 0
+        fs::macos_system_file(
+            metadata.is_file(),
+            metadata.uid(),
+            metadata.nlink(),
+            metadata.mode(),
+        ) && metadata.mode() & 0o111 != 0
     })
 }
 

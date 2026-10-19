@@ -16,6 +16,7 @@ aws-lc-rs = { version = "=1.18.1", default-features = false }
 base64 = { version = "=0.23.1", default-features = false, features = ["alloc"] }
 cap-fs-ext = { version = "4.0.3", default-features = false, features = ["std"] }
 cap-std = { version = "4.0.3", default-features = false }
+cc = "=1.5.1"
 clap = { version = "4.6.7", features = ["derive"] }
 crossterm = { version = "=0.29.0", default-features = false, features = [
   "events",
