@@ -1,3 +1,6 @@
+pub(crate) mod corpus;
+pub use corpus::{CorpusError, export_corpus};
+
 use crate::session::worker::{WorkerBaseVersion, WorkerDataFacts, WorkerDataPurpose};
 use crate::session::{AgentRunId, Event, EventEnvelope, ReplayError, RunId, RunView, SessionView};
 use crate::tools::types::CommandResult;

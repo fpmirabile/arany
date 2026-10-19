@@ -273,7 +273,7 @@ fn append_in_transaction(
     ) {
         let mut candidate = existing.ok_or(StoreError::InvalidHistory)?;
         candidate.push(envelope.clone());
-        prior_view = replay_through(transaction, session_id, &candidate, 0, &mut 0, false)?;
+        prior_view = replay_through(transaction, session_id, &candidate, 0, &mut 0, false, None)?;
     } else if let Some(view) = &mut prior_view {
         view.apply_committed(&envelope)?;
         if matches!(envelope.event, Event::RunStarted { .. }) {

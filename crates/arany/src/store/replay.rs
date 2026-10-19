@@ -384,6 +384,7 @@ fn resolve_view_with_mode(
         depth,
         total_events,
         close_history,
+        None,
     )?;
     Ok((events, view))
 }
@@ -395,6 +396,7 @@ pub(super) fn replay_through(
     depth: usize,
     total_events: &mut usize,
     close_history: bool,
+    corpus: Option<&mut crate::supervisor::corpus::Corpus>,
 ) -> Result<Option<SessionView>, StoreError> {
     let lineage = match events.first().map(|envelope| &envelope.event) {
         Some(Event::SessionForked {
@@ -410,7 +412,9 @@ pub(super) fn replay_through(
             prefix_digest: *prefix_digest,
         },
         _ => {
-            let view = if close_history {
+            let view = if let Some(corpus) = corpus {
+                SessionView::replay_for_corpus(session_id, events, None, corpus)?
+            } else if close_history {
                 SessionView::replay(session_id, events)?
             } else {
                 SessionView::replay_open(session_id, events)?
@@ -422,8 +426,12 @@ pub(super) fn replay_through(
         }
     };
     let (inherited, source) = fork_projection(connection, lineage, depth, total_events)?;
-    let mut view = SessionView::replay_forked(session_id, events, close_history, &inherited)?
-        .ok_or(StoreError::InvalidHistory)?;
+    let mut view = if let Some(corpus) = corpus {
+        SessionView::replay_for_corpus(session_id, events, Some(&inherited), corpus)?
+    } else {
+        SessionView::replay_forked(session_id, events, close_history, &inherited)?
+    }
+    .ok_or(StoreError::InvalidHistory)?;
     if view
         .workspace_identity
         .is_some_and(|identity| Some(identity) != source.workspace_identity)
@@ -478,6 +486,7 @@ fn fork_projection(
         depth + 1,
         total_events,
         false,
+        None,
     )?
     .ok_or(StoreError::InvalidHistory)?;
     let inherited = ForkInheritance {
@@ -595,4 +604,27 @@ fn scan_all_events(
         })?;
     }
     Ok(())
+}
+
+pub(super) fn supervisor_corpus(
+    connection: &Connection,
+    session_id: SessionId,
+) -> Result<String, crate::supervisor::CorpusError> {
+    let events = load_session_events(connection, session_id)?;
+    let mut total = events.len();
+    if total > MAX_SESSION_EVENTS {
+        return Err(StoreError::ReplayLimit.into());
+    }
+    let mut corpus = crate::supervisor::corpus::Corpus::new()?;
+    let view = replay_through(
+        connection,
+        session_id,
+        &events,
+        0,
+        &mut total,
+        true,
+        Some(&mut corpus),
+    )?
+    .ok_or(crate::supervisor::CorpusError::NotFound)?;
+    corpus.finish(&view, &events)
 }
