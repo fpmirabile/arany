@@ -347,6 +347,7 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
         .into_iter()
         .filter(|(_, slots)| *slots <= MAX_ACTION_SLOTS)
         .collect();
+    assert!(!admissions.is_empty(), "the Store recorded no admissions");
     let first = admissions.iter().map(|(count, _)| *count).min();
     for (position, envelope) in events.iter().enumerate() {
         let admitted_elsewhere = matches!(

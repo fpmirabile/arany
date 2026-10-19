@@ -59,8 +59,6 @@ impl TeamProvider {
             paths: vec!["notes".into()],
             commands: if matches!(self.case, "command" | "worker_command") {
                 vec!["verify".into()]
-            } else if self.case == "primary_command_denial" {
-                vec!["sh".into()]
             } else {
                 Vec::new()
             },
@@ -82,8 +80,6 @@ impl TeamProvider {
         let digest = serde_json::from_value(catalog["agents"][0]["digest"].clone()).unwrap();
         let count = if matches!(self.case, "cap" | "hard_cap") {
             8
-        } else if self.case == "primary_command_denial" {
-            6
         } else if matches!(self.case, "waves" | "reassign" | "resume_id") {
             1
         } else {
@@ -112,8 +108,6 @@ impl TeamProvider {
                     editor: Some(Box::new(EditorAssignment {
                         commands: if self.case == "worker_command" {
                             vec!["verify".into()]
-                        } else if self.case == "primary_command_denial" {
-                            vec!["sh".into()]
                         } else {
                             Vec::new()
                         },
@@ -139,7 +133,6 @@ impl TeamProvider {
                                 | "budget_calls"
                                 | "primary_time"
                                 | "primary_denial"
-                                | "primary_command_denial"
                                 | "cancel_background"
                         ) {
                             WorkerMode::Background
@@ -193,21 +186,13 @@ impl TeamProvider {
             .unwrap()
             .parse::<usize>()
             .unwrap();
-        let step = if matches!(self.case, "worker_command" | "primary_command_denial") {
+        let step = if self.case == "worker_command" {
             if step == 0 {
                 return Ok(tool_outcome(
-                    if self.case == "worker_command" {
-                        ToolCall::Command {
-                            program: "verify".into(),
-                            args: Vec::new(),
-                            cwd: ".".into(),
-                        }
-                    } else {
-                        ToolCall::Command {
-                            program: "sh".into(),
-                            args: vec!["-c".into(), "sleep 3".into()],
-                            cwd: ".".into(),
-                        }
+                    ToolCall::Command {
+                        program: "verify".into(),
+                        args: Vec::new(),
+                        cwd: ".".into(),
                     },
                     None,
                 ));
@@ -336,12 +321,7 @@ impl TeamProvider {
                 .as_array()
                 .is_some_and(|p| !p.is_empty());
         let mut stale = self.stale.lock().unwrap();
-        let denial_at = if self.case == "primary_command_denial" {
-            5
-        } else {
-            1
-        };
-        if pending && prior != denial_at {
+        if pending && prior != 1 {
             *stale = observations.len() + 1;
             return tool_outcome(Self::read("notes/0"), None);
         }
@@ -358,8 +338,7 @@ impl TeamProvider {
                 | "budget_calls"
                 | "primary_time"
                 | "primary_denial"
-                | "primary_command_denial"
-        ) && prior == denial_at
+        ) && prior == 1
         {
             return tool_outcome(
                 if self.case == "command" {
@@ -488,9 +467,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     }
     let state = directory.path().join("state");
     let root = StateRoot::admit(&state).unwrap();
-    let commands = if case.starts_with("hook_")
-        || matches!(case, "order_hooks" | "primary_command_denial")
-    {
+    let commands = if case.starts_with("hook_") || case == "order_hooks" {
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
         serde_json::json!([{"name":"sh", "executable":shell, "sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}])
     } else if matches!(case, "command" | "worker_command") {
@@ -508,7 +485,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     std::fs::create_dir(state.join("agents")).unwrap();
     std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(state.join("agents/editor.md"), "---\nname: editor\ndescription: Edit one leased file\ntools: Read, Write\npermissionMode: acceptEdits\nisolation: worktree\n---\nKeep edits private.\n").unwrap();
-    if matches!(case, "worker_command" | "primary_command_denial") {
+    if case == "worker_command" {
         std::fs::write(state.join("agents/editor.md"), "---\nname: editor\ndescription: Edit one leased file\ntools: Read, Write, Bash\npermissionMode: acceptEdits\nisolation: worktree\n---\nKeep edits private.\n").unwrap();
     }
     if case == "background" {
@@ -552,7 +529,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         root,
         EngineConfig {
             guard_executable: Some(guard.into()),
-            worker_concurrency: matches!(case, "hard_cap" | "primary_command_denial").then_some(8),
+            worker_concurrency: (case == "hard_cap").then_some(8),
             ..Default::default()
         },
     )
@@ -581,9 +558,9 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     });
     let mut input = request(&workspace, "Edit independent notes");
     input.include_paths.clear();
-    input.policy = if matches!(case, "primary_denial" | "primary_command_denial") {
+    input.policy = if case == "primary_denial" {
         CollaborationPolicy::Auto {
-            max_active_children: if case == "primary_denial" { 3 } else { 8 },
+            max_active_children: 3,
         }
     } else {
         CollaborationPolicy::Team {
@@ -627,7 +604,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         tokio::select! {
             result = &mut handle.result => break result,
             Some(approval) = inbox.next() => {
-                let allow = !(matches!(case, "primary_denial" | "primary_command_denial") && matches!(&approval.intent.call, ToolCall::Write { path, .. } if path == "notes/free"));
+                let allow = !(case == "primary_denial" && matches!(&approval.intent.call, ToolCall::Write { path, .. } if path == "notes/free"));
                 approval.decide(allow);
             },
             Some(index) = arrivals.recv() => {
@@ -645,7 +622,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                     if case.starts_with("cancel_") { cancellation.cancel(); }
                     else if case == "c1_failure" { provider.gates[7].add_permits(1); }
                     else if case == "failure" { provider.gates[0].add_permits(1); }
-                    else if matches!(case, "primary_denial" | "primary_command_denial") {}
+                    else if case == "primary_denial" {}
                     else if matches!(case, "background" | "command" | "leased_edit" | "defer_finish" | "budget_calls" | "primary_time") { if primary_seen { for gate in &provider.gates { gate.add_permits(1); } } }
                     else { provider.gates[1].add_permits(1); if case == "mixed" { provider.gates[7].add_permits(1); } }
                 }
@@ -727,7 +704,6 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             | "budget_calls"
             | "primary_time"
             | "primary_denial"
-            | "primary_command_denial"
             | "turn_limit"
             | "resume_unknown"
     );
@@ -751,12 +727,8 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             .all(|a| a.status != AgentStatus::Active
                 && a.assignment.as_ref().is_none_or(|w| w.released.is_some()))
     );
-    if matches!(case, "primary_denial" | "primary_command_denial") {
-        assert_eq!(
-            run.agents.len(),
-            if case == "primary_denial" { 3 } else { 7 },
-            "primary and its in-flight editors"
-        );
+    if case == "primary_denial" {
+        assert_eq!(run.agents.len(), 3, "primary and two in-flight editors");
         assert_eq!(run.failure, Some(RunFailure::ToolStopped));
         for editor in run.agents.iter().skip(1) {
             let outcome = &editor
