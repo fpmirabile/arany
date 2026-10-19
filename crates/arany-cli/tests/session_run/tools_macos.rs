@@ -375,7 +375,9 @@ fn native_journey_with_rust_sysroot(helper: &str, rust_sysroot: Option<&Path>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().unwrap();
     let fixture_root = if rust_sysroot.is_some() {
-        let root = temp.path().join("fixture root 'quoted'");
+        let root = std::fs::canonicalize(temp.path())
+            .expect("physical temporary root")
+            .join("fixture root 'quoted'");
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&root)

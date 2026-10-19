@@ -62,14 +62,8 @@ pub(super) fn configure_runtime_compat(
         return Err(ToolError::ChangedInput);
     }
     command.env("DYLD_INSERT_LIBRARIES", path);
-    if program.executable == "/bin/sh" && args.first().is_some_and(|arg| arg == "-c") {
-        let text = args.get_mut(1).ok_or(ToolError::Configuration)?;
-        *text = format!(
-            "export DYLD_INSERT_LIBRARIES='{}'\n{}",
-            path.replace('\'', "'\\''"),
-            text.to_str().ok_or(ToolError::Path)?,
-        )
-        .into();
+    if program.executable == "/bin/sh" {
+        super::prefix_shell_runtime_compat(args, path)?;
     }
     Ok(())
 }
@@ -252,7 +246,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-workspace-grant");
-    bytes.extend_from_slice(b";runtime-compat-v1:public-vm-page-size-sysconf-getpagesize;non-page-sysconf-forward;fixed-cleared-dyld-env;known-pinned-sh-c-fixed-quoted-export;no-sysctl-policy-exception;read-only-nofollow-exact-bytes;128KiB-runtime-budget");
+    bytes.extend_from_slice(b";runtime-compat-v1:public-vm-page-size-sysconf-getpagesize;non-page-sysconf-forward;fixed-cleared-dyld-env;known-pinned-sh-c-fixed-quoted-export-reject-option-script-position;no-sysctl-policy-exception;read-only-nofollow-exact-bytes;128KiB-runtime-budget");
     bytes.extend_from_slice(RUNTIME_COMPAT_BYTES);
     bytes.extend_from_slice(include_bytes!("macos/runtime_compat.c"));
     bytes.extend_from_slice(include_bytes!(concat!(

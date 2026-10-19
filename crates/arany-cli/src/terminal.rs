@@ -2160,12 +2160,12 @@ mod insert_rows_tests {
     use super::{insert_rows_scrolling_screen, resize_classic};
     use ratatui::{
         Terminal, TerminalOptions, Viewport,
-        backend::{Backend, CrosstermBackend, TestBackend},
-        buffer::Buffer,
-        layout::Rect,
+        backend::{Backend, ClearType, CrosstermBackend, TestBackend, WindowSize},
+        buffer::{Buffer, Cell},
+        layout::{Position, Rect, Size},
         text::Line,
     };
-    use std::{cell::RefCell, io, rc::Rc};
+    use std::{cell::Cell as StateCell, cell::RefCell, io, rc::Rc};
 
     fn text_rows(buffer: &Buffer) -> Vec<String> {
         (0..buffer.area.height)
@@ -2306,6 +2306,138 @@ mod insert_rows_tests {
             actual, answer,
             "native transcript after short-screen recovery"
         );
+    }
+
+    #[derive(Clone, Copy)]
+    enum ResizeFailure {
+        Construction,
+        Clear,
+    }
+
+    struct FailingResizeBackend {
+        inner: TestBackend,
+        shown: Rc<StateCell<bool>>,
+        failure: Option<ResizeFailure>,
+    }
+
+    impl Backend for FailingResizeBackend {
+        type Error = io::Error;
+
+        fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+        where
+            I: Iterator<Item = (u16, u16, &'a Cell)>,
+        {
+            self.inner.draw(content).unwrap();
+            Ok(())
+        }
+
+        fn append_lines(&mut self, count: u16) -> io::Result<()> {
+            self.inner.append_lines(count).unwrap();
+            Ok(())
+        }
+
+        fn hide_cursor(&mut self) -> io::Result<()> {
+            self.shown.set(false);
+            self.inner.hide_cursor().unwrap();
+            Ok(())
+        }
+
+        fn show_cursor(&mut self) -> io::Result<()> {
+            self.shown.set(true);
+            self.inner.show_cursor().unwrap();
+            Ok(())
+        }
+
+        fn get_cursor_position(&mut self) -> io::Result<Position> {
+            Ok(self.inner.get_cursor_position().unwrap())
+        }
+
+        fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+            self.inner.set_cursor_position(position).unwrap();
+            Ok(())
+        }
+
+        fn clear(&mut self) -> io::Result<()> {
+            self.clear_region(ClearType::All)
+        }
+
+        fn clear_region(&mut self, region: ClearType) -> io::Result<()> {
+            if self.shown.get() && matches!(self.failure, Some(ResizeFailure::Clear)) {
+                return Err(io::Error::other("resize clear"));
+            }
+            self.inner.clear_region(region).unwrap();
+            Ok(())
+        }
+
+        fn size(&self) -> io::Result<Size> {
+            if self.shown.get() && matches!(self.failure, Some(ResizeFailure::Construction)) {
+                return Err(io::Error::other("resize construction"));
+            }
+            Ok(self.inner.size().unwrap())
+        }
+
+        fn window_size(&mut self) -> io::Result<WindowSize> {
+            Ok(self.inner.window_size().unwrap())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.inner.flush().unwrap();
+            Ok(())
+        }
+
+        fn scroll_region_up(&mut self, region: std::ops::Range<u16>, count: u16) -> io::Result<()> {
+            self.inner.scroll_region_up(region, count).unwrap();
+            Ok(())
+        }
+
+        fn scroll_region_down(
+            &mut self,
+            region: std::ops::Range<u16>,
+            count: u16,
+        ) -> io::Result<()> {
+            self.inner.scroll_region_down(region, count).unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn classic_resize_failure_retains_detached_backend_and_previous_viewport() {
+        for (failure, message) in [
+            (ResizeFailure::Construction, "resize construction"),
+            (ResizeFailure::Clear, "resize clear"),
+        ] {
+            let shown = Rc::new(StateCell::new(false));
+            let mut terminal = Terminal::with_options(
+                FailingResizeBackend {
+                    inner: TestBackend::new(80, 24),
+                    shown: Rc::clone(&shown),
+                    failure: None,
+                },
+                TerminalOptions {
+                    viewport: Viewport::Inline(12),
+                },
+            )
+            .unwrap();
+            terminal.hide_cursor().unwrap();
+            let viewport = terminal.get_frame().area();
+            terminal.backend_mut().inner.resize(40, 24);
+            terminal.backend_mut().failure = Some(failure);
+            let error = resize_classic(&mut terminal, 0, || FailingResizeBackend {
+                inner: TestBackend::new(1, 1),
+                shown: Rc::new(StateCell::new(false)),
+                failure: None,
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), message);
+            assert!(shown.get(), "original backend cursor shown before swap");
+            assert_eq!(terminal.backend().size().unwrap(), Size::new(1, 1));
+            assert_eq!(terminal.get_frame().area(), viewport);
+            terminal.show_cursor().unwrap();
+            assert!(
+                shown.get(),
+                "detached cleanup preserves the original cursor"
+            );
+        }
     }
 
     struct Sink(Rc<RefCell<Vec<u8>>>);

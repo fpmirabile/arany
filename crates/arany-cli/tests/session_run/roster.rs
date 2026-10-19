@@ -290,7 +290,6 @@ fn attached_leg_macos(
     use std::{
         io::Write,
         str::FromStr,
-        thread,
         time::{Duration, Instant},
     };
 
@@ -335,19 +334,9 @@ fn attached_leg_macos(
     let mut transcript = Vec::new();
     let mut stdout_bytes = Vec::new();
     let mut consent_declined = false;
-    let deadline = Instant::now() + Duration::from_secs(120);
-    fn transcript_tail(bytes: &[u8]) -> String {
-        let end = bytes.len().min(4096);
-        let start = bytes.len().saturating_sub(2048).max(end);
-        let mut bounded = bytes[..end].to_vec();
-        if start < bytes.len() {
-            bounded.extend_from_slice(&bytes[start..]);
-        }
-        String::from_utf8_lossy(&bounded)
-            .chars()
-            .flat_map(char::escape_default)
-            .collect()
-    }
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(120);
+    let mut first_byte = None;
     fn normalized_lines(bytes: &[u8]) -> Vec<u8> {
         bytes
             .iter()
@@ -359,15 +348,24 @@ fn attached_leg_macos(
     }
     let mut pump = |input: &mut std::fs::File, transcript: &mut Vec<u8>| {
         drain_attached_output(&mut master, transcript, "attached PTY transcript");
+        if first_byte.is_none() && !transcript.is_empty() {
+            first_byte = Some(Instant::now());
+        }
         drain_attached_output(&mut output, &mut stdout_bytes, "attached stdout");
         assert!(stdout_bytes.is_empty(), "attached roster writes to stdout");
         crate::process::decline_workspace_consent(input, transcript, &mut consent_declined);
         assert!(
             Instant::now() < deadline,
-            "attached roster journey stalled: {}",
-            transcript_tail(transcript)
+            "{}",
+            crate::process::terminal_wait_report(
+                "attached roster journey stalled",
+                started,
+                first_byte,
+                transcript,
+                child.child().try_wait().unwrap(),
+            )
         );
-        thread::yield_now();
+        crate::process::wait_readable(&master);
     };
     for (needle, send) in [
         (&b"Input:"[..], &b"/agents team 1\r"[..]),
@@ -423,7 +421,7 @@ fn attached_leg_macos(
             Instant::now() < stdout_deadline,
             "attached stdout did not close"
         );
-        thread::yield_now();
+        crate::process::wait_readable(&output);
     }
     assert!(
         stdout_bytes.is_empty(),

@@ -430,16 +430,19 @@ fn saturated_collector_keeps_span_end_bounded() {
     let mut peak_rss_kib = idle_rss_kib;
     let mut span_end_us = Vec::with_capacity(OFFERED_SPANS);
     let started = Instant::now();
+    let mut rss_elapsed = Duration::ZERO;
     for index in 0..OFFERED_SPANS / 2 {
         let segment = marked_segment(&telemetry);
         let end_started = Instant::now();
         segment.finish(RunDisposition::Finished, None);
         span_end_us.push(end_started.elapsed().as_micros());
         if index % 32 == 31 {
+            let rss_started = Instant::now();
             peak_rss_kib = peak_rss_kib.max(rss_kib());
+            rss_elapsed += rss_started.elapsed();
         }
     }
-    let offer_elapsed = started.elapsed();
+    let offer_elapsed = started.elapsed().saturating_sub(rss_elapsed);
     release_tx.send(()).expect("release Collector response");
     collector.join().expect("Collector thread");
     let shutdown_started = Instant::now();

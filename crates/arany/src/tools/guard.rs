@@ -1858,6 +1858,28 @@ pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, To
     Ok(paths.join(":"))
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn prefix_shell_runtime_compat(
+    args: &mut [std::ffi::OsString],
+    path: &str,
+) -> Result<(), ToolError> {
+    if !args.first().is_some_and(|arg| arg == "-c") {
+        return Ok(());
+    }
+    let script = args.get_mut(1).ok_or(ToolError::Configuration)?;
+    let text = script.to_str().ok_or(ToolError::Path)?;
+    // Shells parse options after -c; reject ambiguous script positions before changing argv.
+    if text.starts_with(['-', '+']) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    *script = format!(
+        "export DYLD_INSERT_LIBRARIES='{}'\n{text}",
+        path.replace('\'', "'\\''"),
+    )
+    .into();
+    Ok(())
+}
+
 pub(super) fn payload(
     program: &super::config::Program,
     args: &[String],
@@ -1955,6 +1977,49 @@ pub(super) fn payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_runtime_compat_preserves_script_position_and_rejects_options() {
+        use std::ffi::OsString;
+
+        let path = "/private/runtime 'quoted'/compat.dylib";
+        let script = "printf '%s\\n' \"$0\" \"$1\"";
+        for tail in [vec![], vec!["arg0"], vec!["arg0", "-e"]] {
+            let mut args: Vec<OsString> = ["-c", script]
+                .into_iter()
+                .chain(tail.iter().copied())
+                .map(OsString::from)
+                .collect();
+            let original = args.clone();
+            prefix_shell_runtime_compat(&mut args, path).unwrap();
+            assert_eq!(args[0], original[0]);
+            assert_eq!(args[2..], original[2..]);
+            assert_eq!(
+                args[1],
+                OsString::from(format!(
+                    "export DYLD_INSERT_LIBRARIES='/private/runtime '\\''quoted'\\''/compat.dylib'\n{script}"
+                ))
+            );
+        }
+        for option in ["--", "-e", "+e", "-", "+"] {
+            let mut args = ["-c", option, script].map(OsString::from);
+            let original = args.clone();
+            assert!(matches!(
+                prefix_shell_runtime_compat(&mut args, path),
+                Err(ToolError::ProtectionUnavailable)
+            ));
+            assert_eq!(args, original);
+        }
+        let mut missing = [OsString::from("-c")];
+        assert!(matches!(
+            prefix_shell_runtime_compat(&mut missing, path),
+            Err(ToolError::Configuration)
+        ));
+        let mut file = [OsString::from("script.sh"), OsString::from("-c")];
+        let original = file.clone();
+        prefix_shell_runtime_compat(&mut file, path).unwrap();
+        assert_eq!(file, original);
+    }
 
     #[test]
     fn agent_definition_guard_task_binds_snapshot_digest_and_closed_payload() {
