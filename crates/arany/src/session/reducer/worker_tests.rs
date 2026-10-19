@@ -4170,7 +4170,7 @@ fn worker_protocol_handover_requires_current_private_evidence_and_gate_is_bounde
 }
 
 #[test]
-fn worker_editor_grant_replays_only_with_unguarded_denied() {
+fn worker_child_unguarded_grant_can_only_narrow_explicit_parent_permission() {
     use crate::tools::UnguardedGrant::{Denied, HumanOnly};
     for parent in [Denied, HumanOnly] {
         for requested in [Denied, HumanOnly] {
@@ -4194,8 +4194,7 @@ fn worker_editor_grant_replays_only_with_unguarded_denied() {
             }
             assert_eq!(
                 SessionView::replay_open(f.session, &f.envelopes()).is_ok(),
-                requested == Denied,
-                "parent {parent:?} requested {requested:?}"
+                requested == Denied || parent == HumanOnly
             );
         }
     }
