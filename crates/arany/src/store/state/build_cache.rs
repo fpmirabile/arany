@@ -134,14 +134,14 @@ impl BuildCacheLease {
         let metadata = file.metadata()?;
         let mut hash = Sha256::new();
         hash.update(b"arany.build-cache.generation.v1");
+        for value in [metadata.dev(), metadata.ino(), metadata.len()] {
+            hash.update(value.to_le_bytes());
+        }
         for value in [
-            metadata.dev(),
-            metadata.ino(),
-            metadata.len(),
-            metadata.mtime() as u64,
-            metadata.mtime_nsec() as u64,
-            metadata.ctime() as u64,
-            metadata.ctime_nsec() as u64,
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
         ] {
             hash.update(value.to_le_bytes());
         }
@@ -395,17 +395,9 @@ impl Drop for BuildCacheLease {
 }
 
 impl StateRoot {
-    pub(crate) fn read_build_cache(
-        &self,
-        identity: BuildCacheIdentity,
-        archive_limit: u64,
-    ) -> Result<BuildCacheLease, StoreError> {
-        if archive_limit == 0
-            || archive_limit > MAX_ARCHIVE_BYTES
-            || !valid_identity_path(Path::new(&identity.path))
-            || identity.inode == 0
-        {
-            return Err(StoreError::InvalidBuildCache);
+    fn admit_identity(&self, identity: &BuildCacheIdentity) -> Result<(), StoreError> {
+        if !valid_identity_path(Path::new(&identity.path)) || identity.inode == 0 {
+            return Err(StoreError::InvalidStateDirectory);
         }
         let workspace = crate::private_fs::open_workspace_directory(Path::new(&identity.path))
             .map_err(StoreError::from)?;
@@ -414,6 +406,18 @@ impl StateRoot {
         if metadata.dev() != identity.device || metadata.ino() != identity.inode {
             return Err(StoreError::InvalidStateDirectory);
         }
+        Ok(())
+    }
+
+    pub(crate) fn read_build_cache(
+        &self,
+        identity: BuildCacheIdentity,
+        archive_limit: u64,
+    ) -> Result<BuildCacheLease, StoreError> {
+        if archive_limit == 0 || archive_limit > MAX_ARCHIVE_BYTES {
+            return Err(StoreError::InvalidBuildCache);
+        }
+        self.admit_identity(&identity)?;
         let dir = cache_directory(self, true)?;
         let token = identity.token();
         let _namespace = lock_file(&dir, NAMESPACE_LOCK, true)?;
@@ -524,17 +528,7 @@ impl StateRoot {
         {
             return Err(StoreError::InvalidBuildCache);
         }
-        if !valid_identity_path(Path::new(&identity.path)) || identity.inode == 0 {
-            return Err(StoreError::InvalidStateDirectory);
-        }
-        let workspace = crate::private_fs::open_workspace_directory(Path::new(&identity.path))
-            .map_err(StoreError::from)?;
-        self.ensure_outside_workspace(&workspace)?;
-        let workspace_metadata = workspace.dir_metadata()?;
-        if workspace_metadata.dev() != identity.device || workspace_metadata.ino() != identity.inode
-        {
-            return Err(StoreError::InvalidStateDirectory);
-        }
+        self.admit_identity(&identity)?;
         let dir = cache_directory(self, true)?;
         let token = identity.token();
         let _namespace = lock_file(&dir, NAMESPACE_LOCK, true)?;

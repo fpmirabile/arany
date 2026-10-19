@@ -671,7 +671,7 @@ fn collect_open(
     Ok(())
 }
 
-fn ignored_directory(name: &str) -> bool {
+pub(super) fn ignored_directory(name: &str) -> bool {
     matches!(name, "target" | "node_modules" | ".venv" | "venv")
 }
 

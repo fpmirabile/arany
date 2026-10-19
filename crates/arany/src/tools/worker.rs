@@ -257,7 +257,7 @@ pub(crate) struct View {
     process_enforcement_digest: [u8; 32],
     last_intent_digest: Option<[u8; 32]>,
     sealed: Option<WorkerDataRef>,
-    _cache: Option<crate::store::BuildCacheLease>,
+    cache_lease: Option<crate::store::BuildCacheLease>,
     cache_generation: Option<[u8; 32]>,
 }
 
@@ -301,6 +301,14 @@ impl View {
         let root = reads.root.as_ref();
         let image = fs::worker_image(root, &capture_paths(&grant))?;
         image.validate(&grant)?;
+        if grant.tools.contains(&WorkerTool::Command)
+            && image
+                .entries
+                .keys()
+                .any(|path| path.split('/').any(fs::ignored_directory))
+        {
+            return Err(ToolError::Path);
+        }
         let manifest = serde_json::to_vec(&image.manifest()).map_err(|_| ToolError::Operation)?;
         decode_data(&manifest, WorkerDataPurpose::Base).map_err(|_| ToolError::Limit)?;
         // A second bounded scan pins subtree membership as well as bytes and types.
@@ -325,7 +333,7 @@ impl View {
             process_enforcement_digest: runtime.process_enforcement_digest,
             last_intent_digest: None,
             sealed: None,
-            _cache: None,
+            cache_lease: None,
             cache_generation: None,
             retained_limit: 64 * 1024 * 1024,
             remaining_data: (data_bytes as usize)
@@ -379,7 +387,7 @@ impl View {
         runtime: &ToolRuntime,
         bytes: u64,
     ) -> Result<(), ToolError> {
-        if self.revision != 0 || self.last_intent_digest.is_some() || self._cache.is_some() {
+        if self.revision != 0 || self.last_intent_digest.is_some() || self.cache_lease.is_some() {
             return Err(ToolError::Configuration);
         }
         if bytes == 0 {
@@ -399,7 +407,7 @@ impl View {
             .read_build_cache(identity, bytes)
             .map_err(super::guard::map_cache_error)?;
         self.cache_generation = lease.generation().map_err(super::guard::map_cache_error)?;
-        self._cache = Some(lease);
+        self.cache_lease = Some(lease);
         Ok(())
     }
 
@@ -415,7 +423,7 @@ impl View {
             if !matches!(intent.call, ToolCall::Command { .. }) {
                 return Err(Box::new(denied(intent)));
             }
-            self.edit(runtime, intent, cancellation).await
+            self.dispatch(runtime, intent, cancellation).await
         })
     }
 
@@ -474,10 +482,22 @@ impl View {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> Result<Candidate, Box<ToolObservation>> {
+        if matches!(intent.call, ToolCall::Command { .. }) {
+            return Err(Box::new(denied(intent)));
+        }
+        self.dispatch(runtime, intent, cancellation).await
+    }
+
+    async fn dispatch(
+        &mut self,
+        runtime: &ToolRuntime,
+        intent: EffectIntent,
+        cancellation: Cancellation,
+    ) -> Result<Candidate, Box<ToolObservation>> {
         if self.check(&intent).is_err()
             || matches!(intent.call, ToolCall::Command { .. })
                 && intent.limits.cache_bytes > 0
-                && self._cache.is_none()
+                && self.cache_lease.is_none()
             || !(handover_call(&intent.call, self.assignment)
                 || matches!(
                     intent.call,
@@ -1647,6 +1667,57 @@ mod tests {
         assert_eq!(view.dispose().unwrap().revision, 2);
     }
 
+    #[test]
+    fn command_leases_refuse_paths_the_capture_omits() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("owned/target")).unwrap();
+        std::fs::write(dir.path().join("owned/target/mod.rs"), b"x").unwrap();
+        let runtime = runtime(dir.path());
+        let capture = |grant: WorkerGrant| {
+            View::capture(
+                &runtime,
+                crate::session::RunId::new(),
+                AgentRunId::new(),
+                grant,
+                WORKER_DATA_BYTES as u32,
+            )
+        };
+        assert!(capture(grant()).is_ok());
+        let mut command = grant();
+        command.commands = vec!["sh".into()];
+        command.tools.push(WorkerTool::Command);
+        assert!(matches!(capture(command), Err(ToolError::Path)));
+    }
+
+    #[tokio::test]
+    async fn edit_refuses_commands_even_when_the_grant_allows_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(dir.path());
+        let mut allowed = grant();
+        allowed.commands = vec!["sh".into()];
+        allowed.tools.push(WorkerTool::Command);
+        let mut view = View::capture(
+            &runtime,
+            crate::session::RunId::new(),
+            AgentRunId::new(),
+            allowed,
+            WORKER_DATA_BYTES as u32,
+        )
+        .unwrap();
+        let call = ToolCall::Command {
+            program: "sh".into(),
+            args: vec![],
+            cwd: ".".into(),
+        };
+        let refused = view
+            .edit(&runtime, intent(&runtime, &view, call), Cancellation::new())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(refused.disposition, ToolDisposition::Denied);
+        assert!(view.pending.is_none());
+    }
+
     #[tokio::test]
     async fn private_target_refuses_scope_identity_revision_and_model_admission_before_dispatch() {
         let (dir, runtime, mut view) = fixture();
@@ -1925,6 +1996,93 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn forged_guard_images_end_uncertain_and_stop_the_view() {
+        for case in ["outside_lease", "rejected_modified", "directory_to_file"] {
+            let (_dir, runtime, mut view) = fixture();
+            let intent = intent(
+                &runtime,
+                &view,
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: vec![],
+                    cwd: ".".into(),
+                },
+            );
+            let mut image = view.current.clone();
+            match case {
+                "outside_lease" => {
+                    image
+                        .entries
+                        .insert("sibling.txt".into(), Entry::file(b"forged", false));
+                }
+                "rejected_modified" => {
+                    image
+                        .entries
+                        .insert("owned/a".into(), Entry::file(b"forged", false));
+                }
+                _ => {
+                    image
+                        .entries
+                        .insert("owned".into(), Entry::file(b"x", false));
+                    image.entries.remove("owned/a");
+                }
+            }
+            let observation = ToolObservation {
+                intent: intent.clone(),
+                disposition: ToolDisposition::Succeeded,
+                output: serde_json::to_string(&WorkerCommandResult {
+                    exit_code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    private_capture: if case == "rejected_modified" {
+                        PrivateCapture::Rejected {
+                            cause: PrivateCaptureRejection::OutOfLease,
+                        }
+                    } else {
+                        PrivateCapture::None {}
+                    },
+                })
+                .unwrap(),
+                attestation: Some(Attestation::Guard(super::super::GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                })),
+                enforcement_cause: None,
+                cache_update: super::super::CacheUpdate::Discarded,
+            };
+            let action = Action {
+                transfer: Transfer {
+                    target: view.target(),
+                    grant: view.grant.clone(),
+                    bytes: 1,
+                    sha256: [1; 32],
+                },
+                input: vec![1].into(),
+                output: Mutex::new(Some(image.encode().unwrap())),
+                contained: std::sync::atomic::AtomicBool::new(true),
+            };
+            view.pending = Some(intent.id);
+            let refused = view
+                .receive_command(observation, &action)
+                .err()
+                .expect(case);
+            assert_eq!(refused.disposition, ToolDisposition::Uncertain, "{case}");
+            assert!(view.stopped, "{case}");
+            assert!(view.pending.is_none(), "{case}");
+            assert_eq!(view.revision, 0, "{case}");
+            assert!(view.handover().is_err(), "{case}");
+            let retried = view
+                .command(&runtime, intent.clone(), Cancellation::new())
+                .await
+                .err()
+                .expect(case);
+            assert_eq!(retried.disposition, ToolDisposition::Denied, "{case}");
         }
     }
 

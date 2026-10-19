@@ -1549,7 +1549,7 @@ fn send_result(
         observation.output = serde_json::to_string(&crate::session::worker::WorkerCommandResult {
             exit_code: None,
             stdout: String::new(),
-            stderr: observation.output,
+            stderr: String::new(),
             private_capture: crate::session::worker::PrivateCapture::None {},
         })
         .map_err(|_| ToolError::Operation)?;

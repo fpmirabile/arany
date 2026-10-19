@@ -363,8 +363,19 @@ pub async fn exercise_private_guard_command(
         cap_std::fs::Dir::open_ambient_dir(cache_source.path(), cap_std::ambient_authority())
             .unwrap();
     let mut archive = Vec::new();
+    #[cfg(target_os = "linux")]
     crate::store::capture_archive_with_limit(&directory, &identity, &[], &mut archive, 64 << 20)
         .unwrap();
+    #[cfg(target_os = "macos")]
+    crate::store::capture_archive_async_with_limit(
+        &directory,
+        &identity,
+        &[],
+        &mut archive,
+        64 << 20,
+    )
+    .await
+    .unwrap();
     let mut primary = state
         .begin_build_cache_with_limits(identity.clone(), 64 << 20, 64 << 20)
         .unwrap();
