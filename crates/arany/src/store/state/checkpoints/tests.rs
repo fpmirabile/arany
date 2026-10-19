@@ -450,6 +450,43 @@ fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_sessio
 }
 
 #[test]
+fn checkpoints_physical_quota_accepts_a_victim_covering_only_the_shortfall() {
+    let (_temp, root) = fixture();
+    let (session, goal, run) = (SessionId::new(), GoalId::new(), RunId::new());
+    let victim = vec![0; 50_000];
+    capture_inner(&root, &batch(session, goal, run, 1, &victim), 100, LIMITS).unwrap();
+    assert_eq!(count(&root, "PRAGMA freelist_count"), 0);
+    let shortfall = 32_774;
+    let needed = 3 + 16 * 4096;
+    let limits = Limits {
+        bytes: count(&root, "PRAGMA page_count") * 4096 + needed - shortfall,
+        ..LIMITS
+    };
+    assert!((shortfall..2 * shortfall).contains(&(victim.len() as i64)));
+    EVICTION_PASSES.set(0);
+    assert_eq!(
+        capture_inner(
+            &root,
+            &batch(session, goal, RunId::new(), 2, b"new"),
+            100,
+            limits,
+        )
+        .unwrap(),
+        Some(run)
+    );
+    assert_eq!(EVICTION_PASSES.get(), 2);
+    assert_eq!(count(&root, "SELECT COUNT(*) FROM refs"), 1);
+    assert_eq!(load(&root, Sha256::digest(&victim).into()).unwrap(), None);
+    assert_eq!(
+        load(&root, Sha256::digest(b"new").into())
+            .unwrap()
+            .as_deref(),
+        Some(b"new".as_slice())
+    );
+    assert!(count(&root, "PRAGMA page_count") * 4096 <= limits.bytes);
+}
+
+#[test]
 fn checkpoints_physical_quota_evicts_twice_the_shortfall_in_one_pass() {
     let (_temp, root) = fixture();
     let (session, goal, run) = (SessionId::new(), GoalId::new(), RunId::new());
