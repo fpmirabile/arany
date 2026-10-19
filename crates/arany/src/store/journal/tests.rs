@@ -1,4 +1,7 @@
-use super::super::replay::{BEFORE_DECODE, list_page_in_snapshot, list_session_page};
+use super::super::replay::{
+    BEFORE_DECODE, HEAD_FIRST_SQL, HEAD_TAIL_SQL, LANE_SQL, LINEAGE_COUNT_SQL, NEXT_HEAD_SQL,
+    WATERMARK_SQL, list_page_in_snapshot, list_session_page,
+};
 use super::*;
 use crate::session::WorkspaceIdentity;
 use crate::session::payload_version;
@@ -447,21 +450,28 @@ fn forged_rewind_workspace_identity_is_rejected_on_append_and_replay() {
 
 fn seed_session(
     connection: &mut Connection,
-    hot_session: &mut Option<HotSession>,
+    _hot_session: &mut Option<HotSession>,
     identity: WorkspaceIdentity,
     renames: usize,
 ) -> SessionId {
     let session_id = SessionId::new();
-    append(
-        connection,
-        hot_session,
-        session_id,
-        Event::SessionStarted {
-            title: "Session".into(),
-            workspace_identity: identity,
-        },
-    )
-    .expect("first Event");
+    let start = Event::SessionStarted {
+        title: "Session".into(),
+        workspace_identity: identity,
+    };
+    let start_payload = start.payload().expect("bounded Event payload");
+    connection
+        .execute(
+            "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
+             VALUES ((SELECT COALESCE(MAX(sequence), 0) + 1 FROM events), ?1, ?2, ?3, ?4, 0)",
+            params![
+                session_id.to_string(),
+                start.kind(),
+                start.version(),
+                start_payload
+            ],
+        )
+        .expect("first Event");
     let rename = Event::SessionRenamed { title: "x".into() };
     let payload = rename.payload().expect("bounded Event payload");
     let transaction = connection.transaction().expect("seed transaction");
@@ -726,4 +736,78 @@ fn fork_resolution_ignores_events_committed_after_the_watermark() {
     assert_eq!(page.items[0].last_sequence, tail as u64);
     let later = list_session_page(&reader, mine, None, 10, usize::MAX).expect("later page");
     assert_eq!(later.items.len(), 2);
+}
+
+#[test]
+fn every_listing_statement_is_an_index_seek_without_scan_or_temp_sort() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let connection = open_connection(&root, false).expect("file-backed store");
+    for (sql, arguments) in [
+        (WATERMARK_SQL, 0),
+        (NEXT_HEAD_SQL, 1),
+        (HEAD_TAIL_SQL, 2),
+        (HEAD_FIRST_SQL, 2),
+        (LINEAGE_COUNT_SQL, 2),
+        (LANE_SQL, 3),
+    ] {
+        let values = vec![rusqlite::types::Value::Integer(1); arguments];
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("plan");
+        let plan: Vec<String> = statement
+            .query_map(rusqlite::params_from_iter(values), |row| row.get(3))
+            .expect("plan rows")
+            .collect::<Result<_, _>>()
+            .expect("plan detail");
+        assert!(!plan.is_empty());
+        for detail in plan {
+            assert!(
+                detail.starts_with("SEARCH") && !detail.contains("TEMP B-TREE"),
+                "{sql}: {detail}"
+            );
+        }
+    }
+}
+
+#[test]
+fn full_listing_of_a_large_store_never_fails_a_concurrent_append() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let mut connection = open_connection(&root, false).expect("file-backed store");
+    let mut hot_session = None;
+    let mine = WorkspaceIdentity {
+        device: 1,
+        inode: 1,
+    };
+    let mut last = None;
+    for _ in 0..500 {
+        last = Some(seed_session(&mut connection, &mut hot_session, mine, 99));
+    }
+    let target = last.expect("seeded");
+    let reader = open_connection(&root, true).expect("read-only store");
+    let listing = std::thread::spawn(move || {
+        let mut after = None;
+        let mut seen = 0;
+        loop {
+            let page = list_session_page(&reader, mine, after, 100, usize::MAX).expect("page");
+            seen += page.items.len();
+            after = page.items.last().map(|item| (item.id, item.last_sequence));
+            if !page.more {
+                break seen;
+            }
+        }
+    });
+    for index in 0..40 {
+        append(
+            &mut connection,
+            &mut hot_session,
+            target,
+            Event::SessionRenamed {
+                title: format!("t{index}"),
+            },
+        )
+        .expect("append at the normal busy timeout never fails during a listing");
+    }
+    assert!(listing.join().expect("listing thread") >= 499);
 }

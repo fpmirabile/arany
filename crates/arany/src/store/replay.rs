@@ -5,7 +5,7 @@ use crate::session::{
     RunDisposition, RunId, SessionDefaults, SessionId, SessionListItem, SessionView,
     WorkspaceIdentity, prefix_digest, validate_compaction_references,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -14,6 +14,31 @@ const MAX_FORK_DEPTH: usize = 8;
 const MAX_DISCOVERED_SESSIONS: usize = 65_536;
 pub(super) const MAX_LIST_SCAN_EVENTS: usize = 262_144;
 const LIST_HEAD_CHUNK: usize = 1024;
+pub(super) const WATERMARK_SQL: &str = "SELECT COALESCE(MAX(sequence), 0) FROM events";
+pub(super) const NEXT_HEAD_SQL: &str =
+    "SELECT session_id FROM events WHERE session_id > ?1 ORDER BY session_id LIMIT 1";
+pub(super) const HEAD_TAIL_SQL: &str = "SELECT sequence FROM events
+     WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence DESC LIMIT 1";
+pub(super) const LINEAGE_COUNT_SQL: &str =
+    "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND sequence <= ?2";
+macro_rules! raw_select {
+    ($tail:literal) => {
+        concat!(
+            "SELECT sequence,
+                length(CAST(session_id AS BLOB)),
+                length(CAST(kind AS BLOB)),
+                length(CAST(payload AS BLOB)),
+                session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+         FROM events ",
+            $tail
+        )
+    };
+}
+pub(super) const HEAD_FIRST_SQL: &str =
+    raw_select!("WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence ASC LIMIT 1");
+pub(super) const LANE_SQL: &str = raw_select!(
+    "WHERE session_id = ?1 AND sequence > ?2 AND sequence <= ?3 ORDER BY sequence ASC LIMIT 256"
+);
 const LIST_EVENT_CHUNK: usize = 256;
 
 struct SessionHead {
@@ -100,49 +125,46 @@ pub(super) fn list_page_in_snapshot(
     mut budget: usize,
     after_ordering: impl FnOnce(),
 ) -> Result<SessionPage, StoreError> {
-    let watermark: i64 =
-        connection.query_row("SELECT COALESCE(MAX(sequence), 0) FROM events", [], |row| {
-            row.get(0)
-        })?;
+    let watermark: i64 = connection.query_row(WATERMARK_SQL, [], |row| row.get(0))?;
     let mut tails = HashMap::<SessionId, u64>::new();
     let mut roots = HashMap::<SessionId, (Option<WorkspaceIdentity>, Option<SessionId>)>::new();
+    let mut next_head = connection.prepare(NEXT_HEAD_SQL)?;
+    let mut head_tail = connection.prepare(HEAD_TAIL_SQL)?;
+    let mut head_first = connection.prepare(HEAD_FIRST_SQL)?;
     let mut last = String::new();
-    loop {
-        let mut found = Vec::<(String, i64)>::new();
-        {
-            let mut statement = connection.prepare(
-                "SELECT session_id, MAX(sequence) FROM events
-                 WHERE session_id > ?1 AND sequence <= ?2
-                 GROUP BY session_id ORDER BY session_id LIMIT ?3",
-            )?;
-            let mut rows =
-                statement.query(rusqlite::params![last, watermark, LIST_HEAD_CHUNK as i64])?;
-            while let Some(row) = rows.next()? {
-                found.push((row.get(0)?, row.get(1)?));
-            }
-        }
-        let mut firsts = Vec::with_capacity(found.len());
-        {
-            let mut first = connection.prepare(&format!(
-                "{RAW_COLUMNS} WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence LIMIT 1"
-            ))?;
-            for (raw_id, _) in &found {
-                firsts.push(
-                    first.query_row(rusqlite::params![raw_id, watermark], |row| {
-                        Ok(raw_row(row))
-                    })??,
-                );
-            }
+    let mut exhausted = false;
+    while !exhausted {
+        let mut batch = Vec::<(String, i64, RawRow)>::new();
+        while batch.len() < LIST_HEAD_CHUNK {
+            let Some(raw_id) = next_head
+                .query_row([&last], |row| row.get::<_, String>(0))
+                .optional()?
+            else {
+                exhausted = true;
+                break;
+            };
+            last.clone_from(&raw_id);
+            let Some(tail) = head_tail
+                .query_row(rusqlite::params![raw_id, watermark], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .optional()?
+            else {
+                continue;
+            };
+            let first = head_first
+                .query_row(rusqlite::params![raw_id, watermark], |row| Ok(raw_row(row)))??;
+            batch.push((raw_id, tail, first));
         }
         before_decode();
-        for ((raw_id, tail), raw) in found.iter().zip(firsts) {
+        for (raw_id, tail, raw) in batch {
             if tails.len() == MAX_DISCOVERED_SESSIONS {
                 return Err(StoreError::TooManySessions);
             }
-            let id = SessionId::from_str(raw_id).map_err(|_| StoreError::InvalidHistory)?;
+            let id = SessionId::from_str(&raw_id).map_err(|_| StoreError::InvalidHistory)?;
             tails.insert(
                 id,
-                u64::try_from(*tail).map_err(|_| StoreError::InvalidHistory)?,
+                u64::try_from(tail).map_err(|_| StoreError::InvalidHistory)?,
             );
             let envelope = raw.decode()?;
             let root = match envelope.event {
@@ -155,10 +177,6 @@ pub(super) fn list_page_in_snapshot(
                 _ => return Err(StoreError::InvalidHistory),
             };
             roots.insert(id, root);
-        }
-        match found.last() {
-            Some((raw_id, _)) if found.len() == LIST_HEAD_CHUNK => last.clone_from(raw_id),
-            _ => break,
         }
     }
     let lineage = |id: SessionId| -> Result<Vec<SessionId>, StoreError> {
@@ -261,7 +279,7 @@ fn lineage_event_count(
     let mut total = 0_usize;
     for &(id, tail) in bounded {
         let count: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND sequence <= ?2",
+            LINEAGE_COUNT_SQL,
             rusqlite::params![id.to_string(), tail as i64],
             |row| row.get(0),
         )?;
@@ -714,39 +732,52 @@ fn scan_events(
         }
         return Ok(());
     }
-    // Rows at or below a captured bound never change. Each chunk is fetched as raw
-    // bytes and its statement finishes before any decode, so no reader lock
-    // outlives a short indexed range read.
-    let bounds = vec!["(session_id = ? AND sequence <= ?)"; filter.len()].join(" OR ");
-    let mut statement = connection.prepare(&format!(
-        "{RAW_COLUMNS} WHERE sequence > ? AND ({bounds}) ORDER BY sequence LIMIT {LIST_EVENT_CHUNK}"
-    ))?;
-    let mut after = 0_i64;
+    // Rows at or below a captured bound never change. Each Session is a lane read by
+    // an index range seek; lanes merge here, so SQLite never sorts and no reader lock
+    // outlives a short range read of one lane chunk.
+    struct Lane {
+        id: String,
+        bound: i64,
+        after: i64,
+        rows: std::collections::VecDeque<RawRow>,
+        done: bool,
+    }
+    let mut lanes = filter
+        .iter()
+        .map(|(id, tail)| {
+            Ok(Lane {
+                id: id.to_string(),
+                bound: i64::try_from(*tail).map_err(|_| StoreError::InvalidHistory)?,
+                after: 0,
+                rows: std::collections::VecDeque::new(),
+                done: false,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let mut statement = connection.prepare(LANE_SQL)?;
     loop {
-        let mut values = vec![rusqlite::types::Value::Integer(after)];
-        for (id, tail) in filter {
-            values.push(id.to_string().into());
-            values.push(rusqlite::types::Value::Integer(
-                i64::try_from(*tail).map_err(|_| StoreError::InvalidHistory)?,
-            ));
-        }
-        let chunk = {
-            let mut rows = statement.query(rusqlite::params_from_iter(values))?;
-            let mut chunk = Vec::with_capacity(LIST_EVENT_CHUNK);
+        let mut fetched = false;
+        for lane in lanes.iter_mut().filter(|l| l.rows.is_empty() && !l.done) {
+            let mut rows = statement.query(rusqlite::params![lane.id, lane.after, lane.bound])?;
             while let Some(row) = rows.next()? {
-                chunk.push(raw_row(row)?);
+                lane.rows.push_back(raw_row(row)?);
             }
-            chunk
-        };
-        before_decode();
-        let count = chunk.len();
-        for raw in chunk {
-            after = raw.sequence;
-            on_event(raw.decode()?)?;
+            lane.done = lane.rows.len() < LIST_EVENT_CHUNK;
+            lane.after = lane.rows.back().map_or(lane.after, |raw| raw.sequence);
+            fetched = true;
         }
-        if count < LIST_EVENT_CHUNK {
+        if fetched {
+            before_decode();
+        }
+        let Some(lane) = lanes
+            .iter_mut()
+            .filter(|l| !l.rows.is_empty())
+            .min_by_key(|l| l.rows[0].sequence)
+        else {
             return Ok(());
-        }
+        };
+        let raw = lane.rows.pop_front().expect("non-empty lane");
+        on_event(raw.decode()?)?;
     }
 }
 
@@ -763,13 +794,6 @@ struct RawRow {
     payload: String,
     created_at_ms: i64,
 }
-
-const RAW_COLUMNS: &str = "SELECT sequence,
-                length(CAST(session_id AS BLOB)),
-                length(CAST(kind AS BLOB)),
-                length(CAST(payload AS BLOB)),
-                session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
-         FROM events";
 
 fn raw_row(row: &rusqlite::Row<'_>) -> Result<RawRow, StoreError> {
     let text = |index: usize| -> Result<String, StoreError> {
