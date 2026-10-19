@@ -196,7 +196,17 @@ async fn case(case: &str) {
         .rewind_preview(request(target.clone(), kept, overwrite))
         .await
         .unwrap();
-    if ["drift", "link", "special", "grant", "missing", "oversized", "case_alias"].contains(&case) {
+    if [
+        "drift",
+        "link",
+        "special",
+        "grant",
+        "missing",
+        "oversized",
+        "case_alias",
+    ]
+    .contains(&case)
+    {
         assert!(!preview.can_restore(), "{case}");
         let expected = match case {
             "drift" => RewindIssue::Drifted,
