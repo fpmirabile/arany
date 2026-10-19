@@ -16,6 +16,7 @@ pub const CAPABILITIES: &[&str] = &[
     "thread_fork_v1",
     "turn_steer_v1",
     "goal_pause_v1",
+    "thread_settings_update_v1",
 ];
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -149,6 +150,28 @@ pub enum PermissionMode {
     Default,
     AcceptEdits,
     Auto,
+}
+
+pub fn deserialize_permission_mode<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<PermissionMode, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    serde_json::from_value(Value::String(value)).map_err(D::Error::custom)
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadSettingsUpdateParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+    #[serde(deserialize_with = "deserialize_permission_mode")]
+    pub permission_mode: PermissionMode,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadSettingsUpdateResult {
+    pub permission_mode: PermissionMode,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]

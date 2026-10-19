@@ -31,6 +31,7 @@ pub(super) struct State {
 }
 
 struct Session {
+    mode: PermissionMode,
     sequence: u64,
     cwd: String,
 }
@@ -59,11 +60,17 @@ struct Active {
 
 enum Pending {
     Initialize(RequestId),
-    New(RequestId, String),
+    New(RequestId, String, PermissionMode),
     Load {
         id: RequestId,
         cwd: String,
         replay: bool,
+        mode: PermissionMode,
+    },
+    Mode {
+        id: RequestId,
+        session: SessionId,
+        config: bool,
     },
     Start,
     Interrupt,
@@ -270,7 +277,14 @@ pub(super) async fn input(
             notice_mcp(state, &params.mcp_servers);
             let cwd = params.cwd;
             let params = config.thread(cwd.clone());
-            send_request(state, serve, "thread/start", params, Pending::New(id, cwd)).await
+            send_request(
+                state,
+                serve,
+                "thread/start",
+                params,
+                Pending::New(id, cwd, config.permission_mode.clone()),
+            )
+            .await
         }
         "session/load" | "session/resume" => {
             let replay = request.method == "session/load";
@@ -290,18 +304,31 @@ pub(super) async fn input(
             if !params.additional_directories.is_empty() {
                 return immediate(output, invalid());
             }
-            if state
-                .lock()
-                .expect("translator state")
-                .active
-                .as_ref()
-                .is_some_and(|active| active.session == params.session_id)
-            {
+            let busy = {
+                let state = state.lock().expect("translator state");
+                state
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.session == params.session_id)
+                    || state.pending.values().any(|pending| {
+                        matches!(pending,
+                        Pending::Mode {session, ..} if *session == params.session_id)
+                    })
+            };
+            if busy {
                 return immediate(output, wire::error(Some(id), -32600, "Server busy", "busy"));
             }
             notice_mcp(state, &params.mcp_servers);
             let cwd = params.cwd;
-            let selection = config.thread(cwd.clone());
+            let mut selection = config.thread(cwd.clone());
+            let mode = state
+                .lock()
+                .expect("translator state")
+                .sessions
+                .get(&params.session_id)
+                .map(|session| session.mode.clone())
+                .unwrap_or_else(|| config.permission_mode.clone());
+            selection.permission_mode = Some(mode.clone());
             send_request(
                 state,
                 serve,
@@ -318,7 +345,57 @@ pub(super) async fn input(
                     permission_mode: selection.permission_mode,
                     include_paths: selection.include_paths,
                 },
-                Pending::Load { id, cwd, replay },
+                Pending::Load {
+                    id,
+                    cwd,
+                    replay,
+                    mode,
+                },
+            )
+            .await
+        }
+        "session/set_mode" | "session/set_config_option" => {
+            let config_option = request.method == "session/set_config_option";
+            let params = if config_option {
+                parse::<wire::SetConfigOption>(request.params).and_then(|p| {
+                    if p.config_id != "mode" || p.value_type.as_deref() == Some("boolean") {
+                        return Err(());
+                    }
+                    Ok(wire::SetMode {
+                        session_id: p.session_id,
+                        mode_id: p.value,
+                    })
+                })
+            } else {
+                parse::<wire::SetMode>(request.params)
+            };
+            let Ok(params) = params else {
+                return immediate(output, invalid());
+            };
+            if !state
+                .lock()
+                .expect("translator state")
+                .sessions
+                .contains_key(&params.session_id)
+            {
+                return immediate(
+                    output,
+                    wire::error(Some(id), -32002, "Session not found", "resource_not_found"),
+                );
+            }
+            send_request(
+                state,
+                serve,
+                "thread/settings/update",
+                ThreadSettingsUpdateParams {
+                    thread_id: params.session_id,
+                    permission_mode: params.mode_id,
+                },
+                Pending::Mode {
+                    id,
+                    session: params.session_id,
+                    config: config_option,
+                },
             )
             .await
         }
@@ -453,23 +530,37 @@ pub(super) async fn output(
                     Some(Pending::Initialize(id)) => {
                         emit(&outbound, wire::response(id, wire::initialized())).await?
                     }
-                    Some(Pending::New(id, cwd)) => {
+                    Some(Pending::New(id, cwd, mode)) => {
                         let result: ThreadResult = serde_json::from_value(reply.result)
                             .map_err(|_| "invalid serve thread")?;
                         {
                             let mut state = state.lock().expect("translator state");
-                            state
-                                .sessions
-                                .insert(result.thread.id, Session { sequence: 0, cwd });
+                            state.sessions.insert(
+                                result.thread.id,
+                                Session {
+                                    sequence: 0,
+                                    cwd,
+                                    mode: mode.clone(),
+                                },
+                            );
                             state.authenticated = true;
                         }
                         emit(
                             &outbound,
-                            wire::response(id, json!({"sessionId": result.thread.id})),
+                            wire::response(id, {
+                                let mut settings = wire::mode_state(&mode);
+                                settings["sessionId"] = json!(result.thread.id);
+                                settings
+                            }),
                         )
                         .await?;
                     }
-                    Some(Pending::Load { id, cwd, replay }) => {
+                    Some(Pending::Load {
+                        id,
+                        cwd,
+                        replay,
+                        mode,
+                    }) => {
                         let result: ThreadResumeResult = serde_json::from_value(reply.result)
                             .map_err(|_| "invalid serve history")?;
                         if replay {
@@ -479,12 +570,42 @@ pub(super) async fn output(
                         }
                         {
                             let mut state = state.lock().expect("translator state");
-                            state
-                                .sessions
-                                .insert(result.thread.id, Session { sequence: 0, cwd });
+                            state.sessions.insert(
+                                result.thread.id,
+                                Session {
+                                    sequence: 0,
+                                    cwd,
+                                    mode: mode.clone(),
+                                },
+                            );
                             state.authenticated = true;
                         }
-                        emit(&outbound, wire::response(id, json!({}))).await?;
+                        emit(&outbound, wire::response(id, wire::mode_state(&mode))).await?;
+                    }
+                    Some(Pending::Mode {
+                        id,
+                        session,
+                        config,
+                    }) => {
+                        let result: ThreadSettingsUpdateResult =
+                            serde_json::from_value(reply.result)
+                                .map_err(|_| "invalid serve settings")?;
+                        state
+                            .lock()
+                            .expect("translator state")
+                            .sessions
+                            .get_mut(&session)
+                            .ok_or("no loaded ACP Session")?
+                            .mode = result.permission_mode.clone();
+                        for update in wire::mode_updates(session, &result.permission_mode) {
+                            emit(&outbound, update).await?;
+                        }
+                        let result = if config {
+                            json!({"configOptions":wire::mode_state(&result.permission_mode)["configOptions"]})
+                        } else {
+                            json!({})
+                        };
+                        emit(&outbound, wire::response(id, result)).await?;
                     }
                     Some(Pending::Start) => {
                         let result: TurnResult = serde_json::from_value(reply.result)
@@ -601,7 +722,10 @@ pub(super) async fn output(
                 let pending = state.lock().expect("translator state").pending.remove(&id);
                 match pending {
                     Some(
-                        Pending::Initialize(id) | Pending::New(id, _) | Pending::Load { id, .. },
+                        Pending::Initialize(id)
+                        | Pending::New(id, ..)
+                        | Pending::Load { id, .. }
+                        | Pending::Mode { id, .. },
                     ) => emit(&outbound, remap(id, reply.error)).await?,
                     Some(Pending::Start) => {
                         let active = state
@@ -829,7 +953,7 @@ fn remap(id: RequestId, error: ErrorObject) -> Value {
     if error
         .data
         .as_ref()
-        .is_some_and(|d| d.reason == Reason::MissingSession)
+        .is_some_and(|d| matches!(d.reason, Reason::MissingSession | Reason::ThreadNotLoaded))
     {
         return wire::error(Some(id), -32002, "Session not found", "resource_not_found");
     }

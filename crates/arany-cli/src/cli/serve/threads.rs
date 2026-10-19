@@ -167,15 +167,12 @@ impl Threads {
             workspace,
             providers,
             grant,
-            approval_mode: match params
-                .permission_mode
-                .as_ref()
-                .unwrap_or(&PermissionMode::Default)
-            {
-                PermissionMode::Default => ApprovalMode::Request,
-                PermissionMode::AcceptEdits => ApprovalMode::AutoEdits,
-                PermissionMode::Auto => ApprovalMode::Auto,
-            },
+            approval_mode: approval_mode(
+                params
+                    .permission_mode
+                    .as_ref()
+                    .unwrap_or(&PermissionMode::Default),
+            ),
             include_paths,
             policy,
             goal_budget,
@@ -323,4 +320,12 @@ pub(super) async fn resume(
         .collect::<Result<_, Fault>>()?;
     let thread = thread(&view, created, &loaded.workspace);
     Ok((ThreadResumeResult { thread, turns }, loaded))
+}
+
+pub(super) fn approval_mode(mode: &PermissionMode) -> ApprovalMode {
+    match mode {
+        PermissionMode::Default => ApprovalMode::Request,
+        PermissionMode::AcceptEdits => ApprovalMode::AutoEdits,
+        PermissionMode::Auto => ApprovalMode::Auto,
+    }
 }

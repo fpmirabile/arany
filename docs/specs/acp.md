@@ -3,8 +3,8 @@
 ## Scope and related contracts
 
 This contract owns `arany acp`, an ACP v1 subprocess on stdio. The current
-surface includes core turns, guarded Tools, one-use permissions, rich prompts
-and stored Session loading/resumption.
+surface includes core turns, guarded Tools, one-use permissions, rich prompts,
+stored Session loading/resumption and live approval modes.
 [Serve](./serve.md) owns the shared Server loop, admission, committed projections, cancellation and shutdown;
 [Session](./session.md), [Goals](./goals.md), [execution](./execution.md) and
 [Tools](./tools.md) retain Engine policy. ACP translates the serve vocabulary;
@@ -17,7 +17,7 @@ journal-first truth and avoids chunks that cannot be retracted after a failed
 Provider validation. The hand-written wire subset is checked against the
 [pinned upstream v1 schema fixture](../../crates/arany-cli/tests/fixtures/acp/README.md).
 
-Audio, session discovery/closure, modes, model selection and
+Audio, session discovery/closure, model selection and
 Goal commands are unavailable. Their remaining slices belong to
 [NEXT_STEPS item 13](../../NEXT_STEPS.md#pursue-in-order). Unadvertised requests
 fail with method-not-found; unsupported prompt blocks fail invalid-params.
@@ -52,9 +52,11 @@ admission wait for Session new/load/resume. Authentication alone grants no Run a
 |---|---|---|
 | `initialize` | `{protocolVersion,clientInfo?,clientCapabilities?}` → `{protocolVersion:1,agentInfo,agentCapabilities,authMethods}` | First request; a repeat is `alreadyInitialized`. The client version is a u16 integer; unsupported integer versions negotiate down/up to 1, and the client disconnects if it cannot speak 1. Malformed versions fail `invalidParams`. Client info fields pass through serve's 256-byte checks. |
 | `authenticate` | `{methodId:"arany-setup"}` → `{}` | Re-probes credentials for the pinned selection without inference or Workspace admission. Exactly one agent auth method directs the user to `arany --setup` in a terminal. Missing credentials give `auth_required`; another method ID is invalid. No credential is accepted or returned. |
-| `session/new` | `{cwd,mcpServers,additionalDirectories?}` → `{sessionId}` | Maps to typed `thread/start` with the CLI tuple and CLI-pinned Tool opt-in. Absolute cwd, Workspace identity and State overlap use serve admission. Nonempty additional directories fail. Editor MCP servers are ignored with one fixed stderr notice per connection; no server is launched or contacted. Success commits Session creation before replying and counts toward serve's loaded-thread limit. |
-| `session/load` | `{sessionId,cwd,mcpServers,additionalDirectories?}` → `{}` | Maps to `thread/resume` with the same CLI-pinned execution settings as new, including Provider selection, collaboration policy, child limit and Tool opt-in. Revalidates the stored Session's Workspace identity, State separation and current roster/Provider admission. Replays bounded history as updates before replying. Unknown Sessions refuse; foreign Workspaces fail `workspaceMismatch`; active/locked Sessions fail `busy`/`sessionBusy`. |
-| `session/resume` | `{sessionId,cwd,mcpServers?,additionalDirectories?}` → `{}` | Same admission and history-size refusal as load, without history updates. A successful load or resume makes the Session available for subsequent prompts. No mode/config state is returned until modes are supported. |
+| `session/new` | `{cwd,mcpServers,additionalDirectories?}` → `{sessionId,modes,configOptions}` | Maps to typed `thread/start` with the CLI tuple and CLI-pinned Tool opt-in. Absolute cwd, Workspace identity and State overlap use serve admission. Nonempty additional directories fail. Editor MCP servers are ignored with one fixed stderr notice per connection; no server is launched or contacted. Success commits Session creation before replying and counts toward serve's loaded-thread limit. |
+| `session/load` | `{sessionId,cwd,mcpServers,additionalDirectories?}` → `{modes,configOptions}` | Maps to `thread/resume` with the same CLI-pinned execution settings as new, including Provider selection, collaboration policy, child limit and Tool opt-in. Revalidates the stored Session's Workspace identity, State separation and current roster/Provider admission. Replays bounded history as updates before replying. Unknown Sessions refuse; foreign Workspaces fail `workspaceMismatch`; active/locked Sessions fail `busy`/`sessionBusy`. |
+| `session/resume` | `{sessionId,cwd,mcpServers?,additionalDirectories?}` → `{modes,configOptions}` | Same admission and history-size refusal as load, without history updates. A successful load or resume makes the Session available for subsequent prompts. Returns the same synchronized mode state as new/load. |
+| `session/set_mode` | `{sessionId,modeId}` → `{}` | Requires a loaded Session; maps to serve `thread/settings/update`. Unsupported IDs fail invalid-params. Success queues both mode/config updates before replying. |
+| `session/set_config_option` | `{sessionId,configId:"mode",value,type?}` → `{configOptions}` | Same mode admission and settings update as set_mode. Returns the complete selector list. Only a string value from the advertised modes is accepted; boolean values/types and other config IDs refuse. |
 | `session/prompt` | `{sessionId,prompt:ContentBlock[]}` → `{stopReason}` | Requires available selection and a loaded Session. Converts bounded rich content as below. No URI is fetched, opened or turned into authority. Maps to `turn/start`, starting one ordinary Goal. One prompt per process; a concurrent prompt fails `busy`, without queueing or execution. |
 | `session/cancel` | Notification `{sessionId}` | Cancels that Session's active prompt through `turn/interrupt`. Before the turn ID arrives, cancellation is latched and forwarded once. Repeated/unknown cancellations do nothing. |
 | `$/cancel_request` | Notification `{requestId}` | Same cancellation when the ID names the active prompt; unknown IDs do nothing. |
@@ -65,6 +67,41 @@ terminal offers are ignored. Arany never sends `fs/*`, `terminal/*` or
 `elicitation/*`, and never connects editor-supplied MCP servers. Load/resume
 ignore editor MCP servers with the same once-per-connection notice as new and
 refuse nonempty additional directories.
+
+### Approval modes
+
+Following [ACP v1 config options](https://agentclientprotocol.com/protocol/v1/session-config-options)
+and Claude Code ACP's mode selector, new/load/resume return both `modes`
+(`currentModeId`, `availableModes`) and one `configOptions` entry with `id:"mode"`,
+`category:"mode"`, `type:"select"`, `currentValue` and flat `options`.
+Both surfaces offer exactly `default`, `acceptEdits` and `auto`, with the same
+IDs, order and labels. `--permission-mode` selects the initial value (default
+`default`); reloading a Session on the same connection keeps its current value.
+A new process uses its CLI starting value. These are connection settings, not
+replayed journal transitions or persisted changes to private configuration.
+
+Both setters go through serve's [settings update](./serve.md#methods).
+After success, `current_mode_update` and `config_option_update` (the complete
+selector list) precede the response, keeping either client UI synchronized.
+Failures send no mode/config update and retain the prior value. Reloading while
+that Session's mode change is awaiting acknowledgment returns `busy`, preventing
+stale settings from replacing a pending change. Changes during an active prompt
+use the next approval decision; a pending permission request is neither resolved
+nor withdrawn, its intent and expiry stay fixed, and its eventual one-use verdict
+is journaled normally.
+
+The [Tools mode composition](./tools.md#modes-and-approval-decisions) remains
+independent: a settings Ask or Deny cannot be widened by either setter. A mode
+changes approval handling only, never the CLI-admitted Tool grant. In particular,
+selecting `auto` cannot enable Tools without `--tools`, expand paths or commands,
+change Provider selection or budgets, or enable human-only approvals.
+Unlike Claude Code ACP's plan and optional bypass modes, `plan` and `dontAsk`
+remain private-settings-only and bypass is always refused. The fixed selector
+omits these modes to preserve the admitted authority and Arany's independent
+restrictions. Mode/config IDs are case-sensitive closed values; unknown and
+oversized strings fail invalid-params within the existing line bound. Select
+values accept an omitted `type`, `type:"id"`, or an unknown string discriminator
+with a string value, matching the pinned peer SDK's forward compatibility.
 
 ### Stored history and continuation
 
@@ -228,6 +265,7 @@ Shared bounds and their Engine behavior belong to [serve limits](./serve.md#limi
 | Sessions / active prompt | Serve's 64 / 1, with `threadLimit` / `busy`, no eviction. Restart is needed after capacity is exhausted until session closure ships. |
 | Prompt blocks / aggregate text after rich-content conversion | 64 / 64 KiB UTF-8, including mention/context syntax; excess or empty/whitespace-only text without images fails `invalidParams`. |
 | Images | [Serve](./serve.md#limits-and-compatibility) and [terminal](./terminal.md#paste-and-attachments) image limits; reject overflow without truncation. |
+| Mode selectors | One config selector and exactly three mode values; no client-supplied selector list is retained. Setters share the 62 client-request slots, 64 Sessions and line cap; invalid values refuse without changing state. |
 | Tool content / title | 64 KiB / 256 bytes of escaped text plus a Session-history truncation marker. Fences are longer than every contained backtick run. If the full line still exceeds the cap, optional raw input/output and locations are omitted and content becomes a history marker. |
 | Pending permissions | One, with serve's immutable intent deadline; oversize denies unsent. |
 | Oversized answer projection | Cut at a UTF-8 boundary to at most 128 KiB text plus `[truncated; see arany show SESSION_ID]`; worst-case JSON escaping still fits the line cap. Other oversized projections fail closed. |
@@ -249,6 +287,7 @@ State storage and all per-action resource limits remain unchanged.
 |---|---|---|
 | Core committed turn | Canonical transcript validates against pinned upstream v1 schema; update equals reopened MessageCommitted and precedes end_turn; durable RunFinished and reduced Session agree | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs), [golden](../../crates/arany-cli/tests/fixtures/acp/basic.jsonl) |
 | Negotiation and unavailable auth | Integer version negotiation, malformed versions, duplicate init, unknown auth method, unauthenticated prompt, unknown Session and unsupported method refusals | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
+| Approval modes | New/load/resume selectors and both update notifications agree; either setter changes both surfaces; unsupported/oversized modes, boolean config and unknown Sessions refuse; mid-turn switch retains a pending permission, changes the next approval, and cannot widen settings Ask | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs), including its native Guard journey for automatic edits |
 | Cancellation and capacity | Busy refusal runs no second prompt; session and request cancellation, pre-accept latch, EOF and stalled output produce bounded interruption without invented success | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Hostile input and recovery | Oversized/malformed lines recover; resource links remain literal mentions within block/UTF-8 bounds; relative cwd, additional directories, unsupported/oversized prompts and ambiguous envelopes refuse; offered fs/terminal and editor MCP never execute; EOF during recovery preserves the committed completion with incompleteUpdates | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Shipped command | TTY refusal, including with `--tools`, exits 2 before State; cleared credentials initialize successfully, auth/new fail auth_required, no Session, EOF exits 0 with empty stderr and schema-valid stdout | [Session process corpus](../../crates/arany-cli/tests/session_run.rs) |
