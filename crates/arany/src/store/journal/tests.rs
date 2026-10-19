@@ -443,3 +443,84 @@ fn forged_rewind_workspace_identity_is_rejected_on_append_and_replay() {
     let cold = open_connection(&root, true).unwrap();
     assert!(resolve_view(&cold, child, 0, &mut 0).is_err());
 }
+
+#[test]
+fn earlier_fork_revalidates_prepared_prefix_and_event_capacity_before_writing() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let mut connection = open_connection(&root, false).unwrap();
+    let f = crate::session::worker_protocol_fixture();
+    let mut hot = None;
+    for event in &f.events {
+        append(&mut connection, &mut hot, f.session, event.clone()).unwrap();
+    }
+    let (events, view) = resolve_view(&connection, f.session, 0, &mut 0).unwrap();
+    let sequence = view
+        .unwrap()
+        .runs
+        .last()
+        .unwrap()
+        .finished_sequence
+        .unwrap();
+    let boundary = prepare_fork(&mut connection, f.session, Some(sequence)).unwrap();
+    let count = || {
+        connection
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    let before = count();
+    connection
+        .execute(
+            "UPDATE events SET payload=json_set(payload, '$.title', 'Changed') WHERE sequence=?1",
+            [events[0].sequence as i64],
+        )
+        .unwrap();
+    assert!(matches!(
+        fork_at(&mut connection, boundary, "Refused".into()),
+        Err(StoreError::InvalidHistory)
+    ));
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        before
+    );
+    connection
+        .execute(
+            "UPDATE events SET payload=?1 WHERE sequence=?2",
+            params![
+                events[0].event.payload().unwrap(),
+                events[0].sequence as i64
+            ],
+        )
+        .unwrap();
+    let rename = Event::SessionRenamed {
+        title: "Capacity".into(),
+    };
+    let transaction = connection.transaction().unwrap();
+    for next in events.len() + 1..MAX_SESSION_EVENTS {
+        transaction.execute("INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![next as i64, f.session.to_string(), rename.kind(), rename.version(), rename.payload().unwrap()]).unwrap();
+    }
+    transaction.commit().unwrap();
+    assert_eq!(
+        prepare_fork(&mut connection, f.session, Some(sequence)).unwrap(),
+        boundary,
+        "exactly one fork Event fits"
+    );
+    append(&mut connection, &mut hot, f.session, rename).unwrap();
+    assert!(matches!(
+        prepare_fork(&mut connection, f.session, Some(sequence)),
+        Err(StoreError::ReplayLimit)
+    ));
+    assert!(matches!(
+        fork_at(&mut connection, boundary, "Refused".into()),
+        Err(StoreError::ReplayLimit)
+    ));
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        MAX_SESSION_EVENTS as i64
+    );
+}

@@ -1,7 +1,7 @@
 use super::replay::{MAX_SESSION_EVENTS, replay_through, resolve_open_view, resolve_view};
 use super::{DATABASE_FILE, MAX_DATABASE_BYTES, StateRoot, StoreError, event_payload_limit};
 use crate::session::{
-    CompactionStatus, Event, EventEnvelope, SessionId, SessionView, prefix_digest,
+    CompactionStatus, Event, EventEnvelope, ForkLineage, SessionId, SessionView, prefix_digest,
     validate_compaction_references,
 };
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, config::DbConfig, params};
@@ -33,8 +33,26 @@ pub(super) fn admit_operation(
     run_start: bool,
 ) -> Result<(), StoreError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    admit_in_transaction(
+        &transaction,
+        session_id,
+        event_slots,
+        tool_observations,
+        run_start,
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn admit_in_transaction(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    event_slots: usize,
+    tool_observations: usize,
+    run_start: bool,
+) -> Result<(), StoreError> {
     let mut count = 0;
-    resolve_open_view(&transaction, session_id, &mut count)?;
+    resolve_open_view(transaction, session_id, &mut count)?;
     if count
         .checked_add(event_slots)
         .is_none_or(|total| total > MAX_SESSION_EVENTS)
@@ -59,7 +77,6 @@ pub(super) fn admit_operation(
     {
         return Err(StoreError::StorageFull);
     }
-    transaction.commit()?;
     Ok(())
 }
 
@@ -327,48 +344,102 @@ fn bounded_payload_bytes(events: &[EventEnvelope]) -> Result<Option<usize>, Stor
     Ok(Some(bytes))
 }
 
+pub(super) fn prepare_fork(
+    connection: &mut Connection,
+    source_session_id: SessionId,
+    source_sequence: Option<u64>,
+) -> Result<ForkLineage, StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (mut events, view) = resolve_view(&transaction, source_session_id, 0, &mut 0)?;
+    let view = view.ok_or(StoreError::InvalidHistory)?;
+    let (owner, run_id, sequence) = if let Some(sequence) = source_sequence {
+        let run = view
+            .runs
+            .iter()
+            .find(|run| run.finished_sequence == Some(sequence))
+            .ok_or(StoreError::ForkNotAtRunBoundary)?;
+        let owner = super::replay::session_for_run(&transaction, run.id)?
+            .ok_or(StoreError::InvalidHistory)?;
+        if owner != source_session_id {
+            events = resolve_view(&transaction, owner, 0, &mut 0)?.0;
+        }
+        (owner, run.id, sequence)
+    } else {
+        let run = view
+            .runs
+            .last()
+            .filter(|run| run.status.is_outcome())
+            .ok_or(StoreError::ForkNotAtRunBoundary)?;
+        let sequence = events
+            .iter()
+            .rev()
+            .find_map(|envelope| match &envelope.event {
+                Event::RunFinished { run_id, .. }
+                | Event::SessionForked {
+                    source_run_id: run_id,
+                    ..
+                } if *run_id == run.id => Some(envelope.sequence),
+                _ => None,
+            })
+            .ok_or(StoreError::ForkNotAtRunBoundary)?;
+        (source_session_id, run.id, sequence)
+    };
+    let boundary = ForkLineage {
+        source_session_id: owner,
+        source_run_id: run_id,
+        source_sequence: sequence,
+        prefix_digest: prefix_digest(&events, sequence)?,
+    };
+    validate_fork(&transaction, boundary)?;
+    transaction.commit()?;
+    Ok(boundary)
+}
+
+fn validate_fork(transaction: &Transaction<'_>, boundary: ForkLineage) -> Result<(), StoreError> {
+    admit_in_transaction(transaction, boundary.source_session_id, 1, 0, false)?;
+    let id = SessionId::new();
+    let event = fork_event(boundary, "Forked Session".into());
+    let envelope = EventEnvelope {
+        sequence: boundary.source_sequence + 1,
+        session_id: id,
+        run_id: None,
+        agent_run_id: None,
+        event,
+        created_at_ms: 0,
+    };
+    replay_through(transaction, id, &[envelope], 0, &mut 1, false, None)?;
+    Ok(())
+}
+
+fn fork_event(boundary: ForkLineage, title: String) -> Event {
+    Event::SessionForked {
+        title,
+        source_session_id: boundary.source_session_id,
+        source_run_id: boundary.source_run_id,
+        source_sequence: boundary.source_sequence,
+        prefix_digest: boundary.prefix_digest,
+    }
+}
+
+pub(super) fn fork_at(
+    connection: &mut Connection,
+    boundary: ForkLineage,
+    title: String,
+) -> Result<SessionId, StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    validate_fork(&transaction, boundary)?;
+    let id = SessionId::new();
+    append_in_transaction(&transaction, None, id, fork_event(boundary, title))?;
+    resolve_view(&transaction, id, 0, &mut 0)?;
+    transaction.commit()?;
+    Ok(id)
+}
+
 pub(super) fn fork_session(
     connection: &mut Connection,
     source_session_id: SessionId,
     title: String,
 ) -> Result<SessionId, StoreError> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (events, view) = resolve_view(&transaction, source_session_id, 0, &mut 0)?;
-    let view = view.ok_or(StoreError::InvalidHistory)?;
-    let last_run = view.runs.last().ok_or(StoreError::InvalidHistory)?;
-    if !last_run.status.is_outcome() {
-        return Err(StoreError::InvalidHistory);
-    }
-    let source_run_id = last_run.id;
-    let source_sequence = events
-        .iter()
-        .rev()
-        .find_map(|envelope| match &envelope.event {
-            Event::RunFinished { run_id, .. } if *run_id == source_run_id => {
-                Some(envelope.sequence)
-            }
-            Event::SessionForked {
-                source_run_id: run_id,
-                ..
-            } if *run_id == source_run_id => Some(envelope.sequence),
-            _ => None,
-        })
-        .ok_or(StoreError::InvalidHistory)?;
-    let digest = prefix_digest(&events, source_sequence)?;
-    let id = SessionId::new();
-    append_in_transaction(
-        &transaction,
-        None,
-        id,
-        Event::SessionForked {
-            title,
-            source_session_id,
-            source_run_id,
-            source_sequence,
-            prefix_digest: digest,
-        },
-    )?;
-    resolve_view(&transaction, id, 0, &mut 0)?;
-    transaction.commit()?;
-    Ok(id)
+    let boundary = prepare_fork(connection, source_session_id, None)?;
+    fork_at(connection, boundary, title)
 }
