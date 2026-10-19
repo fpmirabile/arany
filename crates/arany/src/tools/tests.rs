@@ -2588,6 +2588,8 @@ fn the_primary_prompt_states_the_read_page_limit() {
 
 #[tokio::test]
 async fn in_process_repeated_reads_all_succeed_on_a_large_file() {
+    use std::time::{Duration, Instant};
+
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -2596,7 +2598,9 @@ async fn in_process_repeated_reads_all_succeed_on_a_large_file() {
         &workspace,
         json!({"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}),
     );
-    for _ in 0..40 {
+    let mut elapsed = [Duration::ZERO; 40];
+    for sample in &mut elapsed {
+        let start = Instant::now();
         let observation = run_in_process(
             &runtime,
             ToolCall::Read {
@@ -2606,8 +2610,14 @@ async fn in_process_repeated_reads_all_succeed_on_a_large_file() {
             },
         )
         .await;
+        *sample = start.elapsed();
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
     }
+    elapsed.sort_unstable();
+    eprintln!(
+        "Read latency: 40 sequential reads of a freshly written 53248-byte file; p50={:?}, p95={:?}, max={:?}",
+        elapsed[19], elapsed[37], elapsed[39]
+    );
 }
 
 #[tokio::test]

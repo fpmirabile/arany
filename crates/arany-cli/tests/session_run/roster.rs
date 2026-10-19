@@ -5,6 +5,46 @@ use std::{os::unix::fs::PermissionsExt, path::Path, process::Stdio};
 const TERMINAL_REQUIRED: &[u8] =
     b"error: attached mode requires terminal stdin and stderr; use arany exec for pipes\n";
 
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn drain_attached_output(
+    reader: &mut impl std::io::Read,
+    destination: &mut Vec<u8>,
+    channel: &str,
+) -> bool {
+    use std::io::ErrorKind;
+
+    loop {
+        let mut bytes = [0; 4096];
+        match reader.read(&mut bytes) {
+            Ok(0) => return true,
+            Ok(count) => {
+                assert!(destination.len() + count <= 64 * 1024, "bounded {channel}");
+                destination.extend_from_slice(&bytes[..count]);
+            }
+            Err(error)
+                if matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) =>
+            {
+                return false;
+            }
+            Err(error) => panic!("{channel} read: {error}"),
+        }
+    }
+}
+
+fn tempdir() -> tempfile::TempDir {
+    #[cfg(target_os = "macos")]
+    {
+        tempfile::Builder::new()
+            .prefix("arany-roster-")
+            .tempdir_in("/private/tmp")
+            .unwrap()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        tempfile::tempdir().unwrap()
+    }
+}
+
 fn record() -> serde_json::Value {
     json!({"version":1,"profiles":[
         {"name":"main","routes":[{"provider":"openai","model":"gpt-5.4","effort":"low","account_id":null}]},
@@ -58,7 +98,7 @@ fn command(workspace: &Path, state: &Path, extra: &[&str]) -> std::process::Outp
 
 #[test]
 fn profile_refusals_precede_workspace_input_and_keep_stdout_empty() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     nix::unistd::mkfifo(
@@ -155,10 +195,10 @@ fn profile_refusals_precede_workspace_input_and_keep_stdout_empty() {
     assert!(!fresh.exists(), "refusal creates no State");
 }
 
-#[cfg(all(target_os = "linux", debug_assertions))]
+#[cfg(debug_assertions)]
 #[test]
 fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     nix::unistd::mkfifo(
@@ -169,7 +209,7 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
     let state = temp.path().join("state");
     StateRoot::admit(&state).unwrap();
     let account_root = temp.path().join("account-root");
-    let account = super::setup::prepare_test_file_account_at(&account_root);
+    let account = super::prepare_test_file_account_at(&account_root);
     let mut roster = record();
     roster["profiles"][0]["routes"][0]["account_id"] = json!(account);
     let same = json!({"name":"same","routes":[{"provider":"openai","model":"gpt-6-luna","effort":"low","account_id":account}]});
@@ -190,6 +230,7 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
                 .env("ARANY_TEST_ACCOUNT_ROOT", &account_root)
                 .env("HOME", temp.path().join("home"))
                 .env("XDG_STATE_HOME", temp.path().join("xdg-state"))
+                .env("XDG_DATA_HOME", temp.path().join("xdg-data"))
                 .current_dir(&workspace)
                 .args(entry)
                 .args(["--profile", "coding", "--state-dir"])
@@ -235,6 +276,174 @@ fn profile_saved_models_share_one_selected_identity_and_refuse_another() {
             },
         );
     }
+}
+
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn attached_leg_macos(
+    temp: &Path,
+    workspace: &Path,
+    state: &Path,
+    held_rx: &std::sync::mpsc::Receiver<()>,
+    served: &std::sync::atomic::AtomicUsize,
+) -> (arany::SessionId, arany::GoalId) {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::{
+        io::Write,
+        str::FromStr,
+        time::{Duration, Instant},
+    };
+
+    let geometry = nix::pty::Winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let (input, slave) = crate::process::cloexec_pty(Some(&geometry));
+    let master = input.try_clone().unwrap();
+    let before = crate::process::terminal_settings(&input);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+    command
+        .env_clear()
+        .env("ARANY_TEST_ACCOUNT_ROOT", temp.join("account"))
+        .env("HOME", temp.join("home"))
+        .env("XDG_STATE_HOME", temp.join("xdg-state"))
+        .env("XDG_DATA_HOME", temp.join("xdg-data"))
+        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .env("TERM", "dumb")
+        .current_dir(workspace)
+        .args(["--screen-reader", "--no-color", "--profile", "coding"])
+        .args(["--provider", "custom:local", "--model", "model-1"])
+        .args(["--state-dir"])
+        .arg(state)
+        .arg("--workspace")
+        .arg(workspace)
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(slave));
+    super::active_terminal::own_terminal(&mut command);
+    let child = command.spawn().unwrap();
+    drop(command);
+    let (mut child, mut master, mut input) =
+        (super::loopback::ChildGuard::new(child), master, input);
+    let flags = fcntl_getfl(&master).unwrap();
+    fcntl_setfl(&master, flags | OFlags::NONBLOCK).unwrap();
+    let mut output = child.child().stdout.take().unwrap();
+    let output_flags = fcntl_getfl(&output).unwrap();
+    fcntl_setfl(&output, output_flags | OFlags::NONBLOCK).unwrap();
+    let mut transcript = Vec::new();
+    let mut stdout_bytes = Vec::new();
+    let mut consent_declined = false;
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(120);
+    let mut first_byte = None;
+    fn normalized_lines(bytes: &[u8]) -> Vec<u8> {
+        bytes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, byte)| {
+                (*byte != b'\r' || bytes.get(index + 1) != Some(&b'\n')).then_some(*byte)
+            })
+            .collect()
+    }
+    let mut pump = |input: &mut std::fs::File, transcript: &mut Vec<u8>| {
+        drain_attached_output(&mut master, transcript, "attached PTY transcript");
+        if first_byte.is_none() && !transcript.is_empty() {
+            first_byte = Some(Instant::now());
+        }
+        drain_attached_output(&mut output, &mut stdout_bytes, "attached stdout");
+        assert!(stdout_bytes.is_empty(), "attached roster writes to stdout");
+        crate::process::decline_workspace_consent(input, transcript, &mut consent_declined);
+        assert!(
+            Instant::now() < deadline,
+            "{}",
+            crate::process::terminal_wait_report(
+                "attached roster journey stalled",
+                started,
+                first_byte,
+                transcript,
+                child.child().try_wait().unwrap(),
+            )
+        );
+        crate::process::wait_readable(&master);
+    };
+    for (needle, send) in [
+        (&b"Input:"[..], &b"/agents team 1\r"[..]),
+        (&b"Next-Run collaboration: team"[..], &b"answer\r"[..]),
+    ] {
+        while !transcript.windows(needle.len()).any(|part| part == needle) {
+            pump(&mut input, &mut transcript);
+        }
+        input.write_all(send).unwrap();
+    }
+    let manifest = "Roster preset: coding\nRoles: primary=main, child=main, review=main, compaction=main\nEligible child profiles: main, inspect\n  inspect[0]: custom:local/model-1 effort=default (exact custom; unknown pricing)\n  main[0]: custom:local/model-1 effort=default (exact custom; unknown pricing)\n";
+    while !normalized_lines(&transcript)
+        .windows(manifest.len())
+        .any(|part| part == manifest.as_bytes())
+    {
+        pump(&mut input, &mut transcript);
+    }
+    loop {
+        match held_rx.try_recv() {
+            Ok(()) => break,
+            Err(std::sync::mpsc::TryRecvError::Empty) => pump(&mut input, &mut transcript),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("Provider peer ended before the held roster request")
+            }
+        }
+    }
+    input.write_all(b"\x03").unwrap();
+    for (needle, send) in [
+        (&b"Goal paused"[..], &b"\x03"[..]),
+        (&b"Ctrl+C again exits"[..], &b"\x03"[..]),
+    ] {
+        while !transcript.windows(needle.len()).any(|part| part == needle) {
+            pump(&mut input, &mut transcript);
+        }
+        input.write_all(send).unwrap();
+    }
+    fcntl_setfl(&master, flags).unwrap();
+    let captured = crate::process::capture_terminal(
+        child.child(),
+        master,
+        Duration::from_secs(10),
+        64 * 1024,
+        |_| {},
+    );
+    assert!(
+        captured.status.success(),
+        "attached exit: {:?}",
+        captured.status
+    );
+    let stdout_deadline = Instant::now() + Duration::from_secs(5);
+    while !drain_attached_output(&mut output, &mut stdout_bytes, "attached stdout") {
+        assert!(
+            Instant::now() < stdout_deadline,
+            "attached stdout did not close"
+        );
+        crate::process::wait_readable(&output);
+    }
+    assert!(
+        stdout_bytes.is_empty(),
+        "cancelled attached run leaves stdout empty"
+    );
+    assert_eq!(crate::process::terminal_settings(&input), before);
+    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 5);
+    let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
+    let session: String = connection
+        .query_row("SELECT DISTINCT session_id FROM events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let session_id = SessionId::from_str(&session).unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let events = runtime.block_on(store.load_session(session_id)).unwrap();
+    runtime.block_on(store.close()).unwrap();
+    let view = SessionView::replay(session_id, &events).unwrap().unwrap();
+    (session_id, view.goals[0].id)
 }
 
 #[cfg(target_os = "linux")]
@@ -319,10 +528,177 @@ fn attached_pty_refusal(
     );
 }
 
+#[cfg(all(target_os = "macos", debug_assertions))]
+fn attached_pty_refusal(
+    temp: &Path,
+    workspace: &Path,
+    state: &Path,
+    account_root: Option<&Path>,
+    refusal: &[u8],
+) {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::time::{Duration, Instant};
+
+    let geometry = nix::pty::Winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let (input, slave) = crate::process::cloexec_pty(Some(&geometry));
+    let master = input.try_clone().unwrap();
+    let before = crate::process::terminal_settings(&input);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+    command
+        .env_clear()
+        .env(
+            "ARANY_TEST_ACCOUNT_ROOT",
+            account_root.unwrap_or(&temp.join("account")),
+        )
+        .env("HOME", temp.join("home"))
+        .env("XDG_STATE_HOME", temp.join("xdg-state"))
+        .env("XDG_DATA_HOME", temp.join("xdg-data"))
+        .env("TERM", "dumb")
+        .current_dir(workspace)
+        .args(["--screen-reader", "--no-color", "--profile", "coding"])
+        .args(["--state-dir"])
+        .arg(state)
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("answer")
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(slave));
+    super::active_terminal::own_terminal(&mut command);
+    let child = command.spawn().unwrap();
+    drop(command);
+    let (mut child, mut master, mut input) =
+        (super::loopback::ChildGuard::new(child), master, input);
+    let flags = fcntl_getfl(&master).unwrap();
+    fcntl_setfl(&master, flags | OFlags::NONBLOCK).unwrap();
+    let mut stdout = child.child().stdout.take().unwrap();
+    let stdout_flags = fcntl_getfl(&stdout).unwrap();
+    fcntl_setfl(&stdout, stdout_flags | OFlags::NONBLOCK).unwrap();
+    let mut transcript = Vec::new();
+    let mut stdout_bytes = Vec::new();
+    let mut consent_declined = false;
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(120);
+    let mut first_byte = None;
+    loop {
+        let closed = drain_attached_output(&mut master, &mut transcript, "attached PTY");
+        if first_byte.is_none() && !transcript.is_empty() {
+            first_byte = Some(Instant::now());
+        }
+        drain_attached_output(&mut stdout, &mut stdout_bytes, "attached stdout");
+        let status = child.child().try_wait().unwrap();
+        if (closed || status.is_some()) && !consent_declined {
+            crate::process::decline_workspace_consent(
+                &mut input,
+                &transcript,
+                &mut consent_declined,
+            );
+            assert!(
+                consent_declined,
+                "{}",
+                crate::process::terminal_wait_report(
+                    "attached child ended before folder consent",
+                    started,
+                    first_byte,
+                    &transcript,
+                    status,
+                )
+            );
+        }
+        crate::process::decline_workspace_consent(&mut input, &transcript, &mut consent_declined);
+        if transcript
+            .windows(b"Do you trust this folder?".len())
+            .any(|part| part == b"Do you trust this folder?")
+        {
+            assert!(
+                !transcript
+                    .windows(refusal.len())
+                    .any(|part| part == refusal),
+                "account refusal follows folder consent"
+            );
+        }
+        if consent_declined {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "{}",
+                crate::process::terminal_wait_report(
+                    "attached folder consent prompt missing",
+                    started,
+                    first_byte,
+                    &transcript,
+                    child.child().try_wait().unwrap(),
+                )
+            );
+        }
+        crate::process::wait_readable(&master);
+    }
+    while !transcript
+        .windows(refusal.len())
+        .any(|part| part == refusal)
+    {
+        if drain_attached_output(&mut master, &mut transcript, "attached PTY") {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "{}",
+                crate::process::terminal_wait_report(
+                    "attached roster refusal missing",
+                    started,
+                    first_byte,
+                    &transcript,
+                    child.child().try_wait().unwrap(),
+                )
+            );
+        }
+        crate::process::wait_readable(&master);
+    }
+    assert!(
+        transcript
+            .windows(refusal.len())
+            .any(|part| part == refusal)
+    );
+    fcntl_setfl(&master, flags).unwrap();
+    let output = crate::process::capture_terminal(
+        child.child(),
+        master,
+        Duration::from_secs(10),
+        64 * 1024,
+        |_| {},
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stdout_deadline = Instant::now() + Duration::from_secs(5);
+    while !drain_attached_output(&mut stdout, &mut stdout_bytes, "attached stdout") {
+        assert!(
+            Instant::now() < stdout_deadline,
+            "attached stdout did not close"
+        );
+        std::thread::yield_now();
+    }
+    assert!(
+        stdout_bytes.is_empty(),
+        "attached refusal leaves stdout empty"
+    );
+    assert_eq!(crate::process::terminal_settings(&input), before);
+    assert_eq!(
+        std::fs::metadata(state.join("events.sqlite3"))
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn attached_profile_admission_waits_for_folder_consent() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempdir();
     let workspace = temp.path().join("project");
     std::fs::create_dir(&workspace).unwrap();
     let state = temp.path().join("state");
@@ -588,7 +964,7 @@ mod journey {
     }
 
     fn cancel_then_resume(attached: bool) {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempdir();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
@@ -608,7 +984,13 @@ mod journey {
         } else {
             exec_leg(&workspace, &state, &held_rx, &served)
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(target_os = "macos", debug_assertions))]
+        let (session_id, goal_id) = if attached {
+            super::attached_leg_macos(temp.path(), &workspace, &state, &held_rx, &served)
+        } else {
+            exec_leg(&workspace, &state, &held_rx, &served)
+        };
+        #[cfg(not(any(target_os = "linux", all(target_os = "macos", debug_assertions))))]
         let (session_id, goal_id) = {
             assert!(!attached);
             exec_leg(&workspace, &state, &held_rx, &served)
@@ -680,7 +1062,7 @@ mod journey {
         cancel_then_resume(false);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
     #[test]
     fn attached_cancellation_resumes_through_exec_only_with_the_same_preset() {
         cancel_then_resume(true);

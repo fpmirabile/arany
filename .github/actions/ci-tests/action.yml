@@ -65,3 +65,50 @@ runs:
       if: inputs.profile == 'release'
       shell: bash
       run: cargo test --workspace --release --locked --offline
+    - name: Run explicit macOS offline Rust build gate
+      if: runner.os == 'macOS' && inputs.profile == 'debug'
+      shell: bash
+      run: |
+          set -euo pipefail
+          ARANY_TEST_RUST_SYSROOT="$(rustc --print sysroot)"
+          ARANY_TEST_RUST_SYSROOT="$(python3 -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$ARANY_TEST_RUST_SYSROOT")"
+          export ARANY_TEST_RUST_SYSROOT
+          cargo test --locked --offline -p arany-cli --test session_run tools::guarded_offline_rust_build_uses_selected_runtime_and_sdk -- --exact --ignored --nocapture 2>&1 | python3 -c '
+          import re
+          import sys
+
+          limit = 1024 * 1024
+          captured = bytearray()
+          for chunk in iter(lambda: sys.stdin.buffer.read(65536), b""):
+              remaining = limit + 1 - len(captured)
+              if remaining > 0:
+                  captured.extend(chunk[:remaining])
+          sys.stdout.buffer.write(captured[:limit])
+          if len(captured) > limit:
+              raise SystemExit("native gate output exceeded 1 MiB")
+          summary = rb"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out"
+          if len(re.findall(summary, captured)) != 1:
+              raise SystemExit("native gate must complete exactly one passing test")
+          '
+    - name: Run explicit macOS APFS rewind alias gate
+      if: runner.os == 'macOS' && inputs.profile == 'release'
+      shell: bash
+      run: |
+          set -euo pipefail
+          cargo test --locked --offline --release -p arany-cli --test guard_runs rewind::guarded_rewind_refuses_case_insensitive_apfs_alias_without_publication -- --exact --ignored --nocapture 2>&1 | python3 -c '
+          import re
+          import sys
+
+          limit = 1024 * 1024
+          captured = bytearray()
+          for chunk in iter(lambda: sys.stdin.buffer.read(65536), b""):
+              remaining = limit + 1 - len(captured)
+              if remaining > 0:
+                  captured.extend(chunk[:remaining])
+          sys.stdout.buffer.write(captured[:limit])
+          if len(captured) > limit:
+              raise SystemExit("native gate output exceeded 1 MiB")
+          summary = rb"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out"
+          if len(re.findall(summary, captured)) != 1:
+              raise SystemExit("native gate must complete exactly one passing test")
+          '
