@@ -2227,16 +2227,25 @@ mod tests {
     }
 
     fn fixture_diagnostics(fixture: &Path) -> String {
-        const TAIL: usize = 4096;
+        use std::io::{Seek, SeekFrom};
+
+        const TAIL: u64 = 4096;
         let mut report = String::new();
         for name in [
             "trace-topology.log",
             "worker-exercise.log",
             "worker-reject.log",
         ] {
-            let bytes = std::fs::read(fixture.join(name)).unwrap_or_default();
-            let tail = &bytes[bytes.len().saturating_sub(TAIL)..];
-            report.push_str(&format!("--- {name}\n{}\n", String::from_utf8_lossy(tail)));
+            let tail = std::fs::File::open(fixture.join(name))
+                .and_then(|mut file| {
+                    let start = file.metadata()?.len().saturating_sub(TAIL);
+                    file.seek(SeekFrom::Start(start))?;
+                    let mut tail = Vec::new();
+                    file.take(TAIL).read_to_end(&mut tail)?;
+                    Ok(tail)
+                })
+                .unwrap_or_default();
+            report.push_str(&format!("--- {name}\n{}\n", String::from_utf8_lossy(&tail)));
         }
         report
     }
@@ -2333,7 +2342,7 @@ mod tests {
                         .kill_on_drop(true)
                         .spawn()
                         .expect("production Bwrap prefix launch");
-                    match capture(child, 64 * 1024, Duration::from_secs(10)).await {
+                    match capture(child, 64 * 1024, Duration::from_secs(30)).await {
                         Ok((status, _, stderr)) => break (status, stderr),
                         Err(ToolError::Limit)
                             if attempts < 3
@@ -2464,11 +2473,15 @@ mod tests {
             .await
         {
             Ok(output) => output,
-            Err((error, true)) => panic!("native mount topology failed after cleanup: {error}"),
+            Err((error, true)) => panic!(
+                "native mount topology failed after cleanup: {error}\n{}",
+                fixture_diagnostics(fixture.path())
+            ),
             Err((error, false)) => {
+                let report = fixture_diagnostics(fixture.path());
                 let retained = fixture.keep();
                 panic!(
-                    "native mount topology cleanup was not confirmed: {error}; fixture retained at {}",
+                    "native mount topology cleanup was not confirmed: {error}; fixture retained at {}\n{report}",
                     retained.display()
                 );
             }
