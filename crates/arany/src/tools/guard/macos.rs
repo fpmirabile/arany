@@ -912,7 +912,7 @@ impl Task {
             handover: runtime
                 .handover
                 .as_ref()
-                .and_then(|_| super::super::worker::handover_ref(intent).cloned()),
+                .and_then(|_| super::super::worker::handover_ref(intent)),
             workspace: runtime.workspace.clone(),
             guard_executable: runtime.guard_executable.clone(),
             system_programs: if intent.call.is_process() {

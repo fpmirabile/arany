@@ -97,7 +97,7 @@ struct Task {
     #[serde(deserialize_with = "Option::deserialize")]
     worker: Option<super::worker::Transfer>,
     #[serde(deserialize_with = "Option::deserialize")]
-    handover: Option<crate::session::worker::WorkerDataRef>,
+    handover: Option<super::worker::PublicationTransfer>,
     #[cfg(target_os = "linux")]
     parent_namespaces: profile::Namespaces,
     #[cfg(target_os = "macos")]
@@ -651,7 +651,7 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
                 handover: runtime
                     .handover
                     .as_ref()
-                    .and_then(|_| super::worker::handover_ref(intent).cloned()),
+                    .and_then(|_| super::worker::handover_ref(intent)),
                 parent_namespaces,
             })
             .is_ok()
@@ -1352,7 +1352,7 @@ fn validate_task(task: &Task) -> Result<(), ToolError> {
     if task
         .handover
         .as_ref()
-        .is_some_and(|data| Some(data) != super::worker::handover_ref(&task.intent))
+        .is_some_and(|data| Some(data.clone()) != super::worker::handover_ref(&task.intent))
         || task.worker.is_some() && task.handover.is_some()
     {
         return Err(ToolError::Configuration);

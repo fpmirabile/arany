@@ -218,6 +218,12 @@ impl Event {
                 ..
             } => {
                 if intent.valid()
+                    && !matches!(
+                        intent.call,
+                        crate::tools::ToolCall::ApplyChangeset {
+                            source: ChangesetSource::Rewind { .. },
+                        }
+                    )
                     && intent.run_id == *run_id
                     && intent.agent_run_id == *agent_run_id
                 {
@@ -236,6 +242,12 @@ impl Event {
                     .as_ref()
                     .is_none_or(|checkpoint| checkpoint.valid())
                     && observation.valid()
+                    && !matches!(
+                        observation.intent.call,
+                        crate::tools::ToolCall::ApplyChangeset {
+                            source: ChangesetSource::Rewind { .. },
+                        }
+                    )
                     && !(observation.cache_update == crate::tools::CacheUpdate::NotAttempted
                         && observation.disposition == crate::tools::ToolDisposition::Succeeded)
                     && observation.intent.run_id == *run_id

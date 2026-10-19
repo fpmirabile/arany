@@ -26,6 +26,8 @@ mod hints;
 mod ledger;
 mod lifecycle;
 mod report;
+mod rewind;
+pub use rewind::{RewindFile, RewindIssue, RewindPreview, RewindRequest};
 mod routing;
 mod run_loop;
 #[cfg(test)]
@@ -64,6 +66,12 @@ const STORE_ACTION_OVERHEAD: std::time::Duration =
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    #[error("rewind is blocked; inspect the preview paths and uncertain publications")]
+    RewindBlocked,
+    #[error("rewind preview changed or expired; preview again")]
+    RewindPreviewExpired,
+    #[error("rewind exceeds file, byte or explicit-path limits; restore with your VCS")]
+    RewindTooLarge,
     #[error("restore the matching --profile preset to resume this Goal, or start a new Goal")]
     RosterSelectionMismatch,
 

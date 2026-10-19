@@ -153,8 +153,8 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 | Event kind | Current payload version |
 |---|---|
 | `RunStarted` | 16 |
-| `ToolFinished` | 15 |
-| `ToolStarted` | 11 |
+| `ToolFinished` | 16 |
+| `ToolStarted` | 12 |
 | `AgentSpawned` | 11 |
 | `AgentFinished` | 10 |
 | `ProviderCallRecorded` | 9 |

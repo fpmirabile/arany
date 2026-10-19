@@ -916,7 +916,7 @@ fn task_bytes(
         handover: runtime
             .handover
             .as_ref()
-            .and_then(|_| super::super::worker::handover_ref(intent).cloned()),
+            .and_then(|_| super::super::worker::handover_ref(intent)),
         config: runtime.config.clone(),
         intent: intent.clone(),
         cache,
