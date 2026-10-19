@@ -29,6 +29,7 @@ pub enum WorkerTool {
     Edit,
     Skill,
     McpList,
+    Command,
 }
 
 impl WorkerTool {
@@ -42,6 +43,7 @@ impl WorkerTool {
             Self::Edit => "edit",
             Self::Skill => "skill",
             Self::McpList => "mcp_list",
+            Self::Command => "command",
         }
     }
 
@@ -55,6 +57,7 @@ impl WorkerTool {
             ToolCall::Edit { .. } => Self::Edit,
             ToolCall::Skill { .. } => Self::Skill,
             ToolCall::McpList { .. } => Self::McpList,
+            ToolCall::Command { .. } => Self::Command,
             _ => return None,
         })
     }
@@ -68,13 +71,16 @@ pub struct WorkerGrant {
     pub tools: Vec<WorkerTool>,
     pub skills: Vec<String>,
     pub mcp_servers: Vec<String>,
+    pub commands: Vec<String>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub permission_mode: Option<crate::tools::permissions::PermissionMode>,
 }
 
 impl WorkerGrant {
     pub(crate) fn valid(&self) -> bool {
-        !self.read_paths.is_empty()
+        valid_commands(&self.commands)
+            && (self.commands.is_empty() || self.tools.contains(&WorkerTool::Command))
+            && !self.read_paths.is_empty()
             && self.read_paths.len() <= 64
             && self
                 .read_paths
@@ -82,7 +88,7 @@ impl WorkerGrant {
                 .all(|p| crate::tools::types::valid_relative(p, true))
             && (self.write_paths == ["."] || valid_leases(&self.write_paths))
             && !self.tools.is_empty()
-            && self.tools.len() <= 8
+            && self.tools.len() <= 9
             && self
                 .tools
                 .iter()
@@ -112,6 +118,7 @@ impl WorkerGrant {
                 .write_paths
                 .iter()
                 .all(|p| within(p, &parent.write_paths))
+            && self.commands.iter().all(|c| parent.commands.contains(c))
             && self.tools.iter().all(|t| parent.tools.contains(t))
             && self.skills.iter().all(|s| parent.skills.contains(s))
             && self
@@ -133,6 +140,9 @@ impl WorkerGrant {
                 }
                 ToolCall::Skill { name, .. } => self.skills.contains(name),
                 ToolCall::McpList { server } => self.mcp_servers.contains(server),
+                ToolCall::Command { program, cwd, .. } => {
+                    self.commands.contains(program) && (cwd == "." || within(cwd, &self.read_paths))
+                }
                 _ => false,
             }
     }
@@ -170,6 +180,7 @@ pub struct EditorAssignment {
     pub mission: String,
     pub direction: String,
     pub lease: Vec<String>,
+    pub commands: Vec<String>,
     pub criterion: GoalSuccessCriterion,
     pub mode: WorkerMode,
     pub max_turns: u8,
@@ -219,6 +230,7 @@ impl ChildAssignment {
                     && a.mission.len() <= 2048
                     && a.direction.len() <= 2048
                     && valid_leases(&a.lease)
+                    && valid_commands(&a.commands)
                     && (1..=17).contains(&a.max_turns)
                     && (1..=8).contains(&a.wave)
                     && [&a.resumes, &a.supersedes]
@@ -254,6 +266,8 @@ pub struct WorkerAssignment {
     pub policy_digest: [u8; 32],
     #[serde(deserialize_with = "Option::deserialize")]
     pub permissions_digest: Option<[u8; 32]>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub cache_generation: Option<[u8; 32]>,
     pub base: WorkerDataRef,
     pub data_bytes: u32,
 }
@@ -266,6 +280,8 @@ pub enum EffectTarget {
         assignment_id: AgentRunId,
         base_digest: [u8; 32],
         revision: u32,
+        #[serde(deserialize_with = "Option::deserialize")]
+        cache_generation: Option<[u8; 32]>,
     },
 }
 impl EffectTarget {
@@ -276,7 +292,13 @@ impl EffectTarget {
                 assignment_id,
                 base_digest,
                 revision,
-            } => assignment_id.valid() && *base_digest != [0; 32] && *revision <= 16,
+                cache_generation,
+            } => {
+                assignment_id.valid()
+                    && *base_digest != [0; 32]
+                    && *revision <= 16
+                    && *cache_generation != Some([0; 32])
+            }
         }
     }
 }
@@ -368,6 +390,7 @@ pub struct WorkerDataSealed {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerHandover {
+    pub criterion_evidence: Vec<u64>,
     pub assignment_id: AgentRunId,
     pub base_digest: [u8; 32],
     pub data: WorkerDataRef,
@@ -407,6 +430,7 @@ pub enum WorkerCause {
     Cancelled,
     Budget,
     SnapshotDrift,
+    CriterionUnverified,
     PrivateUncertain,
     Lost,
 }
@@ -853,6 +877,7 @@ impl WorkerOutcome {
                     | WorkerCause::TurnLimit
                     | WorkerCause::Budget
                     | WorkerCause::SnapshotDrift
+                    | WorkerCause::CriterionUnverified
             ) | (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
                 | (WorkerDisposition::Lost, WorkerCause::Lost)
                 | (
@@ -871,5 +896,52 @@ impl WorkerOutcome {
                     && c.enforcement_digest != [0; 32]
                     && c.last_intent_digest != Some([0; 32])
             })
+    }
+}
+
+pub(crate) fn valid_commands(commands: &[String]) -> bool {
+    commands.len() <= 8
+        && commands.iter().enumerate().all(|(i, name)| {
+            crate::tools::types::valid_name(name)
+                && commands[..i].iter().all(|earlier| earlier < name)
+        })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PrivateCapture {
+    None {},
+    Sealed { data: WorkerDataRef },
+    Rejected { cause: PrivateCaptureRejection },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivateCaptureRejection {
+    OutOfLease,
+    Overflow,
+    UnsupportedEntry,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerCommandResult {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub private_capture: PrivateCapture,
+}
+
+impl WorkerCommandResult {
+    pub(crate) fn valid(&self) -> bool {
+        serde_json::to_vec(self)
+            .is_ok_and(|b| b.len() <= crate::tools::types::MAX_TOOL_RESULT_BYTES)
+            && match &self.private_capture {
+                PrivateCapture::Sealed { data } => {
+                    data.valid() && data.purpose == WorkerDataPurpose::Mutation
+                }
+                _ => true,
+            }
     }
 }

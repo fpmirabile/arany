@@ -763,8 +763,8 @@ mod account_default_tests {
         let mut missing_roster = serde_json::to_value(ordinary).unwrap();
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(15));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(8));
+        assert_eq!(payload_version("RunStarted"), Some(16));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(9));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
@@ -964,7 +964,7 @@ mod provider_call_tests {
     use super::*;
 
     #[test]
-    fn provider_call_record_v8_rejects_v6_and_inconsistent_cache_fields() {
+    fn provider_call_record_rejects_old_versions_and_inconsistent_cache_fields() {
         let current = payload_version("ProviderCallRecorded").expect("payload version");
         let run = RunId::new();
         let agent = AgentRunId::new();
@@ -1268,6 +1268,29 @@ mod provider_call_tests {
                 );
             }
         }
+        record.disposition = ProviderCallDisposition::InvalidResponse;
+        record.failure_reason = Some(ProviderFailureReason::CriterionNotMetInView);
+        for phase in [
+            crate::provider::AgentPhase::RootPlan,
+            crate::provider::AgentPhase::RootSynthesis,
+            crate::provider::AgentPhase::ToolReview,
+            crate::provider::AgentPhase::ChildWork,
+        ] {
+            record.phase = phase;
+            let payload = serde_json::to_string(&record).expect("scoped failure payload");
+            assert_eq!(
+                Event::decode(
+                    "ProviderCallRecorded",
+                    current,
+                    &payload,
+                    run_id,
+                    agent_run_id,
+                )
+                .is_ok(),
+                phase == crate::provider::AgentPhase::ChildWork,
+                "criterion failure phase: {phase:?}"
+            );
+        }
     }
 }
 
@@ -1319,7 +1342,7 @@ mod child_grant_tests {
                 unguarded: crate::tools::UnguardedGrant::Denied,
             }),
         );
-        assert_eq!(payload_version(child.kind()), Some(10));
+        assert_eq!(payload_version(child.kind()), Some(11));
         let payload = child.payload().expect("child payload");
         let mut named = child.clone();
         if let Event::AgentSpawned { profile, .. } = &mut named {
@@ -1457,9 +1480,9 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(13));
+        assert_eq!(payload_version("ToolFinished"), Some(14));
         assert_eq!(
-            Event::decode("ToolFinished", 13, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 14, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1479,9 +1502,9 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 13, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", 14, &invalid, Some(run), Some(agent)).is_err());
         }
-        for previous in [12, 11, 10, 9, 8, 7] {
+        for previous in [13, 12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1534,7 +1557,7 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(10));
+        assert_eq!(payload_version("ToolStarted"), Some(11));
         assert_eq!(payload_version("ToolPermissionDecided"), Some(4));
     }
 
@@ -1590,7 +1613,13 @@ mod payload_version_tests {
         for (kind, old) in [
             ("HookFinished", 2),
             ("HookFinished", 3),
+            ("HookFinished", 4),
+            ("HookFinished", 5),
             ("AgentFinished", 8),
+            ("AgentFinished", 9),
+            ("ProviderCallRecorded", 8),
+            ("RunStarted", 14),
+            ("RunStarted", 15),
             ("RunFinished", 7),
             ("ProviderCallRecorded", 7),
         ] {
@@ -1666,8 +1695,8 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 15,
-                Event::ToolStarted { .. } => 10,
+                Event::RunStarted { .. } => 16,
+                Event::ToolStarted { .. } => 11,
                 Event::RunFinished { .. } => 8,
                 _ => 7,
             };
@@ -1767,6 +1796,132 @@ mod payload_version_tests {
 }
 
 #[test]
+fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
+    use crate::session::worker::*;
+    let f = crate::session::worker_command_protocol_fixture();
+    for (kind, pointer, field) in [
+        (
+            "RunStarted",
+            "/config/worker_policy/parent_grant",
+            "commands",
+        ),
+        (
+            "ProviderCallRecorded",
+            "/delegation/0/assignment",
+            "commands",
+        ),
+        ("AgentSpawned", "/assignment", "cache_generation"),
+        ("AgentSpawned", "/assignment/grant", "commands"),
+        ("ToolStarted", "/intent/target", "cache_generation"),
+        ("ToolFinished", "/intent/target", "cache_generation"),
+        ("WorkerHandoverRecorded", "", "criterion_evidence"),
+    ] {
+        let e = f
+            .envelopes()
+            .into_iter()
+            .find(|e| {
+                e.event.kind() == kind && {
+                    let v: serde_json::Value =
+                        serde_json::from_str(&e.event.payload().unwrap()).unwrap();
+                    v.pointer(pointer).and_then(|v| v.get(field)).is_some()
+                }
+            })
+            .expect("command fixture includes the field");
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&e.event.payload().unwrap()).unwrap();
+        payload
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(
+            Event::decode(
+                kind,
+                e.event.version(),
+                &payload.to_string(),
+                e.run_id,
+                e.agent_run_id
+            )
+            .is_err(),
+            "{kind} {field}"
+        );
+        assert!(
+            Event::decode(
+                kind,
+                e.event.version() - 1,
+                &e.event.payload().unwrap(),
+                e.run_id,
+                e.agent_run_id
+            )
+            .is_err(),
+            "old {kind}"
+        );
+    }
+    for commands in [
+        vec!["x".into(); 9],
+        vec!["b".into(), "a".into()],
+        vec!["x".into(), "x".into()],
+        vec!["x".repeat(65)],
+    ] {
+        let e = f
+            .envelopes()
+            .into_iter()
+            .find(|e| {
+                matches!(
+                    e.event,
+                    Event::AgentSpawned {
+                        assignment: Some(_),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&e.event.payload().unwrap()).unwrap();
+        let decode = |v: &serde_json::Value| {
+            Event::decode(
+                e.event.kind(),
+                e.event.version(),
+                &v.to_string(),
+                e.run_id,
+                e.agent_run_id,
+            )
+        };
+        assert!(decode(&value).is_ok(), "unmutated command payload decodes");
+        *value
+            .pointer_mut("/assignment/request/commands")
+            .expect("fixture carries request commands") = serde_json::json!(["a", "b"]);
+        assert!(decode(&value).is_ok(), "a valid command list decodes");
+        *value.pointer_mut("/assignment/request/commands").unwrap() = serde_json::json!(commands);
+        assert!(decode(&value).is_err(), "commands {commands:?}");
+    }
+    let result = WorkerCommandResult {
+        exit_code: Some(0),
+        stdout: String::new(),
+        stderr: String::new(),
+        private_capture: PrivateCapture::None {},
+    };
+    for field in ["exit_code", "private_capture"] {
+        let mut value = serde_json::to_value(&result).unwrap();
+        value.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<WorkerCommandResult>(value).is_err(),
+            "missing {field}"
+        );
+    }
+    for capture in [
+        serde_json::json!({"kind":"unknown"}),
+        serde_json::json!({"kind":"none","extra":true}),
+        serde_json::json!({"kind":"rejected","cause":"unknown"}),
+    ] {
+        let mut value = serde_json::to_value(&result).unwrap();
+        value["private_capture"] = capture;
+        assert!(serde_json::from_value::<WorkerCommandResult>(value).is_err());
+    }
+}
+
+#[test]
 fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
     use crate::supervisor::*;
     let fixture = crate::session::worker_protocol_fixture();
@@ -1854,5 +2009,5 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         Event::decode(event.kind(), 1, &padded, run, actor),
         Err(ReplayError::InvalidPayload)
     ));
-    assert_eq!(payload_version("RunStarted"), Some(15));
+    assert_eq!(payload_version("RunStarted"), Some(16));
 }

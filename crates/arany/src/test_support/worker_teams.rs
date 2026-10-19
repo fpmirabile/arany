@@ -57,7 +57,7 @@ impl TeamProvider {
         GoalPlanContract {
             mission: "Publish and verify independent edits".into(),
             paths: vec!["notes".into()],
-            commands: if self.case == "command" {
+            commands: if matches!(self.case, "command" | "command_refused") {
                 vec!["verify".into()]
             } else {
                 Vec::new()
@@ -106,6 +106,11 @@ impl TeamProvider {
                     objective: format!("editor {number} wave {wave}"),
                     profile: None,
                     editor: Some(Box::new(EditorAssignment {
+                        commands: if self.case == "command_refused" {
+                            vec!["verify".into()]
+                        } else {
+                            Vec::new()
+                        },
                         definition: "editor".into(),
                         definition_digest: digest,
                         mission: format!("editor {number} wave {wave}"),
@@ -115,9 +120,19 @@ impl TeamProvider {
                         } else {
                             format!("notes/{number}")
                         }],
-                        criterion: GoalSuccessCriterion::WorkspaceFileContent {
-                            path: format!("notes/{number}"),
-                            content: format!("edited {number}"),
+                        criterion: if self.case == "command" && number == 0 {
+                            GoalSuccessCriterion::ToolCallSucceeded {
+                                call: Box::new(ToolCall::Command {
+                                    program: "verify".into(),
+                                    args: Vec::new(),
+                                    cwd: ".".into(),
+                                }),
+                            }
+                        } else {
+                            GoalSuccessCriterion::WorkspaceFileContent {
+                                path: format!("notes/{number}"),
+                                content: format!("edited {number}"),
+                            }
                         },
                         mode: if matches!(
                             self.case,
@@ -180,6 +195,21 @@ impl TeamProvider {
             .unwrap()
             .parse::<usize>()
             .unwrap();
+        let step = if self.case == "command_refused" {
+            if step == 0 {
+                return Ok(tool_outcome(
+                    ToolCall::Command {
+                        program: "verify".into(),
+                        args: Vec::new(),
+                        cwd: ".".into(),
+                    },
+                    None,
+                ));
+            }
+            step - 1
+        } else {
+            step
+        };
         if matches!(self.case, "failure" | "reassign")
             && index == 0
             && request.input.objective.ends_with("wave 1")
@@ -440,7 +470,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let commands = if case.starts_with("hook_") || case == "order_hooks" {
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
         serde_json::json!([{"name":"sh", "executable":shell, "sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}])
-    } else if case == "command" {
+    } else if matches!(case, "command" | "command_refused") {
         let executable = std::fs::canonicalize("/usr/bin/true").unwrap();
         serde_json::json!([{"name":"verify", "executable":executable, "sha256":crate::tools::types::hex_digest(&std::fs::read(&executable).unwrap()),"interpreter":false,"inputs":[]}])
     } else {
@@ -455,6 +485,9 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     std::fs::create_dir(state.join("agents")).unwrap();
     std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(state.join("agents/editor.md"), "---\nname: editor\ndescription: Edit one leased file\ntools: Read, Write\npermissionMode: acceptEdits\nisolation: worktree\n---\nKeep edits private.\n").unwrap();
+    if case == "command_refused" {
+        std::fs::write(state.join("agents/editor.md"), "---\nname: editor\ndescription: Edit one leased file\ntools: Read, Write, Bash\npermissionMode: acceptEdits\nisolation: worktree\n---\nKeep edits private.\n").unwrap();
+    }
     if case == "background" {
         std::fs::write(state.join("agents/editor.md"), "---\nname: editor\ndescription: Edit in the background\ntools: Read, Write\npermissionMode: acceptEdits\nisolation: worktree\nbackground: true\n---\nKeep edits private.\n").unwrap();
     }
@@ -588,7 +621,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                 match &envelope.event {
                     Event::WorkerIntegrationRecorded { record, .. } => {
                         integrated.push(record.assignment_id);
-                        if integrated.len() == 1 && matches!(case, "order" | "order_hooks" | "conflict" | "mixed" | "fallback") { provider.gates[0].add_permits(1); }
+                        if integrated.len() == 1 && matches!(case, "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "command_refused") { provider.gates[0].add_permits(1); }
                     }
                     Event::AgentFinished { worker: Some(outcome), .. } if outcome.disposition == crate::worker::WorkerDisposition::Failed && case == "failure" => provider.gates[1].add_permits(1),
                     Event::ProviderCallRecorded { record, .. } if matches!(case, "leased_edit" | "defer_finish") && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::InvalidResponse => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
@@ -759,6 +792,29 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                 .all(|e| e.sequence < command)
         );
     }
+    if case == "command" {
+        assert!(events.iter().any(|e| matches!(&e.event, Event::WorkerVerificationRecorded { record, .. } if record.passed)));
+    }
+    if case == "command_refused" {
+        let refused = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                Event::ToolFinished { observation, .. }
+                    if matches!(observation.intent.call, ToolCall::Command { .. })
+                        && observation.intent.agent_run_id != run.agents[0].id =>
+                {
+                    Some(observation)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(refused.len(), 2);
+        for observation in refused {
+            assert_eq!(observation.disposition, ToolDisposition::Denied);
+            assert_eq!(observation.output, crate::tools::WORKER_COMMANDS_REFUSED);
+            assert!(!events.iter().any(|e| matches!(&e.event, Event::ToolPermissionDecided { verdict, .. } if verdict.intent_digest == observation.intent.digest())));
+        }
+    }
     if case == "conflict" {
         let outcomes = events
             .iter()
@@ -784,7 +840,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     }
     if matches!(
         case,
-        "order" | "order_hooks" | "conflict" | "mixed" | "fallback"
+        "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "command_refused"
     ) {
         let ordinals = integrated
             .iter()

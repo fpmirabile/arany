@@ -746,6 +746,16 @@ impl ToolRuntime {
         (self.config.write && self.definitions.pin().is_some())
             .then(|| WorkerPolicy {
                 parent_grant: WorkerGrant {
+                    commands: {
+                        let mut names: Vec<_> = self
+                            .config
+                            .commands
+                            .iter()
+                            .map(|c| c.name.clone())
+                            .collect();
+                        names.sort();
+                        names
+                    },
                     read_paths: self.config.workspace_paths.clone(),
                     write_paths: self.config.workspace_paths.clone(),
                     tools: vec![
@@ -757,6 +767,7 @@ impl ToolRuntime {
                         WorkerTool::Edit,
                         WorkerTool::Skill,
                         WorkerTool::McpList,
+                        WorkerTool::Command,
                     ],
                     skills: self.config.skills.iter().map(|s| s.name.clone()).collect(),
                     mcp_servers: self.config.mcp.iter().map(|s| s.name.clone()).collect(),
@@ -793,6 +804,7 @@ impl ToolRuntime {
             grant
                 .tools
                 .iter()
+                .filter(|tool| **tool != crate::worker::WorkerTool::Command)
                 .map(|tool| tool.label())
                 .collect::<Vec<_>>()
         );
@@ -882,6 +894,20 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
+        if matches!(
+            intent.target,
+            crate::worker::EffectTarget::WorkerView { .. }
+        ) && matches!(intent.call, ToolCall::Command { .. })
+        {
+            return ToolObservation {
+                enforcement_cause: None,
+                intent,
+                disposition: ToolDisposition::Denied,
+                output: crate::tools::WORKER_COMMANDS_REFUSED.into(),
+                attestation: None,
+                cache_update: CacheUpdate::NotApplicable,
+            };
+        }
         if matches!(
             intent.call,
             ToolCall::ApplyChangeset {
@@ -1065,6 +1091,8 @@ struct InProcessReads {
     slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
+pub(crate) const WORKER_COMMANDS_REFUSED: &str =
+    "Worker commands are not available yet; no operation was dispatched";
 const MAX_IN_PROCESS_READS: usize = 16;
 static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| {

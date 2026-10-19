@@ -295,6 +295,9 @@ impl AgentDefinition {
     }
 
     pub(crate) fn allows_worker_tool(&self, tool: crate::session::worker::WorkerTool) -> bool {
+        if tool == crate::session::worker::WorkerTool::Command && !self.editor() {
+            return false;
+        }
         let label = tool.label();
         self.tools
             .as_ref()
@@ -375,7 +378,9 @@ fn supported_tool(name: &str) -> Option<Vec<&str>> {
         "Edit" => vec!["edit"],
         "Write" => vec!["write"],
         "Skill" => vec!["skill"],
-        "list" | "read" | "search" | "edit" | "write" | "mkdir" | "skill" | "mcp_list" => {
+        "Bash" => vec!["command"],
+        "list" | "read" | "search" | "edit" | "write" | "mkdir" | "skill" | "mcp_list"
+        | "command" => {
             vec![name]
         }
         _ => return None,
@@ -418,7 +423,11 @@ enum ParsedFile {
     },
 }
 
-fn tool_list(value: serde_json::Value, notes: &mut Vec<String>) -> Result<Vec<String>, Rejected> {
+fn tool_list(
+    value: serde_json::Value,
+    deny: bool,
+    notes: &mut Vec<String>,
+) -> Result<Vec<String>, Rejected> {
     let names: Vec<String> = match value {
         serde_json::Value::String(value) => value
             .split(',')
@@ -448,6 +457,12 @@ fn tool_list(value: serde_json::Value, notes: &mut Vec<String>) -> Result<Vec<St
     let mut result = BTreeSet::new();
     let mut ignored = 0;
     for name in names {
+        // A denied command pattern cannot be matched per command, so it denies them all.
+        let name = if deny && name.starts_with("Bash(") {
+            "Bash".to_owned()
+        } else {
+            name
+        };
         match supported_tool(&name) {
             Some(operations) => result.extend(operations.into_iter().map(str::to_owned)),
             None => ignored += 1,
@@ -527,11 +542,11 @@ pub(super) fn strict(raw: &[u8]) -> Result<(AgentDefinition, Vec<String>), Rejec
         description: front.description,
         tools: front
             .tools
-            .map(|value| tool_list(value, &mut notes))
+            .map(|value| tool_list(value, false, &mut notes))
             .transpose()?,
         disallowed_tools: front
             .disallowed_tools
-            .map(|value| tool_list(value, &mut notes))
+            .map(|value| tool_list(value, true, &mut notes))
             .transpose()?
             .unwrap_or_default(),
         model: front.model.filter(|value| value != "inherit"),
@@ -661,6 +676,40 @@ mod tests {
     }
 
     #[test]
+    fn agent_definition_bash_only_narrows_editor_command_authority() {
+        let call = ToolCall::Command {
+            program: "check".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        };
+        for name in ["Bash", "command"] {
+            let (researcher, notes) =
+                strict(&document(&format!("tools: [{name}]\n"), "Body")).unwrap();
+            assert!(notes.is_empty());
+            assert!(!researcher.allows_worker(&call));
+            assert!(!researcher.allows(&call));
+            let (editor, _) =
+                strict(&document(&format!("tools: [Write, {name}]\n"), "Body")).unwrap();
+            assert!(editor.allows_worker(&call));
+            let (denied, _) = strict(&document(
+                &format!("tools: [Write, {name}]\ndisallowedTools: [Bash]\n"),
+                "Body",
+            ))
+            .unwrap();
+            assert!(!denied.allows_worker(&call));
+        }
+        let (patterned, _) = strict(&document(
+            "tools: [Write]\ndisallowedTools: ['Bash(rm:*)']\n",
+            "Body",
+        ))
+        .unwrap();
+        assert!(!patterned.allows_worker(&call));
+        let (inherited, _) =
+            strict(&document("disallowedTools: ['Bash(rm:*)']\n", "Body")).unwrap();
+        assert!(!inherited.allows_worker(&call));
+    }
+
+    #[test]
     fn agent_definition_parser_accepts_peer_subset_and_rejects_executable_yaml() {
         for fields in [
             "",
@@ -703,7 +752,6 @@ mod tests {
             ("hooks: {}\n", None),
             ("mcpServers: {}\n", None),
             ("color: red\n", None),
-            ("tools: [Bash]\n", Some(Vec::new())),
             ("tools: [Git, 'Read*']\n", Some(Vec::new())),
         ] {
             let (definition, notes) = strict(&document(fields, "Body")).unwrap();
