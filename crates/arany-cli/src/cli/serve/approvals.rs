@@ -267,7 +267,18 @@ fn lines(intent: &EffectIntent, unguarded: Option<&UnguardedPrompt>) -> Vec<Stri
 }
 
 // Keep fetch_update for the Rust 1.88 minimum.
-#[allow(deprecated)]
+// `fetch_update` is deprecated on newer toolchains and `try_update` is above the MSRV.
+fn next_request_id(next_id: &AtomicI64) -> Option<i64> {
+    let mut current = next_id.load(Ordering::Relaxed);
+    loop {
+        let next = current.checked_add(1)?;
+        match next_id.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Some(current),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 fn request(
     thread_id: SessionId,
     approval: &ToolApproval,
@@ -277,11 +288,7 @@ fn request(
     let intent = &approval.intent;
     let request = Request {
         jsonrpc: Default::default(),
-        id: RequestId::Integer(
-            next_id
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-                .ok()?,
-        ),
+        id: RequestId::Integer(next_request_id(next_id)?),
         method: method(&intent.call).into(),
         params: Some(
             serde_json::to_value(ApprovalParams {
