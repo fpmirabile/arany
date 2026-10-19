@@ -66,8 +66,9 @@ fn validate(value: &Value) {
 
 async fn next(reader: &mut Reader) -> Value {
     let mut line = String::new();
+    // Guarded turns on the macOS debug runner can exceed ten seconds per line.
     assert!(
-        tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        tokio::time::timeout(Duration::from_secs(60), reader.read_line(&mut line))
             .await
             .unwrap()
             .unwrap()
