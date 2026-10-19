@@ -3374,3 +3374,105 @@ async fn close_with_a_stalled_turn_completes_at_its_deadline_without_retrying() 
     assert!(adapter.input.try_recv().is_err());
     adapter.close().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn completion_before_expiry_queues_unsubscribe_even_with_a_blocked_writer() {
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Stall"}]))
+        .await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    let mut filler = 0;
+    while adapter.outbound.try_send(json!({"filler":filler})).is_ok() {
+        filler += 1;
+    }
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"interrupted","items":[],"goal":{"status":"interrupted"}}})) })).await.unwrap();
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    for _ in 0..filler {
+        adapter.output.recv().await.unwrap();
+    }
+    assert_eq!(adapter.next().await["id"], "prompt");
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    adapter.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn expiry_during_blocked_reconciliation_drops_the_resumed_completion() {
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Stall"}]))
+        .await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"completed","items":[],"goal":{"status":"completed"}}})) })).await.unwrap();
+    let recover = adapter.request().await;
+    assert_eq!(recover.method, "events/subscribe");
+    let mut filler = 0;
+    while adapter.outbound.try_send(json!({"filler":filler})).is_ok() {
+        filler += 1;
+    }
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: recover.id,
+            result: json!({"events":[{
+                "sequence":1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":null,
+                "kind":"MessageCommitted","event_version":1,"payload":{"text":"Late"},"created_at_ms":0
+            }],"nextSince":null}),
+        }))
+        .await
+        .unwrap();
+    tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE + std::time::Duration::from_millis(1))
+        .await;
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    for _ in 0..filler {
+        adapter.output.recv().await.unwrap();
+    }
+    let mut prompts = 0;
+    for _ in 0..2 {
+        let message = adapter.next().await;
+        if message["id"] == "prompt" {
+            prompts += 1;
+            assert_eq!(message["result"]["stopReason"], "cancelled");
+        }
+    }
+    assert_eq!(prompts, 1);
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    tokio::task::yield_now().await;
+    assert!(adapter.output.try_recv().is_err());
+    adapter.close().await;
+}

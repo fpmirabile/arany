@@ -759,10 +759,13 @@ pub(super) async fn output(
                     Some(Pending::Recover) => {
                         let page: EventsSubscribeResult = serde_json::from_value(reply.result)
                             .map_err(|_| "invalid serve events")?;
-                        let (session, run) = {
+                        let Some((session, run, prompt)) = ({
                             let state = state.lock().expect("translator state");
-                            let active = state.active.as_ref().ok_or("no active ACP prompt")?;
-                            (active.session, active.turn.ok_or("no active Run")?)
+                            state.active.as_ref().and_then(|active| {
+                                Some((active.session, active.turn?, active.id.clone()))
+                            })
+                        }) else {
+                            continue;
                         };
                         for event in &page.events {
                             if event.run_id.as_deref() != Some(run.to_string().as_str()) {
@@ -812,20 +815,21 @@ pub(super) async fn output(
                                 emit_answer(&outbound, update).await?;
                             }
                         }
-                        if let Some(last) = page.events.last() {
-                            state
+                        if let Some(last) = page.events.last()
+                            && let Some(loaded) = state
                                 .lock()
                                 .expect("translator state")
                                 .sessions
                                 .get_mut(&session)
-                                .expect("loaded Session")
-                                .sequence = last.sequence;
+                        {
+                            loaded.sequence = last.sequence;
                         }
                         if let Some(since) = page.next_since.filter(|_| !*stopping.borrow()) {
                             recover(
                                 &state,
                                 &serve,
                                 &outbound,
+                                &prompt,
                                 EventsSubscribeParams {
                                     thread_id: session,
                                     since,
@@ -833,7 +837,14 @@ pub(super) async fn output(
                             )
                             .await?;
                         } else {
-                            finish(&state, &serve, &outbound, page.next_since.is_some()).await?;
+                            finish(
+                                &state,
+                                &serve,
+                                &outbound,
+                                &prompt,
+                                page.next_since.is_some(),
+                            )
+                            .await?;
                         }
                     }
                     _ => (),
@@ -881,7 +892,15 @@ pub(super) async fn output(
                         eprintln!(
                             "Arany could not reconcile all committed ACP updates; check Session history"
                         );
-                        finish(&state, &serve, &outbound, true).await?;
+                        let prompt = state
+                            .lock()
+                            .expect("translator state")
+                            .active
+                            .as_ref()
+                            .map(|a| a.id.clone());
+                        if let Some(prompt) = prompt {
+                            finish(&state, &serve, &outbound, &prompt, true).await?;
+                        }
                     }
                     _ => (),
                 }
@@ -933,19 +952,23 @@ pub(super) async fn output(
                         let recover = active.resync
                             || (!active.answered && result.turn.status == TurnStatus::Completed);
                         active.completion = Some(result.turn);
-                        Some(
+                        let prompt = active.id.clone();
+                        Some((
+                            prompt,
                             recover.then_some(
                                 state
                                     .sessions
                                     .get(&result.thread_id)
                                     .map_or(0, |s| s.sequence),
                             ),
-                        )
+                        ))
                     } else {
                         None
                     }
                 };
-                let Some(since) = since else { continue };
+                let Some((prompt, since)) = since else {
+                    continue;
+                };
                 if let Some(withdrawal) = withdraw_permission(&state, None, true) {
                     emit(&outbound, withdrawal).await?;
                 }
@@ -954,6 +977,7 @@ pub(super) async fn output(
                         &state,
                         &serve,
                         &outbound,
+                        &prompt,
                         EventsSubscribeParams {
                             thread_id: result.thread_id,
                             since,
@@ -961,7 +985,7 @@ pub(super) async fn output(
                     )
                     .await?;
                 } else {
-                    finish(&state, &serve, &outbound, since.is_some()).await?;
+                    finish(&state, &serve, &outbound, &prompt, since.is_some()).await?;
                 }
             }
             Message::Notification(note) if note.method == "events/resync" => {
@@ -988,9 +1012,10 @@ pub(super) async fn output(
         .expect("translator state")
         .active
         .as_ref()
-        .is_some_and(|active| active.completion.is_some());
-    if completed {
-        finish(&state, &serve, &outbound, true).await?;
+        .filter(|active| active.completion.is_some())
+        .map(|active| active.id.clone());
+    if let Some(prompt) = completed {
+        finish(&state, &serve, &outbound, &prompt, true).await?;
     }
     Ok(())
 }
@@ -999,10 +1024,20 @@ async fn recover(
     state: &Shared,
     serve: &mpsc::Sender<ClientMessage>,
     outbound: &mpsc::Sender<Value>,
+    prompt: &RequestId,
     params: EventsSubscribeParams,
 ) -> Result<(), String> {
+    if !state
+        .lock()
+        .expect("translator state")
+        .active
+        .as_ref()
+        .is_some_and(|a| a.id == *prompt)
+    {
+        return Ok(());
+    }
     match send_request(state, serve, "events/subscribe", params, Pending::Recover).await {
-        Err(_) if serve.is_closed() => finish(state, serve, outbound, true).await,
+        Err(_) if serve.is_closed() => finish(state, serve, outbound, prompt, true).await,
         result => result,
     }
 }
@@ -1089,16 +1124,24 @@ async fn finish(
     state: &Shared,
     serve: &mpsc::Sender<ClientMessage>,
     output: &mpsc::Sender<Value>,
+    prompt: &RequestId,
     incomplete: bool,
 ) -> Result<(), String> {
-    let active = state
-        .lock()
-        .expect("translator state")
-        .active
-        .take()
-        .ok_or("no active ACP prompt")?;
+    let active = {
+        let mut state = state.lock().expect("translator state");
+        if !state.active.as_ref().is_some_and(|a| a.id == *prompt) {
+            return Ok(());
+        }
+        state.active.take().expect("matched active prompt")
+    };
     let close = active.close.clone();
     let session = active.session;
+    if let Some(id) = close {
+        match unload(state, serve, id, session).await {
+            Err(_) if serve.is_closed() => {}
+            result => result?,
+        }
+    }
     if let Some(task) = &active.close_task {
         task.abort();
     }
@@ -1150,14 +1193,7 @@ async fn finish(
     if incomplete && response.get("result").is_some() {
         response["result"]["_meta"]["arany.incompleteUpdates"] = json!(true);
     }
-    emit(output, response).await?;
-    match close {
-        Some(id) => match unload(state, serve, id, session).await {
-            Err(_) if serve.is_closed() => Ok(()),
-            result => result,
-        },
-        None => Ok(()),
-    }
+    emit(output, response).await
 }
 
 fn remap(id: RequestId, error: ErrorObject) -> Value {

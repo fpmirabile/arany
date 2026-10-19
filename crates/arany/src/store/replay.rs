@@ -13,6 +13,8 @@ pub(super) const MAX_SESSION_EVENTS: usize = 10_000;
 const MAX_FORK_DEPTH: usize = 8;
 const MAX_DISCOVERED_SESSIONS: usize = 65_536;
 pub(super) const MAX_LIST_SCAN_EVENTS: usize = 262_144;
+const LIST_HEAD_CHUNK: usize = 1024;
+const LIST_EVENT_CHUNK: usize = 256;
 
 struct SessionHead {
     title: String,
@@ -98,51 +100,56 @@ pub(super) fn list_page_in_snapshot(
     mut budget: usize,
     after_ordering: impl FnOnce(),
 ) -> Result<SessionPage, StoreError> {
-    let snapshot = connection.unchecked_transaction()?;
-    let connection = &*snapshot;
-    let mut tails = Vec::<(u64, SessionId)>::new();
-    {
-        let mut statement = connection
-            .prepare("SELECT session_id, MAX(sequence) FROM events GROUP BY session_id")?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            if tails.len() == MAX_DISCOVERED_SESSIONS {
-                return Err(StoreError::TooManySessions);
-            }
-            let id = SessionId::from_str(
-                row.get_ref(0)?
-                    .as_str()
-                    .map_err(|_| StoreError::InvalidHistory)?,
-            )
-            .map_err(|_| StoreError::InvalidHistory)?;
-            let tail =
-                u64::try_from(row.get::<_, i64>(1)?).map_err(|_| StoreError::InvalidHistory)?;
-            tails.push((tail, id));
-        }
-    }
+    let mut tails = HashMap::<SessionId, u64>::new();
     let mut roots = HashMap::<SessionId, (Option<WorkspaceIdentity>, Option<SessionId>)>::new();
-    {
-        let mut statement = connection.prepare(
+    let mut last = String::new();
+    loop {
+        let chunk = connection.unchecked_transaction()?;
+        let mut found = Vec::<(String, i64)>::new();
+        {
+            let mut statement = chunk.prepare(
+                "SELECT session_id, MAX(sequence) FROM events WHERE session_id > ?1
+                 GROUP BY session_id ORDER BY session_id LIMIT ?2",
+            )?;
+            let mut rows = statement.query(rusqlite::params![last, LIST_HEAD_CHUNK as i64])?;
+            while let Some(row) = rows.next()? {
+                found.push((row.get(0)?, row.get(1)?));
+            }
+        }
+        let mut first = chunk.prepare(
             "SELECT sequence,
                     length(CAST(session_id AS BLOB)),
                     length(CAST(kind AS BLOB)),
                     length(CAST(payload AS BLOB)),
                     session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
-             FROM events WHERE sequence IN (SELECT MIN(sequence) FROM events GROUP BY session_id)",
+             FROM events WHERE session_id = ?1 ORDER BY sequence LIMIT 1",
         )?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
-            let envelope = read_envelope(row)?;
+        for (raw_id, tail) in &found {
+            if tails.len() == MAX_DISCOVERED_SESSIONS {
+                return Err(StoreError::TooManySessions);
+            }
+            let id = SessionId::from_str(raw_id).map_err(|_| StoreError::InvalidHistory)?;
+            tails.insert(
+                id,
+                u64::try_from(*tail).map_err(|_| StoreError::InvalidHistory)?,
+            );
+            let envelope = first.query_row([raw_id], |row| Ok(read_envelope(row)))??;
             let root = match envelope.event {
                 Event::SessionStarted {
                     workspace_identity, ..
                 } => (Some(workspace_identity), None),
                 Event::SessionForked {
                     source_session_id, ..
-                } if source_session_id != envelope.session_id => (None, Some(source_session_id)),
+                } if source_session_id != id => (None, Some(source_session_id)),
                 _ => return Err(StoreError::InvalidHistory),
             };
-            roots.insert(envelope.session_id, root);
+            roots.insert(id, root);
+        }
+        drop(first);
+        drop(chunk);
+        match found.last() {
+            Some((raw_id, _)) if found.len() == LIST_HEAD_CHUNK => last.clone_from(raw_id),
+            _ => break,
         }
     }
     let lineage = |id: SessionId| -> Result<Vec<SessionId>, StoreError> {
@@ -159,7 +166,7 @@ pub(super) fn list_page_in_snapshot(
         Ok(chain)
     };
     let mut matching = Vec::new();
-    for &(tail, id) in &tails {
+    for (&id, &tail) in &tails {
         let chain = lineage(id)?;
         let root = chain.last().expect("lineage");
         if roots.get(root).and_then(|(identity, _)| *identity) == Some(workspace_identity) {
@@ -192,15 +199,24 @@ pub(super) fn list_page_in_snapshot(
             more = true;
             break;
         }
+        let bounded = chain
+            .iter()
+            .map(|&member| {
+                tails
+                    .get(&member)
+                    .map(|&tail| (member, tail))
+                    .ok_or(StoreError::InvalidHistory)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let passes = if chain.len() > 1 { 2 } else { 1 };
-        let cost = lineage_event_count(connection, chain)?.saturating_mul(passes);
+        let cost = lineage_event_count(connection, &bounded)?.saturating_mul(passes);
         if !items.is_empty() && cost > budget {
             more = true;
             break;
         }
         budget = budget.saturating_sub(cost);
-        let mut heads = scan_session_heads(connection, chain)?;
-        inherit_fork_metadata(connection, chain, &mut heads)?;
+        let mut heads = scan_session_heads(connection, &bounded)?;
+        inherit_fork_metadata(connection, &bounded, &mut heads)?;
         let head = heads.get(id).ok_or(StoreError::InvalidHistory)?;
         if discovered_identity(*id, &heads, 0)? != Some(workspace_identity) {
             return Err(StoreError::InvalidHistory);
@@ -229,19 +245,26 @@ pub(super) fn list_page_in_snapshot(
     Ok(SessionPage { items, more })
 }
 
-fn lineage_event_count(connection: &Connection, chain: &[SessionId]) -> Result<usize, StoreError> {
-    let marks = vec!["?"; chain.len()].join(",");
-    let count: i64 = connection.query_row(
-        &format!("SELECT COUNT(*) FROM events WHERE session_id IN ({marks})"),
-        rusqlite::params_from_iter(chain.iter().map(ToString::to_string)),
-        |row| row.get(0),
-    )?;
-    usize::try_from(count).map_err(|_| StoreError::InvalidHistory)
+fn lineage_event_count(
+    connection: &Connection,
+    bounded: &[(SessionId, u64)],
+) -> Result<usize, StoreError> {
+    let mut total = 0_usize;
+    for &(id, tail) in bounded {
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND sequence <= ?2",
+            rusqlite::params![id.to_string(), tail as i64],
+            |row| row.get(0),
+        )?;
+        total =
+            total.saturating_add(usize::try_from(count).map_err(|_| StoreError::InvalidHistory)?);
+    }
+    Ok(total)
 }
 
 fn scan_session_heads(
     connection: &Connection,
-    filter: &[SessionId],
+    filter: &[(SessionId, u64)],
 ) -> Result<HashMap<SessionId, SessionHead>, StoreError> {
     let mut heads = HashMap::<SessionId, SessionHead>::new();
     scan_events(connection, filter, |envelope| {
@@ -376,7 +399,7 @@ fn selection_from_run(config: &RunConfig) -> SessionDefaults {
 
 fn inherit_fork_metadata(
     connection: &Connection,
-    filter: &[SessionId],
+    filter: &[(SessionId, u64)],
     heads: &mut HashMap<SessionId, SessionHead>,
 ) -> Result<(), StoreError> {
     let mut boundaries = heads
@@ -659,38 +682,55 @@ fn scan_all_events(
 
 fn scan_events(
     connection: &Connection,
-    filter: &[SessionId],
+    filter: &[(SessionId, u64)],
     mut on_event: impl FnMut(EventEnvelope) -> Result<(), StoreError>,
 ) -> Result<(), StoreError> {
-    let marks = vec!["?"; filter.len()].join(",");
-    let selection = if filter.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE session_id IN ({marks})")
-    };
-    let mut statement = connection.prepare(&format!(
-        "SELECT sequence,
+    const COLUMNS: &str = "SELECT sequence,
                 length(CAST(session_id AS BLOB)),
                 length(CAST(kind AS BLOB)),
                 length(CAST(payload AS BLOB)),
                 session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
-         FROM events {selection} ORDER BY sequence"
-    ))?;
-    let mut rows = statement.query(rusqlite::params_from_iter(
-        filter.iter().map(ToString::to_string),
-    ))?;
-    let mut expected = 1_i64;
-    while let Some(row) = rows.next()? {
-        if filter.is_empty() {
+         FROM events";
+    if filter.is_empty() {
+        let mut statement = connection.prepare(&format!("{COLUMNS} ORDER BY sequence"))?;
+        let mut rows = statement.query([])?;
+        let mut expected = 1_i64;
+        while let Some(row) = rows.next()? {
             let sequence: i64 = row.get(0)?;
             if sequence != expected {
                 return Err(StoreError::InvalidHistory);
             }
             expected = expected.checked_add(1).ok_or(StoreError::InvalidHistory)?;
+            on_event(read_envelope(row)?)?;
         }
-        on_event(read_envelope(row)?)?;
+        return Ok(());
     }
-    Ok(())
+    // Rows at or below a captured bound never change, so short keyset chunks
+    // read a consistent history without holding a lock across replay.
+    let bounds = vec!["(session_id = ? AND sequence <= ?)"; filter.len()].join(" OR ");
+    let mut statement = connection.prepare(&format!(
+        "{COLUMNS} WHERE sequence > ? AND ({bounds}) ORDER BY sequence LIMIT {LIST_EVENT_CHUNK}"
+    ))?;
+    let mut after = 0_i64;
+    loop {
+        let mut values = vec![rusqlite::types::Value::Integer(after)];
+        for (id, tail) in filter {
+            values.push(id.to_string().into());
+            values.push(rusqlite::types::Value::Integer(
+                i64::try_from(*tail).map_err(|_| StoreError::InvalidHistory)?,
+            ));
+        }
+        let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+        let mut count = 0;
+        while let Some(row) = rows.next()? {
+            after = row.get(0)?;
+            count += 1;
+            on_event(read_envelope(row)?)?;
+        }
+        if count < LIST_EVENT_CHUNK {
+            return Ok(());
+        }
+    }
 }
 
 fn read_envelope(row: &rusqlite::Row<'_>) -> Result<EventEnvelope, StoreError> {
