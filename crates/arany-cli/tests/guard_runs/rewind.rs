@@ -262,11 +262,13 @@ async fn case(case: &str) {
     let gate = ["go_race", "cancel_started", "crash_captured"]
         .contains(&case)
         .then(|| arany::FaultPlan::gate_checkpoint(session));
-    let ack = (case == "crash_started").then(|| {
-        arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
-            matches!(event, Event::WorkspaceRewindStarted { .. })
-        })
-    });
+    let ack = ["crash_started", "cancel_at_started"]
+        .contains(&case)
+        .then(|| {
+            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                matches!(event, Event::WorkspaceRewindStarted { .. })
+            })
+        });
     if partial {
         std::fs::set_permissions(
             workspace.join("notes/sub"),
@@ -298,6 +300,11 @@ async fn case(case: &str) {
             tokio::select! {
                 result = &mut restore => panic!("rewind completed before the Started acknowledgment: {result:?}"),
                 entered = tokio::time::timeout(Duration::from_secs(120), entered) => entered.unwrap().unwrap(),
+            }
+            if case == "cancel_at_started" {
+                cancellation.cancel();
+                release.send(()).unwrap();
+                break 'run Some(restore.await);
             }
             drop(release);
             assert!(restore.await.is_err());
@@ -331,8 +338,9 @@ async fn case(case: &str) {
         );
         assert!(workspace.join("notes/new.txt").exists());
         assert_eq!(std::fs::read(&path).unwrap(), b"changed");
-    } else if ["go_race", "cancel_started"].contains(&case) {
+    } else if ["go_race", "cancel_started", "cancel_at_started"].contains(&case) {
         let finished = result.unwrap();
+        assert!(finished.checkpoint.is_none());
         assert_eq!(
             finished.outcome,
             if case == "go_race" {
@@ -499,6 +507,12 @@ async fn settle(engine: Engine, state: &Path, session: SessionId, path: &Path, c
         _ => None,
     });
     match case {
+        "cancel_at_started" => {
+            let finished = finished.expect("Finished is persisted");
+            assert_eq!(finished.outcome, RewindOutcome::Cancelled);
+            assert!(finished.attestation.is_none());
+            assert!(finished.checkpoint.is_none());
+        }
         "receipt_loss" | "partial" => {
             let finished = finished.expect("Finished is persisted");
             assert_eq!(finished.outcome, RewindOutcome::Uncertain);
@@ -581,6 +595,7 @@ async fn guarded_rewind_lost_receipt_and_crash_prefix_block_resume_without_reexe
         "partial",
         "crash_started",
         "crash_captured",
+        "cancel_at_started",
     ] {
         case(name).await;
     }

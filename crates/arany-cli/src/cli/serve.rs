@@ -11,6 +11,7 @@ use tokio::{
 mod approvals;
 mod history;
 pub(in crate::cli) mod items;
+mod rewind;
 pub(in crate::cli) mod server;
 pub(in crate::cli) mod threads;
 

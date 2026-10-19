@@ -197,6 +197,10 @@ mod model_catalog;
 mod slash_completion;
 
 #[cfg(target_os = "linux")]
+#[path = "session_run/rewind.rs"]
+mod rewind;
+
+#[cfg(target_os = "linux")]
 #[path = "session_run/account_lock.rs"]
 mod account_lock;
 #[cfg(target_os = "linux")]

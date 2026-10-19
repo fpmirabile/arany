@@ -81,6 +81,8 @@ pub struct RewindPreview {
     plan: RewindPlan,
     started: RewindStarted,
     permissions_digest: Option<[u8; 32]>,
+    comparisons: Vec<FileChange>,
+    checkpoint_storage_unavailable: bool,
 }
 impl RewindPreview {
     pub fn rewind_id(&self) -> uuid::Uuid {
@@ -91,6 +93,32 @@ impl RewindPreview {
     }
     pub fn plan(&self) -> &RewindPlan {
         &self.plan
+    }
+    pub fn comparisons(&self) -> &[FileChange] {
+        &self.comparisons
+    }
+    pub fn expires_at_ms(&self) -> i64 {
+        self.started.expires_at_ms
+    }
+    pub fn checkpoint_storage_unavailable(&self) -> bool {
+        self.checkpoint_storage_unavailable
+    }
+    pub fn observations_match(&self, previous: &Self) -> bool {
+        self.request.session_id == previous.request.session_id
+            && self.request.target == previous.request.target
+            && self.started.head_sequence == previous.started.head_sequence
+            && self.started.prefix_digest == previous.started.prefix_digest
+            && self.started.policy_digest == previous.started.policy_digest
+            && self.started.enforcement_digest == previous.started.enforcement_digest
+            && self.permissions_digest == previous.permissions_digest
+            && i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX)
+                < previous.started.expires_at_ms
+            && self.files.len() == previous.files.len()
+            && self
+                .files
+                .iter()
+                .zip(&previous.files)
+                .all(|(a, b)| a.path == b.path && a.observed == b.observed)
     }
     pub fn can_restore(&self) -> bool {
         !self.plan.files.is_empty()
@@ -112,6 +140,34 @@ impl Engine {
         workspace: PathBuf,
         before_run: RunId,
     ) -> Result<ConversationRewind, EngineError> {
+        self.rewind_conversation_checked(session, workspace, before_run, None)
+            .await
+    }
+
+    pub async fn rewind_conversation_at_head(
+        &self,
+        session: SessionId,
+        workspace: PathBuf,
+        before_run: RunId,
+        head: (u64, [u8; 32]),
+        expires_at_ms: i64,
+    ) -> Result<ConversationRewind, EngineError> {
+        self.rewind_conversation_checked(
+            session,
+            workspace,
+            before_run,
+            Some((head.0, head.1, expires_at_ms)),
+        )
+        .await
+    }
+
+    async fn rewind_conversation_checked(
+        &self,
+        session: SessionId,
+        workspace: PathBuf,
+        before_run: RunId,
+        head: Option<(u64, [u8; 32], i64)>,
+    ) -> Result<ConversationRewind, EngineError> {
         let _slot = self.claim()?;
         let mut lock = self.lock_session(session)?;
         let view = self
@@ -122,9 +178,21 @@ impl Engine {
             .ok_or(EngineError::MissingSession)?;
         lock.keep();
         let _ancestors = self.lock_lineage(&view).await?;
+        if head.is_some_and(|(sequence, digest, expiry)| {
+            sequence != view.last_sequence
+                || digest != view.rewinds.prefix_digest()
+                || i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX) >= expiry
+        }) {
+            return Err(EngineError::RewindPreviewExpired);
+        }
         let identity = WorkspaceInputs::admit_identity(&workspace, &self.state)?;
         ensure_session_workspace(&view, identity)?;
         let prepared = self.prepare_conversation(&view, before_run).await?;
+        if head.is_some_and(|(_, _, expiry)| {
+            i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX) >= expiry
+        }) {
+            return Err(EngineError::RewindPreviewExpired);
+        }
         self.finish_conversation(prepared).await
     }
 
@@ -385,6 +453,8 @@ impl Engine {
             .await?;
         let checkpoint = if files.is_empty() {
             Checkpoint::not_needed()
+        } else if cancellation.is_cancelled() {
+            Checkpoint::skipped(CheckpointReason::StoreUnavailable)
         } else {
             let capture = crate::store::CheckpointCapture {
                 session,
@@ -520,6 +590,9 @@ impl Engine {
         }
         let mut files: Vec<RewindFile> = Vec::new();
         let mut changes = Vec::new();
+        let mut comparisons = Vec::new();
+        let mut comparison_bytes = 0u64;
+        let mut checkpoint_storage_unavailable = false;
         let mut overwrite = Vec::new();
         let mut current_bytes = 0u64;
         for file in &plan.files {
@@ -553,7 +626,8 @@ impl Engine {
                         Ok(Some(bytes)) if bytes.len() == state.bytes as usize => {
                             Some(FileVersion::from_bytes(&bytes, state.executable))
                         }
-                        _ => {
+                        result => {
+                            checkpoint_storage_unavailable |= result.is_err();
                             issues.push(RewindIssue::Unavailable);
                             None
                         }
@@ -562,6 +636,23 @@ impl Engine {
             } else {
                 None
             };
+            let compared_bytes = observed.as_ref().map_or(0, |v| u64::from(v.bytes))
+                + file.restore_to.as_ref().map_or(0, |v| u64::from(v.bytes));
+            if comparison_bytes + compared_bytes <= 2 * rewind::MAX_REWIND_BYTES
+                && !issues.iter().any(|issue| {
+                    matches!(
+                        issue,
+                        RewindIssue::OutsideGrant | RewindIssue::Unsafe | RewindIssue::Unavailable
+                    )
+                })
+            {
+                comparison_bytes += compared_bytes;
+                comparisons.push(FileChange {
+                    path: file.path.clone(),
+                    before: before.clone(),
+                    after: after.clone(),
+                });
+            }
             if request.overwrite.contains(&file.path) {
                 if issues.is_empty()
                     || issues
@@ -624,6 +715,8 @@ impl Engine {
                 plan: selected,
                 started,
                 permissions_digest,
+                comparisons,
+                checkpoint_storage_unavailable,
             },
             runtime,
             changeset: WorkerChangeset { files: changes },
@@ -751,6 +844,99 @@ mod tests {
     use crate::session::worker::{WorkerBaseVersion, WorkerDataFacts};
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn rewind_selection_confirmation_pins_observations_authority_head_and_expiry() {
+        let session = SessionId::new();
+        let target = CheckpointTarget::Run {
+            run_id: RunId::new(),
+            sequence: 2,
+        };
+        let preview = || RewindPreview {
+            request: RewindRequest {
+                session_id: session,
+                workspace: "/fixture".into(),
+                target: target.clone(),
+                tools: ToolGrant::None,
+                kept: Vec::new(),
+                overwrite: Vec::new(),
+            },
+            files: vec![RewindFile {
+                path: "src/a".into(),
+                observed: None,
+                issues: vec![RewindIssue::Drifted],
+                kept: false,
+            }],
+            plan: RewindPlan {
+                files: Vec::new(),
+                blockers: Vec::new(),
+                non_rewindable: Vec::new(),
+            },
+            started: RewindStarted {
+                rewind_id: uuid::Uuid::now_v7(),
+                target: target.clone(),
+                head_sequence: 3,
+                prefix_digest: [1; 32],
+                plan_digest: [2; 32],
+                file_count: 1,
+                restored_bytes: 0,
+                kept: Vec::new(),
+                overwrite: Vec::new(),
+                workspace_device: 1,
+                workspace_inode: 2,
+                policy_digest: [3; 32],
+                enforcement_digest: [4; 32],
+                expires_at_ms: i64::MAX,
+            },
+            permissions_digest: None,
+            comparisons: Vec::new(),
+            checkpoint_storage_unavailable: false,
+        };
+        type Mutation = fn(&mut RewindPreview);
+        for (change, expected) in [
+            (
+                (|p: &mut RewindPreview| {
+                    p.files[0].kept = true;
+                    p.started.plan_digest = [9; 32];
+                }) as Mutation,
+                true,
+            ),
+            (|p| p.request.session_id = SessionId::new(), false),
+            (
+                |p| {
+                    p.request.target = CheckpointTarget::Run {
+                        run_id: RunId::new(),
+                        sequence: 2,
+                    }
+                },
+                false,
+            ),
+            (|p| p.started.head_sequence += 1, false),
+            (|p| p.started.prefix_digest = [9; 32], false),
+            (|p| p.started.policy_digest = [9; 32], false),
+            (|p| p.started.enforcement_digest = [9; 32], false),
+            (|p| p.permissions_digest = Some([9; 32]), false),
+            (
+                |p| {
+                    p.files[0].observed = Some(FileState {
+                        sha256: "a".repeat(64),
+                        bytes: 1,
+                        executable: false,
+                    })
+                },
+                false,
+            ),
+            (|p| p.files[0].path = "src/b".into(), false),
+        ] {
+            let original = preview();
+            let mut selected = preview();
+            change(&mut selected);
+            assert_eq!(selected.observations_match(&original), expected);
+        }
+        let mut expired = preview();
+        expired.started.expires_at_ms = 0;
+        assert!(!preview().observations_match(&expired));
+    }
+
     fn write_grant(state: &std::path::Path, write: bool) {
         let path = state.join("tools.json");
         std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["src"],"write":write,"commands":[],"skills":[],"mcp":[]})).unwrap()).unwrap();
@@ -861,6 +1047,18 @@ mod tests {
             .unwrap()
             .preview;
         assert!(overwrite.can_restore());
+        assert!(overwrite.observations_match(&refused));
+        std::fs::write(workspace.join("src/a"), "external again").unwrap();
+        let changed = engine
+            .prepare_rewind(request(Vec::new(), vec!["src/a".into()]), &view)
+            .await
+            .unwrap()
+            .preview;
+        assert!(!changed.observations_match(&refused));
+        let mut expired = refused;
+        expired.started.expires_at_ms = 0;
+        assert!(!changed.observations_match(&expired));
+        std::fs::write(workspace.join("src/a"), "external").unwrap();
         assert_eq!(
             overwrite.plan.files[0]
                 .expected_current

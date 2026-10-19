@@ -57,9 +57,20 @@ pub struct Composer {
     file_candidates: Vec<String>,
     skills: Vec<String>,
     approval_mode: Option<arany::ApprovalMode>,
+    recalled_draft: Option<(String, Vec<ImageAttachment>)>,
 }
 
 impl Composer {
+    pub fn restore_prompt(&mut self, text: &str) -> Result<ComposerEdit, &'static str> {
+        let literal = text.starts_with('/').then(|| format!("/{text}"));
+        self.insert_paste(literal.as_deref().unwrap_or(text))
+    }
+    pub fn remember_and_clear(&mut self) {
+        let draft = self.take();
+        let images = self.take_images();
+        self.clear();
+        self.recalled_draft = Some((draft, images));
+    }
     pub fn completion_layout(&self) -> CompletionLayout {
         self.completion_layout
     }
@@ -386,6 +397,15 @@ impl Composer {
     }
 
     pub fn apply(&mut self, input: TerminalInput) -> ComposerEdit {
+        if input == TerminalInput::Up
+            && self.is_empty()
+            && let Some((draft, images)) = self.recalled_draft.take()
+        {
+            self.text = draft;
+            self.images = images;
+            self.cursor = self.text.len();
+            return ComposerEdit::Changed;
+        }
         if let Some((items, selected)) = self.file_menu() {
             let count = items.len();
             match input {
@@ -669,6 +689,33 @@ fn next_word_boundary(text: &str, cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewind_restored_prompts_remain_objective_data_and_clear_is_recallable() {
+        for prompt in [
+            "ordinary prompt",
+            "/rewind",
+            "/permissions",
+            "//literal",
+            "first\nsecond",
+        ] {
+            let mut composer = Composer::default();
+            assert_eq!(composer.restore_prompt(prompt), Ok(ComposerEdit::Changed));
+            assert_eq!(composer.submission(), Ok(Submission::Objective(prompt)));
+            let draft = composer.text().to_owned();
+            composer.remember_and_clear();
+            assert!(composer.is_empty());
+            composer.apply(TerminalInput::Up);
+            assert_eq!(composer.text(), draft);
+            assert_eq!(composer.submission(), Ok(Submission::Objective(prompt)));
+        }
+        let mut composer = Composer::default();
+        assert_eq!(
+            composer.restore_prompt(&format!("/{}", "x".repeat(MAX_DRAFT_BYTES - 1))),
+            Ok(ComposerEdit::AtCapacity)
+        );
+        assert!(composer.is_empty());
+    }
 
     #[test]
     fn composer_navigation_editing_and_capacity_keep_whole_graphemes() {
@@ -1026,7 +1073,7 @@ mod tests {
         assert_eq!(composer.text(), "/r");
         assert_eq!(
             composer.completion_rows().unwrap().0,
-            ["Cmd /resume", "Cmd /rename"]
+            ["Cmd /rewind", "Cmd /resume", "Cmd /rename"]
         );
         composer.apply(TerminalInput::Right);
         composer.apply(TerminalInput::Escape);
