@@ -139,6 +139,8 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
         "drift",
         "kept",
         "overwrite",
+        "mixed",
+        "saturated",
         "uncertain",
         "bounds",
     ] {
@@ -296,7 +298,7 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
             result.unwrap();
             continue;
         }
-        if matches!(case, "drift" | "kept" | "overwrite") {
+        if matches!(case, "drift" | "kept" | "overwrite" | "mixed") {
             std::fs::write(workspace.join("src/a"), "external").unwrap();
         }
         let (before, _) = closed_view(&state, thread).await;
@@ -318,6 +320,7 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
         .unwrap();
         let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
         let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+        let outbound_probe = outbound.clone();
         let client = async {
             input.send(initialize()).await.unwrap();
             next(&mut output).await;
@@ -341,7 +344,10 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
             if case == "bounds" {
                 params["kept"] = json!((0..65).map(|n| format!("src/{n:02}")).collect::<Vec<_>>());
             }
-            if case == "overwrite" {
+            if case == "mixed" {
+                params["kept"] = json!(["src/b"]);
+            }
+            if case == "overwrite" || case == "mixed" {
                 params["overwrite"] = json!(["src/a"]);
                 input
                     .send(request(11, "thread/rewind", params.clone()))
@@ -353,6 +359,28 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
                 );
                 assert_eq!(std::fs::read(workspace.join("src/a")).unwrap(), b"external");
                 params["confirmOverwrite"] = json!(true);
+            }
+            if case == "saturated" {
+                let probe = outbound_probe;
+                for _ in 0..OUTBOUND_CAPACITY {
+                    probe
+                        .try_send(server::response(RequestId::Integer(0), json!({})))
+                        .unwrap();
+                }
+                drop(probe);
+                input.send(request(11, "thread/rewind", params)).await.unwrap();
+                input.send(request(12, "thread/list", json!({}))).await.unwrap();
+                input.send(ClientMessage::Eof).await.unwrap();
+                let mut reply = None;
+                while let Some(message) = output.recv().await {
+                    let value = serde_json::to_value(message).unwrap();
+                    if value["id"] == 11 {
+                        reply = Some(value);
+                    }
+                }
+                let reply = reply.expect("rewind answered");
+                assert_ne!(reply["result"]["rewind"]["outcome"], "uncertain", "{reply}");
+                return;
             }
             input
                 .send(request(11, "thread/rewind", params))
@@ -388,7 +416,11 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
         );
         result.unwrap();
         let (after, view) = closed_view(&state, thread).await;
-        if matches!(case, "drift" | "bounds") {
+        if case == "saturated" {
+            if let Some(operation) = view.rewinds.operations.last() {
+                assert_ne!(operation.outcome(), arany::rewind::RewindOutcome::Uncertain);
+            }
+        } else if matches!(case, "drift" | "bounds") {
             assert_eq!(after, before);
             assert!(workspace.join("src/b").exists());
         } else {
@@ -400,7 +432,7 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
                     b"original".as_slice()
                 }
             );
-            assert!(!workspace.join("src/b").exists());
+            assert_eq!(workspace.join("src/b").exists(), case == "mixed");
             assert_eq!(
                 view.rewinds.operations.last().unwrap().outcome(),
                 arany::rewind::RewindOutcome::Restored

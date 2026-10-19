@@ -3,7 +3,7 @@ use crate::presentation::{escape_terminal, rewind as display};
 use crate::terminal::{AttachedTerminal, Composer, RewindPanelError};
 use arany::rewind::{self, CheckpointTarget, RewindOutcome};
 use arany::{
-    ConversationRewind, ConversationRewindOutcome, Engine, RewindIssue, RewindPreview,
+    ConversationRewind, ConversationRewindOutcome, Engine, RewindFile, RewindIssue, RewindPreview,
     RewindRequest, RunCancellation, SessionId, SessionView, StateRoot, Store, ToolGrant,
 };
 
@@ -383,13 +383,8 @@ async fn journey(
                         kept.sort();
                         kept.dedup();
                     }
-                    2 if conflicts.iter().all(|f| {
-                        f.issues
-                            .iter()
-                            .all(|i| matches!(i, RewindIssue::Drifted | RewindIssue::HistoryDrift))
-                    }) =>
-                    {
-                        let warning = ["Overwrite changed files. Their current content must be saved before any write. This applies only to the listed drifted paths; review and confirm the new preview.".into()];
+                    2 if conflicts.iter().any(|f| overwritable(f)) => {
+                        let warning = ["Overwrite changed files. Their current content must be saved before any write. This applies only to the listed drifted paths; unavailable, unsafe and outside-grant files stay kept; review and confirm the new preview.".into()];
                         if terminal
                             .rewind_choice(
                                 "Confirm overwrite",
@@ -402,8 +397,11 @@ async fn journey(
                         {
                             return Ok(("Rewind cancelled".into(), None));
                         }
-                        overwrite = conflicts.iter().map(|f| f.path.clone()).collect();
-                        overwrite.sort();
+                        let (drifted, rest) = split_overwrite(&conflicts);
+                        overwrite = drifted;
+                        kept.extend(rest);
+                        kept.sort();
+                        kept.dedup();
                     }
                     2 => {
                         return Ok((
@@ -554,5 +552,45 @@ async fn compare(terminal: &mut AttachedTerminal, preview: &RewindPreview) -> Re
                 break;
             }
         }
+    }
+}
+
+fn overwritable(file: &RewindFile) -> bool {
+    file.issues
+        .iter()
+        .all(|i| matches!(i, RewindIssue::Drifted | RewindIssue::HistoryDrift))
+}
+
+fn split_overwrite(conflicts: &[&RewindFile]) -> (Vec<String>, Vec<String>) {
+    let (drifted, rest): (Vec<_>, Vec<_>) = conflicts.iter().partition(|f| overwritable(f));
+    let paths = |files: Vec<&&RewindFile>| {
+        let mut paths: Vec<_> = files.iter().map(|f| f.path.clone()).collect();
+        paths.sort();
+        paths
+    };
+    (paths(drifted), paths(rest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str, issues: &[RewindIssue]) -> RewindFile {
+        RewindFile {
+            path: path.into(),
+            observed: None,
+            issues: issues.to_vec(),
+            kept: false,
+        }
+    }
+
+    #[test]
+    fn mixed_conflicts_overwrite_only_drifted_paths_and_keep_the_rest() {
+        let a = file("a", &[RewindIssue::Drifted]);
+        let b = file("b", &[RewindIssue::Unavailable]);
+        let c = file("c", &[RewindIssue::HistoryDrift, RewindIssue::Unsafe]);
+        let (overwrite, kept) = split_overwrite(&[&b, &a, &c]);
+        assert_eq!(overwrite, ["a"]);
+        assert_eq!(kept, ["b", "c"]);
     }
 }

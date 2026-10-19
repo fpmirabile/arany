@@ -255,6 +255,7 @@ pub(in crate::cli) async fn run_configured(
                                     params(request.params)?,
                                     cancellation.clone(),
                                 ));
+                                let mut busy = Vec::new();
                                 let result = loop {
                                     tokio::select! {
                                         result = restoration.as_mut() => break result?,
@@ -265,12 +266,24 @@ pub(in crate::cli) async fn run_configured(
                                                 stopping.send_replace(true);
                                             }
                                             Some(ClientMessage::Message(Message::Request(request))) => {
-                                                send(&outbound, Fault::state(Reason::Busy).message(Some(request.id))).await.map_err(internal)?;
+                                                let reply = Fault::state(Reason::Busy).message(Some(request.id));
+                                                if let Err(mpsc::error::TrySendError::Full(reply)) = outbound.try_send(reply) {
+                                                    if busy.len() < REWIND_BUSY_QUEUE {
+                                                        busy.push(reply);
+                                                    } else {
+                                                        cancellation.cancel();
+                                                        shutdown = true;
+                                                        stopping.send_replace(true);
+                                                    }
+                                                }
                                             }
                                             _ => {}
                                         }
                                     }
                                 };
+                                for reply in busy {
+                                    send(&outbound, reply).await.map_err(internal)?;
+                                }
                                 send(&outbound, response(id.clone(), &result))
                                     .await
                                     .map_err(internal)?;
@@ -849,6 +862,8 @@ pub(super) fn response(id: RequestId, result: impl Serialize) -> Message {
         result: serde_json::to_value(result).expect("typed result"),
     })
 }
+const REWIND_BUSY_QUEUE: usize = 64;
+
 pub(super) async fn send(outbound: &mpsc::Sender<Message>, message: Message) -> Result<(), String> {
     outbound
         .send(message)
