@@ -296,7 +296,9 @@ pub(crate) fn history_unanswered_block(run: &RunView) -> String {
         RunStatus::Failed => ("failed", "Run failed before any primary model Tool"),
         RunStatus::Cancelled => ("cancelled", "Run cancelled"),
         RunStatus::StoppedByHook => ("stopped_by_hook", "Run stopped by hook"),
-        _ => ("interrupted", "Run interrupted"),
+        RunStatus::Interrupted | RunStatus::Pending | RunStatus::Active | RunStatus::Finished => {
+            ("interrupted", "Run interrupted")
+        }
     };
     let call = run
         .agents
