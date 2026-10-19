@@ -105,6 +105,9 @@ async fn case(case: &str) {
     if ["drift", "keep", "overwrite"].contains(&case) {
         std::fs::write(&path, "external").unwrap();
     }
+    if ["oversized", "oversized_keep"].contains(&case) {
+        std::fs::write(&path, vec![0; 1024 * 1024 + 1]).unwrap();
+    }
     if case == "link" {
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink("new.txt", &path).unwrap();
@@ -126,7 +129,7 @@ async fn case(case: &str) {
         std::fs::write(&path, br#"{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"exit 2","timeout":5}]}],"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"exit 2","timeout":5}]}]}}"#).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    let kept = if case == "keep" {
+    let kept = if ["keep", "oversized_keep"].contains(&case) {
         vec!["notes/facts.txt".into()]
     } else {
         Vec::new()
@@ -140,7 +143,7 @@ async fn case(case: &str) {
         .rewind_preview(request(target.clone(), kept, overwrite))
         .await
         .unwrap();
-    if ["drift", "link", "special", "grant", "missing"].contains(&case) {
+    if ["drift", "link", "special", "grant", "missing", "oversized"].contains(&case) {
         assert!(!preview.can_restore(), "{case}");
         let expected = match case {
             "drift" => RewindIssue::Drifted,
@@ -148,6 +151,7 @@ async fn case(case: &str) {
             "missing" => RewindIssue::Unavailable,
             _ => RewindIssue::Unsafe,
         };
+        assert_eq!(preview.files()[0].path, "notes/facts.txt");
         assert!(preview.files()[0].issues.contains(&expected), "{case}");
         assert!(matches!(
             engine.rewind(preview, RunCancellation::new()).await,
@@ -158,8 +162,13 @@ async fn case(case: &str) {
             "whole batch refused"
         );
         engine.close().await.unwrap();
-        let (_, after) = replayed(&state, session).await;
+        let (events, after) = replayed(&state, session).await;
         assert!(after.rewinds.operations.is_empty());
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.event, Event::WorkspaceRewindStarted { .. }))
+        );
         return;
     }
     assert!(preview.can_restore());
@@ -309,10 +318,12 @@ async fn case(case: &str) {
         assert!(!workspace.join("notes/new.txt").exists());
         assert_eq!(
             std::fs::read(&path).unwrap(),
-            if case == "keep" {
-                b"external".as_slice()
+            if case == "oversized_keep" {
+                vec![0; 1024 * 1024 + 1]
+            } else if case == "keep" {
+                b"external".to_vec()
             } else {
-                b"original".as_slice()
+                b"original".to_vec()
             }
         );
         if ["receipt_loss", "finish_loss", "partial"].contains(&case) {
@@ -324,7 +335,7 @@ async fn case(case: &str) {
                 request(target.clone(), Vec::new(), Vec::new()),
             )
             .await;
-        } else if case != "keep" {
+        } else if !["keep", "oversized_keep"].contains(&case) {
             let (_, restored) = replayed(&state, session).await;
             let boundary = restored.rewinds.checkpoints.iter().find(|c| matches!(c, CheckpointTarget::Rewind { rewind_id: id, .. } if *id == rewind_id)).unwrap().clone();
             let undo = engine
@@ -465,7 +476,14 @@ fn hash(bytes: &[u8]) -> String {
 
 #[tokio::test]
 async fn guarded_rewind_success_drift_choices_and_undo() {
-    for name in ["success", "drift", "keep", "overwrite", "hooks"] {
+    for name in [
+        "success",
+        "drift",
+        "keep",
+        "oversized_keep",
+        "overwrite",
+        "hooks",
+    ] {
         case(name).await;
     }
 }
@@ -473,6 +491,7 @@ async fn guarded_rewind_success_drift_choices_and_undo() {
 async fn guarded_rewind_refuses_missing_grant_links_special_files_and_stale_confirmation() {
     for name in [
         "missing",
+        "oversized",
         "grant",
         "link",
         "special",

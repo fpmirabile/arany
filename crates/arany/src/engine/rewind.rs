@@ -598,7 +598,7 @@ impl Engine {
         for file in &plan.files {
             let mut issues = Vec::new();
             let kept = request.kept.contains(&file.path);
-            let before = live_version(&runtime, &file.path, kept, &mut issues).await?;
+            let before = live_version(&runtime, &file.path, &mut issues).await?;
             let observed = before.as_ref().map(file_state).transpose()?;
             if !kept {
                 current_bytes += observed.as_ref().map_or(0, |v| u64::from(v.bytes));
@@ -727,7 +727,6 @@ impl Engine {
 async fn live_version(
     runtime: &ToolRuntime,
     path: &str,
-    kept: bool,
     issues: &mut Vec<RewindIssue>,
 ) -> Result<Option<FileVersion>, EngineError> {
     use crate::tools::ToolError;
@@ -747,7 +746,6 @@ async fn live_version(
     {
         Ok(version) => Ok(version),
         Err(ToolError::QueueFull) => Err(EngineError::Tool(ToolError::QueueFull)),
-        Err(ToolError::Limit) if !kept => Err(EngineError::RewindTooLarge),
         Err(_) => {
             issues.push(RewindIssue::Unsafe);
             Ok(None)
@@ -1013,7 +1011,11 @@ mod tests {
             .unwrap();
         view.workspace_identity =
             Some(WorkspaceInputs::admit_identity(&workspace, &engine.state).unwrap());
-        let session = view.id;
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        view.id = session;
         let target = view.rewinds.checkpoints[0].clone();
         let request = |kept, overwrite| RewindRequest {
             session_id: session,
@@ -1116,9 +1118,41 @@ mod tests {
             assert!(refused.files()[0].issues.contains(&RewindIssue::Unsafe));
             assert!(!refused.can_restore(), "{path}");
         }
-        for paths in [
-            ["src/missing", "src/missing/child"],
-            ["src/Missing", "src/missing"],
+        publications(&mut view, 1, 3);
+        std::fs::write(workspace.join("src/f0000"), vec![0; 1024 * 1024 + 1]).unwrap();
+        let oversized = engine
+            .prepare_rewind(request(Vec::new(), Vec::new()), &view)
+            .await
+            .unwrap()
+            .preview;
+        assert_eq!(oversized.files()[0].path, "src/f0000");
+        assert!(oversized.files()[0].issues.contains(&RewindIssue::Unsafe));
+        assert!(!oversized.can_restore());
+        let kept = engine
+            .prepare_rewind(request(vec!["src/f0000".into()], Vec::new()), &view)
+            .await
+            .unwrap()
+            .preview;
+        assert!(kept.files()[0].kept);
+        assert!(kept.plan.files.is_empty());
+        let before_events = engine.journal.store().load_session(session).await.unwrap();
+        let checkpoints = rusqlite::Connection::open(state.join("checkpoints.sqlite")).unwrap();
+        checkpoints
+            .execute(
+                "INSERT INTO blobs(digest,bytes,len) VALUES(?1,?2,3)",
+                rusqlite::params![
+                    parse_digest(&crate::tools::types::hex_digest(b"old"))
+                        .unwrap()
+                        .as_slice(),
+                    b"old".as_slice()
+                ],
+            )
+            .unwrap();
+        drop(checkpoints);
+        for (paths, restore) in [
+            (["src/missing", "src/missing/child"], false),
+            (["src/Missing", "src/missing"], false),
+            (["src/Missing", "src/missing"], true),
         ] {
             let paths = paths.map(str::to_owned);
             publications_at(&mut view, &paths, 3);
@@ -1134,10 +1168,20 @@ mod tests {
                 unreachable!()
             };
             for file in files {
-                file.before = WorkerBaseVersion::Absent;
+                if restore {
+                    file.after = WorkerBaseVersion::Absent;
+                } else {
+                    file.before = WorkerBaseVersion::Absent;
+                }
             }
             let refused = engine
-                .prepare_rewind(request(Vec::new(), paths.to_vec()), &view)
+                .prepare_rewind(
+                    request(
+                        Vec::new(),
+                        if restore { Vec::new() } else { paths.to_vec() },
+                    ),
+                    &view,
+                )
                 .await
                 .unwrap()
                 .preview;
@@ -1149,6 +1193,14 @@ mod tests {
                     .all(|f| f.issues == [RewindIssue::Unsafe])
             );
             assert!(!refused.can_restore());
+            assert!(matches!(
+                engine.rewind(refused, RunCancellation::new()).await,
+                Err(EngineError::RewindBlocked)
+            ));
+            assert_eq!(
+                engine.journal.store().load_session(session).await.unwrap(),
+                before_events
+            );
         }
         engine.close().await.unwrap();
     }

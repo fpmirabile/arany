@@ -196,7 +196,7 @@ impl ProviderTurn {
         {
             return Err(ProviderError::InvalidOutcome);
         }
-        let value = crate::tools::parse_json(json.as_bytes(), json.len())
+        let value = super::parse_response_json(json.as_bytes())
             .map_err(|_| ProviderError::InvalidOutcome)?;
         if !value
             .as_array()
@@ -308,15 +308,29 @@ mod tests {
             );
         }
         let mut nested = String::from("1");
-        for _ in 0..40 {
+        for _ in 0..70 {
             nested = format!("[{nested}]");
         }
         assert!(
             ProviderTurn::new("anthropic", &format!(r#"[{{"a":{nested}}}]"#), SECRET, 4096)
                 .is_err()
         );
-        let nodes = format!("[{{\"a\":[{}]}}]", vec!["1"; 5000].join(","));
-        assert!(ProviderTurn::new("anthropic", &nodes, SECRET, 4096).is_err());
+        let nodes = format!("[{{\"a\":[{}]}}]", vec!["1"; 300_000].join(","));
+        assert!(ProviderTurn::new("anthropic", &nodes, SECRET, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn turn_with_many_reasoning_summaries_and_a_finish_call_is_admitted() {
+        use serde_json::json;
+        let summaries: Vec<_> = (0..1400)
+            .map(|_| json!({"type":"summary_text","text":"s"}))
+            .collect();
+        let turn = json!([
+            {"type":"reasoning","summary":summaries},
+            {"type":"function_call","name":"Finish","arguments":"{}","call_id":"call_1"}
+        ])
+        .to_string();
+        assert!(ProviderTurn::new("openai", &turn, SECRET, 4096).is_ok());
     }
 
     #[test]

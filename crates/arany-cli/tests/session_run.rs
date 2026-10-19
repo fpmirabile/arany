@@ -200,6 +200,9 @@ mod active_terminal;
 mod active_terminal;
 
 #[cfg(target_os = "linux")]
+#[path = "session_run/chat_mouse.rs"]
+mod chat_mouse;
+#[cfg(target_os = "linux")]
 #[path = "session_run/session_picker.rs"]
 mod session_picker;
 

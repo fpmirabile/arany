@@ -376,6 +376,8 @@ fn evict(
     must_satisfy: bool,
     mut enough: impl FnMut(i64, i64) -> bool,
 ) -> Result<(), StoreError> {
+    #[cfg(test)]
+    tests::EVICTION_PASSES.with(|passes| passes.set(passes.get() + 1));
     let mut victims = Vec::new();
     let (mut bytes, mut groups) = (0i64, 0i64);
     let mut group = None::<String>;
@@ -421,17 +423,10 @@ fn evict(
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let gone = !incoming.contains(&victim.digest)
-                    && scalar(
-                        connection,
-                        "SELECT EXISTS(SELECT 1 FROM refs WHERE digest=?1)",
+                    && connection.execute(
+                        "DELETE FROM blobs WHERE digest=?1 AND NOT EXISTS(SELECT 1 FROM refs WHERE digest=?1)",
                         [victim.digest.as_slice()],
-                    )? == 0;
-                if gone {
-                    connection.execute(
-                        "DELETE FROM blobs WHERE digest=?1",
-                        [victim.digest.as_slice()],
-                    )?;
-                }
+                    )? > 0;
                 entry.insert(gone)
             }
         };
@@ -455,9 +450,18 @@ fn evict_total(
     connection: &Connection,
     incoming: &BTreeSet<[u8; 32]>,
     pruned: &mut Pruned,
+    must_satisfy: bool,
     enough: impl FnMut(i64, i64) -> bool,
 ) -> Result<(), StoreError> {
-    evict(connection, TOTAL_ORDER, [], incoming, pruned, true, enough)
+    evict(
+        connection,
+        TOTAL_ORDER,
+        [],
+        incoming,
+        pruned,
+        must_satisfy,
+        enough,
+    )
 }
 
 fn evict_checkpoints(
@@ -683,7 +687,7 @@ fn capture_inner(
     in_time(deadline)?;
     let rows = scalar(&tx, "SELECT COUNT(*) FROM refs", [])?;
     if rows + files > limits.refs {
-        evict_total(&tx, &incoming, &mut pruned, |_, removed| {
+        evict_total(&tx, &incoming, &mut pruned, true, |_, removed| {
             rows - removed + files <= limits.refs
         })?;
     }
@@ -703,7 +707,9 @@ fn capture_inner(
         if HEADROOM as i64 + needed > available {
             return Err(StoreError::StorageFull);
         }
-        evict_total(&tx, &incoming, &mut pruned, |freed, _| freed >= short)?;
+        evict_total(&tx, &incoming, &mut pruned, false, |freed, _| {
+            freed >= short.saturating_mul(2)
+        })?;
         in_time(deadline)?;
         if shortfall(&tx)? > 0 {
             return Err(StoreError::StorageFull);
