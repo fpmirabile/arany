@@ -395,7 +395,7 @@ mod tests {
         const TEST: &str = "cli::attached::permissions::tests::rejected_save_keeps_the_trust_record_and_reports_the_error";
         let Some(root) = std::env::var_os(FIXTURE) else {
             let temp = tempfile::tempdir().unwrap();
-            // The only candidate is the cache under HOME, which is also the workspace: saving it overlaps.
+            // The cache under HOME overlaps the workspace, so selecting it must reject saving.
             std::fs::create_dir_all(temp.path().join("home/.cargo/registry/cache")).unwrap();
             let (master, slave) = crate::test_process::cloexec_pty(None);
             let mut input = master.try_clone().unwrap();
@@ -426,15 +426,18 @@ mod tests {
                             .replace("\r\n", "\n")
                             .contains(crate::test_process::READ_ONLY_CONSENT_PROMPT)
                     {
-                        input.write_all(b"trust 3\r").unwrap();
+                        let answer = std::fs::read(temp.path().join("answer")).unwrap();
+                        assert!((1..=32).contains(&answer.len()));
+                        input.write_all(&answer).unwrap();
                         answered = true;
                     }
                 },
             );
             assert!(
                 output.status.success(),
-                "rejected save child: {:?}",
-                String::from_utf8_lossy(&output.stdout)
+                "rejected save child: stdout={:?}; stderr={:?}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             );
             assert!(answered, "linear consent prompt was not shown");
             crate::test_process::assert_single_test_completed(&output.stdout, "rejected save");
@@ -453,6 +456,13 @@ mod tests {
             let access = WorkspacePermissions::open(&workspace)
                 .unwrap()
                 .prepare_profile_selection();
+            let cache = workspace.join(".cargo/registry/cache");
+            let index = access
+                .runtime_profile_choices()
+                .iter()
+                .position(|option| option.detected && option.path == cache)
+                .expect("detected overlapping Cargo cache candidate");
+            std::fs::write(root.join("answer"), format!("trust {}\r", index + 3)).unwrap();
             let choice = match choose(&mut terminal, access, &mut composer, false).await {
                 Ok(choice) => choice,
                 Err(_) => panic!("a failed save must not abort the chooser"),
