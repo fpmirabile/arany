@@ -558,6 +558,80 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
     );
 }
 
+#[test]
+fn created_event_echoing_a_large_tool_catalog_is_admitted_within_the_byte_bound() {
+    let tools: Vec<_> = (0..40)
+        .map(|index| {
+            let properties: serde_json::Map<String, serde_json::Value> = (0..40)
+                .map(|field| (format!("field_{field}"), json!({"type":"string","description":"x"})))
+                .collect();
+            json!({"type":"function","name":format!("tool_{index}"),"parameters":{"type":"object","properties":properties}})
+        })
+        .collect();
+    let created =
+        json!({"type":"response.created","response":{"id":"resp_synthetic","tools":tools}});
+    let bytes = format!("event: response.created\ndata: {created}\n\n").into_bytes();
+    assert!(bytes.len() < 1024 * 1024);
+    let mut decoder = StreamDecoder::new(TOKEN);
+    decoder
+        .feed(&bytes)
+        .expect("echoed catalog within the byte bound");
+
+    let flood = format!(
+        "event: response.created\ndata: {{\"type\":\"response.created\",\"x\":[{}]}}\n\n",
+        vec!["0"; 300_000].join(",")
+    );
+    let mut decoder = StreamDecoder::new(TOKEN);
+    assert!(decoder.feed(flood.as_bytes()).is_err());
+    assert_eq!(decoder.stage, Stage::EventJson);
+}
+
+// A response.created event echoes the whole request; half-cap headroom makes catalog growth fail here before it fails users.
+#[test]
+fn created_echo_of_the_largest_real_request_stays_within_half_the_stream_json_caps() {
+    fn nodes(value: &serde_json::Value) -> usize {
+        1 + match value {
+            serde_json::Value::Array(items) => items.iter().map(nodes).sum(),
+            serde_json::Value::Object(fields) => fields.values().map(nodes).sum(),
+            _ => 0,
+        }
+    }
+    let catalog = json!({
+        "write": true,
+        "commands": (0..8).map(|index| json!({"name": format!("command_{index}")})).collect::<Vec<_>>(),
+        "skills": (0..crate::tools::MAX_SKILLS).map(|index| json!({"name": format!("skill_{index}")})).collect::<Vec<_>>(),
+        "mcp_servers": (0..4).map(|index| json!({"name": format!("server_{index}"), "tools": ["echo"]})).collect::<Vec<_>>(),
+        "git": {"operations": ["git_status", "git_diff", "git_log"]},
+        "tool_calls_remaining": 4,
+    });
+    let mut request = crate::provider::test_support::primary_request("model-a");
+    request.input.tools = Some(crate::provider::test_support::tool_context(catalog));
+    let conversation = render::conversation(&request).unwrap();
+    let chatgpt: serde_json::Value =
+        serde_json::from_slice(&body_for(&request, Effort::Medium).unwrap()).unwrap();
+    let api = crate::provider::openai::wire::run_body(&request, &conversation).unwrap();
+    for (label, echoed) in [("chatgpt", chatgpt), ("openai api", api)] {
+        let mut echoed = echoed;
+        echoed["id"] = json!("resp_synthetic");
+        let created = json!({"type":"response.created","response":echoed});
+        let data = created.to_string();
+        let count = nodes(&created);
+        assert!(
+            data.len() < crate::provider::MAX_RESPONSE_BYTES / 2,
+            "{label} {} bytes",
+            data.len()
+        );
+        assert!(
+            count < crate::provider::MAX_RESPONSE_JSON_NODES / 2,
+            "{label} {count} nodes"
+        );
+        let mut decoder = StreamDecoder::new(TOKEN);
+        decoder
+            .feed(format!("event: response.created\ndata: {data}\n\n").as_bytes())
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+    }
+}
+
 async fn serve(reply: Vec<u8>) -> (Url, tokio::task::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let endpoint = Url::parse(&format!(

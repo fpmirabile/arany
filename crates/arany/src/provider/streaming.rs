@@ -378,8 +378,8 @@ impl SseFramer {
                 return Err(ProviderError::InvalidOutcome);
             }
             self.stage = FramingStage::Json;
-            let value = crate::tools::parse_json(&data, MAX_RESPONSE_BYTES)
-                .map_err(|_| ProviderError::InvalidStream)?;
+            let value =
+                super::parse_response_json(&data).map_err(|_| ProviderError::InvalidStream)?;
             self.stage = FramingStage::Credential;
             if reflects_secret(&value, secret) {
                 return Err(ProviderError::InvalidOutcome);

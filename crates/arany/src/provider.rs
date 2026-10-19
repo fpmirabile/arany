@@ -100,7 +100,18 @@ async fn read_identity_body(
 pub(crate) const MAX_REPORTED_INPUT_TOKENS: u32 = 1_000_000;
 pub(crate) const MAX_OUTPUT_TOKEN_CAP: u32 = 16_384;
 pub(crate) const DEFAULT_OUTPUT_TOKEN_CAP: u32 = 4096;
-const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_RESPONSE_JSON_NODES: usize = MAX_RESPONSE_BYTES / 4;
+const MAX_RESPONSE_JSON_DEPTH: usize = 64;
+
+fn parse_response_json(bytes: &[u8]) -> Result<Value, crate::tools::ToolError> {
+    crate::tools::parse_json_bounded(
+        bytes,
+        MAX_RESPONSE_BYTES,
+        MAX_RESPONSE_JSON_NODES,
+        MAX_RESPONSE_JSON_DEPTH,
+    )
+}
 
 fn outcome_schema() -> Value {
     json!({

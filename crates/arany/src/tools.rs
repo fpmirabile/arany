@@ -32,8 +32,8 @@ pub use approval::{
 };
 pub use cancel::Cancellation;
 use config::Config;
-pub(crate) use skills::parse_json;
 pub use skills::{ProjectSkills, project_skills};
+pub(crate) use skills::{parse_json, parse_json_bounded};
 pub use workspace::{
     RuntimeProfileOption, TrustRecordError, TrustReset, WorkspacePermissions, mention_paths,
 };
