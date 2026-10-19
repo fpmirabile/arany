@@ -588,7 +588,7 @@ fn created_event_echoing_a_large_tool_catalog_is_admitted_within_the_byte_bound(
 
 // A response.created event echoes the whole request; half-cap headroom makes catalog growth fail here before it fails users.
 #[test]
-fn created_echo_of_the_largest_real_request_stays_within_half_the_stream_json_caps() {
+fn created_echo_of_the_largest_catalog_request_stays_within_half_the_stream_json_caps() {
     fn nodes(value: &serde_json::Value) -> usize {
         1 + match value {
             serde_json::Value::Array(items) => items.iter().map(nodes).sum(),
@@ -598,12 +598,13 @@ fn created_echo_of_the_largest_real_request_stays_within_half_the_stream_json_ca
     }
     let catalog = json!({
         "write": true,
-        "commands": (0..8).map(|index| json!({"name": format!("command_{index}")})).collect::<Vec<_>>(),
-        "skills": (0..crate::tools::MAX_SKILLS).map(|index| json!({"name": format!("skill_{index}")})).collect::<Vec<_>>(),
-        "mcp_servers": (0..4).map(|index| json!({"name": format!("server_{index}"), "tools": ["echo"]})).collect::<Vec<_>>(),
+        "commands": (0..8).map(|index| json!({"name": format!("{index}{}", "c".repeat(63))})).collect::<Vec<_>>(),
+        "skills": (0..crate::tools::MAX_SKILLS).map(|index| json!({"name": format!("{index:02}{}", "s".repeat(62)), "description": "d".repeat(100)})).collect::<Vec<_>>(),
+        "mcp_servers": (0..4).map(|index| json!({"name": format!("{index}{}", "m".repeat(63)), "tools": ["echo"]})).collect::<Vec<_>>(),
         "git": {"operations": ["git_status", "git_diff", "git_log"]},
         "tool_calls_remaining": 4,
     });
+    assert!(catalog.to_string().len() <= crate::tools::types::MAX_TOOL_CATALOG_BYTES);
     let mut request = crate::provider::test_support::primary_request("model-a");
     request.input.tools = Some(crate::provider::test_support::tool_context(catalog));
     let conversation = render::conversation(&request).unwrap();
