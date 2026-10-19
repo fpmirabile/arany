@@ -1,6 +1,11 @@
 set -eu
 source=$1; alias=$2; late=$3; nested=$4; fixture=$5; binary=$6; target=$7
 mode=$8
+exec 9>>"$fixture/trace-$mode.log"
+BASH_XTRACEFD=9
+PS4='+${SECONDS}s ${LINENO}: '
+set -x
+trap 'status=$?; printf "exit %s mode=%s line=%s\n" "$status" "$mode" "$LINENO" >&2' EXIT
 setup_alias() {
   /usr/bin/mount --bind "$source" "$alias"
   /usr/bin/mount --make-shared "$alias"
@@ -52,7 +57,7 @@ wait_worker_identity() {
   [ "$namespace_pid" = "$worker" ]
 }
 cleanup() { /usr/bin/umount --recursive "$alias" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
+trap 'status=$?; printf "exit %s mode=%s\n" "$status" "$mode" >&2; cleanup' EXIT
 if [ "$mode" = timeout-child ]; then
   report_identity "$fixture/held.pid"
   exec /usr/bin/sleep 60

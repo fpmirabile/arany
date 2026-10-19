@@ -2226,6 +2226,21 @@ mod tests {
             .block_on(native_runtime_mount_attestation_inner());
     }
 
+    fn fixture_diagnostics(fixture: &Path) -> String {
+        const TAIL: usize = 4096;
+        let mut report = String::new();
+        for name in [
+            "trace-topology.log",
+            "worker-exercise.log",
+            "worker-reject.log",
+        ] {
+            let bytes = std::fs::read(fixture.join(name)).unwrap_or_default();
+            let tail = &bytes[bytes.len().saturating_sub(TAIL)..];
+            report.push_str(&format!("--- {name}\n{}\n", String::from_utf8_lossy(tail)));
+        }
+        report
+    }
+
     async fn native_runtime_mount_attestation_inner() {
         use crate::tools::toolchains::RuntimeGrant;
 
@@ -2306,16 +2321,30 @@ mod tests {
                         "--include-ignored",
                         "--nocapture",
                     ]);
-                let child = command
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true)
-                    .spawn()
-                    .expect("production Bwrap prefix launch");
-                let (status, _, stderr) = capture(child, 64 * 1024, Duration::from_secs(30))
-                    .await
-                    .expect("bounded production-prefix fixture");
+                // Bubblewrap can wedge with no child before the fixture runs; retry only while
+                // the helper has published nothing.
+                let mut attempts = 0;
+                let (status, stderr) = loop {
+                    attempts += 1;
+                    let child = command
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .kill_on_drop(true)
+                        .spawn()
+                        .expect("production Bwrap prefix launch");
+                    match capture(child, 64 * 1024, Duration::from_secs(10)).await {
+                        Ok((status, _, stderr)) => break (status, stderr),
+                        Err(ToolError::Limit)
+                            if attempts < 3
+                                && !["ready", "result"]
+                                    .iter()
+                                    .any(|name| Path::new(&fixture).join(name).exists()) => {}
+                        Err(error) => panic!(
+                            "bounded production-prefix fixture: {error:?} after {attempts} attempt(s)"
+                        ),
+                    }
+                };
                 assert!(
                     status.success(),
                     "production unshare/Bubblewrap prefix: {}",
@@ -2430,6 +2459,7 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        let started = std::time::Instant::now();
         let (status, stdout, stderr) = match capture_runtime_mount_topology(command, fixture.path())
             .await
         {
@@ -2445,8 +2475,10 @@ mod tests {
         };
         assert!(
             status.success(),
-            "native mount attestation fixture: {}",
-            String::from_utf8_lossy(&stderr)
+            "native mount attestation fixture: status {status:?} after {:?}; stderr {:?}\n{}",
+            started.elapsed(),
+            String::from_utf8_lossy(&stderr),
+            fixture_diagnostics(fixture.path())
         );
         assert_eq!(
             stdout,
