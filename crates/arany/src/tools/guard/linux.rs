@@ -1962,8 +1962,9 @@ mod tests {
         mut command: Command,
         fixture: &Path,
     ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), (String, bool)> {
-        const CAPTURE: Duration = Duration::from_secs(40);
-        const OWNER_DEADLINE: Duration = Duration::from_secs(60);
+        // Both workers need three 30-second attempts, reap overhead and fixture coordination.
+        const CAPTURE: Duration = Duration::from_secs(240);
+        const OWNER_DEADLINE: Duration = Duration::from_secs(260);
         const CAPTURE_CLEANUP_RESERVE: Duration = Duration::from_secs(10);
         const OUTPUT_CAP: usize = 64 * 1024;
 

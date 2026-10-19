@@ -88,7 +88,7 @@ setup_alias
 /usr/bin/grep -F "$alias" /proc/self/mountinfo | /usr/bin/grep -Eq ' shared:[0-9]+'
 run_worker exercise > "$fixture/worker-exercise.log" 2>&1 & worker=$!
 wait_worker_identity exercise "$worker"
-for ((i = 0; i < 1000; i++)); do
+for ((i = 0; i < 10000; i++)); do
   [ -e "$fixture/ready" ] && break
   if ! kill -0 "$worker" 2>/dev/null; then wait "$worker"; exit 1; fi
   /usr/bin/sleep .01
