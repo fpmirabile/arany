@@ -390,13 +390,12 @@ async fn unguarded_rerun_is_never_ai_reviewed_and_dont_ask_or_deny_rules_refuse_
     let seen = auto
         .run(
             &auto.workspace,
-            // The review of the guarded command is the only AI review in the script.
+            // The review of the guarded command, after the plan call, is the only AI review in the script.
             script(&first, &second, vec![])
                 .into_iter()
                 .fold(Vec::new(), |mut all, outcome| {
-                    let first_call = all.is_empty();
                     all.push(outcome);
-                    if first_call {
+                    if all.len() == 2 {
                         all.push(finish("approve"));
                     }
                     all

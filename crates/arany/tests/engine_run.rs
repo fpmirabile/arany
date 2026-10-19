@@ -1127,16 +1127,16 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         // Each admitted action reserves its worst-case Event envelope before dispatch; the boundary is the
         // largest prefix that still admits the Run: 11 Events for a single plain Run, 17 for one Team child.
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
-            (9990, CollaborationPolicy::Single, false, false, false, false),
-            (9989, CollaborationPolicy::Single, true, false, false, false),
+            (9989, CollaborationPolicy::Single, false, false, false, false),
+            (9988, CollaborationPolicy::Single, true, false, false, false),
             (9984, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
-            (9983, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
-            (9989, CollaborationPolicy::Single, false, true, false, false),
-            (9988, CollaborationPolicy::Single, true, true, false, false),
-            (9989, CollaborationPolicy::Single, false, false, true, false),
-            (9988, CollaborationPolicy::Single, true, false, true, false),
-            (9926, CollaborationPolicy::Single, false, false, false, true),
-            (9925, CollaborationPolicy::Single, true, false, false, true),
+            (9982, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
+            (9988, CollaborationPolicy::Single, false, true, false, false),
+            (9987, CollaborationPolicy::Single, true, true, false, false),
+            (9988, CollaborationPolicy::Single, false, false, true, false),
+            (9987, CollaborationPolicy::Single, true, false, true, false),
+            (9925, CollaborationPolicy::Single, false, false, false, true),
+            (9924, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
@@ -1243,8 +1243,8 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             }
             store.close().await.unwrap();
         }
-        // Two children in two slots form one wave with a 4N+6 = 14 Event tail: 9979 admits to exactly 10,000 Events.
-        for (prefix, admitted) in [(9979_i64, true), (9980, false)] {
+        // Two children in two slots form one wave with a 4N+6 = 14 Event tail: 9978 admits to 9,999 Events and the root call reserves one more for a recorded plan.
+        for (prefix, admitted) in [(9978_i64, true), (9980, false)] {
             let path = temp.path().join(format!("two-child-{prefix}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
             let provider = Arc::new(ScriptedProvider::new(vec![finish()]));
@@ -1298,7 +1298,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let events = store.load_session(id).await.unwrap();
             let spawned = events.iter().filter(|event| matches!(event.event, Event::AgentSpawned { role: arany::AgentRole::Child, .. })).count();
             assert_eq!(spawned, if admitted { 2 } else { 0 }, "two children at {prefix}: AgentSpawned");
-            assert_eq!(events.len(), if admitted { 10_000 } else { prefix as usize + 7 }, "two children at {prefix}: committed Events");
+            assert_eq!(events.len(), if admitted { 9_999 } else { prefix as usize + 7 }, "two children at {prefix}: committed Events");
             store.close().await.unwrap();
         }
         for (index, (prefix, prior_forks, admitted)) in [

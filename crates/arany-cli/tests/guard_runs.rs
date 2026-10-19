@@ -1873,6 +1873,7 @@ ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
 AgentFinished
+MessageCommitted
 RunFinished
 GoalFinished";
 
@@ -2303,7 +2304,11 @@ mod goals {
             "v1",
             "a Tool approved during a pause is not dispatched"
         );
-        assert_eq!(requests.lock().expect("requests").len(), 1);
+        assert_eq!(
+            requests.lock().expect("requests").len(),
+            2,
+            "the plan call and the Write call; nothing after the pause"
+        );
         let (events, view) = replayed(&state_path, outcome.session_id).await;
         assert_action_bounds(&events, false, false);
         let observed: Vec<_> = events
@@ -2354,8 +2359,8 @@ mod goals {
             }),
             finish_with("never reached"),
         ])
-        // Zero-based call 1 is the Tool review that follows the proposed Tool.
-        .with_before_call(1, move || assert!(pause.pause(), "first pause"));
+        // Zero-based call 2 is the Tool review that follows the proposed Tool.
+        .with_before_call(2, move || assert!(pause.pause(), "first pause"));
         let requests = provider.requests.clone();
         let provider = Arc::new(provider);
         let engine = engine_support::open(
@@ -2398,7 +2403,7 @@ mod goals {
             "v1",
             "a Tool reviewed during a pause is not dispatched"
         );
-        assert_eq!(requests.lock().expect("requests").len(), 2);
+        assert_eq!(requests.lock().expect("requests").len(), 3);
         let (events, view) = replayed(&state_path, outcome.session_id).await;
         let observed: Vec<_> = events
             .iter()
@@ -2617,7 +2622,7 @@ mod goals {
                     write("external", "three"),
                     finish_with("three"),
                 ])
-                .with_before_call(2, move || std::fs::write(&external, b"external").unwrap()),
+                .with_before_call(3, move || std::fs::write(&external, b"external").unwrap()),
             );
             let mut input = request(&workspace, "Change the facts");
             input.session_id = Some(session);
@@ -2665,7 +2670,7 @@ mod goals {
                 statuses,
                 [captured, arany::CheckpointStatus::NotNeeded, captured]
             );
-            assert_eq!(provider.requests.lock().unwrap().len(), 4);
+            assert_eq!(provider.requests.lock().unwrap().len(), 5);
             assert_eq!(std::fs::read(&path).unwrap(), b"three");
             engine.close().await.unwrap();
             let (events, view) = replayed(&state_path, session).await;

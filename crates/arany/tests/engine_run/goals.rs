@@ -2952,11 +2952,12 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
     let state_path = temp.path().join("state");
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget.max_active_ms = Some(1);
-    // The plan-bearing call runs longer than the plan's active-time limit, so the plan cannot narrow the Goal.
-    let provider = ScriptedProvider::new(vec![
-        arany::test_support::scenario::plan_outcome(plan),
-        crate::tool_outcome(facts_read()),
-    ])
+    // The settled Read call runs longer than the plan's active-time limit, so no later plan can narrow the Goal.
+    let provider = ScriptedProvider::new(
+        std::iter::once(crate::tool_outcome(facts_read()))
+            .chain((0..3).map(|_| arany::test_support::scenario::plan_outcome(plan.clone())))
+            .collect(),
+    )
     .with_before_call(0, || {
         std::thread::sleep(std::time::Duration::from_millis(20))
     });
@@ -2974,8 +2975,8 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
     .await
     .expect("an unnarrowable plan is a Failed Run, not a Store error");
     assert_eq!(outcome.run.status, RunStatus::Failed);
-    assert_eq!(outcome.run.failure, Some(arany::RunFailure::PlanAdmission));
     engine.close().await.expect("engine shutdown");
+    assert_eq!(outcome.run.failure, Some(arany::RunFailure::RefusalLimit));
 
     let (events, view) = replayed(&state_path, outcome.session_id).await;
     let goal = view.goal(outcome.goal_id).expect("Goal");
@@ -2983,19 +2984,22 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
         goal.plan_contract.is_none(),
         "the refused plan is not recorded"
     );
-    let root_plan_dispositions: Vec<_> = events
+    let dispositions: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.event {
-            Event::ProviderCallRecorded { record, .. } if record.phase == AgentPhase::RootPlan => {
-                Some(record.disposition)
-            }
+            Event::ProviderCallRecorded { record, .. } => Some(record.disposition),
             _ => None,
         })
         .collect();
     assert_eq!(
-        root_plan_dispositions,
-        [ProviderCallDisposition::ToolRequested],
-        "the plan-bearing call is refused at the plan contract, after its Tool was requested"
+        dispositions,
+        [
+            ProviderCallDisposition::ToolRequested,
+            ProviderCallDisposition::InvalidResponse,
+            ProviderCallDisposition::InvalidResponse,
+            ProviderCallDisposition::InvalidResponse,
+        ],
+        "each unnarrowable plan call is refused and never recorded"
     );
 }
 
@@ -3035,7 +3039,11 @@ async fn active_time_left_below_one_second_stops_the_tool_step_without_a_context
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     let run = &view.runs[0];
     assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
-    assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    assert_eq!(
+        provider.requests.lock().expect("requests").len(),
+        2,
+        "the plan call and the stopped Read call; no third call"
+    );
 }
 
 #[tokio::test]
@@ -5841,7 +5849,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
             },
         )
         .await;
-        if free.is_some_and(|(_, free)| free == 9) {
+        if free.is_some_and(|(_, free)| free == 10) {
             assert!(matches!(
                 result,
                 Err(EngineError::Store(arany::StoreError::ReplayLimit))
@@ -5863,7 +5871,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
         .position(|e| matches!(e.event, Event::GoalStarted { .. }))
         .unwrap();
     let offset = last_hook - initial;
-    for free in [9, 10] {
+    for free in [10, 11] {
         let events = run(
             &temp.path().join(format!("free-{free}")),
             Some((offset, free)),
@@ -5874,7 +5882,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
                 .iter()
                 .filter(|e| matches!(e.event, Event::HookStarted { .. }))
                 .count(),
-            if free == 9 { 7 } else { 8 },
+            if free == 10 { 7 } else { 8 },
             "free {free}: the last blocked hook needs its pair, verdict and complete continuation tail"
         );
         assert!(
