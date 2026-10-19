@@ -18,15 +18,15 @@ fn wait(
     answered: &mut PtyResponses,
     from: usize,
     needle: &[u8],
-) {
+) -> usize {
     let end = Instant::now() + Duration::from_secs(10);
     loop {
         pump(output, input, transcript, answered);
-        if transcript[from..]
+        if let Some(offset) = transcript[from..]
             .windows(needle.len())
-            .any(|s| s == needle)
+            .position(|s| s == needle)
         {
-            return;
+            return from + offset + needle.len();
         }
         assert!(
             Instant::now() < end,
@@ -125,7 +125,8 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
         let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
         if !linear {
             let from = transcript.len();
-            input.write_all(b"saved draft\x1b").unwrap();
+            // Crossterm collapses adjacent legacy Escape bytes into one event.
+            input.write_all(b"saved draft\x1b[27u\x1b[27u").unwrap();
             wait(
                 &mut output,
                 &mut input,
@@ -134,8 +135,6 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
                 from,
                 b"Esc again",
             );
-            let from = transcript.len();
-            input.write_all(b"\x1b").unwrap();
             wait(
                 &mut output,
                 &mut input,
@@ -189,7 +188,7 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
                 b"cancelled",
             );
             let from = transcript.len();
-            input.write_all(b"\x1b").unwrap();
+            input.write_all(b"\x1b[27u\x1b[27u").unwrap();
             wait(
                 &mut output,
                 &mut input,
@@ -198,8 +197,6 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
                 from,
                 b"Esc again",
             );
-            let from = transcript.len();
-            input.write_all(b"\x1b").unwrap();
             wait(
                 &mut output,
                 &mut input,
@@ -229,7 +226,7 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
                 b"\x1b[A\r"
             })
             .unwrap();
-        wait(
+        let restored = wait(
             &mut output,
             &mut input,
             &mut transcript,
@@ -240,12 +237,24 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
         if linear {
             assert!(String::from_utf8_lossy(&transcript[from..]).contains("Draft (not sent):"));
         }
+        wait(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            restored,
+            if linear { b"Input:\r\n" } else { b"\x1b[?25h" },
+        );
+        let from = transcript.len();
         input.write_all(b"\x03").unwrap();
-        let settle = Instant::now() + Duration::from_millis(500);
-        while Instant::now() < settle {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            std::thread::yield_now();
-        }
+        wait(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            if linear { b"Input:\r\n" } else { b"\x1b[?25h" },
+        );
         let from = transcript.len();
         input.write_all(b"/exit\r").unwrap();
         wait(

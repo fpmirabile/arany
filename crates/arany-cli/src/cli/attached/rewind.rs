@@ -166,7 +166,7 @@ async fn journey(
             let count = rewind::plan(view, target).map(|p| p.files.len());
             let count = match count {
                 Ok(0) => "no code changes since".into(),
-                Ok(count) => format!("{count} files changed since"),
+                Ok(count) => format!("{count} {} changed since", display::file_noun(count)),
                 Err(_) => "code plan exceeds bounds".into(),
             };
             let prompt = match target {

@@ -429,6 +429,12 @@ async fn settle(engine: Engine, state: &Path, session: SessionId, path: &Path, c
         _ => None,
     });
     match case {
+        "cancel_at_started" => {
+            let finished = finished.expect("Finished is persisted");
+            assert_eq!(finished.outcome, RewindOutcome::Cancelled);
+            assert!(finished.attestation.is_none());
+            assert!(finished.checkpoint.is_none());
+        }
         "receipt_loss" | "partial" => {
             let finished = finished.expect("Finished is persisted");
             assert_eq!(finished.outcome, RewindOutcome::Uncertain);

@@ -7,6 +7,10 @@ pub const KEEP: &str = "Restore the others, keep these files";
 pub const OVERWRITE: &str = "Overwrite changed files (their current content is saved first)";
 pub const COMPARE_PAGE_BYTES: usize = 64 * 1024;
 
+pub fn file_noun(count: usize) -> &'static str {
+    if count == 1 { "file" } else { "files" }
+}
+
 pub fn checkpoint_label(view: &SessionView, target: &CheckpointTarget) -> String {
     match target {
         CheckpointTarget::Run { run_id, .. } => {
@@ -87,7 +91,7 @@ pub fn compare_pages(change: &FileChange) -> Vec<Vec<String>> {
     let (Some(before), Some(after)) = (text(change.before.as_ref()), text(change.after.as_ref()))
     else {
         return vec![vec![
-            "Binary comparison; content differs. No text diff available.".into(),
+            "Binary or oversized content; no text diff available.".into(),
         ]];
     };
     let (old, new) = changed_lines(&before, &after);
@@ -135,8 +139,9 @@ pub fn compare_pages(change: &FileChange) -> Vec<Vec<String>> {
 
 pub fn preview_lines(preview: &RewindPreview) -> Vec<String> {
     let mut lines = vec![format!(
-        "{} files in the restore plan",
-        preview.plan().files.len()
+        "{} {} in the restore plan",
+        preview.plan().files.len(),
+        file_noun(preview.plan().files.len())
     )];
     for sequence in &preview.plan().blockers {
         lines.push(format!("Code restore blocked: publication at Event {sequence} has an unknown or open outcome; inspect files. Conversation restore remains available."));
@@ -164,7 +169,7 @@ pub fn preview_lines(preview: &RewindPreview) -> Vec<String> {
         .filter(|f| !f.kept && !f.issues.is_empty())
         .count();
     if conflicts != 0 {
-        lines.push(format!("Rewind refused: {conflicts} files changed outside Arany or cannot be restored safely. No file changed."));
+        lines.push(format!("Rewind refused: {conflicts} {} changed outside Arany or cannot be restored safely. No file changed.", file_noun(conflicts)));
         lines.extend([KEEP.into(), OVERWRITE.into()]);
     }
     lines
@@ -187,13 +192,16 @@ pub fn non_rewindable_lines(plan: &arany::rewind::RewindPlan) -> Vec<String> {
 
 pub fn receipt(finished: &RewindFinished, count: usize, label: &str) -> String {
     let mut result = match finished.outcome {
-        RewindOutcome::Restored => format!("Restored {count} files to before {label}"),
+        RewindOutcome::Restored => {
+            format!("Restored {count} {} to before {label}", file_noun(count))
+        }
         RewindOutcome::Uncertain => {
             "Rewind outcome unknown: inspect files before continuing".into()
         }
         RewindOutcome::Conflict => format!(
-            "Rewind refused: {} files changed outside Arany",
-            finished.conflict_count
+            "Rewind refused: {} {} changed outside Arany",
+            finished.conflict_count,
+            file_noun(finished.conflict_count as usize)
         ),
         RewindOutcome::Denied => "Rewind denied; no files restored".into(),
         RewindOutcome::Failed => "Rewind failed; no files restored".into(),
@@ -266,6 +274,18 @@ mod tests {
                 .iter()
                 .all(|page| page.iter().map(|s| s.len() + 1).sum::<usize>() <= COMPARE_PAGE_BYTES)
         );
+        for bytes in [vec![0xff], vec![b'a'; 1024 * 1024 + 1]] {
+            let change = FileChange {
+                path: "src/a".into(),
+                before: Some(version(&bytes)),
+                after: None,
+            };
+            assert_eq!(line_counts(&change), None);
+            assert_eq!(
+                compare_pages(&change),
+                vec![vec!["Binary or oversized content; no text diff available."]]
+            );
+        }
         let mut finished = RewindFinished {
             rewind_id: uuid::Uuid::now_v7(),
             outcome: RewindOutcome::Uncertain,
@@ -278,12 +298,17 @@ mod tests {
             receipt(&finished, 1, "Run 2"),
             "Rewind outcome unknown: inspect files before continuing\nConflict: src/\\u{001b}[31m"
         );
-        finished.outcome = RewindOutcome::Conflict;
-        assert!(
-            receipt(&finished, 1, "Run 2")
-                .starts_with("Rewind refused: 1 files changed outside Arany")
-        );
-        finished.outcome = RewindOutcome::Restored;
-        assert!(receipt(&finished, 1, "Run 2").starts_with("Restored 1 files to before Run 2"));
+        for (count, noun) in [(0, "files"), (1, "file"), (2, "files")] {
+            finished.conflict_count = count as u32;
+            finished.outcome = RewindOutcome::Conflict;
+            assert!(receipt(&finished, count, "Run 2").starts_with(&format!(
+                "Rewind refused: {count} {noun} changed outside Arany"
+            )));
+            finished.outcome = RewindOutcome::Restored;
+            assert!(
+                receipt(&finished, count, "Run 2")
+                    .starts_with(&format!("Restored {count} {noun} to before Run 2"))
+            );
+        }
     }
 }
