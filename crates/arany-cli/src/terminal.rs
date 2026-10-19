@@ -500,42 +500,39 @@ impl AttachedTerminal {
         }
         let palette = self.palette();
         let mut progress = view::PermissionFrameProgress { more: true, page };
-        self.terminal
-            .as_mut()
-            .expect("inline terminal")
-            .draw(|frame| {
-                if frame.area().width >= 16 && frame.area().height >= 8 {
-                    progress = view::draw_permission_frame(
-                        frame,
-                        &lines,
-                        view::PermissionFrameState {
-                            choices: if configured && frame.area().width < 24 {
-                                &["Use config", "Trust folder"]
-                            } else if configured {
-                                &["Use explicit config", "Trust this folder"]
-                            } else if frame.area().width < 24 {
-                                &["Read only", "Trust folder"]
-                            } else {
-                                &["Continue read only", "Trust this folder"]
-                            },
-                            page,
-                            focus: usize::from(trust),
-                            profile_start,
-                            profile_count: options.len(),
-                            focused_profile,
-                            profile_selection_enabled: Some(profile_selection_enabled),
-                            footer: None,
-                            palette,
-                            boxed: false,
+        self.draw_frame(|frame| {
+            if frame.area().width >= 16 && frame.area().height >= 8 {
+                progress = view::draw_permission_frame(
+                    frame,
+                    &lines,
+                    view::PermissionFrameState {
+                        choices: if configured && frame.area().width < 24 {
+                            &["Use config", "Trust folder"]
+                        } else if configured {
+                            &["Use explicit config", "Trust this folder"]
+                        } else if frame.area().width < 24 {
+                            &["Read only", "Trust folder"]
+                        } else {
+                            &["Continue read only", "Trust this folder"]
                         },
-                    );
-                } else {
-                    frame.render_widget(
-                        ratatui::widgets::Paragraph::new("Resize to review; Ctrl+C exits"),
-                        frame.area(),
-                    );
-                }
-            })?;
+                        page,
+                        focus: usize::from(trust),
+                        profile_start,
+                        profile_count: options.len(),
+                        focused_profile,
+                        profile_selection_enabled: Some(profile_selection_enabled),
+                        footer: None,
+                        palette,
+                        boxed: false,
+                    },
+                );
+            } else {
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new("Resize to review; Ctrl+C exits"),
+                    frame.area(),
+                );
+            }
+        })?;
         Ok((progress.more, progress.page))
     }
     pub fn draw_tool_approval(
@@ -564,58 +561,55 @@ impl AttachedTerminal {
         }
         let palette = self.palette();
         let mut more = true;
-        self.terminal
-            .as_mut()
-            .expect("inline terminal")
-            .draw(|frame| {
-                if frame.area().width >= 16 && frame.area().height >= 8 {
-                    let width = frame.area().width;
-                    let choices: &[&str] = match (
-                        approval.unguarded.as_ref().map(|prompt| prompt.remember),
-                        width,
-                    ) {
-                        (None, _) => &["Deny", "Allow once"],
-                        (Some(false), _) => &["Deny", "Allow once (unguarded)"],
-                        (Some(true), 68..) => &[
-                            "Deny",
-                            "Allow once (unguarded)",
-                            "Always allow this exact command in this project (unguarded)",
-                        ],
-                        (Some(true), 40..) => {
-                            &["Deny", "Allow once", "Always allow exact command here"]
-                        }
-                        (Some(true), _) => &["Deny", "Allow once", "Always allow"],
-                    };
-                    more = view::draw_permission_frame(
-                        frame,
-                        &lines,
-                        view::PermissionFrameState {
-                            choices,
-                            page,
-                            focus: choice,
-                            profile_start: None,
-                            profile_count: 0,
-                            focused_profile: None,
-                            profile_selection_enabled: None,
-                            footer: Some(if width < 24 {
-                                "↑↓ Enter Esc"
-                            } else if width < 50 {
-                                "↑↓ Enter · Esc denies"
-                            } else {
-                                "↑↓ choose · Enter confirm · Esc denies"
-                            }),
-                            palette,
-                            boxed: true,
-                        },
-                    )
-                    .more;
-                } else {
-                    frame.render_widget(
-                        ratatui::widgets::Paragraph::new("Resize to review; Esc denies"),
-                        frame.area(),
-                    );
-                }
-            })?;
+        self.draw_frame(|frame| {
+            if frame.area().width >= 16 && frame.area().height >= 8 {
+                let width = frame.area().width;
+                let choices: &[&str] = match (
+                    approval.unguarded.as_ref().map(|prompt| prompt.remember),
+                    width,
+                ) {
+                    (None, _) => &["Deny", "Allow once"],
+                    (Some(false), _) => &["Deny", "Allow once (unguarded)"],
+                    (Some(true), 68..) => &[
+                        "Deny",
+                        "Allow once (unguarded)",
+                        "Always allow this exact command in this project (unguarded)",
+                    ],
+                    (Some(true), 40..) => {
+                        &["Deny", "Allow once", "Always allow exact command here"]
+                    }
+                    (Some(true), _) => &["Deny", "Allow once", "Always allow"],
+                };
+                more = view::draw_permission_frame(
+                    frame,
+                    &lines,
+                    view::PermissionFrameState {
+                        choices,
+                        page,
+                        focus: choice,
+                        profile_start: None,
+                        profile_count: 0,
+                        focused_profile: None,
+                        profile_selection_enabled: None,
+                        footer: Some(if width < 24 {
+                            "↑↓ Enter Esc"
+                        } else if width < 50 {
+                            "↑↓ Enter · Esc denies"
+                        } else {
+                            "↑↓ choose · Enter confirm · Esc denies"
+                        }),
+                        palette,
+                        boxed: true,
+                    },
+                )
+                .more;
+            } else {
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new("Resize to review; Esc denies"),
+                    frame.area(),
+                );
+            }
+        })?;
         Ok(more)
     }
     pub fn acquire_with_mode(
@@ -958,6 +952,8 @@ impl AttachedTerminal {
                     alternate.release()?;
                 }
                 self.terminal = self.parked_terminal.take();
+                self.transcript_open = false;
+                self.prepare_frame()?;
                 self.terminal.as_mut().expect("classic viewport").clear()?;
             }
             if self.mode == TerminalMode::Classic
@@ -976,6 +972,7 @@ impl AttachedTerminal {
 
     fn open_transcript_panel(&mut self) -> Result<(), TerminalError> {
         if self.mode == TerminalMode::Classic {
+            self.prepare_frame()?;
             let terminal = self.terminal.as_mut().expect("classic viewport");
             terminal.backend_mut().clear_owned()?;
             let alternate = AlternateScreen::acquire()?;
@@ -1227,6 +1224,40 @@ impl AttachedTerminal {
         self.draw_snapshot(view, composer, notice, SnapshotState::Session, None)
     }
 
+    fn prepare_frame(&mut self) -> Result<(), TerminalError> {
+        let terminal = self.terminal.as_mut().expect("owned terminal");
+        if self.mode == TerminalMode::Classic && !self.transcript_open {
+            let offset = terminal.backend().cursor_offset();
+            let resized = resize_classic(terminal, offset, || {
+                let mut backend = TerminalBackend::new(TerminalMode::Classic, None);
+                backend.detach();
+                backend
+            });
+            if resized.is_err() {
+                let _ = terminal.show_cursor();
+                terminal.backend_mut().detach();
+            }
+            resized?;
+        } else {
+            terminal.autoresize()?;
+        }
+        let area = terminal.get_frame().area();
+        terminal.backend_mut().set_area(area);
+        Ok(())
+    }
+
+    fn draw_frame(
+        &mut self,
+        render: impl FnOnce(&mut ratatui::Frame<'_>),
+    ) -> Result<(), TerminalError> {
+        self.prepare_frame()?;
+        let terminal = self.terminal.as_mut().expect("owned terminal");
+        terminal.draw(render)?;
+        let area = terminal.get_frame().area();
+        terminal.backend_mut().set_area(area);
+        Ok(())
+    }
+
     fn draw_snapshot(
         &mut self,
         view: &SessionView,
@@ -1264,10 +1295,7 @@ impl AttachedTerminal {
                 .as_ref()
                 .map(|_| TerminalNotice::Transient("Reading clipboard... draft retained"))
         });
-        self.terminal
-            .as_mut()
-            .expect("owned terminal")
-            .autoresize()?;
+        self.prepare_frame()?;
         self.sync_native(view)?;
         if (self.mode == TerminalMode::Fullscreen || self.transcript_open)
             && self.mouse_capture.is_none()
@@ -1357,30 +1385,24 @@ impl AttachedTerminal {
             self.history_mut().status()
         };
         let palette = self.palette();
-        self.terminal
-            .as_mut()
-            .expect("inline terminal")
-            .draw(|frame| {
-                draw_frame_with_history(
-                    frame,
-                    &model,
-                    composer,
-                    notice
-                        .filter(|notice| {
-                            matches!(notice, TerminalNotice::Transient(_)) || history_height == 0
-                        })
-                        .map(TerminalNotice::text),
-                    palette,
-                    &history_rows,
-                    history_status.as_deref(),
-                );
-                if let Some(picker) = picker {
-                    draw_model_catalog_frame(frame, picker, composer, &model, palette);
-                }
-            })?;
-        let terminal = self.terminal.as_mut().expect("owned terminal");
-        let area = terminal.get_frame().area();
-        terminal.backend_mut().set_area(area);
+        self.draw_frame(|frame| {
+            draw_frame_with_history(
+                frame,
+                &model,
+                composer,
+                notice
+                    .filter(|notice| {
+                        matches!(notice, TerminalNotice::Transient(_)) || history_height == 0
+                    })
+                    .map(TerminalNotice::text),
+                palette,
+                &history_rows,
+                history_status.as_deref(),
+            );
+            if let Some(picker) = picker {
+                draw_model_catalog_frame(frame, picker, composer, &model, palette);
+            }
+        })?;
         Ok(())
     }
 
@@ -1459,20 +1481,17 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        self.terminal
-            .as_mut()
-            .expect("inline terminal")
-            .draw(|frame| {
-                draw_setup_frame(
-                    frame,
-                    step,
-                    title,
-                    instruction,
-                    input_chars,
-                    notice,
-                    palette,
-                )
-            })?;
+        self.draw_frame(|frame| {
+            draw_setup_frame(
+                frame,
+                step,
+                title,
+                instruction,
+                input_chars,
+                notice,
+                palette,
+            )
+        })?;
         Ok(())
     }
 
@@ -1490,12 +1509,9 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        self.terminal
-            .as_mut()
-            .expect("inline terminal")
-            .draw(|frame| {
-                draw_setup_text_frame(frame, title, instruction, draft, notice, palette)
-            })?;
+        self.draw_frame(|frame| {
+            draw_setup_text_frame(frame, title, instruction, draft, notice, palette)
+        })?;
         Ok(())
     }
 
@@ -1529,20 +1545,17 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        self.terminal
-            .as_mut()
-            .expect("inline terminal")
-            .draw(|frame| {
-                draw_setup_choices_frame(
-                    frame,
-                    title,
-                    instruction,
-                    choices,
-                    selected,
-                    notice,
-                    palette,
-                )
-            })?;
+        self.draw_frame(|frame| {
+            draw_setup_choices_frame(
+                frame,
+                title,
+                instruction,
+                choices,
+                selected,
+                notice,
+                palette,
+            )
+        })?;
         Ok(())
     }
 
@@ -1564,21 +1577,18 @@ impl AttachedTerminal {
         let palette = self.palette();
         let mut has_more = false;
         let mut visible = false;
-        self.terminal
-            .as_mut()
-            .expect("inline terminal")
-            .draw(|frame| {
-                visible = frame.area().width >= 16 && frame.area().height >= 8;
-                has_more = draw_setup_warning_frame(
-                    frame,
-                    title,
-                    warning,
-                    page,
-                    accept_selected,
-                    notice,
-                    palette,
-                );
-            })?;
+        self.draw_frame(|frame| {
+            visible = frame.area().width >= 16 && frame.area().height >= 8;
+            has_more = draw_setup_warning_frame(
+                frame,
+                title,
+                warning,
+                page,
+                accept_selected,
+                notice,
+                palette,
+            );
+        })?;
         if !visible {
             return Err(TerminalError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1721,14 +1731,11 @@ impl AttachedTerminal {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();
-        let result = self
-            .terminal
-            .as_mut()
-            .expect("inline terminal")
-            .draw(|frame| draw_session_picker_frame(frame, items, selected, palette));
+        let result =
+            self.draw_frame(|frame| draw_session_picker_frame(frame, items, selected, palette));
         if let Err(error) = result {
             let _ = self.close_sessions();
-            return Err(TerminalError::Io(error));
+            return Err(error);
         }
         self.session_picker_area = Some(bottom_area(
             self.terminal
@@ -1748,10 +1755,7 @@ impl AttachedTerminal {
     ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
         let palette = self.palette();
-        self.terminal
-            .as_mut()
-            .expect("inline terminal")
-            .draw(|frame| draw_quick_actions_frame(frame, selected, has_draft, palette))?;
+        self.draw_frame(|frame| draw_quick_actions_frame(frame, selected, has_draft, palette))?;
         Ok(())
     }
 
@@ -1796,10 +1800,7 @@ impl AttachedTerminal {
 
     fn draw_help(&mut self, selected: usize) -> Result<(), TerminalError> {
         let palette = self.palette();
-        self.terminal
-            .as_mut()
-            .expect("inline terminal")
-            .draw(|frame| draw_help_frame(frame, selected, palette))?;
+        self.draw_frame(|frame| draw_help_frame(frame, selected, palette))?;
         Ok(())
     }
 
@@ -2003,10 +2004,7 @@ impl AttachedTerminal {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();
-        self.terminal
-            .as_mut()
-            .expect("inline terminal")
-            .draw(|frame| draw_agent_inspector_frame(frame, &model, scroll, palette))?;
+        self.draw_frame(|frame| draw_agent_inspector_frame(frame, &model, scroll, palette))?;
         self.agent_picker_area = Some(bottom_area(
             self.terminal
                 .as_mut()
@@ -2098,6 +2096,33 @@ impl AttachedTerminal {
     }
 }
 
+fn resize_classic<B: Backend>(
+    terminal: &mut Terminal<B>,
+    cursor_offset: u16,
+    detached: impl FnOnce() -> B,
+) -> Result<(), B::Error> {
+    let size = terminal.size()?;
+    if size.width >= terminal.get_frame().area().width {
+        return terminal.autoresize();
+    }
+    // Ratatui's Inline shrink clears from screen row zero, including settled transcript.
+    let cursor = terminal.get_cursor_position()?;
+    let backend = terminal.backend_mut();
+    backend.set_cursor_position((0, cursor.y.saturating_sub(cursor_offset)))?;
+    backend.clear_region(ratatui::backend::ClearType::AfterCursor)?;
+    backend.show_cursor()?;
+    let backend = std::mem::replace(backend, detached());
+    let mut resized = Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Inline(size.height.min(12)),
+        },
+    )?;
+    resized.clear()?;
+    *terminal = resized;
+    Ok(())
+}
+
 // Too short for Ratatui's scrolling region: draw rows as diffs from blank cells so wide-cell padding is not sent.
 fn insert_rows_scrolling_screen<'a, B: Backend>(
     terminal: &mut Terminal<B>,
@@ -2140,7 +2165,7 @@ impl Drop for AttachedTerminal {
 
 #[cfg(test)]
 mod insert_rows_tests {
-    use super::insert_rows_scrolling_screen;
+    use super::{insert_rows_scrolling_screen, resize_classic};
     use ratatui::{
         Terminal, TerminalOptions, Viewport,
         backend::{Backend, CrosstermBackend, TestBackend},
@@ -2167,6 +2192,81 @@ mod insert_rows_tests {
             .into_iter()
             .map(Line::from)
             .chain(std::iter::once(Line::default()))
+    }
+
+    #[test]
+    fn classic_resize_preserves_native_scrollback() {
+        use ratatui::widgets::Paragraph;
+
+        fn fixture(width: u16, height: u16, answer: &[String]) -> Terminal<TestBackend> {
+            let mut backend = TestBackend::new(width, height);
+            backend.set_cursor_position((0, height - 1)).unwrap();
+            for line in answer {
+                use ratatui::widgets::Widget;
+                backend.append_lines(1).unwrap();
+                let mut row = Buffer::empty(Rect::new(0, height - 1, width, 1));
+                Paragraph::new(line.as_str()).render(row.area, &mut row);
+                backend
+                    .draw(Buffer::empty(row.area).diff(&row).into_iter())
+                    .unwrap();
+            }
+            backend.append_lines(1).unwrap();
+            let mut terminal = Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Inline(12),
+                },
+            )
+            .unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    frame.render_widget(
+                        Paragraph::new("stale composer draft ".repeat(4))
+                            .wrap(ratatui::widgets::Wrap { trim: false }),
+                        area,
+                    );
+                    frame.set_cursor_position((20, area.y + 2));
+                })
+                .unwrap();
+            terminal
+        }
+
+        for width in [65, 40] {
+            let answer = (1..=200)
+                .map(|line| format!("native answer {line:03}"))
+                .collect::<Vec<_>>();
+            let mut terminal = fixture(80, 24, &answer);
+            let before = text_rows(terminal.backend().scrollback())
+                .into_iter()
+                .chain(text_rows(terminal.backend().buffer()))
+                .filter(|row| row.starts_with("native answer "))
+                .collect::<Vec<_>>();
+            assert_eq!(before, answer, "complete transcript before resize");
+            for (columns, height) in [(width, 25), (80, 24)] {
+                // TestBackend::resize reshapes its flat scrollback bytes instead of preserving rows.
+                *terminal.backend_mut() = fixture(columns, height, &answer).backend().clone();
+                resize_classic(&mut terminal, 2, || TestBackend::new(1, 1)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        let area = frame.area();
+                        frame.render_widget(Paragraph::new("current composer"), area);
+                        frame.set_cursor_position((2, area.y + 2));
+                    })
+                    .unwrap();
+                let rows = text_rows(terminal.backend().scrollback())
+                    .into_iter()
+                    .chain(text_rows(terminal.backend().buffer()))
+                    .collect::<Vec<_>>();
+                let actual = rows
+                    .iter()
+                    .filter(|row| row.starts_with("native answer "))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, answer, "native transcript at {columns}x{height}");
+                assert!(rows.iter().all(|row| !row.contains("stale composer")));
+            }
+        }
     }
 
     struct Sink(Rc<RefCell<Vec<u8>>>);
