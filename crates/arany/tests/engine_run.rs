@@ -4877,11 +4877,19 @@ async fn list_sessions_page_rejects_zero_limit_before_workspace_or_store_access(
     let temp = tempfile::tempdir().expect("temporary root");
     let state_path = temp.path().join("state");
     let state = StateRoot::admit(&state_path).expect("private state");
+    let store_before = std::fs::metadata(state_path.join("events.sqlite3"))
+        .ok()
+        .map(|m| m.len());
     assert!(matches!(
         arany::list_sessions_page(state, temp.path().join("missing-workspace"), None, 0).await,
         Err(EngineError::InvalidRequest)
     ));
-    assert!(!state_path.join("events.sqlite3").exists());
+    assert_eq!(
+        std::fs::metadata(state_path.join("events.sqlite3"))
+            .ok()
+            .map(|m| m.len()),
+        store_before
+    );
 }
 
 #[tokio::test]
