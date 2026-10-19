@@ -2,7 +2,8 @@ use super::EngineError;
 use crate::journal::Journal;
 use crate::session::input::WorkspaceInputs;
 use crate::session::{
-    Event, RunStatus, SessionDefaults, SessionId, SessionListItem, SessionView, WorkspaceIdentity,
+    Event, RunStatus, SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView,
+    WorkspaceIdentity,
 };
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError};
 use std::path::{Path, PathBuf};
@@ -167,20 +168,61 @@ pub async fn continue_session(
     resume_session(state, workspace, session_id).await
 }
 
+pub async fn list_sessions_page(
+    state: StateRoot,
+    workspace: PathBuf,
+    after: Option<(SessionId, u64)>,
+    limit: usize,
+) -> Result<SessionPage, EngineError> {
+    let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
+    let store = Store::open_read_only(state)?;
+    let page = list_page(&store, identity, after, limit).await;
+    let closed = store.close().await;
+    let page = page?;
+    closed?;
+    Ok(page)
+}
+
 pub async fn list_sessions(
     state: StateRoot,
     workspace: PathBuf,
 ) -> Result<Vec<SessionListItem>, EngineError> {
-    let workspace_identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
+    let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
     let store = Store::open_read_only(state)?;
-    let listed = store.list_sessions(workspace_identity).await;
+    let mut items = Vec::new();
+    let mut after = None;
+    let listed = loop {
+        match list_page(&store, identity, after, 100).await {
+            Ok(page) => {
+                after = page.items.last().map(|item| (item.id, item.last_sequence));
+                items.extend(page.items);
+                if !page.more {
+                    break Ok(());
+                }
+            }
+            Err(error) => break Err(error),
+        }
+    };
     let closed = store.close().await;
-    let items = listed.map_err(|error| match error {
-        StoreError::TooManySessions => EngineError::TooManySessions,
-        other => EngineError::Store(other),
-    })?;
+    listed?;
     closed?;
     Ok(items)
+}
+
+async fn list_page(
+    store: &Store,
+    identity: WorkspaceIdentity,
+    after: Option<(SessionId, u64)>,
+    limit: usize,
+) -> Result<SessionPage, EngineError> {
+    store
+        .list_sessions(identity, after, limit)
+        .await
+        .map_err(|error| match error {
+            StoreError::TooManySessions => EngineError::TooManySessions,
+            StoreError::StaleCursor => EngineError::InvalidRequest,
+            other => EngineError::Store(other),
+        })
 }
 
 pub async fn rename_session(

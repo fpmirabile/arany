@@ -366,26 +366,21 @@ pub(super) async fn list(
     }
     let (workspace, root) =
         crate::cli::admit_workspace(Some(cwd), Some(state.into())).map_err(|_| Fault::params())?;
-    let items = arany::list_sessions(
+    let page = arany::list_sessions_page(
         StateRoot::open_existing(&root)
             .map_err(arany::EngineError::from)
             .map_err(Fault::engine)?,
         workspace.clone(),
+        cursor,
+        limit,
     )
     .await
-    .map_err(Fault::engine)?;
-    let start = if let Some((id, sequence)) = cursor {
-        items
-            .iter()
-            .position(|item| item.id == id && item.last_sequence == sequence)
-            .ok_or_else(Fault::params)?
-            + 1
-    } else {
-        0
-    };
-    let end = (start + limit).min(items.len());
-    let next_cursor = (end < items.len()).then(|| {
-        let item = &items[end - 1];
+    .map_err(|error| match error {
+        arany::EngineError::InvalidRequest => Fault::params(),
+        other => Fault::engine(other),
+    })?;
+    let next_cursor = page.more.then(|| {
+        let item = page.items.last().expect("a partial page returns an item");
         URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&(item.id, item.last_sequence)).expect("cursor tuple"))
     });
@@ -397,7 +392,8 @@ pub(super) async fn list(
         }
     };
     Ok(ThreadListResult {
-        data: items[start..end]
+        data: page
+            .items
             .iter()
             .map(|item| ThreadListEntry {
                 id: item.id,

@@ -36,8 +36,8 @@ pub use hints::{DisplayUpdate, RunHints, RunPreview};
 pub use ledger::Action;
 use ledger::GoalLedger;
 pub use lifecycle::{
-    continue_session, create_session, fork_session, list_sessions, rename_session, resume_session,
-    set_session_defaults,
+    continue_session, create_session, fork_session, list_sessions, list_sessions_page,
+    rename_session, resume_session, set_session_defaults,
 };
 use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
 use report::goal_report;
@@ -78,7 +78,7 @@ pub enum EngineError {
     MissingSession,
     #[error("no Session for this Workspace")]
     NoSessionForWorkspace,
-    #[error("too many Sessions or Events for discovery; use --resume ID")]
+    #[error("too many Sessions for discovery; use --resume ID")]
     TooManySessions,
     #[error("Session has an active operation")]
     SessionBusy,

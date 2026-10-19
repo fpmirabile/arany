@@ -3235,6 +3235,26 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
     assert!(prompt["result"]["_meta"]["arany.incompleteUpdates"].is_null());
     let close = adapter.request().await;
     assert_eq!(close.method, "thread/unsubscribe");
+    for (id, method, params) in [
+        (
+            json!(40),
+            "session/prompt",
+            json!({"sessionId":adapter.session,"prompt":[{"type":"text","text":"Race"}]}),
+        ),
+        (
+            json!(41),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        ),
+    ] {
+        adapter.call(id, method, params).await;
+        assert_eq!(
+            adapter.next().await["error"]["data"]["reason"],
+            "busy",
+            "closing state survives until the unsubscribe response"
+        );
+    }
+    assert!(adapter.input.try_recv().is_err());
     adapter
         .events
         .send(Message::Response(Response {
@@ -3257,5 +3277,49 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         adapter.input.try_recv().is_err(),
         "the Uncertain effect is never retried and the slot is freed"
     );
+    adapter.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn close_with_a_stalled_turn_completes_at_its_deadline_without_retrying() {
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Stall"}]))
+        .await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE + std::time::Duration::from_millis(1))
+        .await;
+    let prompt = adapter.next().await;
+    assert_eq!(prompt["id"], "prompt");
+    assert_eq!(prompt["result"]["stopReason"], "cancelled");
+    assert_eq!(prompt["result"]["_meta"]["arany.incompleteUpdates"], true);
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    adapter
+        .call(
+            json!(31),
+            "session/prompt",
+            json!({"sessionId":adapter.session,"prompt":[{"type":"text","text":"Again"}]}),
+        )
+        .await;
+    assert_eq!(adapter.next().await["error"]["code"], -32002);
+    assert!(adapter.input.try_recv().is_err());
     adapter.close().await;
 }

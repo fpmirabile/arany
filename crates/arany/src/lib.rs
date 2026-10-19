@@ -33,7 +33,8 @@ pub use engine::{
     DisplayUpdate, Engine, EngineConfig, EngineError, GoalRequest, RunCancellation, RunControls,
     RunFuture, RunHandle, RunHints, RunOutcome, RunPreview, RunRequest, RunResult, RunSteering,
     SteeringRefused, ToolGrant, continue_session, create_session, fork_session, list_sessions,
-    rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
+    list_sessions_page, rename_session, resume_session, set_session_defaults,
+    validate_workspace_inputs,
 };
 #[cfg(feature = "test-support")]
 pub use fault::FaultPlan;
@@ -66,8 +67,8 @@ pub use session::{
     GoalSuccessCriterion, GoalView, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS,
     MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS,
     ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition, RunId,
-    RunStatus, RunView, SessionDefaults, SessionId, SessionListItem, SessionView, ToolView,
-    WorkspaceIdentity,
+    RunStatus, RunView, SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView,
+    ToolView, WorkspaceIdentity,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};

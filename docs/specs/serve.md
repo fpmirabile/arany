@@ -113,9 +113,8 @@ Cursors are opaque, at most 128 UTF-8 bytes, and bind a Session ID and its last
 committed sequence to the selected Workspace. They confer no access authority.
 If the anchor changes, restart discovery without a cursor; new activity before
 the anchor is visible on a fresh first page. A page is not a retained snapshot.
-Each listing scans at most 262,144 journal Events (both discovery passes
-counted) and 65,536 Session heads; exceeding either refuses the request with
-`tooManySessions` and no partial page, so one request cannot monopolize the loop. A result that cannot fit the line cap fails `contextTooLarge` without
+Listing resolves Workspace membership from each Session's first Event only, then replays just the requested Workspace's returned Sessions (with their fork sources) newest first. A page stops early, with a cursor, once the replayed Events reach 262,144 (the first Session is always returned), so pages may hold fewer than `limit` entries; `nextCursor:null` alone ends the list. At most 65,536 Session heads exist (`tooManySessions` beyond). Other Workspaces' history is never replayed.
+A result that cannot fit the line cap fails `contextTooLarge` without
 partial output. Unsupported sorting, filtering and archival options refuse as
 unknown parameters.
 

@@ -67,6 +67,12 @@ pub struct SessionListItem {
     pub defaults: SessionDefaults,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPage {
+    pub items: Vec<SessionListItem>,
+    pub more: bool,
+}
+
 pub(crate) fn placeholder_title(title: &str) -> bool {
     matches!(title, "New Session" | "Forked Session")
 }

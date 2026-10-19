@@ -1,3 +1,4 @@
+use super::super::replay::list_session_page;
 use super::*;
 use crate::session::WorkspaceIdentity;
 use crate::session::payload_version;
@@ -444,21 +445,16 @@ fn forged_rewind_workspace_identity_is_rejected_on_append_and_replay() {
     assert!(resolve_view(&cold, child, 0, &mut 0).is_err());
 }
 
-#[test]
-fn session_listing_stops_at_its_scan_budget() {
-    use super::super::replay::list_session_items;
-    let temp = tempfile::tempdir().expect("private test root");
-    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
-    let mut connection = open_connection(&root, false).expect("file-backed store");
-    let mut hot_session = None;
-    let identity = WorkspaceIdentity {
-        device: 1,
-        inode: 1,
-    };
+fn seed_session(
+    connection: &mut Connection,
+    hot_session: &mut Option<HotSession>,
+    identity: WorkspaceIdentity,
+    renames: usize,
+) -> SessionId {
     let session_id = SessionId::new();
     append(
-        &mut connection,
-        &mut hot_session,
+        connection,
+        hot_session,
         session_id,
         Event::SessionStarted {
             title: "Session".into(),
@@ -469,35 +465,83 @@ fn session_listing_stops_at_its_scan_budget() {
     let rename = Event::SessionRenamed { title: "x".into() };
     let payload = rename.payload().expect("bounded Event payload");
     let transaction = connection.transaction().expect("seed transaction");
-    {
-        let mut insert = transaction
-            .prepare(
+    for _ in 0..renames {
+        transaction
+            .execute(
                 "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                 VALUES ((SELECT MAX(sequence) + 1 FROM events), ?1, ?2, ?3, ?4, 0)",
+                params![session_id.to_string(), rename.kind(), rename.version(), payload],
             )
-            .expect("seed statement");
-        for sequence in 2..=100_i64 {
-            insert
-                .execute(params![
-                    sequence,
-                    session_id.to_string(),
-                    rename.kind(),
-                    rename.version(),
-                    payload,
-                ])
-                .expect("valid Event row");
-        }
+            .expect("valid Event row");
     }
     transaction.commit().expect("seeded history");
+    session_id
+}
 
-    assert_eq!(
-        list_session_items(&connection, identity, 100)
-            .expect("within budget")
-            .len(),
-        1
-    );
+#[test]
+fn listing_is_filtered_by_workspace_before_decoding_history() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let mut connection = open_connection(&root, false).expect("file-backed store");
+    let mut hot_session = None;
+    let other = WorkspaceIdentity {
+        device: 1,
+        inode: 1,
+    };
+    let empty = WorkspaceIdentity {
+        device: 1,
+        inode: 2,
+    };
+    for _ in 0..20 {
+        seed_session(&mut connection, &mut hot_session, other, 500);
+    }
+    let page = list_session_page(&connection, empty, None, 50, 10).expect("empty Workspace");
+    assert!(page.items.is_empty() && !page.more);
+}
+
+#[test]
+fn budget_limited_listing_pages_without_skips_or_duplicates() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let mut connection = open_connection(&root, false).expect("file-backed store");
+    let mut hot_session = None;
+    let mine = WorkspaceIdentity {
+        device: 1,
+        inode: 1,
+    };
+    let other = WorkspaceIdentity {
+        device: 1,
+        inode: 2,
+    };
+    let mut expected = Vec::new();
+    for round in 0..7 {
+        expected.push(seed_session(&mut connection, &mut hot_session, mine, 30));
+        seed_session(&mut connection, &mut hot_session, other, round);
+    }
+    expected.reverse();
+    let mut listed = Vec::new();
+    let mut after = None;
+    let mut pages = 0;
+    loop {
+        let page = list_session_page(&connection, mine, after, 100, 40).expect("bounded page");
+        assert!(
+            !page.items.is_empty() && page.items.len() < 7,
+            "budget bounds each page"
+        );
+        after = page.items.last().map(|item| (item.id, item.last_sequence));
+        listed.extend(page.items.iter().map(|item| item.id));
+        pages += 1;
+        if !page.more {
+            break;
+        }
+    }
+    assert!(pages > 1);
+    assert_eq!(listed, expected);
     assert!(matches!(
-        list_session_items(&connection, identity, 99),
-        Err(StoreError::TooManySessions)
+        list_session_page(&connection, mine, Some((expected[0], 1)), 100, 40),
+        Err(StoreError::StaleCursor)
     ));
+    let first = list_session_page(&connection, mine, None, 3, usize::MAX).expect("limit page");
+    assert_eq!(first.items.len(), 3);
+    assert!(first.more);
 }

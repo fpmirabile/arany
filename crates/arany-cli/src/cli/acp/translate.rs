@@ -28,6 +28,7 @@ pub(super) struct State {
     permission: Option<Permission>,
     changed: Arc<Notify>,
     active: Option<Active>,
+    closing: BTreeSet<SessionId>,
 }
 
 struct Session {
@@ -57,6 +58,7 @@ struct Active {
     uncertain: usize,
     incomplete: bool,
     close: Option<RequestId>,
+    close_deadline: Option<Instant>,
 }
 
 enum Pending {
@@ -414,19 +416,18 @@ pub(super) async fn input(
                         wire::error(Some(id), -32002, "Session not found", "resource_not_found"),
                     );
                 }
+                if !state.closing.insert(params.session_id) {
+                    return immediate(output, wire::error(Some(id), -32600, "Server busy", "busy"));
+                }
                 let cancel = match state
                     .active
                     .as_mut()
                     .filter(|a| a.session == params.session_id)
                 {
-                    Some(active) if active.close.is_some() => {
-                        return immediate(
-                            output,
-                            wire::error(Some(id), -32600, "Server busy", "busy"),
-                        );
-                    }
                     Some(active) => {
                         active.close = Some(id.clone());
+                        active.close_deadline =
+                            Some(Instant::now() + crate::cli::exec::SHUTDOWN_GRACE);
                         let first = !active.cancelled;
                         active.cancelled = true;
                         Some(
@@ -497,7 +498,7 @@ pub(super) async fn input(
                         "Session not found",
                         "resource_not_found",
                     ))
-                } else if state.active.is_some() {
+                } else if state.active.is_some() || state.closing.contains(&session_id) {
                     Some(wire::error(Some(id.clone()), -32600, "Server busy", "busy"))
                 } else {
                     state.active = Some(Active {
@@ -512,6 +513,7 @@ pub(super) async fn input(
                         uncertain: 0,
                         incomplete: false,
                         close: None,
+                        close_deadline: None,
                     });
                     None
                 }
@@ -587,10 +589,17 @@ pub(super) async fn output(
         if let Some(withdrawal) = withdraw_permission(&state, None, false) {
             emit(&outbound, withdrawal).await?;
         }
+        expire_close(&state, &serve, &outbound).await?;
         let (deadline, changed) = {
             let state = state.lock().expect("translator state");
             (
-                state.permission.as_ref().map(|p| p.deadline),
+                [
+                    state.permission.as_ref().map(|p| p.deadline),
+                    state.active.as_ref().and_then(|a| a.close_deadline),
+                ]
+                .into_iter()
+                .flatten()
+                .min(),
                 state.changed.clone(),
             )
         };
@@ -688,11 +697,11 @@ pub(super) async fn output(
                         emit(&outbound, wire::response(id, result)).await?;
                     }
                     Some(Pending::Close(id, session)) => {
-                        state
-                            .lock()
-                            .expect("translator state")
-                            .sessions
-                            .remove(&session);
+                        {
+                            let mut state = state.lock().expect("translator state");
+                            state.sessions.remove(&session);
+                            state.closing.remove(&session);
+                        }
                         emit(&outbound, wire::response(id, json!({}))).await?;
                     }
                     Some(Pending::List(id)) => {
@@ -840,9 +849,16 @@ pub(super) async fn output(
                         | Pending::New(id, ..)
                         | Pending::Load { id, .. }
                         | Pending::Mode { id, .. }
-                        | Pending::Close(id, _)
                         | Pending::List(id),
                     ) => emit(&outbound, remap(id, reply.error)).await?,
+                    Some(Pending::Close(id, session)) => {
+                        state
+                            .lock()
+                            .expect("translator state")
+                            .closing
+                            .remove(&session);
+                        emit(&outbound, remap(id, reply.error)).await?
+                    }
                     Some(Pending::Start) => {
                         let active = state
                             .lock()
@@ -1006,12 +1022,58 @@ async fn emit_answer(outbound: &mpsc::Sender<Value>, mut answer: Value) -> Resul
     emit(outbound, answer).await
 }
 
+async fn expire_close(
+    state: &Shared,
+    serve: &mpsc::Sender<ClientMessage>,
+    output: &mpsc::Sender<Value>,
+) -> Result<(), String> {
+    let active = {
+        let mut state = state.lock().expect("translator state");
+        if !state
+            .active
+            .as_ref()
+            .and_then(|a| a.close_deadline)
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Ok(());
+        }
+        state
+            .pending
+            .retain(|_, pending| !matches!(pending, Pending::Start | Pending::Recover));
+        state
+            .active
+            .take()
+            .expect("expired close has an active prompt")
+    };
+    let response = if active.uncertain > 0 {
+        wire::error(Some(active.id), -32603, tools::UNKNOWN, "effectUncertain")
+    } else {
+        wire::response(
+            active.id,
+            json!({"stopReason":"cancelled","_meta":{"arany.incompleteUpdates":true}}),
+        )
+    };
+    emit(output, response).await?;
+    if let Some(id) = active.close {
+        match unload(state, serve, id, active.session).await {
+            Err(_) if serve.is_closed() => {}
+            result => result?,
+        }
+    }
+    Ok(())
+}
+
 async fn unload(
     state: &Shared,
     serve: &mpsc::Sender<ClientMessage>,
     id: RequestId,
     session: SessionId,
 ) -> Result<(), String> {
+    state
+        .lock()
+        .expect("translator state")
+        .closing
+        .insert(session);
     send_request(
         state,
         serve,

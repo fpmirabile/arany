@@ -1,4 +1,4 @@
-use super::{ResolvedSession, StoreError, event_payload_limit};
+use super::{ResolvedSession, SessionPage, StoreError, event_payload_limit};
 use crate::session::ForkInheritance;
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, ForkLineage, RunConfig,
@@ -43,7 +43,7 @@ pub(super) fn session_for_run(
     run_id: RunId,
 ) -> Result<Option<SessionId>, StoreError> {
     let mut selected = None;
-    scan_all_events(connection, &mut { usize::MAX }, |envelope| {
+    scan_all_events(connection, |envelope| {
         if envelope.run_id == Some(run_id) {
             if selected.is_some_and(|id| id != envelope.session_id) {
                 return Err(StoreError::InvalidHistory);
@@ -59,7 +59,7 @@ pub(super) fn latest_session_id(
     connection: &Connection,
     workspace_identity: WorkspaceIdentity,
 ) -> Result<Option<SessionId>, StoreError> {
-    let heads = scan_session_heads(connection, &mut { usize::MAX })?;
+    let heads = scan_session_heads(connection, &[])?;
     let mut latest = None::<(SessionId, u64)>;
     for (&id, head) in &heads {
         if discovered_identity(id, &heads, 0)? == Some(workspace_identity)
@@ -80,14 +80,90 @@ pub(super) fn latest_session_id(
     Ok(Some(id))
 }
 
-pub(super) fn list_session_items(
+pub(super) fn list_session_page(
     connection: &Connection,
     workspace_identity: WorkspaceIdentity,
+    after: Option<(SessionId, u64)>,
+    limit: usize,
     mut budget: usize,
-) -> Result<Vec<SessionListItem>, StoreError> {
-    let mut heads = scan_session_heads(connection, &mut budget)?;
-    inherit_fork_metadata(connection, &mut budget, &mut heads)?;
-    let mut items = Vec::new();
+) -> Result<SessionPage, StoreError> {
+    let mut tails = Vec::<(u64, SessionId)>::new();
+    {
+        let mut statement = connection
+            .prepare("SELECT session_id, MAX(sequence) FROM events GROUP BY session_id")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            if tails.len() == MAX_DISCOVERED_SESSIONS {
+                return Err(StoreError::TooManySessions);
+            }
+            let id = SessionId::from_str(
+                row.get_ref(0)?
+                    .as_str()
+                    .map_err(|_| StoreError::InvalidHistory)?,
+            )
+            .map_err(|_| StoreError::InvalidHistory)?;
+            let tail =
+                u64::try_from(row.get::<_, i64>(1)?).map_err(|_| StoreError::InvalidHistory)?;
+            tails.push((tail, id));
+        }
+    }
+    let mut roots = HashMap::<SessionId, (Option<WorkspaceIdentity>, Option<SessionId>)>::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT sequence,
+                    length(CAST(session_id AS BLOB)),
+                    length(CAST(kind AS BLOB)),
+                    length(CAST(payload AS BLOB)),
+                    session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+             FROM events WHERE sequence IN (SELECT MIN(sequence) FROM events GROUP BY session_id)",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let envelope = read_envelope(row)?;
+            let root = match envelope.event {
+                Event::SessionStarted {
+                    workspace_identity, ..
+                } => (Some(workspace_identity), None),
+                Event::SessionForked {
+                    source_session_id, ..
+                } if source_session_id != envelope.session_id => (None, Some(source_session_id)),
+                _ => return Err(StoreError::InvalidHistory),
+            };
+            roots.insert(envelope.session_id, root);
+        }
+    }
+    let lineage = |id: SessionId| -> Result<Vec<SessionId>, StoreError> {
+        let mut chain = vec![id];
+        while let (_, Some(source)) = *roots
+            .get(chain.last().expect("lineage"))
+            .ok_or(StoreError::InvalidHistory)?
+        {
+            if chain.len() > MAX_FORK_DEPTH {
+                return Err(StoreError::ReplayLimit);
+            }
+            chain.push(source);
+        }
+        Ok(chain)
+    };
+    let mut matching = Vec::new();
+    for &(tail, id) in &tails {
+        let chain = lineage(id)?;
+        let root = chain.last().expect("lineage");
+        if roots.get(root).and_then(|(identity, _)| *identity) == Some(workspace_identity) {
+            matching.push((tail, id, chain));
+        }
+    }
+    matching.sort_unstable_by_key(|(tail, ..)| std::cmp::Reverse(*tail));
+    let start = match after {
+        Some((id, sequence)) => {
+            matching
+                .iter()
+                .position(|(tail, candidate, _)| *candidate == id && *tail == sequence)
+                .ok_or(StoreError::StaleCursor)?
+                + 1
+        }
+        None => 0,
+    };
     let mut timestamp =
         connection.prepare("SELECT strftime('%Y-%m-%d %H:%M:%S', ?1 / 1000, 'unixepoch')")?;
     let mut format_timestamp = |millis: i64| -> Result<String, StoreError> {
@@ -95,40 +171,65 @@ pub(super) fn list_session_items(
             .query_row([millis], |row| row.get::<_, Option<String>>(0))?
             .unwrap_or_else(|| "Unknown".into()))
     };
-    for (&id, head) in &heads {
-        if discovered_identity(id, &heads, 0)? == Some(workspace_identity) {
-            items.push(SessionListItem {
-                id,
-                title: if head.explicit_title {
-                    head.title.clone()
-                } else {
-                    head.ai_title
-                        .as_ref()
-                        .map(|(_, title)| title.clone())
-                        .or_else(|| head.fallback_title.as_ref().map(|(_, title)| title.clone()))
-                        .unwrap_or_else(|| "Empty conversation".into())
-                },
-                last_sequence: head.last_sequence,
-                created_at: format_timestamp(head.created_at_ms)?,
-                last_activity_at: format_timestamp(head.last_activity_at_ms)?,
-                defaults: if head.defaults.provider.is_some() {
-                    head.defaults.clone()
-                } else {
-                    head.run_defaults.clone()
-                },
-            });
+    let mut items = Vec::new();
+    let mut more = false;
+    for (_, id, chain) in matching.iter().skip(start) {
+        if items.len() == limit {
+            more = true;
+            break;
         }
+        let cost = lineage_event_count(connection, chain)?;
+        if !items.is_empty() && cost > budget {
+            more = true;
+            break;
+        }
+        budget = budget.saturating_sub(cost);
+        let mut heads = scan_session_heads(connection, chain)?;
+        inherit_fork_metadata(connection, chain, &mut heads)?;
+        let head = heads.get(id).ok_or(StoreError::InvalidHistory)?;
+        if discovered_identity(*id, &heads, 0)? != Some(workspace_identity) {
+            return Err(StoreError::InvalidHistory);
+        }
+        items.push(SessionListItem {
+            id: *id,
+            title: if head.explicit_title {
+                head.title.clone()
+            } else {
+                head.ai_title
+                    .as_ref()
+                    .map(|(_, title)| title.clone())
+                    .or_else(|| head.fallback_title.as_ref().map(|(_, title)| title.clone()))
+                    .unwrap_or_else(|| "Empty conversation".into())
+            },
+            last_sequence: head.last_sequence,
+            created_at: format_timestamp(head.created_at_ms)?,
+            last_activity_at: format_timestamp(head.last_activity_at_ms)?,
+            defaults: if head.defaults.provider.is_some() {
+                head.defaults.clone()
+            } else {
+                head.run_defaults.clone()
+            },
+        });
     }
-    items.sort_unstable_by_key(|item| std::cmp::Reverse(item.last_sequence));
-    Ok(items)
+    Ok(SessionPage { items, more })
+}
+
+fn lineage_event_count(connection: &Connection, chain: &[SessionId]) -> Result<usize, StoreError> {
+    let marks = vec!["?"; chain.len()].join(",");
+    let count: i64 = connection.query_row(
+        &format!("SELECT COUNT(*) FROM events WHERE session_id IN ({marks})"),
+        rusqlite::params_from_iter(chain.iter().map(ToString::to_string)),
+        |row| row.get(0),
+    )?;
+    usize::try_from(count).map_err(|_| StoreError::InvalidHistory)
 }
 
 fn scan_session_heads(
     connection: &Connection,
-    budget: &mut usize,
+    filter: &[SessionId],
 ) -> Result<HashMap<SessionId, SessionHead>, StoreError> {
     let mut heads = HashMap::<SessionId, SessionHead>::new();
-    scan_all_events(connection, budget, |envelope| {
+    scan_events(connection, filter, |envelope| {
         let id = envelope.session_id;
         if let Some(head) = heads.get_mut(&id) {
             if matches!(
@@ -260,7 +361,7 @@ fn selection_from_run(config: &RunConfig) -> SessionDefaults {
 
 fn inherit_fork_metadata(
     connection: &Connection,
-    budget: &mut usize,
+    filter: &[SessionId],
     heads: &mut HashMap<SessionId, SessionHead>,
 ) -> Result<(), StoreError> {
     let mut boundaries = heads
@@ -274,7 +375,7 @@ fn inherit_fork_metadata(
     let mut next = 0;
     let mut selections = HashMap::<SessionId, SessionDefaults>::new();
     let mut inherited = HashMap::<SessionId, (SessionDefaults, Option<(u64, String)>)>::new();
-    scan_all_events(connection, budget, |envelope| {
+    scan_events(connection, filter, |envelope| {
         match &envelope.event {
             Event::RunStarted { config, .. } => {
                 selections.insert(envelope.session_id, selection_from_run(config));
@@ -522,7 +623,7 @@ fn load_session_events(
     session_id: SessionId,
 ) -> Result<Vec<EventEnvelope>, StoreError> {
     let mut selected = Vec::new();
-    scan_all_events(connection, &mut { usize::MAX }, |envelope| {
+    scan_all_events(connection, |envelope| {
         if envelope.session_id == session_id {
             if selected.len() == MAX_SESSION_EVENTS {
                 return Err(StoreError::ReplayLimit);
@@ -536,82 +637,101 @@ fn load_session_events(
 
 fn scan_all_events(
     connection: &Connection,
-    budget: &mut usize,
+    on_event: impl FnMut(EventEnvelope) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    scan_events(connection, &[], on_event)
+}
+
+fn scan_events(
+    connection: &Connection,
+    filter: &[SessionId],
     mut on_event: impl FnMut(EventEnvelope) -> Result<(), StoreError>,
 ) -> Result<(), StoreError> {
-    let mut statement = connection.prepare(
+    let marks = vec!["?"; filter.len()].join(",");
+    let selection = if filter.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE session_id IN ({marks})")
+    };
+    let mut statement = connection.prepare(&format!(
         "SELECT sequence,
                 length(CAST(session_id AS BLOB)),
                 length(CAST(kind AS BLOB)),
                 length(CAST(payload AS BLOB)),
                 session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
-         FROM events ORDER BY sequence",
-    )?;
-    let mut rows = statement.query([])?;
+         FROM events {selection} ORDER BY sequence"
+    ))?;
+    let mut rows = statement.query(rusqlite::params_from_iter(
+        filter.iter().map(ToString::to_string),
+    ))?;
     let mut expected = 1_i64;
     while let Some(row) = rows.next()? {
-        *budget = budget.checked_sub(1).ok_or(StoreError::TooManySessions)?;
-        let sequence: i64 = row.get(0)?;
-        if sequence != expected {
-            return Err(StoreError::InvalidHistory);
+        if filter.is_empty() {
+            let sequence: i64 = row.get(0)?;
+            if sequence != expected {
+                return Err(StoreError::InvalidHistory);
+            }
+            expected = expected.checked_add(1).ok_or(StoreError::InvalidHistory)?;
         }
-        expected = expected.checked_add(1).ok_or(StoreError::InvalidHistory)?;
-        let id_bytes: i64 = row.get(1)?;
-        let kind_bytes: i64 = row.get(2)?;
-        let payload_bytes: i64 = row.get(3)?;
-        if id_bytes != 36 || !(1..=32).contains(&kind_bytes) {
-            return Err(StoreError::InvalidHistory);
-        }
-        let raw_id = row
-            .get_ref(4)?
-            .as_str()
-            .map_err(|_| StoreError::InvalidHistory)?;
-        let id = SessionId::from_str(raw_id).map_err(|_| StoreError::InvalidHistory)?;
-        let run_id = match row.get_ref(5)? {
-            ValueRef::Null => None,
-            ValueRef::Text(raw) if raw.len() == 36 => Some(
-                RunId::from_str(std::str::from_utf8(raw).map_err(|_| StoreError::InvalidHistory)?)
-                    .map_err(|_| StoreError::InvalidHistory)?,
-            ),
-            _ => return Err(StoreError::InvalidHistory),
-        };
-        let agent_run_id = match row.get_ref(6)? {
-            ValueRef::Null => None,
-            ValueRef::Text(raw) if raw.len() == 36 => Some(
-                AgentRunId::from_str(
-                    std::str::from_utf8(raw).map_err(|_| StoreError::InvalidHistory)?,
-                )
-                .map_err(|_| StoreError::InvalidHistory)?,
-            ),
-            _ => return Err(StoreError::InvalidHistory),
-        };
-        let kind = row
-            .get_ref(7)?
-            .as_str()
-            .map_err(|_| StoreError::InvalidHistory)?;
-        let version: i64 = row.get(8)?;
-        if !(1..=event_payload_limit(kind, version) as i64).contains(&payload_bytes) {
-            return Err(StoreError::InvalidHistory);
-        }
-        let payload = row
-            .get_ref(9)?
-            .as_str()
-            .map_err(|_| StoreError::InvalidHistory)?;
-        let event = Event::decode(kind, version, payload, run_id, agent_run_id)?;
-        let created_at_ms: i64 = row.get(10)?;
-        if created_at_ms < 0 {
-            return Err(StoreError::InvalidHistory);
-        }
-        on_event(EventEnvelope {
-            sequence: u64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?,
-            session_id: id,
-            run_id,
-            agent_run_id,
-            event,
-            created_at_ms,
-        })?;
+        on_event(read_envelope(row)?)?;
     }
     Ok(())
+}
+
+fn read_envelope(row: &rusqlite::Row<'_>) -> Result<EventEnvelope, StoreError> {
+    let sequence: i64 = row.get(0)?;
+    let id_bytes: i64 = row.get(1)?;
+    let kind_bytes: i64 = row.get(2)?;
+    let payload_bytes: i64 = row.get(3)?;
+    if id_bytes != 36 || !(1..=32).contains(&kind_bytes) {
+        return Err(StoreError::InvalidHistory);
+    }
+    let raw_id = row
+        .get_ref(4)?
+        .as_str()
+        .map_err(|_| StoreError::InvalidHistory)?;
+    let id = SessionId::from_str(raw_id).map_err(|_| StoreError::InvalidHistory)?;
+    let run_id = match row.get_ref(5)? {
+        ValueRef::Null => None,
+        ValueRef::Text(raw) if raw.len() == 36 => Some(
+            RunId::from_str(std::str::from_utf8(raw).map_err(|_| StoreError::InvalidHistory)?)
+                .map_err(|_| StoreError::InvalidHistory)?,
+        ),
+        _ => return Err(StoreError::InvalidHistory),
+    };
+    let agent_run_id = match row.get_ref(6)? {
+        ValueRef::Null => None,
+        ValueRef::Text(raw) if raw.len() == 36 => Some(
+            AgentRunId::from_str(std::str::from_utf8(raw).map_err(|_| StoreError::InvalidHistory)?)
+                .map_err(|_| StoreError::InvalidHistory)?,
+        ),
+        _ => return Err(StoreError::InvalidHistory),
+    };
+    let kind = row
+        .get_ref(7)?
+        .as_str()
+        .map_err(|_| StoreError::InvalidHistory)?;
+    let version: i64 = row.get(8)?;
+    if !(1..=event_payload_limit(kind, version) as i64).contains(&payload_bytes) {
+        return Err(StoreError::InvalidHistory);
+    }
+    let payload = row
+        .get_ref(9)?
+        .as_str()
+        .map_err(|_| StoreError::InvalidHistory)?;
+    let event = Event::decode(kind, version, payload, run_id, agent_run_id)?;
+    let created_at_ms: i64 = row.get(10)?;
+    if created_at_ms < 0 {
+        return Err(StoreError::InvalidHistory);
+    }
+    Ok(EventEnvelope {
+        sequence: u64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?,
+        session_id: id,
+        run_id,
+        agent_run_id,
+        event,
+        created_at_ms,
+    })
 }
 
 pub(super) fn supervisor_corpus(
