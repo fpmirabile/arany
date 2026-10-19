@@ -10,18 +10,21 @@ fn main() {
     build_macos_runtime();
 }
 
+// Cargo evaluates the macOS-only `cc` build-dependency against the host, so this gate is the host too.
 #[cfg(target_os = "macos")]
 fn build_macos_runtime() {
     let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"))
         .join("arany-runtime-compat.dylib");
     let compiler = cc::Build::new()
         .opt_level(2)
+        .debug(false)
         .warnings(true)
         .warnings_into_errors(true)
         .get_compiler();
     let mut command = compiler.to_command();
-    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64") {
-        command.args(["-arch", "arm64", "-arch", "arm64e"]);
+    // dyld aborts a child whose inserted library has no slice for its architecture.
+    for arch in ["arm64", "arm64e", "x86_64"] {
+        command.args(["-arch", arch]);
     }
     let status = command
         .arg("-dynamiclib")

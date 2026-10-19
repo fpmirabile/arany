@@ -539,10 +539,7 @@ fn attached_pty_refusal(
     refusal: &[u8],
 ) {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use std::{
-        thread,
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
     let geometry = nix::pty::Winsize {
         ws_row: 24,
@@ -587,9 +584,14 @@ fn attached_pty_refusal(
     let mut transcript = Vec::new();
     let mut stdout_bytes = Vec::new();
     let mut consent_declined = false;
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(120);
+    let mut first_byte = None;
     loop {
         drain_attached_output(&mut master, &mut transcript, "attached PTY");
+        if first_byte.is_none() && !transcript.is_empty() {
+            first_byte = Some(Instant::now());
+        }
         drain_attached_output(&mut stdout, &mut stdout_bytes, "attached stdout");
         crate::process::decline_workspace_consent(&mut input, &transcript, &mut consent_declined);
         if transcript
@@ -606,11 +608,19 @@ fn attached_pty_refusal(
         if consent_declined {
             break;
         }
-        assert!(
-            Instant::now() < deadline,
-            "attached folder consent prompt missing"
-        );
-        thread::yield_now();
+        if Instant::now() >= deadline {
+            panic!(
+                "{}",
+                crate::process::terminal_wait_report(
+                    "attached folder consent prompt missing",
+                    started,
+                    first_byte,
+                    &transcript,
+                    child.child().try_wait().unwrap(),
+                )
+            );
+        }
+        crate::process::wait_readable(&master);
     }
     while !transcript
         .windows(refusal.len())
@@ -619,8 +629,19 @@ fn attached_pty_refusal(
         if drain_attached_output(&mut master, &mut transcript, "attached PTY") {
             break;
         }
-        assert!(Instant::now() < deadline, "attached roster refusal missing");
-        thread::yield_now();
+        if Instant::now() >= deadline {
+            panic!(
+                "{}",
+                crate::process::terminal_wait_report(
+                    "attached roster refusal missing",
+                    started,
+                    first_byte,
+                    &transcript,
+                    child.child().try_wait().unwrap(),
+                )
+            );
+        }
+        crate::process::wait_readable(&master);
     }
     assert!(
         transcript

@@ -504,15 +504,27 @@ fn read_until_consent(
 ) {
     let flags = rustix::fs::fcntl_getfl(&*reader).unwrap();
     rustix::fs::fcntl_setfl(&*reader, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(20);
+    let mut first_byte = None;
     let mut consent = false;
     let mut suggested_input = Vec::new();
     while !consent {
         let mut bytes = [0; 4096];
         match reader.read(&mut bytes) {
-            Ok(0) => panic!("native consent closed before admission: {context}"),
+            Ok(0) => panic!(
+                "{}",
+                crate::process::terminal_wait_report(
+                    &format!("native consent closed before admission: {context}"),
+                    started,
+                    first_byte,
+                    transcript,
+                    child.child().try_wait().unwrap(),
+                )
+            ),
             Ok(count) => {
                 assert!(transcript.len() + count <= 64 * 1024);
+                first_byte.get_or_insert_with(Instant::now);
                 transcript.extend_from_slice(&bytes[..count]);
             }
             Err(error)
@@ -524,19 +536,19 @@ fn read_until_consent(
         }
         crate::process::decline_workspace_consent(&mut suggested_input, transcript, &mut consent);
         let status = child.child().try_wait().unwrap();
-        if Instant::now() >= deadline {
-            let start = transcript.len().saturating_sub(512);
-            let tail = String::from_utf8_lossy(&transcript[start..])
-                .chars()
-                .flat_map(char::escape_default)
-                .collect::<String>();
+        if Instant::now() >= deadline || status.is_some() {
             panic!(
-                "native consent missing: {context}; child={:?}; transcript_tail={tail}",
-                status
+                "{}",
+                crate::process::terminal_wait_report(
+                    &format!("native consent missing: {context}"),
+                    started,
+                    first_byte,
+                    transcript,
+                    status,
+                )
             );
         }
-        assert!(status.is_none(), "native consent child exited: {context}");
-        thread::yield_now();
+        crate::process::wait_readable(&*reader);
     }
 }
 

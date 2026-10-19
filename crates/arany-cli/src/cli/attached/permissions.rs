@@ -462,7 +462,13 @@ mod tests {
                 .iter()
                 .position(|option| option.detected && option.path == cache)
                 .expect("detected overlapping Cargo cache candidate");
-            std::fs::write(root.join("answer"), format!("trust {}\r", index + 3)).unwrap();
+            // Choices 1 and 2 are the fixed read-only and trust entries; profiles start at 3.
+            const FIRST_PROFILE_NUMBER: usize = 3;
+            std::fs::write(
+                root.join("answer"),
+                format!("trust {}\r", index + FIRST_PROFILE_NUMBER),
+            )
+            .unwrap();
             let choice = match choose(&mut terminal, access, &mut composer, false).await {
                 Ok(choice) => choice,
                 Err(_) => panic!("a failed save must not abort the chooser"),

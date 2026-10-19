@@ -1934,14 +1934,12 @@ pub(super) fn payload(
         args
     };
     command.args(payload_args);
-    if cfg!(target_os = "macos") {
-        command.env("CURL_SSL_BACKEND", "Secure-Transport");
-        if let Some(sdk) = runtime_grants
+    if cfg!(target_os = "macos")
+        && let Some(sdk) = runtime_grants
             .iter()
             .find(|grant| grant.kind == super::toolchains::RuntimeKind::AppleSdk)
-        {
-            command.env("SDKROOT", &sdk.path);
-        }
+    {
+        command.env("SDKROOT", &sdk.path);
     }
     Ok(command)
 }

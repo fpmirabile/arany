@@ -1220,6 +1220,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
 
+    const BOOTSTRAP_NOT_PRIVILEGED: i32 = 1100;
+
     #[test]
     fn profile_builder_emits_exact_rules() {
         for (kind, rules, syscalls, operations, filter, expected) in [
@@ -1677,7 +1679,7 @@ mod tests {
         assert_eq!(install(&task, &mut stage).unwrap(), root);
         assert_eq!(
             mach.lookup(),
-            1100,
+            BOOTSTRAP_NOT_PRIVILEGED,
             "Seatbelt must deny the same service lookup through the retained bootstrap right"
         );
         for path in [&outside, &workspace_file] {
