@@ -19,8 +19,11 @@ fn build_macos_runtime() {
         .warnings(true)
         .warnings_into_errors(true)
         .get_compiler();
-    let status = compiler
-        .to_command()
+    let mut command = compiler.to_command();
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64") {
+        command.args(["-arch", "arm64", "-arch", "arm64e"]);
+    }
+    let status = command
         .arg("-dynamiclib")
         .arg("src/tools/guard/macos/runtime_compat.c")
         .arg("-o")

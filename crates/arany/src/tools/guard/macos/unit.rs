@@ -2941,6 +2941,27 @@ int main(int argc, char **argv) {
 
         let mut generated = tempfile::tempdir().unwrap();
         generated.disable_cleanup(true);
+        #[cfg(target_arch = "aarch64")]
+        {
+            let library = generated.path().join(super::super::RUNTIME_COMPAT_FILE);
+            std::fs::write(&library, super::super::RUNTIME_COMPAT_BYTES).unwrap();
+            let architectures = std::process::Command::new("/usr/bin/xcrun")
+                .args(["--sdk", "macosx", "lipo"])
+                .arg(&library)
+                .args(["-verify_arch", "arm64", "arm64e"])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", generated.path())
+                .env("TMPDIR", generated.path())
+                .current_dir(generated.path())
+                .bounded_output_for(Duration::from_secs(20), 16 * 1024)
+                .unwrap();
+            assert!(
+                architectures.status.success(),
+                "runtime compatibility library architectures: {architectures:?}"
+            );
+            assert!(architectures.stdout.is_empty() && architectures.stderr.is_empty());
+        }
         let (actor, plain, sysctl_probe, rust_probe) = native_actors(generated.path());
         let disk_gate = disk_gate_actor(generated.path());
         verify_uncertain_storage_is_retained(generated.path()).await;
