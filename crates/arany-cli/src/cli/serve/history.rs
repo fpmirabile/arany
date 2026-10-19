@@ -15,6 +15,10 @@ pub(super) struct History {
 }
 
 impl History {
+    pub(super) fn unsubscribe(&mut self, id: SessionId) {
+        self.cursors.remove(&id);
+    }
+
     pub async fn dispatch(
         &mut self,
         engine: &Engine,

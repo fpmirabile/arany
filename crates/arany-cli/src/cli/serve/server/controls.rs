@@ -155,6 +155,7 @@ mod tests {
             steering: arany::RunSteering::new(),
             pending_start: None,
             result_done: false,
+            pending_close: None,
             state: TurnState {
                 run_id: Some(run_id),
                 goal_id: Some(goal_id),

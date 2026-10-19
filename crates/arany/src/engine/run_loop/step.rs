@@ -258,7 +258,8 @@ impl RunLoop<'_> {
                     }
                     Err(SizingRefusal::Unavailable) => return Ok(false),
                 };
-            let command = matches!(intent.call, ToolCall::Command { .. });
+            let command = matches!(intent.call, ToolCall::Command { .. })
+                && matches!(intent.target, crate::worker::EffectTarget::Workspace);
             let source_intent_digest = intent.digest();
             let narrowable =
                 matches!(grant, Grant::Primary { .. }) && narrowings < MAX_NARROWINGS_PER_STEP;
@@ -386,10 +387,18 @@ impl RunLoop<'_> {
                         );
                     let remaining =
                         remaining.saturating_sub(self.hook_time(runtime, &intent.call, remaining));
-                    intent.limits.runtime_ms = intent
-                        .limits
-                        .runtime_ms
-                        .min(u32::try_from(duration_ms(remaining) / 4).unwrap_or(u32::MAX));
+                    intent.limits.runtime_ms = intent.limits.runtime_ms.min(
+                        u32::try_from(
+                            duration_ms(remaining)
+                                / if intent.limits.cache_bytes > 0 { 6 } else { 4 },
+                        )
+                        .unwrap_or(u32::MAX),
+                    );
+                    intent.limits.cache_transfer_ms = if intent.limits.cache_bytes > 0 {
+                        intent.limits.runtime_ms
+                    } else {
+                        0
+                    };
                     if intent.limits.runtime_ms < 1_000 {
                         return Ok(Err(SizingRefusal::DelegationDeadline));
                     }
@@ -406,13 +415,14 @@ impl RunLoop<'_> {
         intent.expires_at_ms = intent
             .expires_at_ms
             .saturating_add(self.hook_admission(runtime, &intent.call, post_call).1);
-        let integration =
-            matches!(intent.call, ToolCall::Command { .. }).then(|| ToolCall::ApplyChangeset {
-                source: crate::session::worker::ChangesetSource::CommandReceipt {
-                    source_intent_digest: intent.digest(),
-                    changeset: CommandChangeset { files: Vec::new() },
-                },
-            });
+        let integration = (matches!(intent.call, ToolCall::Command { .. })
+            && matches!(intent.target, crate::worker::EffectTarget::Workspace))
+        .then(|| ToolCall::ApplyChangeset {
+            source: crate::session::worker::ChangesetSource::CommandReceipt {
+                source_intent_digest: intent.digest(),
+                changeset: CommandChangeset { files: Vec::new() },
+            },
+        });
         let reserved: Vec<_> = std::iter::once(&intent.call).chain(&integration).collect();
         let overhead = grant.context()?.reserved_len(step, &reserved);
         let integration_capacity = if integration.is_some() {
@@ -678,13 +688,9 @@ impl RunLoop<'_> {
         }
         let mut narrowed = None;
         let mut candidate = None;
-        let verdict = match refused_worker_command(grant, &intent) {
-            Some(answer) => Verdict::Deny(answer),
-            None => {
-                self.before_dispatch(grant, runtime, intent, permission, narrowable)
-                    .await?
-            }
-        };
+        let verdict = self
+            .before_dispatch(grant, runtime, intent, permission, narrowable)
+            .await?;
         let answer = match verdict {
             Verdict::Deny(answer) => answer,
             Verdict::Narrow(answer, call) => {
@@ -739,6 +745,10 @@ impl RunLoop<'_> {
         })
         .await?;
         if let Some((candidate, data)) = candidate {
+            if matches!(answer.observation.intent.call, ToolCall::Command { .. }) {
+                self.seal_worker_command(&answer.observation.intent, &candidate, &data)
+                    .await?;
+            }
             self.worker
                 .lock()
                 .await
@@ -819,12 +829,14 @@ impl RunLoop<'_> {
             }
         };
         let tail = if worker {
+            let action = Action::Worker {
+                chunks: self.worker_call_chunks(intent.agent_run_id, &intent.call)?,
+            };
             tail.max(
-                Action::Worker {
-                    chunks: self.worker_call_chunks(intent.agent_run_id, &intent.call)?,
-                }
-                .max_events_for_admitted(&self.routing.providers)
-                .saturating_add(2 * hook_events),
+                action
+                    .max_events_for_admitted(&self.routing.providers)
+                    .saturating_add(self.ledger().verdicts(action))
+                    .saturating_add(2 * hook_events),
             )
         } else {
             tail
@@ -992,10 +1004,7 @@ impl RunLoop<'_> {
         let config = runtime.permissions();
         let unguarded = intent.call.is_unguarded();
         let permission = permission.narrow_terminal(self.terminal_mode(), &intent.call);
-        let timeout_limit = match grant {
-            Grant::Primary { .. } => self.ledger().command_timeout_limit(&intent.call)?,
-            Grant::Researcher { .. } => None,
-        };
+        let timeout_limit = self.ledger().command_timeout_limit(&intent.call)?;
         let hooks = match config {
             Some(config)
                 if !intent.call.is_internal()
@@ -1753,7 +1762,7 @@ impl RunLoop<'_> {
                             intent.expires_at_ms.saturating_sub(crate::tools::now_ms()),
                         );
                         // A sibling Provider call keeps the shared delegation interval active.
-                        let idle = self.ledger().in_flight_children() == 0;
+                        let idle = self.ledger().providers_idle()?;
                         let started = Instant::now();
                         let (approved, source) = tokio::select! {
                             biased;
@@ -2077,21 +2086,6 @@ fn unguarded_gate(
 
 const NO_PRIOR_FAILURE: &str =
     "No identical command failed under the Guard in this Run; no operation was dispatched";
-
-fn refused_worker_command(grant: &Grant<'_>, intent: &EffectIntent) -> Option<Answer> {
-    (matches!(grant, Grant::Researcher { child, .. } if child.editor)
-        && matches!(intent.call, ToolCall::Command { .. }))
-    .then(|| Answer {
-        observation: not_dispatched(
-            intent.clone(),
-            ToolDisposition::Denied,
-            crate::tools::WORKER_COMMANDS_REFUSED,
-        ),
-        refused: false,
-        active_time: None,
-        checkpoint: None,
-    })
-}
 
 fn outside_plan(intent: EffectIntent) -> ToolObservation {
     not_dispatched(

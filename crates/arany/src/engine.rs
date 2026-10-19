@@ -27,7 +27,10 @@ mod ledger;
 mod lifecycle;
 mod report;
 mod rewind;
-pub use rewind::{RewindFile, RewindIssue, RewindPreview, RewindRequest};
+pub use rewind::{
+    ConversationRewind, ConversationRewindOutcome, RewindBothResult, RewindFile, RewindIssue,
+    RewindPreview, RewindRequest,
+};
 mod routing;
 mod run_loop;
 #[cfg(test)]
@@ -38,8 +41,8 @@ pub use hints::{DisplayUpdate, RunHints, RunPreview};
 pub use ledger::Action;
 use ledger::GoalLedger;
 pub use lifecycle::{
-    continue_session, create_session, fork_session, list_sessions, rename_session, resume_session,
-    set_session_defaults,
+    continue_session, create_session, fork_session, list_sessions, list_sessions_page,
+    rename_session, resume_session, set_session_defaults,
 };
 use lifecycle::{ensure_session_workspace, fork_with_store, lock_session};
 use report::goal_report;
@@ -110,6 +113,8 @@ pub enum EngineError {
     SessionNotIdle,
     #[error("Session has no committed Run boundary to fork")]
     ForkNotAtRunBoundary,
+    #[error("conversation rewind exceeds the eight-link or Event limit; start a new Session")]
+    ConversationRewindLimit,
     #[error("Session belongs to a different Workspace")]
     WorkspaceMismatch,
     #[error("Workspace input path is invalid")]
@@ -906,6 +911,39 @@ impl Engine {
             title,
         )
         .await
+    }
+
+    pub async fn fork_session_at(
+        &self,
+        source_session_id: SessionId,
+        workspace: PathBuf,
+        source_sequence: u64,
+        title: Option<String>,
+    ) -> Result<SessionId, EngineError> {
+        let _slot = self.claim()?;
+        lifecycle::validate_session_title(title.as_deref())?;
+        let mut lock = self.lock_session(source_session_id)?;
+        let view = self
+            .journal
+            .store()
+            .load_view(source_session_id)
+            .await?
+            .ok_or(EngineError::MissingSession)?;
+        lock.keep();
+        let _ancestors = self.lock_lineage(&view).await?;
+        let identity = WorkspaceInputs::admit_identity(&workspace, &self.state)?;
+        ensure_session_workspace(&view, identity)?;
+        let boundary = self
+            .journal
+            .store()
+            .prepare_fork(source_session_id, Some(source_sequence))
+            .await
+            .map_err(rewind::fork_error)?;
+        self.journal
+            .store()
+            .fork_at(boundary, title.unwrap_or_else(|| "Forked Session".into()))
+            .await
+            .map_err(rewind::fork_error)
     }
 
     /// Admits one submission and returns its handle. It is refused with `Busy` while another

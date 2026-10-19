@@ -30,6 +30,8 @@ fn validate(value: &Value) {
         "Error"
     } else if value["result"].get("protocolVersion").is_some() {
         "InitializeResponse"
+    } else if value["result"].get("sessions").is_some() {
+        "ListSessionsResponse"
     } else if value["result"].get("sessionId").is_some() {
         "NewSessionResponse"
     } else if value["result"].get("configOptions").is_some() {
@@ -66,8 +68,9 @@ fn validate(value: &Value) {
 
 async fn next(reader: &mut Reader) -> Value {
     let mut line = String::new();
+    // Guarded turns on the macOS debug runner can exceed ten seconds per line.
     assert!(
-        tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        tokio::time::timeout(Duration::from_secs(60), reader.read_line(&mut line))
             .await
             .unwrap()
             .unwrap()
@@ -216,7 +219,7 @@ async fn initialize(writer: &mut Writer, reader: &mut Reader) {
     );
     assert_eq!(
         initialized["result"]["agentCapabilities"]["sessionCapabilities"],
-        json!({"resume":{}})
+        json!({"resume":{},"close":{},"list":{}})
     );
 }
 
@@ -331,7 +334,7 @@ async fn committed_text_turn_matches_upstream_schema_and_golden() {
 #[tokio::test]
 async fn busy_cancel_and_eof_commit_interruption() {
     let _deadline = crate::cli::serve::tests::deadline();
-    for cancel in ["session/cancel", "$/cancel_request", "eof"] {
+    for cancel in ["session/cancel", "$/cancel_request", "session/close", "eof"] {
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -392,7 +395,30 @@ async fn busy_cancel_and_eof_commit_interruption() {
         other_writer.shutdown().await.unwrap();
         other_task.await.unwrap().unwrap();
         assert!(idle.requests.lock().unwrap().is_empty());
-        if cancel != "eof" {
+        if cancel == "session/close" {
+            send(
+                &mut writer,
+                json!(8),
+                "session/close",
+                json!({"sessionId":session}),
+            )
+            .await;
+            assert_eq!(next(&mut reader).await["result"]["stopReason"], "cancelled");
+            let closed = next(&mut reader).await;
+            assert_eq!(closed["id"], 8);
+            assert_eq!(closed["result"], json!({}));
+            send(
+                &mut writer,
+                json!(9),
+                "session/prompt",
+                json!({"sessionId":session,"prompt":[{"type":"text","text":"Again"}]}),
+            )
+            .await;
+            assert_eq!(
+                next(&mut reader).await["error"]["data"]["reason"],
+                "resource_not_found"
+            );
+        } else if cancel != "eof" {
             writer.write_all(&encode_line(&json!({"jsonrpc":"2.0","method":cancel,"params":if cancel == "session/cancel" {json!({"sessionId":session})} else {json!({"requestId":3})}})).unwrap()).await.unwrap();
             let completion = next(&mut reader).await;
             assert_eq!(completion["id"], 3);
@@ -974,7 +1000,7 @@ async fn malformed_oversized_and_hostile_params_recover_over_stdio() {
         .await;
         assert_eq!(next(&mut reader).await["error"]["code"], -32602);
     }
-    send(&mut writer, json!(9), "session/list", json!({})).await;
+    send(&mut writer, json!(9), "session/delete", json!({})).await;
     assert_eq!(next(&mut reader).await["error"]["code"], -32601);
     writer.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
@@ -2930,4 +2956,605 @@ fn acp_cli_modes_are_closed_and_do_not_enable_tools() {
             assert!(parsed.is_err(), "unsupported CLI mode: {mode}");
         }
     }
+}
+
+#[tokio::test]
+async fn session_lifecycle_closes_full_roster_and_lists_bounded_inert_metadata() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let foreign = root.path().join("foreign");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&foreign).unwrap();
+    let state = root.path().join("state");
+    let engine =
+        arany::Engine::open(StateRoot::admit(&state).unwrap(), EngineConfig::default()).unwrap();
+    let title = "Hostile\u{1b}[31m\u{202e}<img src=x>";
+    let saved = engine
+        .create_session(workspace.clone(), Some(title.into()))
+        .await
+        .unwrap();
+    let hidden = engine
+        .create_session(foreign.clone(), Some("Hidden".into()))
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let provider = scripted();
+    let (mut writer, mut reader, task) = start(&state, provider.clone());
+    initialize(&mut writer, &mut reader).await;
+    let mut ids = Vec::new();
+    for _ in 0..64 {
+        ids.push(session(&mut writer, &mut reader, &workspace).await);
+    }
+    send(
+        &mut writer,
+        json!(20),
+        "session/new",
+        json!({"cwd":workspace,"mcpServers":[]}),
+    )
+    .await;
+    assert_eq!(
+        next(&mut reader).await["error"]["data"]["reason"],
+        "threadLimit"
+    );
+    send(
+        &mut writer,
+        json!(20),
+        "session/close",
+        json!({"sessionId":ids[0]}),
+    )
+    .await;
+    assert_eq!(next(&mut reader).await["result"], json!({}));
+    ids.push(session(&mut writer, &mut reader, &workspace).await);
+    send(
+        &mut writer,
+        json!(20),
+        "session/close",
+        json!({"sessionId":ids[0]}),
+    )
+    .await;
+    assert_eq!(next(&mut reader).await["error"]["code"], -32002);
+    send(
+        &mut writer,
+        json!(20),
+        "session/list",
+        json!({"cwd":workspace,"_meta":{"untrusted":"ignored"}}),
+    )
+    .await;
+    let first = next(&mut reader).await;
+    assert_eq!(first["result"]["sessions"].as_array().unwrap().len(), 50);
+    let cursor = first["result"]["nextCursor"].as_str().unwrap();
+    send(
+        &mut writer,
+        json!(20),
+        "session/list",
+        json!({"cwd":workspace,"cursor":cursor}),
+    )
+    .await;
+    let second = next(&mut reader).await;
+    assert_eq!(second["result"]["sessions"].as_array().unwrap().len(), 16);
+    assert!(second["result"]["nextCursor"].is_null());
+    let mut listed = std::collections::BTreeSet::new();
+    for entry in first["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second["result"]["sessions"].as_array().unwrap())
+    {
+        assert!(listed.insert(entry["sessionId"].as_str().unwrap().to_owned()));
+        assert_eq!(entry["cwd"], json!(workspace));
+        assert_eq!(entry.as_object().unwrap().len(), 4);
+        if entry["sessionId"] == json!(saved) {
+            assert_eq!(entry["title"], crate::presentation::escape_terminal(title));
+            assert!(
+                !entry["title"]
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .any(char::is_control)
+            );
+        }
+    }
+    assert!(listed.contains(&saved.to_string()));
+    assert!(listed.contains(&ids[0].to_string()));
+    for response in [&first, &second] {
+        let encoded = response.to_string();
+        assert!(!encoded.contains(foreign.to_str().unwrap()));
+        assert!(!encoded.contains(state.to_str().unwrap()));
+        assert!(!encoded.contains(&hidden.to_string()));
+    }
+    for params in [
+        json!({"cwd":workspace,"cursor":"bad"}),
+        json!({"cwd":workspace,"cursor":"x".repeat(129)}),
+        json!({"cwd":foreign,"cursor":cursor}),
+        json!({"cwd":"relative"}),
+        json!({"cwd":root.path()}),
+    ] {
+        send(&mut writer, json!(20), "session/list", params).await;
+        assert_eq!(next(&mut reader).await["error"]["code"], -32602);
+    }
+    for method in ["session/delete", "session/fork", "session/set_model"] {
+        send(&mut writer, json!(20), method, json!({"sessionId":saved})).await;
+        assert_eq!(next(&mut reader).await["error"]["code"], -32601);
+    }
+    writer.shutdown().await.unwrap();
+    task.await.unwrap().unwrap();
+    assert!(provider.requests.lock().unwrap().is_empty());
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    assert_eq!(store.load_session(ids[0]).await.unwrap().len(), 1);
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn close_cancels_pending_permissions_and_preserves_unknown_effects_without_private_state() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter.prompt(json!([{"type":"text","text":"Edit"}])).await;
+    let intent = adapter.intent(arany::ToolCall::Write {
+        path: "file".into(),
+        content: "new".into(),
+        expected_digest: None,
+    });
+    adapter.item(&intent, None).await;
+    adapter.next().await;
+    adapter.permission(&intent, 1).await;
+    let permission = adapter.next().await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    let interrupt = adapter.request().await;
+    assert_eq!(interrupt.method, "turn/interrupt");
+    let observation = arany::ToolObservation {
+        intent: intent.clone(),
+        disposition: arany::ToolDisposition::Uncertain,
+        enforcement_cause: None,
+        output: "Outcome unknown".into(),
+        attestation: None,
+        cache_update: arany::CacheUpdate::NotApplicable,
+    };
+    adapter.item(&intent, Some(&observation)).await;
+    let withdrawal = adapter.next().await;
+    assert_eq!(withdrawal["method"], "$/cancel_request");
+    assert_eq!(withdrawal["params"]["requestId"], permission["id"]);
+    let item = adapter.next().await;
+    assert_eq!(
+        item["params"]["update"]["_meta"]["arany.status"],
+        "uncertain"
+    );
+    adapter.events.send(Message::Notification(Notification {
+        jsonrpc: Default::default(), method: "turn/completed".into(),
+        params: Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})),
+    })).await.unwrap();
+    let prompt = adapter.next().await;
+    assert_eq!(prompt["id"], "prompt");
+    assert_eq!(prompt["result"]["stopReason"], "cancelled");
+    assert_eq!(prompt["result"]["_meta"]["arany.uncertainEffects"], 1);
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    assert_eq!(close.params.unwrap(), json!({"threadId":adapter.session}));
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    adapter
+        .call(
+            json!(31),
+            "session/prompt",
+            json!({"sessionId":adapter.session,"prompt":[{"type":"text","text":"Again"}]}),
+        )
+        .await;
+    assert_eq!(adapter.next().await["error"]["code"], -32002);
+    assert!(
+        adapter.input.try_recv().is_err(),
+        "closing never retries or continues the effect"
+    );
+    adapter.close().await;
+}
+
+#[tokio::test]
+async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertain_effect() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter.prompt(json!([{"type":"text","text":"Edit"}])).await;
+    let intent = adapter.intent(arany::ToolCall::Write {
+        path: "file".into(),
+        content: "new".into(),
+        expected_digest: None,
+    });
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    adapter
+        .call(
+            json!(31),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.next().await["error"]["data"]["reason"], "busy");
+    let observation = arany::ToolObservation {
+        intent: intent.clone(),
+        disposition: arany::ToolDisposition::Uncertain,
+        enforcement_cause: None,
+        output: "Outcome unknown".into(),
+        attestation: None,
+        cache_update: arany::CacheUpdate::NotApplicable,
+    };
+    adapter
+        .events
+        .send(Message::Notification(Notification {
+            jsonrpc: Default::default(),
+            method: "events/resync".into(),
+            params: Some(json!({"threadId":adapter.session,"missed":2,"lastSequence":0})),
+        }))
+        .await
+        .unwrap();
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
+    let events: Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",json!({"observation":observation}))].into_iter().enumerate().map(|(index,(kind,payload))| json!({
+        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":1,"payload":payload,"created_at_ms":0
+    })).collect();
+    let recover = adapter.request().await;
+    assert_eq!(
+        recover.method, "events/subscribe",
+        "the thread stays loaded for reconciliation before unload"
+    );
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: recover.id,
+            result: json!({"events":events,"nextSince":null}),
+        }))
+        .await
+        .unwrap();
+    let mut recovered = false;
+    let prompt = loop {
+        let message = adapter.next().await;
+        if message["id"] == "prompt" {
+            break message;
+        }
+        recovered |= message["params"]["update"]["_meta"]["arany.status"] == "uncertain";
+    };
+    assert!(recovered, "the missed Uncertain observation is recovered");
+    assert_eq!(prompt["result"]["stopReason"], "cancelled");
+    assert_eq!(prompt["result"]["_meta"]["arany.uncertainEffects"], 1);
+    assert!(prompt["result"]["_meta"]["arany.incompleteUpdates"].is_null());
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    for (id, method, params) in [
+        (
+            json!(40),
+            "session/prompt",
+            json!({"sessionId":adapter.session,"prompt":[{"type":"text","text":"Race"}]}),
+        ),
+        (
+            json!(41),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        ),
+    ] {
+        adapter.call(id, method, params).await;
+        assert_eq!(
+            adapter.next().await["error"]["data"]["reason"],
+            "busy",
+            "closing state survives until the unsubscribe response"
+        );
+    }
+    assert!(adapter.input.try_recv().is_err());
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    adapter
+        .call(
+            json!(32),
+            "session/prompt",
+            json!({"sessionId":adapter.session,"prompt":[{"type":"text","text":"Again"}]}),
+        )
+        .await;
+    assert_eq!(adapter.next().await["error"]["code"], -32002);
+    assert!(
+        adapter.input.try_recv().is_err(),
+        "the Uncertain effect is never retried and the slot is freed"
+    );
+    adapter.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn close_deadline_holds_under_output_backpressure_and_ignores_late_completion() {
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Stall"}]))
+        .await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    let mut filler = 0;
+    while adapter.outbound.try_send(json!({"filler":filler})).is_ok() {
+        filler += 1;
+    }
+    tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE + std::time::Duration::from_millis(1))
+        .await;
+    let close = adapter.request().await;
+    assert_eq!(
+        close.method, "thread/unsubscribe",
+        "unsubscribe is sent while the writer is blocked"
+    );
+    for _ in 0..filler {
+        adapter.output.recv().await.unwrap();
+    }
+    let prompt = adapter.next().await;
+    assert_eq!(prompt["id"], "prompt");
+    assert_eq!(prompt["result"]["stopReason"], "cancelled");
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"interrupted","items":[],"goal":{"status":"interrupted"}}})) })).await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        adapter.output.try_recv().is_err(),
+        "late completion is dropped"
+    );
+    assert!(adapter.input.try_recv().is_err());
+    adapter.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn close_with_a_stalled_turn_completes_at_its_deadline_without_retrying() {
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Stall"}]))
+        .await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE + std::time::Duration::from_millis(1))
+        .await;
+    let prompt = adapter.next().await;
+    assert_eq!(prompt["id"], "prompt");
+    assert_eq!(prompt["result"]["stopReason"], "cancelled");
+    assert_eq!(prompt["result"]["_meta"]["arany.incompleteUpdates"], true);
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    adapter
+        .call(
+            json!(31),
+            "session/prompt",
+            json!({"sessionId":adapter.session,"prompt":[{"type":"text","text":"Again"}]}),
+        )
+        .await;
+    assert_eq!(adapter.next().await["error"]["code"], -32002);
+    assert!(adapter.input.try_recv().is_err());
+    adapter.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_before_expiry_queues_unsubscribe_even_with_a_blocked_writer() {
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Stall"}]))
+        .await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    let mut filler = 0;
+    while adapter.outbound.try_send(json!({"filler":filler})).is_ok() {
+        filler += 1;
+    }
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"interrupted","items":[],"goal":{"status":"interrupted"}}})) })).await.unwrap();
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    for _ in 0..filler {
+        adapter.output.recv().await.unwrap();
+    }
+    assert_eq!(adapter.next().await["id"], "prompt");
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    adapter.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn expiry_during_blocked_reconciliation_drops_the_resumed_completion() {
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Stall"}]))
+        .await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"completed","items":[],"goal":{"status":"completed"}}})) })).await.unwrap();
+    let recover = adapter.request().await;
+    assert_eq!(recover.method, "events/subscribe");
+    let mut filler = 0;
+    while adapter.outbound.try_send(json!({"filler":filler})).is_ok() {
+        filler += 1;
+    }
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: recover.id,
+            result: json!({"events":[{
+                "sequence":1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":null,
+                "kind":"MessageCommitted","event_version":1,"payload":{"text":"Late"},"created_at_ms":0
+            }],"nextSince":null}),
+        }))
+        .await
+        .unwrap();
+    tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE + std::time::Duration::from_millis(1))
+        .await;
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    for _ in 0..filler {
+        adapter.output.recv().await.unwrap();
+    }
+    let mut prompts = 0;
+    for _ in 0..2 {
+        let message = adapter.next().await;
+        if message["id"] == "prompt" {
+            prompts += 1;
+            assert_eq!(message["result"]["stopReason"], "cancelled");
+        }
+    }
+    assert_eq!(prompts, 1);
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    tokio::task::yield_now().await;
+    assert!(adapter.output.try_recv().is_err());
+    adapter.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn reused_client_prompt_id_is_not_consumed_by_expired_blocked_work() {
+    let mut adapter = Adapter::new().await;
+    let other = SessionId::new();
+    adapter
+        .call(
+            json!(3),
+            "session/new",
+            json!({"cwd":"/var/workspace","mcpServers":[]}),
+        )
+        .await;
+    let start = adapter.request().await;
+    adapter.events.send(Message::Response(Response { jsonrpc:Default::default(), id:start.id,
+        result:json!({"thread":{"id":other,"workspace":"/private/var/workspace","title":"Other","createdAtMs":0}}) })).await.unwrap();
+    assert_eq!(adapter.next().await["id"], 3);
+    adapter
+        .prompt(json!([{"type":"text","text":"Stall"}]))
+        .await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"completed","items":[],"goal":{"status":"completed"}}})) })).await.unwrap();
+    let recover = adapter.request().await;
+    let mut filler = 0;
+    while adapter.outbound.try_send(json!({"filler":filler})).is_ok() {
+        filler += 1;
+    }
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: recover.id,
+            result: json!({"events":[{
+                "sequence":1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":null,
+                "kind":"MessageCommitted","event_version":1,"payload":{"text":"Late"},"created_at_ms":0
+            }],"nextSince":null}),
+        }))
+        .await
+        .unwrap();
+    tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE + std::time::Duration::from_millis(1))
+        .await;
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    adapter
+        .call(
+            json!("prompt"),
+            "session/prompt",
+            json!({"sessionId":other,"prompt":[{"type":"text","text":"Reuse"}]}),
+        )
+        .await;
+    let turn_start = adapter.request().await;
+    assert_eq!(turn_start.method, "turn/start");
+    for _ in 0..filler {
+        adapter.output.recv().await.unwrap();
+    }
+    let mut old = 0;
+    for _ in 0..2 {
+        if adapter.next().await["id"] == "prompt" {
+            old += 1;
+        }
+    }
+    assert_eq!(old, 1, "only the expired prompt's own response");
+    tokio::task::yield_now().await;
+    let run = arany::RunId::new();
+    adapter.events.send(Message::Response(Response { jsonrpc:Default::default(), id:turn_start.id,
+        result:json!({"turn":{"id":run,"goalId":arany::GoalId::new(),"status":"inProgress","items":[]}}) })).await.unwrap();
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":other,"turn":{"id":run,"goalId":arany::GoalId::new(),"status":"interrupted","items":[],"goal":{"status":"interrupted"}}})) })).await.unwrap();
+    let reused = adapter.next().await;
+    assert_eq!(
+        reused["id"], "prompt",
+        "the reused ID still owns the new prompt"
+    );
+    adapter.close().await;
+    drop(close);
 }

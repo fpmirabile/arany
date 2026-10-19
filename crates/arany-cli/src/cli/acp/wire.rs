@@ -271,7 +271,7 @@ pub(super) fn initialized() -> Value {
             "loadSession": true,
             "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true},
             "mcpCapabilities": {"http": false, "sse": false},
-            "sessionCapabilities": {"resume": {}}
+            "sessionCapabilities": {"resume": {}, "close": {}, "list": {}}
         },
         "agentInfo": {"name": "arany", "title": "Arany", "version": env!("CARGO_PKG_VERSION")},
         "authMethods": [{"id": "arany-setup", "type": "agent", "name": "Set up Arany",
@@ -373,4 +373,11 @@ pub(super) fn mode_updates(session: SessionId, mode: &PermissionMode) -> [Value;
         json!({"sessionUpdate":"current_mode_update","currentModeId":mode}),
         json!({"sessionUpdate":"config_option_update","configOptions":mode_state(mode)["configOptions"]}),
     ].map(|update| json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session,"update":update}}))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ListSessions {
+    pub cwd: Option<String>,
+    pub cursor: Option<String>,
 }

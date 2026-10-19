@@ -345,6 +345,7 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::GuardUnavailable => "GuardUnavailable",
         EngineError::SessionNotIdle => "SessionNotIdle",
         EngineError::ForkNotAtRunBoundary => "ForkNotAtRunBoundary",
+        EngineError::ConversationRewindLimit => "ConversationRewindLimit",
         EngineError::WorkspaceMismatch => "WorkspaceMismatch",
         EngineError::InvalidWorkspacePath => "InvalidWorkspacePath",
         EngineError::InputNotRegular => "InputNotRegular",

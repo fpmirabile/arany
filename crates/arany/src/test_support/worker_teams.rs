@@ -57,7 +57,7 @@ impl TeamProvider {
         GoalPlanContract {
             mission: "Publish and verify independent edits".into(),
             paths: vec!["notes".into()],
-            commands: if matches!(self.case, "command" | "command_refused") {
+            commands: if matches!(self.case, "command" | "worker_command") {
                 vec!["verify".into()]
             } else {
                 Vec::new()
@@ -106,7 +106,7 @@ impl TeamProvider {
                     objective: format!("editor {number} wave {wave}"),
                     profile: None,
                     editor: Some(Box::new(EditorAssignment {
-                        commands: if self.case == "command_refused" {
+                        commands: if self.case == "worker_command" {
                             vec!["verify".into()]
                         } else {
                             Vec::new()
@@ -120,19 +120,9 @@ impl TeamProvider {
                         } else {
                             format!("notes/{number}")
                         }],
-                        criterion: if self.case == "command" && number == 0 {
-                            GoalSuccessCriterion::ToolCallSucceeded {
-                                call: Box::new(ToolCall::Command {
-                                    program: "verify".into(),
-                                    args: Vec::new(),
-                                    cwd: ".".into(),
-                                }),
-                            }
-                        } else {
-                            GoalSuccessCriterion::WorkspaceFileContent {
-                                path: format!("notes/{number}"),
-                                content: format!("edited {number}"),
-                            }
+                        criterion: GoalSuccessCriterion::WorkspaceFileContent {
+                            path: format!("notes/{number}"),
+                            content: format!("edited {number}"),
                         },
                         mode: if matches!(
                             self.case,
@@ -195,7 +185,7 @@ impl TeamProvider {
             .unwrap()
             .parse::<usize>()
             .unwrap();
-        let step = if self.case == "command_refused" {
+        let step = if self.case == "worker_command" {
             if step == 0 {
                 return Ok(tool_outcome(
                     ToolCall::Command {
@@ -470,7 +460,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let commands = if case.starts_with("hook_") || case == "order_hooks" {
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
         serde_json::json!([{"name":"sh", "executable":shell, "sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}])
-    } else if matches!(case, "command" | "command_refused") {
+    } else if matches!(case, "command" | "worker_command") {
         let executable = std::fs::canonicalize("/usr/bin/true").unwrap();
         serde_json::json!([{"name":"verify", "executable":executable, "sha256":crate::tools::types::hex_digest(&std::fs::read(&executable).unwrap()),"interpreter":false,"inputs":[]}])
     } else {
@@ -485,7 +475,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     std::fs::create_dir(state.join("agents")).unwrap();
     std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::write(state.join("agents/editor.md"), "---\nname: editor\ndescription: Edit one leased file\ntools: Read, Write\npermissionMode: acceptEdits\nisolation: worktree\n---\nKeep edits private.\n").unwrap();
-    if case == "command_refused" {
+    if case == "worker_command" {
         std::fs::write(state.join("agents/editor.md"), "---\nname: editor\ndescription: Edit one leased file\ntools: Read, Write, Bash\npermissionMode: acceptEdits\nisolation: worktree\n---\nKeep edits private.\n").unwrap();
     }
     if case == "background" {
@@ -621,7 +611,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                 match &envelope.event {
                     Event::WorkerIntegrationRecorded { record, .. } => {
                         integrated.push(record.assignment_id);
-                        if integrated.len() == 1 && matches!(case, "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "command_refused") { provider.gates[0].add_permits(1); }
+                        if integrated.len() == 1 && matches!(case, "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "worker_command") { provider.gates[0].add_permits(1); }
                     }
                     Event::AgentFinished { worker: Some(outcome), .. } if outcome.disposition == crate::worker::WorkerDisposition::Failed && case == "failure" => provider.gates[1].add_permits(1),
                     Event::ProviderCallRecorded { record, .. } if matches!(case, "leased_edit" | "defer_finish") && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::InvalidResponse => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
@@ -795,8 +785,8 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     if case == "command" {
         assert!(events.iter().any(|e| matches!(&e.event, Event::WorkerVerificationRecorded { record, .. } if record.passed)));
     }
-    if case == "command_refused" {
-        let refused = events
+    if case == "worker_command" {
+        let commands = events
             .iter()
             .filter_map(|e| match &e.event {
                 Event::ToolFinished { observation, .. }
@@ -808,11 +798,15 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(refused.len(), 2);
-        for observation in refused {
-            assert_eq!(observation.disposition, ToolDisposition::Denied);
-            assert_eq!(observation.output, crate::tools::WORKER_COMMANDS_REFUSED);
-            assert!(!events.iter().any(|e| matches!(&e.event, Event::ToolPermissionDecided { verdict, .. } if verdict.intent_digest == observation.intent.digest())));
+        assert_eq!(commands.len(), 2);
+        for observation in commands {
+            assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+            assert!(matches!(
+                observation.attestation,
+                Some(Attestation::WorkerCommand { .. })
+            ));
+            assert_eq!(observation.cache_update, CacheUpdate::Discarded);
+            assert!(events.iter().any(|e| matches!(&e.event, Event::ToolPermissionDecided { verdict, .. } if verdict.intent_digest == observation.intent.digest())));
         }
     }
     if case == "conflict" {
@@ -866,7 +860,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     }
     if matches!(
         case,
-        "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "command_refused"
+        "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "worker_command"
     ) {
         let ordinals = integrated
             .iter()
@@ -1171,6 +1165,442 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
     assert_eq!(assignment.pins.grant.write_paths, ["notes/0"]);
     assert_eq!(events[original.events.len()..].iter().filter(|e| matches!(&e.event, Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::ApplyChangeset { .. }))).count(), 1, "historical effect re-executed");
     assert_action_bounds(&events, false, false);
+    TeamObservation {
+        directory: original.directory,
+        session: original.session,
+        events,
+        view,
+    }
+}
+
+pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObservation {
+    use super::goals::ForegroundWorkerProvider;
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("notes")).unwrap();
+    std::fs::write(workspace.join("notes/a"), "original a").unwrap();
+    std::fs::write(workspace.join("notes/b"), "original b").unwrap();
+    std::fs::create_dir(workspace.join(".git")).unwrap();
+    std::fs::write(workspace.join(".git/config"), "hostile git canary").unwrap();
+    let state = directory.path().join("state");
+    let root = StateRoot::admit(&state).unwrap();
+    let private = |path: &Path, bytes: &[u8]| {
+        std::fs::write(path, bytes).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    let shell = std::fs::canonicalize("/bin/sh").unwrap();
+    private(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
+        "version":1,"workspace_paths":["notes"],"write":true,
+        "commands":[{"name":"sh","executable":shell,"sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}],
+        "skills":[],"mcp":[],"child_unguarded":"human_only"
+    })).unwrap());
+    std::fs::create_dir(state.join("agents")).unwrap();
+    std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mode = if case == "command_review_denied" {
+        ""
+    } else {
+        "permissionMode: acceptEdits\n"
+    };
+    private(
+        &state.join("agents/editor.md"),
+        format!("---\nname: editor\ndescription: Build and test leased notes\ntools: Read, Write, Bash\n{mode}isolation: worktree\n---\nKeep commands private.\n").as_bytes(),
+    );
+    let hooks = serde_json::json!({
+        "PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"exit 0","timeout":5}]}],
+        "PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo checked >&2; exit 2","timeout":5}]}]
+    });
+    let permissions = if case == "command_denied" {
+        serde_json::json!({"permissions":{"deny":["Bash"]}})
+    } else if case == "command_review_denied" {
+        serde_json::json!({"permissions":{"defaultMode":"auto"},"hooks":hooks})
+    } else if case == "command_hook_denied" {
+        serde_json::json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo blocked >&2; exit 2","timeout":5}]}]}})
+    } else {
+        serde_json::json!({"hooks":hooks})
+    };
+    private(
+        &state.join("permissions.json"),
+        &serde_json::to_vec(&permissions).unwrap(),
+    );
+    let engine = super::engine::open(
+        root,
+        EngineConfig {
+            guard_executable: Some(guard.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let budget = GoalBudget {
+        max_provider_calls: Some(48),
+        ..Default::default()
+    };
+    let provider = Arc::new(ForegroundWorkerProvider::new(&workspace, case, budget));
+    let mut input = request(&workspace, "Build and verify in the worker view");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 3,
+    };
+    input.goal = GoalRequest::new(budget, GoalPhase::Implementation);
+    let (approvals, mut inbox) = ToolApprovals::new(if case == "command_review_denied" {
+        ApprovalMode::Auto
+    } else {
+        ApprovalMode::Request
+    });
+    let mut handle = engine
+        .submit(
+            AdmittedProviders::single(provider.clone()),
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                approvals: Some(approvals),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut lost = false;
+    let mut tail = std::collections::VecDeque::new();
+    let result = loop {
+        tokio::select! {
+            result = &mut handle.result => match result {
+                Ok(result) => break result,
+                Err(error) => panic!("{case}: {error:?}; last committed Events {tail:?}"),
+            },
+            Some(crate::journal::Tapped::Committed(envelope)) = handle.events.next() => {
+                if tail.len() == 8 {
+                    tail.pop_front();
+                }
+                tail.push_back((envelope.sequence, envelope.event.kind()));
+            }
+            Some(approval) = inbox.next() => {
+                assert!(!approval.intent.call.is_unguarded());
+                if case == "command_loss" && matches!(approval.intent.target, crate::worker::EffectTarget::WorkerView { .. }) {
+                    assert!(!lost);
+                    crate::FaultPlan::lose_guard_receipt(approval.intent.id);
+                    lost = true;
+                }
+                approval.decide(case != "command_review_denied");
+            }
+        }
+    };
+    drop(handle);
+    assert!(
+        provider.violations.lock().unwrap().is_empty(),
+        "{case}: {:?}",
+        provider.violations.lock().unwrap()
+    );
+    let session = result.run.session_id;
+    engine.close().await.unwrap();
+    let (events, view) = replayed(&state, session).await;
+    let first_action = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e.event,
+                Event::ToolStarted { .. } | Event::GoalProviderCallReserved { .. }
+            )
+        })
+        .expect("admitted action");
+    for end in 1..=events.len() {
+        SessionView::replay_open(session, &events[..end]).expect("valid interrupted prefix");
+        if end > first_action {
+            assert_action_bounds(&events[..end], false, false);
+        }
+    }
+    let run = &view.runs[0];
+    let child = &run.agents[1];
+    let worker = child.assignment.as_ref().unwrap();
+    assert_eq!(
+        child.grant,
+        Some(ChildGrant::EditOnly {
+            unguarded: UnguardedGrant::Denied
+        })
+    );
+    assert!(worker.released.is_some());
+    let commands: Vec<_> = child
+        .tools
+        .iter()
+        .filter(|t| matches!(t.intent.call, ToolCall::Command { .. }))
+        .collect();
+    assert!(commands.len() <= 16);
+    assert!(child.provider_calls.len() <= 17);
+    assert!(run.tools.iter().all(|t| !t.intent.call.is_unguarded()));
+    assert!(child.tools.iter().all(|t| matches!(
+        t.intent.target,
+        crate::worker::EffectTarget::WorkerView { .. }
+    )));
+    assert_eq!(
+        std::fs::read(workspace.join(".git/config")).unwrap(),
+        b"hostile git canary"
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(view.goals[0].provider_calls as usize, requests.len());
+    assert_eq!(view.goals[0].known_tokens, requests.len() as u64 * 4);
+    assert!(view.goals[0].active_ms > 0);
+    let rejected: Vec<_> = child
+        .provider_calls
+        .iter()
+        .filter(|c| c.failure_reason == Some(ProviderFailureReason::CriterionNotMetInView))
+        .collect();
+    assert!(worker.gate_continuations <= 3);
+    if case == "command_success" {
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(commands.len(), 3);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(worker.gate_continuations, 1);
+        assert_eq!(worker.revision, 2);
+        assert!(worker.verification.as_ref().unwrap().1.passed);
+        let handover = &worker.handover.as_ref().unwrap().1;
+        assert_eq!(
+            handover.criterion_evidence,
+            vec![commands.last().unwrap().finished_sequence.unwrap()]
+        );
+        for tool in commands {
+            assert_eq!(tool.hooks.len(), 2);
+            assert!(
+                tool.hooks
+                    .iter()
+                    .all(|h| h.invocation.intent.agent_run_id == child.id)
+            );
+            assert_eq!(
+                tool.observation.as_ref().unwrap().cache_update,
+                CacheUpdate::Discarded
+            );
+        }
+        assert!(requests.iter().any(|r| {
+            r.phase == AgentPhase::ChildWork
+                && r.input
+                    .tools
+                    .as_ref()
+                    .unwrap()
+                    .steps
+                    .iter()
+                    .any(|s| !s.hook_feedback.is_empty())
+        }));
+        assert_eq!(
+            std::fs::read(workspace.join("notes/a")).unwrap(),
+            b"edited a"
+        );
+    } else {
+        assert!(worker.handover.is_none());
+        assert_eq!(
+            std::fs::read(workspace.join("notes/a")).unwrap(),
+            b"original a"
+        );
+        let outcome = &worker.outcome.as_ref().unwrap().1;
+        if case == "command_loss" {
+            assert!(lost);
+            assert_eq!(commands.len(), 1);
+            assert_eq!(child.provider_calls.len(), 1);
+            assert_eq!(
+                outcome.disposition,
+                crate::worker::WorkerDisposition::PrivateUncertain
+            );
+            assert_eq!(
+                commands[0].observation.as_ref().unwrap().disposition,
+                ToolDisposition::Uncertain
+            );
+        } else if case == "command_unguarded" {
+            assert_eq!(commands.len(), 1);
+            assert_eq!(outcome.cause, crate::worker::WorkerCause::InvalidOutcome);
+        } else if case == "command_time" {
+            assert!(run.workers.stop.is_some());
+            assert_eq!(view.goals[0].status, GoalStatus::Failed);
+        } else {
+            assert_eq!(
+                outcome.cause,
+                if case == "command_review_denied" {
+                    crate::worker::WorkerCause::ToolFailed
+                } else {
+                    crate::worker::WorkerCause::CriterionUnverified
+                },
+                "{case}: {} child calls, {} commands, {} gate rejections",
+                child.provider_calls.len(),
+                commands.len(),
+                rejected.len()
+            );
+            if matches!(
+                case,
+                "command_nonzero"
+                    | "command_rejected"
+                    | "command_review_denied"
+                    | "command_hook_denied"
+            ) {
+                assert_eq!(commands.len(), 1);
+            }
+            if case == "command_cap" {
+                assert_eq!(rejected.len(), 4);
+                assert_eq!(worker.gate_continuations, 3);
+                let heads: Vec<_> = requests
+                    .iter()
+                    .filter(|r| r.phase == AgentPhase::ChildWork)
+                    .map(|r| r.input.workspace_guidance.clone())
+                    .collect();
+                assert_eq!(heads.len(), 4);
+                assert!(heads.windows(2).all(|w| w[0] == w[1]));
+                assert!(
+                    !heads[0]
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("Finish refused")
+                );
+                let feedback: Vec<_> = requests
+                    .iter()
+                    .filter(|r| r.phase == AgentPhase::ChildWork)
+                    .map(|r| r.input.stop_hook_feedback.len())
+                    .collect();
+                assert_eq!(feedback, [0, 1, 2, 3]);
+            }
+            if matches!(case, "command_review_denied" | "command_hook_denied") {
+                let observation = commands[0].observation.as_ref().unwrap();
+                assert_eq!(observation.disposition, ToolDisposition::Denied);
+                assert!(commands[0].permission_verdict.is_some());
+                assert!(worker.verification.is_none());
+            }
+            if case == "command_review_denied" {
+                assert!(requests.iter().any(|r| r.phase == AgentPhase::ToolReview));
+                let verdict = commands[0].permission_verdict.as_ref().unwrap();
+                assert!(!verdict.approved);
+                assert_eq!(verdict.source, crate::permissions::PermissionSource::Human);
+            }
+            if case == "command_denied" {
+                assert_eq!(commands.len(), 16);
+                assert!(commands.iter().all(|t| t.permission_verdict.is_some()
+                    && t.observation.as_ref().unwrap().disposition == ToolDisposition::Denied));
+                assert_eq!(rejected.len(), 1);
+                assert_eq!(worker.gate_continuations, 0);
+            }
+            if !matches!(case, "command_review_denied" | "command_hook_denied") {
+                assert!(
+                    run.supervisor
+                        .verdicts()
+                        .iter()
+                        .any(|(actor, _)| *actor == child.id)
+                );
+            }
+        }
+    }
+    TeamObservation {
+        directory,
+        session,
+        events,
+        view,
+    }
+}
+
+pub async fn recover_open_worker_command(guard: &Path) -> TeamObservation {
+    use super::goals::ForegroundWorkerProvider;
+    use std::os::unix::fs::PermissionsExt;
+    let mut original = Box::pin(runtime_command_case(guard, "command_success")).await;
+    let prior = original.directory.path().join("state");
+    let state = original.directory.path().join("recovery-state");
+    let root = StateRoot::admit(&state).unwrap();
+    for file in ["tools.json", "permissions.json", "agents/editor.md"] {
+        if file.contains('/') {
+            std::fs::create_dir_all(state.join("agents")).unwrap();
+            std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        std::fs::copy(prior.join(file), state.join(file)).unwrap();
+    }
+    let open = original
+        .events
+        .iter()
+        .position(|e| {
+            matches!(&e.event, Event::ToolStarted { intent, .. }
+                if matches!(intent.call, ToolCall::Command { .. })
+                    && matches!(intent.target, crate::worker::EffectTarget::WorkerView { .. }))
+        })
+        .expect("worker command intent");
+    let intent = match &original.events[open].event {
+        Event::ToolStarted { intent, .. } => intent.id,
+        _ => unreachable!(),
+    };
+    let store = Store::open(root).unwrap();
+    for event in &original.events[..=open] {
+        store
+            .append(original.session, event.event.clone())
+            .await
+            .unwrap();
+    }
+    store.close().await.unwrap();
+    let (prefix, _) = replayed(&state, original.session).await;
+    let workspace = original.directory.path().join("workspace");
+    std::fs::write(workspace.join("notes/a"), b"original a").unwrap();
+    let engine = super::engine::open(
+        StateRoot::open_existing(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(guard.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let budget = original.view.goals[0].budget;
+    let provider = Arc::new(ForegroundWorkerProvider::new(
+        &workspace,
+        "command_success",
+        budget,
+    ));
+    let mut input = request(&workspace, "");
+    input.include_paths.clear();
+    input.title = None;
+    input.session_id = Some(original.session);
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 3,
+    };
+    input.goal = GoalRequest::resume(original.view.goals[0].id, false);
+    let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
+    let mut running = engine
+        .submit(
+            AdmittedProviders::single(provider.clone()),
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                approvals: Some(approvals),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .result;
+    let result = loop {
+        tokio::select! {
+            result = &mut running => break result,
+            Some(approval) = inbox.next() => { approval.decide(true); },
+        }
+    };
+    drop(running);
+    engine.close().await.unwrap();
+    let (events, view) = replayed(&state, original.session).await;
+    assert_eq!(
+        &events[..prefix.len()],
+        prefix.as_slice(),
+        "recovery rewrote history"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(&e.event, Event::ToolStarted { intent: i, .. } if i.id == intent))
+            .count(),
+        1,
+        "the open worker command was re-executed"
+    );
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+    assert!(
+        view.runs[0]
+            .agents
+            .iter()
+            .flat_map(|a| &a.tools)
+            .find(|t| t.intent.id == intent)
+            .is_some_and(|t| t.observation.is_none()),
+        "recovery neither re-executes nor invents an outcome for the open command"
+    );
+    assert_eq!(
+        std::fs::read(workspace.join(".git/config")).unwrap(),
+        b"hostile git canary"
+    );
+    original.events = events.clone();
+    original.view = view.clone();
     TeamObservation {
         directory: original.directory,
         session: original.session,

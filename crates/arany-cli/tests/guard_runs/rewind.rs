@@ -566,3 +566,226 @@ async fn guarded_rewind_lost_receipt_and_crash_prefix_block_resume_without_reexe
         case(name).await;
     }
 }
+
+#[tokio::test]
+async fn conversation_rewind_orders_code_and_preserves_partial_and_crash_outcomes() {
+    for scenario in [
+        "restored",
+        "conflict",
+        "uncertain",
+        "fork_failure",
+        "crash_between",
+        "cancel_between",
+    ] {
+        arany::test_support::isolate_account_root();
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "original");
+        let state = temp.path().join("state");
+        let engine = engine_support::open(
+            StateRoot::admit(&state).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        grant(&state, true);
+        let mut plan = write_plan();
+        plan.paths = vec!["notes/facts.txt".into()];
+        plan.budget = arany::GoalBudget::default();
+        plan.success_criterion = arany::GoalSuccessCriterion::WorkspaceFileContent {
+            path: "notes/facts.txt".into(),
+            content: "changed".into(),
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            finish_with("baseline"),
+            tool_outcome(
+                arany::ToolCall::Write {
+                    path: "notes/facts.txt".into(),
+                    expected_digest: Some(hash(b"original")),
+                    content: "changed".into(),
+                },
+                Some(Box::new(plan)),
+            ),
+            finish_with("changed"),
+        ]));
+        let baseline = run_with(
+            &engine,
+            &provider,
+            request(&workspace, "Baseline"),
+            RunControls::default(),
+        )
+        .await
+        .unwrap();
+        let mut input = request(&workspace, "Change file");
+        input.session_id = Some(baseline.session_id);
+        input.title = None;
+        let result = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.run.status,
+            RunStatus::Finished,
+            "{scenario}: setup Run must publish"
+        );
+        let session = result.session_id;
+        let (before, view) = replayed(&state, session).await;
+        let target = view
+            .rewinds
+            .checkpoints
+            .iter()
+            .find(|c| matches!(c, CheckpointTarget::Run { run_id, .. } if *run_id == result.run.id))
+            .unwrap()
+            .clone();
+        let preview = engine
+            .rewind_preview(RewindRequest {
+                session_id: session,
+                workspace: workspace.clone(),
+                target,
+                tools: ToolGrant::Configured,
+                kept: Vec::new(),
+                overwrite: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            preview.can_restore(),
+            "{scenario}: {:?}, blockers={:?}",
+            preview.files(),
+            preview.plan().blockers
+        );
+        if scenario == "uncertain" {
+            arany::FaultPlan::lose_guard_receipt(preview.rewind_id());
+        }
+        let conflict_gate =
+            (scenario == "conflict").then(|| arany::FaultPlan::gate_checkpoint(session));
+        let finish_gate = ["fork_failure", "crash_between", "cancel_between"]
+            .contains(&scenario)
+            .then(|| {
+                arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                    matches!(event, Event::WorkspaceRewindFinished { .. })
+                })
+            });
+        let cancellation = RunCancellation::new();
+        let result = {
+            let restore = engine.rewind_both(preview, cancellation.clone());
+            tokio::pin!(restore);
+            if let Some((entered, release)) = conflict_gate {
+                tokio::select! {
+                    result = &mut restore => panic!("completed before capture: {result:?}"),
+                    entered = tokio::time::timeout(Duration::from_secs(120), entered) => entered.unwrap().unwrap(),
+                }
+                std::fs::write(workspace.join("notes/facts.txt"), "raced").unwrap();
+                release.send(()).unwrap();
+            }
+            if let Some((entered, release)) = finish_gate {
+                tokio::select! {
+                    result = &mut restore => panic!("completed before Finished acknowledgment: {result:?}"),
+                    entered = tokio::time::timeout(Duration::from_secs(120), entered) => entered.unwrap().unwrap(),
+                }
+                if scenario == "fork_failure" {
+                    let db = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
+                    db.execute_batch("CREATE TRIGGER refuse_fork BEFORE INSERT ON events WHEN NEW.kind='SessionForked' BEGIN SELECT RAISE(FAIL, 'injected fork failure'); END;").unwrap();
+                    release.send(()).unwrap();
+                } else if scenario == "cancel_between" {
+                    cancellation.cancel();
+                    release.send(()).unwrap();
+                } else {
+                    drop(release);
+                }
+            }
+            restore.await
+        };
+        let fork = if scenario == "crash_between" {
+            assert!(result.is_err(), "lost completion must not fork or retry");
+            None
+        } else {
+            let result = result.unwrap();
+            assert_eq!(
+                result.code.outcome,
+                match scenario {
+                    "conflict" => RewindOutcome::Conflict,
+                    "uncertain" => RewindOutcome::Uncertain,
+                    _ => RewindOutcome::Restored,
+                }
+            );
+            match result.conversation {
+                arany::ConversationRewindOutcome::Restored(conversation) => {
+                    assert_eq!(scenario, "restored");
+                    assert_eq!(conversation.prompt.as_deref(), Some("Change file"));
+                    conversation.session_id
+                }
+                arany::ConversationRewindOutcome::Failed(_) => {
+                    assert_eq!(scenario, "fork_failure");
+                    None
+                }
+                arany::ConversationRewindOutcome::Unchanged => {
+                    assert!(["conflict", "uncertain", "cancel_between"].contains(&scenario));
+                    None
+                }
+            }
+        };
+        if scenario == "fork_failure" {
+            rusqlite::Connection::open(state.join("events.sqlite3"))
+                .unwrap()
+                .execute_batch("DROP TRIGGER refuse_fork;")
+                .unwrap();
+        }
+        engine.close().await.unwrap();
+        let bytes = std::fs::read(workspace.join("notes/facts.txt")).unwrap();
+        assert_eq!(
+            bytes,
+            if scenario == "conflict" {
+                b"raced".as_slice()
+            } else {
+                b"original".as_slice()
+            }
+        );
+        let (events, reopened) = replayed(&state, session).await;
+        assert_eq!(&events[..before.len()], before);
+        assert_eq!(reopened.runs.len(), 2, "source conversation stays intact");
+        assert_eq!(
+            reopened.rewinds.operations.len(),
+            1,
+            "never retries either step"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, Event::WorkspaceRewindStarted { .. }))
+                .count(),
+            1
+        );
+        let listed =
+            arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace.clone())
+                .await
+                .unwrap();
+        assert_eq!(listed.len(), if fork.is_some() { 2 } else { 1 });
+        if let Some(fork) = fork {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            let fork_events = store.load_session(fork).await.unwrap();
+            let child = store.load_view(fork).await.unwrap().unwrap();
+            store.close().await.unwrap();
+            assert!(
+                fork_events[0].sequence > events.last().unwrap().sequence,
+                "code Finished commits before the fork"
+            );
+            assert_eq!(child.runs.len(), 1);
+            assert_eq!(child.runs[0].id, baseline.run.id);
+            assert!(child.goals.is_empty());
+        }
+        assert_eq!(
+            bytes,
+            std::fs::read(workspace.join("notes/facts.txt")).unwrap(),
+            "strict replay has no effects"
+        );
+    }
+}

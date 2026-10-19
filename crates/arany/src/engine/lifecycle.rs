@@ -2,7 +2,8 @@ use super::EngineError;
 use crate::journal::Journal;
 use crate::session::input::WorkspaceInputs;
 use crate::session::{
-    Event, RunStatus, SessionDefaults, SessionId, SessionListItem, SessionView, WorkspaceIdentity,
+    Event, RunStatus, SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView,
+    WorkspaceIdentity,
 };
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError};
 use std::path::{Path, PathBuf};
@@ -167,20 +168,43 @@ pub async fn continue_session(
     resume_session(state, workspace, session_id).await
 }
 
+pub async fn list_sessions_page(
+    state: StateRoot,
+    workspace: PathBuf,
+    after: Option<(SessionId, u64)>,
+    limit: usize,
+) -> Result<SessionPage, EngineError> {
+    if limit == 0 {
+        return Err(EngineError::InvalidRequest);
+    }
+    let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
+    let store = Store::open_read_only(state)?;
+    let page = store.list_sessions(identity, after, limit, None).await;
+    let closed = store.close().await;
+    let (page, _) = page.map_err(list_error)?;
+    closed?;
+    Ok(page)
+}
+
 pub async fn list_sessions(
     state: StateRoot,
     workspace: PathBuf,
 ) -> Result<Vec<SessionListItem>, EngineError> {
-    let workspace_identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
+    let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
     let store = Store::open_read_only(state)?;
-    let listed = store.list_sessions(workspace_identity).await;
+    let listed = store.list_all_sessions(identity).await;
     let closed = store.close().await;
-    let items = listed.map_err(|error| match error {
-        StoreError::TooManySessions => EngineError::TooManySessions,
-        other => EngineError::Store(other),
-    })?;
+    let items = listed.map_err(list_error)?;
     closed?;
     Ok(items)
+}
+
+fn list_error(error: StoreError) -> EngineError {
+    match error {
+        StoreError::TooManySessions => EngineError::TooManySessions,
+        StoreError::StaleCursor => EngineError::InvalidRequest,
+        other => EngineError::Store(other),
+    }
 }
 
 pub async fn rename_session(

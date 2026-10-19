@@ -230,7 +230,9 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                     }
                 } else if workers.contains_key(agent_run_id) {
                     Action::Worker {
-                        chunks: if intent.call.mutates() {
+                        chunks: if intent.call.mutates()
+                            || matches!(intent.call, crate::ToolCall::Command { .. })
+                        {
                             workers[agent_run_id].div_ceil(crate::worker::WORKER_CHUNK_BYTES)
                         } else {
                             0
@@ -354,11 +356,154 @@ impl ForegroundWorkerProvider {
         }
     }
 
+    fn worker_command(&self) -> crate::ToolCall {
+        crate::ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), match self.case {
+                "command_nonzero" | "command_unguarded" => "exit 1",
+                "command_rejected" => "printf rejected > outside",
+                _ => "test \"$(cat notes/a)\" = 'edited a' && test \"$(cat notes/build)\" = built",
+            }.into()],
+            cwd: ".".into(),
+        }
+    }
+
+    fn command_outcome(
+        &self,
+        request: &crate::ProviderRequest,
+        step: usize,
+    ) -> crate::ProviderOutcome {
+        use crate::ToolCall;
+        if request.phase == AgentPhase::ChildWork {
+            let catalog: serde_json::Value =
+                serde_json::from_str(&request.input.tools.as_ref().unwrap().catalog).unwrap();
+            self.check(
+                catalog["commands"]
+                    .as_array()
+                    .is_some_and(|commands| commands.len() == 1 && commands[0]["name"] == "sh"),
+                "private command missing from worker catalog",
+            );
+            self.check(
+                catalog["operations"].as_array().is_some_and(|ops| {
+                    ops.iter().any(|op| op == "command")
+                        && ops.iter().all(|op| op != "command_unguarded")
+                }),
+                "worker command operations widened or missing",
+            );
+            self.check(
+                std::fs::read(self.workspace.join("notes/a")).unwrap() == b"original a",
+                "command published before handover",
+            );
+            if self.case == "command_cap"
+                || step == 0
+                    && !matches!(
+                        self.case,
+                        "command_denied"
+                            | "command_review_denied"
+                            | "command_hook_denied"
+                            | "command_loss"
+                            | "command_nonzero"
+                            | "command_rejected"
+                            | "command_unguarded"
+                    )
+            {
+                return finish_with("Candidate private result");
+            }
+            if step > 0 && self.case == "command_denied" {
+                let tools = request.input.tools.as_ref().unwrap();
+                if tools.steps.last().and_then(|s| s.calls_remaining) == Some(0) {
+                    return finish_with("Command was denied");
+                }
+            }
+            let script = match step {
+                1 if matches!(
+                    self.case,
+                    "command_success" | "command_stale" | "command_time"
+                ) =>
+                {
+                    Some("printf 'edited a' > notes/a; printf 'edited b' > notes/b")
+                }
+                2 if matches!(
+                    self.case,
+                    "command_success" | "command_stale" | "command_time"
+                ) =>
+                {
+                    Some("test -f notes/a; printf built > notes/build")
+                }
+                _ => None,
+            };
+            if let Some(script) = script {
+                return super::scenario::tool_outcome(
+                    ToolCall::Command {
+                        program: "sh".into(),
+                        args: vec!["-c".into(), script.into()],
+                        cwd: ".".into(),
+                    },
+                    None,
+                );
+            }
+            if self.case == "command_unguarded" && step == 1 {
+                let ToolCall::Command { program, args, cwd } = self.worker_command() else {
+                    unreachable!()
+                };
+                return super::scenario::tool_outcome(
+                    ToolCall::CommandUnguarded {
+                        program,
+                        args,
+                        cwd,
+                        justification: "sandbox failed".into(),
+                    },
+                    None,
+                );
+            }
+            if self.case == "command_stale" && step == 4 {
+                return super::scenario::tool_outcome(
+                    ToolCall::Write {
+                        path: "notes/b".into(),
+                        expected_digest: Some(crate::tools::types::hex_digest(b"edited b")),
+                        content: "late edit".into(),
+                    },
+                    None,
+                );
+            }
+            if self.case == "command_denied"
+                || step == 0
+                || step == 3
+                    && matches!(
+                        self.case,
+                        "command_success" | "command_stale" | "command_time"
+                    )
+            {
+                return super::scenario::tool_outcome(self.worker_command(), None);
+            }
+            return finish_with("Private command work ready");
+        }
+        if self.case != "command_success" {
+            return finish_with("Worker criterion remains unresolved");
+        }
+        match step {
+            0 => super::scenario::tool_outcome(self.worker_command(), None),
+            1 => super::scenario::tool_outcome(
+                ToolCall::Read {
+                    path: "notes/a".into(),
+                    offset: 0,
+                    limit: 128,
+                },
+                None,
+            ),
+            _ => finish_with("Primary verified published notes"),
+        }
+    }
+
     fn plan(&self) -> crate::GoalPlanContract {
         crate::GoalPlanContract {
             mission: "Edit two leased files and verify their publication".into(),
             paths: vec!["notes".into()],
-            commands: Vec::new(),
+            commands: if self.case.starts_with("command_") {
+                vec!["sh".into()]
+            } else {
+                Vec::new()
+            },
             resource_class: crate::ToolResourceClass::Default,
             command_timeout_ms: None,
             skills: Vec::new(),
@@ -384,13 +529,31 @@ impl ForegroundWorkerProvider {
             objective: "Edit the leased notes".into(),
             profile: None,
             editor: Some(Box::new(crate::worker::EditorAssignment {
-                commands: Vec::new(),
+                commands: self.plan().commands,
                 definition: "editor".into(),
                 definition_digest: digest,
                 mission: "Edit the leased notes".into(),
                 direction: "Return one whole changeset".into(),
                 lease: vec!["notes".into()],
-                criterion: self.plan().success_criterion,
+                criterion: if self.case.starts_with("command_") {
+                    crate::GoalSuccessCriterion::ToolCallSucceeded {
+                        call: Box::new(self.worker_command()),
+                    }
+                } else if matches!(
+                    self.case,
+                    "hook_stop_last_turn"
+                        | "hook_requested_stop_last_turn"
+                        | "hook_stop_tokens"
+                        | "hook_stop_deadline"
+                        | "hook_stop_deadline_last_turn"
+                ) {
+                    crate::GoalSuccessCriterion::WorkspaceFileContent {
+                        path: "notes/a".into(),
+                        content: "original a".into(),
+                    }
+                } else {
+                    self.plan().success_criterion
+                },
                 mode: if matches!(self.case, "headroom_background" | "headroom_race") {
                     crate::worker::WorkerMode::Background
                 } else {
@@ -402,7 +565,7 @@ impl ForegroundWorkerProvider {
                         | "hook_requested_stop_last_turn"
                         | "hook_stop_deadline_last_turn"
                 ) {
-                    1
+                    2
                 } else {
                     17
                 },
@@ -441,8 +604,21 @@ impl crate::Provider for ForegroundWorkerProvider {
             .filter(|r| r.phase == request.phase)
             .count();
         self.requests.lock().unwrap().push(request.clone());
+        if self.case == "command_time" && request.phase == AgentPhase::ChildWork && step == 4 {
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+            tokio::time::resume();
+        }
         let mut release_child = None;
         let outcome = match (request.phase, step) {
+            (AgentPhase::ToolReview, _) if self.case == "command_review_denied" => {
+                finish_with("ask")
+            }
+            (AgentPhase::ChildWork | AgentPhase::RootSynthesis, _)
+                if self.case.starts_with("command_") =>
+            {
+                self.command_outcome(&request, step)
+            }
             (AgentPhase::RootPlan, 0) => super::scenario::tool_outcome(
                 ToolCall::Read {
                     path: "notes/a".into(),
@@ -476,7 +652,7 @@ impl crate::Provider for ForegroundWorkerProvider {
                     None,
                 )
             }
-            (AgentPhase::ChildWork, 0)
+            (AgentPhase::ChildWork, 0 | 1)
                 if matches!(
                     self.case,
                     "hook_stop_last_turn"
@@ -486,15 +662,26 @@ impl crate::Provider for ForegroundWorkerProvider {
                         | "hook_stop_deadline_last_turn"
                 ) =>
             {
-                if matches!(
-                    self.case,
-                    "hook_stop_deadline" | "hook_stop_deadline_last_turn"
-                ) {
-                    tokio::time::pause();
-                    tokio::time::advance(std::time::Duration::from_secs(1192)).await;
-                    tokio::time::resume();
+                if step == 0 {
+                    super::scenario::tool_outcome(
+                        ToolCall::Read {
+                            path: "notes/a".into(),
+                            offset: 0,
+                            limit: 128,
+                        },
+                        None,
+                    )
+                } else {
+                    if matches!(
+                        self.case,
+                        "hook_stop_deadline" | "hook_stop_deadline_last_turn"
+                    ) {
+                        tokio::time::pause();
+                        tokio::time::advance(std::time::Duration::from_secs(1192)).await;
+                        tokio::time::resume();
+                    }
+                    finish_with("Candidate worker result")
                 }
-                finish_with("Candidate worker result")
             }
             (AgentPhase::ChildWork, _) if self.case == "headroom_background" => {
                 self.background_started.notify_one();

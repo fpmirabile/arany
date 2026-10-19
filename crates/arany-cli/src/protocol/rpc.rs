@@ -136,7 +136,8 @@ impl From<&arany::EngineError> for Reason {
     fn from(error: &arany::EngineError) -> Self {
         match error {
             arany::EngineError::IncompatibleProviderChain => Reason::IncompatibleProviderChain,
-            arany::EngineError::RewindBlocked
+            arany::EngineError::ConversationRewindLimit
+            | arany::EngineError::RewindBlocked
             | arany::EngineError::RewindPreviewExpired
             | arany::EngineError::RewindTooLarge
             | arany::EngineError::RosterSelectionMismatch

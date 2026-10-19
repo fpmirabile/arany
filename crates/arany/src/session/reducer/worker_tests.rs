@@ -2375,6 +2375,10 @@ fn worker_protocol_refused_base_capture_spends_its_slot_and_other_workers_procee
             };
             let mut other = assignment;
             other.lease = vec!["src/b".into()];
+            other.criterion = GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/b".into(),
+                content: "new".into(),
+            };
             other.mission = "Edit src b".into();
             plan.push(ChildAssignment::Editor {
                 assignment: other.clone(),
@@ -2605,6 +2609,10 @@ fn worker_protocol_lineage_accepts_only_released_children_of_the_goal() {
         };
         let mut request = *assignment;
         request.lease = vec!["src/c".into()];
+        request.criterion = GoalSuccessCriterion::WorkspaceFileContent {
+            path: "src/c".into(),
+            content: "new".into(),
+        };
         request.mission = "Edit src c".into();
         request.wave = 2;
         request.resumes = Some(if reference == "released" {
@@ -3992,8 +4000,44 @@ fn worker_protocol_command_authority_revision_generation_and_capture_order() {
 }
 
 #[test]
-fn worker_protocol_command_criterion_editor_hands_over_without_private_evidence() {
-    let mut f = fixture();
+fn worker_protocol_command_criterion_requires_private_evidence() {
+    let mut f = command_fixture();
+    set_command_criterion(&mut f);
+    f.mutation();
+    f.finish_worker();
+    assert!(SessionView::replay(f.session, &f.envelopes()).is_err());
+}
+
+#[test]
+fn worker_protocol_denied_command_without_a_required_verdict_cannot_continue() {
+    let mut f = command_fixture();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let intent = f.intent(
+        f.child,
+        ToolCall::Command {
+            program: "check".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        },
+        f.target(0),
+    );
+    f.started(&intent);
+    f.observed(&intent, ToolDisposition::Denied, None, "refused");
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        None,
+    );
+    assert!(SessionView::replay(f.session, &f.envelopes()).is_err());
+}
+
+fn set_command_criterion(f: &mut Fixture) {
     let criterion = GoalSuccessCriterion::ToolCallSucceeded {
         call: Box::new(ToolCall::Command {
             program: "check".into(),
@@ -4014,57 +4058,85 @@ fn worker_protocol_command_criterion_editor_hands_over_without_private_evidence(
                 assignment: Some(p),
                 ..
             } => p.request.criterion = criterion.clone(),
-            Event::GoalPlanContractRecorded { contract, .. } => {
-                contract.commands = vec!["check".into()]
-            }
             _ => (),
         }
     }
-    f.mutation();
-    let data = f.finish_worker();
-    assert!(
-        private_criterion_evidence(&f.view().runs[0], f.child)
-            .unwrap()
-            .is_empty()
-    );
-    let handover = f.handover(data.clone());
-    let integrated = f.integrate(handover, data, ToolDisposition::Succeeded);
-    f.release(Some(handover), integrated);
-    SessionView::replay(f.session, &f.envelopes()).expect("command criterion hands over");
 }
 
 #[test]
-fn worker_protocol_refused_private_command_is_a_denied_non_failure() {
-    let mut f = command_fixture();
-    f.call(
-        f.child,
-        AgentPhase::ChildWork,
-        ProviderCallDisposition::ToolRequested,
-        None,
-    );
-    let intent = f.intent(
-        f.child,
-        ToolCall::Command {
-            program: "check".into(),
-            args: Vec::new(),
-            cwd: ".".into(),
-        },
-        f.target(0),
-    );
-    f.started(&intent);
-    f.observed(
-        &intent,
-        ToolDisposition::Denied,
-        None,
-        crate::tools::WORKER_COMMANDS_REFUSED,
-    );
-    f.call(
-        f.child,
-        AgentPhase::ChildWork,
-        ProviderCallDisposition::Finished,
-        None,
-    );
-    SessionView::replay(f.session, &f.envelopes()).expect("refusal is valid history");
+fn worker_protocol_call_criterion_must_be_runnable_inside_the_lease() {
+    for (call, ok) in [
+        (
+            ToolCall::Command {
+                program: "check".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+            true,
+        ),
+        (
+            ToolCall::Command {
+                program: "check".into(),
+                args: Vec::new(),
+                cwd: "elsewhere".into(),
+            },
+            false,
+        ),
+        (
+            ToolCall::Mkdir {
+                path: "src/a/d".into(),
+            },
+            false,
+        ),
+        (
+            ToolCall::Write {
+                path: "src/b".into(),
+                expected_digest: None,
+                content: "x".into(),
+            },
+            false,
+        ),
+    ] {
+        let mut f = command_fixture();
+        let criterion = GoalSuccessCriterion::ToolCallSucceeded {
+            call: Box::new(call),
+        };
+        check_criterion_admission(&mut f, criterion, ok);
+    }
+    for (path, ok) in [("src/a", true), ("src/b", false)] {
+        let mut f = command_fixture();
+        let criterion = GoalSuccessCriterion::WorkspaceFileContent {
+            path: path.into(),
+            content: "x".into(),
+        };
+        check_criterion_admission(&mut f, criterion, ok);
+    }
+}
+
+fn check_criterion_admission(f: &mut Fixture, criterion: GoalSuccessCriterion, ok: bool) {
+    {
+        for e in &mut f.events {
+            match e {
+                Event::ProviderCallRecorded { record, .. } => {
+                    if let Some(d) = &mut record.delegation
+                        && let ChildAssignment::Editor { assignment } = &mut d[0]
+                    {
+                        assignment.criterion = criterion.clone();
+                    }
+                }
+                Event::AgentSpawned {
+                    assignment: Some(p),
+                    ..
+                } => p.request.criterion = criterion.clone(),
+                _ => (),
+            }
+        }
+        assert_eq!(
+            SessionView::replay(f.session, &f.envelopes()).is_ok(),
+            ok,
+            "{criterion:?}"
+        );
+    }
 }
 
 #[test]
@@ -4112,29 +4184,7 @@ fn worker_protocol_handover_requires_current_private_evidence_and_gate_is_bounde
     }
     for case in ["fresh", "stale revision", "nonzero", "rejected"] {
         let mut f = command_fixture();
-        let criterion = GoalSuccessCriterion::ToolCallSucceeded {
-            call: Box::new(ToolCall::Command {
-                program: "check".into(),
-                args: Vec::new(),
-                cwd: ".".into(),
-            }),
-        };
-        for e in &mut f.events {
-            match e {
-                Event::ProviderCallRecorded { record, .. } => {
-                    if let Some(d) = &mut record.delegation
-                        && let ChildAssignment::Editor { assignment } = &mut d[0]
-                    {
-                        assignment.criterion = criterion.clone();
-                    }
-                }
-                Event::AgentSpawned {
-                    assignment: Some(p),
-                    ..
-                } => p.request.criterion = criterion.clone(),
-                _ => (),
-            }
-        }
+        set_command_criterion(&mut f);
         f.command(if case == "rejected" {
             PrivateCapture::Rejected {
                 cause: PrivateCaptureRejection::OutOfLease,
@@ -4156,11 +4206,11 @@ fn worker_protocol_handover_requires_current_private_evidence_and_gate_is_bounde
         } else {
             f.changes.files.clear();
         }
-        f.finish_worker();
         let evidence = private_criterion_evidence(&f.view().runs[0], f.child).unwrap();
         assert_eq!(evidence.is_empty(), case != "fresh", "{case}");
+        f.finish_worker();
         let replay = SessionView::replay(f.session, &f.envelopes());
-        assert!(replay.is_ok(), "command criteria are exempt: {case}");
+        assert_eq!(replay.is_ok(), case == "fresh", "{case}");
     }
     let mut f = fixture();
     for attempt in 0..=3 {

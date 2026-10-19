@@ -54,7 +54,7 @@ pub use reducer::{
 };
 pub(crate) use reducer::{
     ForkInheritance, coordination_ready, criterion_unmet_in_view, evidence_admitted,
-    private_criterion_evidence, verification_passed, wave_settled,
+    private_criterion_evidence, private_failure, verification_passed, wave_settled,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,6 +65,12 @@ pub struct SessionListItem {
     pub created_at: String,
     pub last_activity_at: String,
     pub defaults: SessionDefaults,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPage {
+    pub items: Vec<SessionListItem>,
+    pub more: bool,
 }
 
 pub(crate) fn placeholder_title(title: &str) -> bool {

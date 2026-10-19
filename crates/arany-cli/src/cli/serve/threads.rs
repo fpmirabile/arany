@@ -329,3 +329,80 @@ pub(super) fn approval_mode(mode: &PermissionMode) -> ApprovalMode {
         PermissionMode::Auto => ApprovalMode::Auto,
     }
 }
+
+pub(super) async fn list(
+    state: &Path,
+    params: ThreadListParams,
+) -> Result<ThreadListResult, Fault> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let limit = params.limit.unwrap_or(50) as usize;
+    if !(1..=100).contains(&limit) || params.cursor.as_ref().is_some_and(|s| s.len() > 128) {
+        return Err(Fault::params());
+    }
+    let cursor = params
+        .cursor
+        .map(|cursor| {
+            let bytes = URL_SAFE_NO_PAD
+                .decode(&cursor)
+                .map_err(|_| Fault::params())?;
+            let (id, sequence): (SessionId, u64) =
+                serde_json::from_slice(&bytes).map_err(|_| Fault::params())?;
+            if URL_SAFE_NO_PAD.encode(serde_json::to_vec(&(id, sequence)).expect("cursor tuple"))
+                != cursor
+            {
+                return Err(Fault::params());
+            }
+            Ok((id, sequence))
+        })
+        .transpose()?;
+    let cwd = params
+        .cwd
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(std::env::current_dir)
+        .map_err(|_| Fault::params())?;
+    if !cwd.is_absolute() {
+        return Err(Fault::params());
+    }
+    let (workspace, root) =
+        crate::cli::admit_workspace(Some(cwd), Some(state.into())).map_err(|_| Fault::params())?;
+    let page = arany::list_sessions_page(
+        StateRoot::open_existing(&root)
+            .map_err(arany::EngineError::from)
+            .map_err(Fault::engine)?,
+        workspace.clone(),
+        cursor,
+        limit,
+    )
+    .await
+    .map_err(|error| match error {
+        arany::EngineError::InvalidRequest => Fault::params(),
+        other => Fault::engine(other),
+    })?;
+    let next_cursor = page.more.then(|| {
+        let item = page.items.last().expect("a partial page returns an item");
+        URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&(item.id, item.last_sequence)).expect("cursor tuple"))
+    });
+    let timestamp = |text: &str| {
+        if text == "Unknown" {
+            text.to_owned()
+        } else {
+            format!("{}Z", text.replace(' ', "T"))
+        }
+    };
+    Ok(ThreadListResult {
+        data: page
+            .items
+            .iter()
+            .map(|item| ThreadListEntry {
+                id: item.id,
+                title: item.title.clone(),
+                cwd: workspace.to_string_lossy().into_owned(),
+                created_at: timestamp(&item.created_at),
+                updated_at: timestamp(&item.last_activity_at),
+            })
+            .collect(),
+        next_cursor,
+    })
+}
