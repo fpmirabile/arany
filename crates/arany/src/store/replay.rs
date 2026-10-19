@@ -5,7 +5,7 @@ use crate::session::{
     RunDisposition, RunId, SessionDefaults, SessionId, SessionListItem, SessionView,
     WorkspaceIdentity, prefix_digest, validate_compaction_references,
 };
-use rusqlite::{Connection, types::ValueRef};
+use rusqlite::Connection;
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -100,31 +100,42 @@ pub(super) fn list_page_in_snapshot(
     mut budget: usize,
     after_ordering: impl FnOnce(),
 ) -> Result<SessionPage, StoreError> {
+    let watermark: i64 =
+        connection.query_row("SELECT COALESCE(MAX(sequence), 0) FROM events", [], |row| {
+            row.get(0)
+        })?;
     let mut tails = HashMap::<SessionId, u64>::new();
     let mut roots = HashMap::<SessionId, (Option<WorkspaceIdentity>, Option<SessionId>)>::new();
     let mut last = String::new();
     loop {
-        let chunk = connection.unchecked_transaction()?;
         let mut found = Vec::<(String, i64)>::new();
         {
-            let mut statement = chunk.prepare(
-                "SELECT session_id, MAX(sequence) FROM events WHERE session_id > ?1
-                 GROUP BY session_id ORDER BY session_id LIMIT ?2",
+            let mut statement = connection.prepare(
+                "SELECT session_id, MAX(sequence) FROM events
+                 WHERE session_id > ?1 AND sequence <= ?2
+                 GROUP BY session_id ORDER BY session_id LIMIT ?3",
             )?;
-            let mut rows = statement.query(rusqlite::params![last, LIST_HEAD_CHUNK as i64])?;
+            let mut rows =
+                statement.query(rusqlite::params![last, watermark, LIST_HEAD_CHUNK as i64])?;
             while let Some(row) = rows.next()? {
                 found.push((row.get(0)?, row.get(1)?));
             }
         }
-        let mut first = chunk.prepare(
-            "SELECT sequence,
-                    length(CAST(session_id AS BLOB)),
-                    length(CAST(kind AS BLOB)),
-                    length(CAST(payload AS BLOB)),
-                    session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
-             FROM events WHERE session_id = ?1 ORDER BY sequence LIMIT 1",
-        )?;
-        for (raw_id, tail) in &found {
+        let mut firsts = Vec::with_capacity(found.len());
+        {
+            let mut first = connection.prepare(&format!(
+                "{RAW_COLUMNS} WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence LIMIT 1"
+            ))?;
+            for (raw_id, _) in &found {
+                firsts.push(
+                    first.query_row(rusqlite::params![raw_id, watermark], |row| {
+                        Ok(raw_row(row))
+                    })??,
+                );
+            }
+        }
+        before_decode();
+        for ((raw_id, tail), raw) in found.iter().zip(firsts) {
             if tails.len() == MAX_DISCOVERED_SESSIONS {
                 return Err(StoreError::TooManySessions);
             }
@@ -133,7 +144,7 @@ pub(super) fn list_page_in_snapshot(
                 id,
                 u64::try_from(*tail).map_err(|_| StoreError::InvalidHistory)?,
             );
-            let envelope = first.query_row([raw_id], |row| Ok(read_envelope(row)))??;
+            let envelope = raw.decode()?;
             let root = match envelope.event {
                 Event::SessionStarted {
                     workspace_identity, ..
@@ -145,8 +156,6 @@ pub(super) fn list_page_in_snapshot(
             };
             roots.insert(id, root);
         }
-        drop(first);
-        drop(chunk);
         match found.last() {
             Some((raw_id, _)) if found.len() == LIST_HEAD_CHUNK => last.clone_from(raw_id),
             _ => break,
@@ -705,11 +714,12 @@ fn scan_events(
         }
         return Ok(());
     }
-    // Rows at or below a captured bound never change, so short keyset chunks
-    // read a consistent history without holding a lock across replay.
+    // Rows at or below a captured bound never change. Each chunk is fetched as raw
+    // bytes and its statement finishes before any decode, so no reader lock
+    // outlives a short indexed range read.
     let bounds = vec!["(session_id = ? AND sequence <= ?)"; filter.len()].join(" OR ");
     let mut statement = connection.prepare(&format!(
-        "{COLUMNS} WHERE sequence > ? AND ({bounds}) ORDER BY sequence LIMIT {LIST_EVENT_CHUNK}"
+        "{RAW_COLUMNS} WHERE sequence > ? AND ({bounds}) ORDER BY sequence LIMIT {LIST_EVENT_CHUNK}"
     ))?;
     let mut after = 0_i64;
     loop {
@@ -720,12 +730,19 @@ fn scan_events(
                 i64::try_from(*tail).map_err(|_| StoreError::InvalidHistory)?,
             ));
         }
-        let mut rows = statement.query(rusqlite::params_from_iter(values))?;
-        let mut count = 0;
-        while let Some(row) = rows.next()? {
-            after = row.get(0)?;
-            count += 1;
-            on_event(read_envelope(row)?)?;
+        let chunk = {
+            let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+            let mut chunk = Vec::with_capacity(LIST_EVENT_CHUNK);
+            while let Some(row) = rows.next()? {
+                chunk.push(raw_row(row)?);
+            }
+            chunk
+        };
+        before_decode();
+        let count = chunk.len();
+        for raw in chunk {
+            after = raw.sequence;
+            on_event(raw.decode()?)?;
         }
         if count < LIST_EVENT_CHUNK {
             return Ok(());
@@ -733,60 +750,113 @@ fn scan_events(
     }
 }
 
-fn read_envelope(row: &rusqlite::Row<'_>) -> Result<EventEnvelope, StoreError> {
-    let sequence: i64 = row.get(0)?;
-    let id_bytes: i64 = row.get(1)?;
-    let kind_bytes: i64 = row.get(2)?;
-    let payload_bytes: i64 = row.get(3)?;
-    if id_bytes != 36 || !(1..=32).contains(&kind_bytes) {
-        return Err(StoreError::InvalidHistory);
-    }
-    let raw_id = row
-        .get_ref(4)?
-        .as_str()
-        .map_err(|_| StoreError::InvalidHistory)?;
-    let id = SessionId::from_str(raw_id).map_err(|_| StoreError::InvalidHistory)?;
-    let run_id = match row.get_ref(5)? {
-        ValueRef::Null => None,
-        ValueRef::Text(raw) if raw.len() == 36 => Some(
-            RunId::from_str(std::str::from_utf8(raw).map_err(|_| StoreError::InvalidHistory)?)
-                .map_err(|_| StoreError::InvalidHistory)?,
-        ),
-        _ => return Err(StoreError::InvalidHistory),
+struct RawRow {
+    sequence: i64,
+    id_bytes: i64,
+    kind_bytes: i64,
+    payload_bytes: i64,
+    session_id: String,
+    run_id: Option<String>,
+    agent_run_id: Option<String>,
+    kind: String,
+    version: i64,
+    payload: String,
+    created_at_ms: i64,
+}
+
+const RAW_COLUMNS: &str = "SELECT sequence,
+                length(CAST(session_id AS BLOB)),
+                length(CAST(kind AS BLOB)),
+                length(CAST(payload AS BLOB)),
+                session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms
+         FROM events";
+
+fn raw_row(row: &rusqlite::Row<'_>) -> Result<RawRow, StoreError> {
+    let text = |index: usize| -> Result<String, StoreError> {
+        row.get::<_, String>(index)
+            .map_err(|_| StoreError::InvalidHistory)
     };
-    let agent_run_id = match row.get_ref(6)? {
-        ValueRef::Null => None,
-        ValueRef::Text(raw) if raw.len() == 36 => Some(
-            AgentRunId::from_str(std::str::from_utf8(raw).map_err(|_| StoreError::InvalidHistory)?)
-                .map_err(|_| StoreError::InvalidHistory)?,
-        ),
-        _ => return Err(StoreError::InvalidHistory),
+    let optional = |index: usize| -> Result<Option<String>, StoreError> {
+        row.get::<_, Option<String>>(index)
+            .map_err(|_| StoreError::InvalidHistory)
     };
-    let kind = row
-        .get_ref(7)?
-        .as_str()
-        .map_err(|_| StoreError::InvalidHistory)?;
-    let version: i64 = row.get(8)?;
-    if !(1..=event_payload_limit(kind, version) as i64).contains(&payload_bytes) {
-        return Err(StoreError::InvalidHistory);
-    }
-    let payload = row
-        .get_ref(9)?
-        .as_str()
-        .map_err(|_| StoreError::InvalidHistory)?;
-    let event = Event::decode(kind, version, payload, run_id, agent_run_id)?;
-    let created_at_ms: i64 = row.get(10)?;
-    if created_at_ms < 0 {
-        return Err(StoreError::InvalidHistory);
-    }
-    Ok(EventEnvelope {
-        sequence: u64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?,
-        session_id: id,
-        run_id,
-        agent_run_id,
-        event,
-        created_at_ms,
+    Ok(RawRow {
+        sequence: row.get(0)?,
+        id_bytes: row.get(1)?,
+        kind_bytes: row.get(2)?,
+        payload_bytes: row.get(3)?,
+        session_id: text(4)?,
+        run_id: optional(5)?,
+        agent_run_id: optional(6)?,
+        kind: text(7)?,
+        version: row.get(8)?,
+        payload: text(9)?,
+        created_at_ms: row.get(10)?,
     })
+}
+
+impl RawRow {
+    fn decode(self) -> Result<EventEnvelope, StoreError> {
+        if self.id_bytes != 36 || !(1..=32).contains(&self.kind_bytes) {
+            return Err(StoreError::InvalidHistory);
+        }
+        let id = SessionId::from_str(&self.session_id).map_err(|_| StoreError::InvalidHistory)?;
+        let run_id = match &self.run_id {
+            None => None,
+            Some(raw) if raw.len() == 36 => {
+                Some(RunId::from_str(raw).map_err(|_| StoreError::InvalidHistory)?)
+            }
+            _ => return Err(StoreError::InvalidHistory),
+        };
+        let agent_run_id = match &self.agent_run_id {
+            None => None,
+            Some(raw) if raw.len() == 36 => {
+                Some(AgentRunId::from_str(raw).map_err(|_| StoreError::InvalidHistory)?)
+            }
+            _ => return Err(StoreError::InvalidHistory),
+        };
+        if !(1..=event_payload_limit(&self.kind, self.version) as i64).contains(&self.payload_bytes)
+        {
+            return Err(StoreError::InvalidHistory);
+        }
+        let event = Event::decode(
+            &self.kind,
+            self.version,
+            &self.payload,
+            run_id,
+            agent_run_id,
+        )?;
+        if self.created_at_ms < 0 {
+            return Err(StoreError::InvalidHistory);
+        }
+        Ok(EventEnvelope {
+            sequence: u64::try_from(self.sequence).map_err(|_| StoreError::InvalidHistory)?,
+            session_id: id,
+            run_id,
+            agent_run_id,
+            event,
+            created_at_ms: self.created_at_ms,
+        })
+    }
+}
+
+fn read_envelope(row: &rusqlite::Row<'_>) -> Result<EventEnvelope, StoreError> {
+    raw_row(row)?.decode()
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static BEFORE_DECODE: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn before_decode() {
+    #[cfg(test)]
+    BEFORE_DECODE.with(|hook| {
+        if let Some(hook) = &*hook.borrow() {
+            hook();
+        }
+    });
 }
 
 pub(super) fn supervisor_corpus(

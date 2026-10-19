@@ -1,4 +1,4 @@
-use super::super::replay::{list_page_in_snapshot, list_session_page};
+use super::super::replay::{BEFORE_DECODE, list_page_in_snapshot, list_session_page};
 use super::*;
 use crate::session::WorkspaceIdentity;
 use crate::session::payload_version;
@@ -635,4 +635,95 @@ fn long_listings_never_block_concurrent_appends() {
         )
         .expect("count");
     assert_eq!(count, 61);
+}
+
+#[test]
+fn listing_holds_no_reader_lock_while_decoding() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let mut connection = open_connection(&root, false).expect("file-backed store");
+    let mut hot_session = None;
+    let mine = WorkspaceIdentity {
+        device: 1,
+        inode: 1,
+    };
+    let other = WorkspaceIdentity {
+        device: 1,
+        inode: 2,
+    };
+    for _ in 0..3 {
+        seed_session(&mut connection, &mut hot_session, mine, 600);
+    }
+    let bystander = seed_session(&mut connection, &mut hot_session, other, 0);
+    let reader = open_connection(&root, true).expect("read-only store");
+    let writer_root = root.try_clone().expect("state clone");
+    let appended = Arc::new(AtomicUsize::new(0));
+    let counter = appended.clone();
+    BEFORE_DECODE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let mut writer = open_connection(&writer_root, false).expect("writer");
+            writer
+                .busy_timeout(std::time::Duration::ZERO)
+                .expect("no wait");
+            append(
+                &mut writer,
+                &mut None,
+                bystander,
+                Event::SessionRenamed { title: "y".into() },
+            )
+            .expect("append succeeds immediately while the listing decodes");
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+    });
+    let page = list_session_page(&reader, mine, None, 100, usize::MAX).expect("page");
+    BEFORE_DECODE.with(|hook| *hook.borrow_mut() = None);
+    assert_eq!(page.items.len(), 3);
+    assert!(appended.load(Ordering::SeqCst) > 3);
+}
+
+#[test]
+fn fork_resolution_ignores_events_committed_after_the_watermark() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let mut connection = open_connection(&root, false).expect("file-backed store");
+    let mut hot_session = None;
+    let fixture = crate::session::worker_protocol_fixture();
+    let source = fixture.session;
+    let mut mine = None;
+    for event in &fixture.events {
+        if let Event::SessionStarted {
+            workspace_identity, ..
+        } = event
+        {
+            mine = Some(*workspace_identity);
+        }
+        append(&mut connection, &mut hot_session, source, event.clone()).expect("fixture Event");
+    }
+    let mine = mine.expect("fixture identity");
+    let tail: i64 = connection
+        .query_row("SELECT MAX(sequence) FROM events", [], |row| row.get(0))
+        .expect("tail");
+    let reader = open_connection(&root, true).expect("read-only store");
+    let writer_root = root.try_clone().expect("state clone");
+    let page = list_page_in_snapshot(&reader, mine, None, 10, usize::MAX, || {
+        let mut writer = open_connection(&writer_root, false).expect("writer");
+        append(
+            &mut writer,
+            &mut None,
+            source,
+            Event::SessionRenamed {
+                title: "newer".into(),
+            },
+        )
+        .expect("source advances");
+        fork_session(&mut writer, source, "Child".into()).expect("child forked later");
+    })
+    .expect("page at the captured watermark");
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, source);
+    assert_eq!(page.items[0].last_sequence, tail as u64);
+    let later = list_session_page(&reader, mine, None, 10, usize::MAX).expect("later page");
+    assert_eq!(later.items.len(), 2);
 }

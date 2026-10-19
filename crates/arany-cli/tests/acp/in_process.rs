@@ -3476,3 +3476,84 @@ async fn expiry_during_blocked_reconciliation_drops_the_resumed_completion() {
     assert!(adapter.output.try_recv().is_err());
     adapter.close().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn reused_client_prompt_id_is_not_consumed_by_expired_blocked_work() {
+    let mut adapter = Adapter::new().await;
+    let other = SessionId::new();
+    adapter
+        .call(
+            json!(3),
+            "session/new",
+            json!({"cwd":"/var/workspace","mcpServers":[]}),
+        )
+        .await;
+    let start = adapter.request().await;
+    adapter.events.send(Message::Response(Response { jsonrpc:Default::default(), id:start.id,
+        result:json!({"thread":{"id":other,"workspace":"/private/var/workspace","title":"Other","createdAtMs":0}}) })).await.unwrap();
+    assert_eq!(adapter.next().await["id"], 3);
+    adapter
+        .prompt(json!([{"type":"text","text":"Stall"}]))
+        .await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"completed","items":[],"goal":{"status":"completed"}}})) })).await.unwrap();
+    let recover = adapter.request().await;
+    let mut filler = 0;
+    while adapter.outbound.try_send(json!({"filler":filler})).is_ok() {
+        filler += 1;
+    }
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: recover.id,
+            result: json!({"events":[{
+                "sequence":1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":null,
+                "kind":"MessageCommitted","event_version":1,"payload":{"text":"Late"},"created_at_ms":0
+            }],"nextSince":null}),
+        }))
+        .await
+        .unwrap();
+    tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE + std::time::Duration::from_millis(1))
+        .await;
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    adapter
+        .call(
+            json!("prompt"),
+            "session/prompt",
+            json!({"sessionId":other,"prompt":[{"type":"text","text":"Reuse"}]}),
+        )
+        .await;
+    let turn_start = adapter.request().await;
+    assert_eq!(turn_start.method, "turn/start");
+    for _ in 0..filler {
+        adapter.output.recv().await.unwrap();
+    }
+    let mut old = 0;
+    for _ in 0..2 {
+        if adapter.next().await["id"] == "prompt" {
+            old += 1;
+        }
+    }
+    assert_eq!(old, 1, "only the expired prompt's own response");
+    tokio::task::yield_now().await;
+    let run = arany::RunId::new();
+    adapter.events.send(Message::Response(Response { jsonrpc:Default::default(), id:turn_start.id,
+        result:json!({"turn":{"id":run,"goalId":arany::GoalId::new(),"status":"inProgress","items":[]}}) })).await.unwrap();
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":other,"turn":{"id":run,"goalId":arany::GoalId::new(),"status":"interrupted","items":[],"goal":{"status":"interrupted"}}})) })).await.unwrap();
+    let reused = adapter.next().await;
+    assert_eq!(
+        reused["id"], "prompt",
+        "the reused ID still owns the new prompt"
+    );
+    adapter.close().await;
+    drop(close);
+}

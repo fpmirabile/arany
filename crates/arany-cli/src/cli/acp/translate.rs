@@ -29,6 +29,7 @@ pub(super) struct State {
     changed: Arc<Notify>,
     active: Option<Active>,
     closing: BTreeSet<SessionId>,
+    next_generation: u64,
 }
 
 struct Session {
@@ -48,6 +49,7 @@ struct Permission {
 
 struct Active {
     id: RequestId,
+    generation: u64,
     session: SessionId,
     turn: Option<RunId>,
     cancelled: bool,
@@ -432,7 +434,7 @@ pub(super) async fn input(
                                 shared.clone(),
                                 serve.clone(),
                                 output.clone(),
-                                active.id.clone(),
+                                active.generation,
                             ))
                             .abort_handle(),
                         );
@@ -509,8 +511,11 @@ pub(super) async fn input(
                 } else if state.active.is_some() || state.closing.contains(&session_id) {
                     Some(wire::error(Some(id.clone()), -32600, "Server busy", "busy"))
                 } else {
+                    state.next_generation += 1;
+                    let generation = state.next_generation;
                     state.active = Some(Active {
                         id: id.clone(),
+                        generation,
                         session: session_id,
                         turn: None,
                         cancelled: false,
@@ -762,7 +767,7 @@ pub(super) async fn output(
                         let Some((session, run, prompt)) = ({
                             let state = state.lock().expect("translator state");
                             state.active.as_ref().and_then(|active| {
-                                Some((active.session, active.turn?, active.id.clone()))
+                                Some((active.session, active.turn?, active.generation))
                             })
                         }) else {
                             continue;
@@ -829,7 +834,7 @@ pub(super) async fn output(
                                 &state,
                                 &serve,
                                 &outbound,
-                                &prompt,
+                                prompt,
                                 EventsSubscribeParams {
                                     thread_id: session,
                                     since,
@@ -837,14 +842,8 @@ pub(super) async fn output(
                             )
                             .await?;
                         } else {
-                            finish(
-                                &state,
-                                &serve,
-                                &outbound,
-                                &prompt,
-                                page.next_since.is_some(),
-                            )
-                            .await?;
+                            finish(&state, &serve, &outbound, prompt, page.next_since.is_some())
+                                .await?;
                         }
                     }
                     _ => (),
@@ -897,9 +896,9 @@ pub(super) async fn output(
                             .expect("translator state")
                             .active
                             .as_ref()
-                            .map(|a| a.id.clone());
+                            .map(|a| a.generation);
                         if let Some(prompt) = prompt {
-                            finish(&state, &serve, &outbound, &prompt, true).await?;
+                            finish(&state, &serve, &outbound, prompt, true).await?;
                         }
                     }
                     _ => (),
@@ -952,7 +951,7 @@ pub(super) async fn output(
                         let recover = active.resync
                             || (!active.answered && result.turn.status == TurnStatus::Completed);
                         active.completion = Some(result.turn);
-                        let prompt = active.id.clone();
+                        let prompt = active.generation;
                         Some((
                             prompt,
                             recover.then_some(
@@ -977,7 +976,7 @@ pub(super) async fn output(
                         &state,
                         &serve,
                         &outbound,
-                        &prompt,
+                        prompt,
                         EventsSubscribeParams {
                             thread_id: result.thread_id,
                             since,
@@ -985,7 +984,7 @@ pub(super) async fn output(
                     )
                     .await?;
                 } else {
-                    finish(&state, &serve, &outbound, &prompt, since.is_some()).await?;
+                    finish(&state, &serve, &outbound, prompt, since.is_some()).await?;
                 }
             }
             Message::Notification(note) if note.method == "events/resync" => {
@@ -1013,9 +1012,9 @@ pub(super) async fn output(
         .active
         .as_ref()
         .filter(|active| active.completion.is_some())
-        .map(|active| active.id.clone());
+        .map(|active| active.generation);
     if let Some(prompt) = completed {
-        finish(&state, &serve, &outbound, &prompt, true).await?;
+        finish(&state, &serve, &outbound, prompt, true).await?;
     }
     Ok(())
 }
@@ -1024,7 +1023,7 @@ async fn recover(
     state: &Shared,
     serve: &mpsc::Sender<ClientMessage>,
     outbound: &mpsc::Sender<Value>,
-    prompt: &RequestId,
+    prompt: u64,
     params: EventsSubscribeParams,
 ) -> Result<(), String> {
     if !state
@@ -1032,7 +1031,7 @@ async fn recover(
         .expect("translator state")
         .active
         .as_ref()
-        .is_some_and(|a| a.id == *prompt)
+        .is_some_and(|a| a.generation == prompt)
     {
         return Ok(());
     }
@@ -1065,7 +1064,7 @@ async fn expire_close(
     state: Shared,
     serve: mpsc::Sender<ClientMessage>,
     output: mpsc::Sender<Value>,
-    prompt: RequestId,
+    prompt: u64,
 ) {
     tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE).await;
     let active = {
@@ -1073,7 +1072,7 @@ async fn expire_close(
         if !state
             .active
             .as_ref()
-            .is_some_and(|a| a.id == prompt && a.close.is_some())
+            .is_some_and(|a| a.generation == prompt && a.close.is_some())
         {
             return;
         }
@@ -1124,12 +1123,16 @@ async fn finish(
     state: &Shared,
     serve: &mpsc::Sender<ClientMessage>,
     output: &mpsc::Sender<Value>,
-    prompt: &RequestId,
+    prompt: u64,
     incomplete: bool,
 ) -> Result<(), String> {
     let active = {
         let mut state = state.lock().expect("translator state");
-        if !state.active.as_ref().is_some_and(|a| a.id == *prompt) {
+        if !state
+            .active
+            .as_ref()
+            .is_some_and(|a| a.generation == prompt)
+        {
             return Ok(());
         }
         state.active.take().expect("matched active prompt")
