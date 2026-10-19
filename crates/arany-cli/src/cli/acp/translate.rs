@@ -58,7 +58,7 @@ struct Active {
     uncertain: usize,
     incomplete: bool,
     close: Option<RequestId>,
-    close_deadline: Option<Instant>,
+    close_task: Option<tokio::task::AbortHandle>,
 }
 
 enum Pending {
@@ -408,6 +408,7 @@ pub(super) async fn input(
             let Ok(params) = parse::<wire::Cancel>(request.params) else {
                 return immediate(output, invalid());
             };
+            let shared = state;
             let cancel = {
                 let mut state = state.lock().expect("translator state");
                 if !state.sessions.contains_key(&params.session_id) {
@@ -426,8 +427,15 @@ pub(super) async fn input(
                 {
                     Some(active) => {
                         active.close = Some(id.clone());
-                        active.close_deadline =
-                            Some(Instant::now() + crate::cli::exec::SHUTDOWN_GRACE);
+                        active.close_task = Some(
+                            tokio::spawn(expire_close(
+                                shared.clone(),
+                                serve.clone(),
+                                output.clone(),
+                                active.id.clone(),
+                            ))
+                            .abort_handle(),
+                        );
                         let first = !active.cancelled;
                         active.cancelled = true;
                         Some(
@@ -513,7 +521,7 @@ pub(super) async fn input(
                         uncertain: 0,
                         incomplete: false,
                         close: None,
-                        close_deadline: None,
+                        close_task: None,
                     });
                     None
                 }
@@ -589,17 +597,10 @@ pub(super) async fn output(
         if let Some(withdrawal) = withdraw_permission(&state, None, false) {
             emit(&outbound, withdrawal).await?;
         }
-        expire_close(&state, &serve, &outbound).await?;
         let (deadline, changed) = {
             let state = state.lock().expect("translator state");
             (
-                [
-                    state.permission.as_ref().map(|p| p.deadline),
-                    state.active.as_ref().and_then(|a| a.close_deadline),
-                ]
-                .into_iter()
-                .flatten()
-                .min(),
+                state.permission.as_ref().map(|p| p.deadline),
                 state.changed.clone(),
             )
         };
@@ -932,16 +933,19 @@ pub(super) async fn output(
                         let recover = active.resync
                             || (!active.answered && result.turn.status == TurnStatus::Completed);
                         active.completion = Some(result.turn);
-                        recover.then_some(
-                            state
-                                .sessions
-                                .get(&result.thread_id)
-                                .map_or(0, |s| s.sequence),
+                        Some(
+                            recover.then_some(
+                                state
+                                    .sessions
+                                    .get(&result.thread_id)
+                                    .map_or(0, |s| s.sequence),
+                            ),
                         )
                     } else {
                         None
                     }
                 };
+                let Some(since) = since else { continue };
                 if let Some(withdrawal) = withdraw_permission(&state, None, true) {
                     emit(&outbound, withdrawal).await?;
                 }
@@ -1023,19 +1027,20 @@ async fn emit_answer(outbound: &mpsc::Sender<Value>, mut answer: Value) -> Resul
 }
 
 async fn expire_close(
-    state: &Shared,
-    serve: &mpsc::Sender<ClientMessage>,
-    output: &mpsc::Sender<Value>,
-) -> Result<(), String> {
+    state: Shared,
+    serve: mpsc::Sender<ClientMessage>,
+    output: mpsc::Sender<Value>,
+    prompt: RequestId,
+) {
+    tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE).await;
     let active = {
         let mut state = state.lock().expect("translator state");
         if !state
             .active
             .as_ref()
-            .and_then(|a| a.close_deadline)
-            .is_some_and(|deadline| Instant::now() >= deadline)
+            .is_some_and(|a| a.id == prompt && a.close.is_some())
         {
-            return Ok(());
+            return;
         }
         state
             .pending
@@ -1045,6 +1050,9 @@ async fn expire_close(
             .take()
             .expect("expired close has an active prompt")
     };
+    if let Some(id) = active.close {
+        let _ = unload(&state, &serve, id, active.session).await;
+    }
     let response = if active.uncertain > 0 {
         wire::error(Some(active.id), -32603, tools::UNKNOWN, "effectUncertain")
     } else {
@@ -1053,14 +1061,7 @@ async fn expire_close(
             json!({"stopReason":"cancelled","_meta":{"arany.incompleteUpdates":true}}),
         )
     };
-    emit(output, response).await?;
-    if let Some(id) = active.close {
-        match unload(state, serve, id, active.session).await {
-            Err(_) if serve.is_closed() => {}
-            result => result?,
-        }
-    }
-    Ok(())
+    let _ = emit(&output, response).await;
 }
 
 async fn unload(
@@ -1098,6 +1099,9 @@ async fn finish(
         .ok_or("no active ACP prompt")?;
     let close = active.close.clone();
     let session = active.session;
+    if let Some(task) = &active.close_task {
+        task.abort();
+    }
     let turn = active.completion.ok_or("no committed turn completion")?;
     let incomplete = incomplete
         || active.incomplete

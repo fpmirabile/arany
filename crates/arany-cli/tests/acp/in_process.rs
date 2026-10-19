@@ -3281,6 +3281,57 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
 }
 
 #[tokio::test(start_paused = true)]
+async fn close_deadline_holds_under_output_backpressure_and_ignores_late_completion() {
+    let mut adapter = Adapter::new().await;
+    adapter
+        .prompt(json!([{"type":"text","text":"Stall"}]))
+        .await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    let mut filler = 0;
+    while adapter.outbound.try_send(json!({"filler":filler})).is_ok() {
+        filler += 1;
+    }
+    tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE + std::time::Duration::from_millis(1))
+        .await;
+    let close = adapter.request().await;
+    assert_eq!(
+        close.method, "thread/unsubscribe",
+        "unsubscribe is sent while the writer is blocked"
+    );
+    for _ in 0..filler {
+        adapter.output.recv().await.unwrap();
+    }
+    let prompt = adapter.next().await;
+    assert_eq!(prompt["id"], "prompt");
+    assert_eq!(prompt["result"]["stopReason"], "cancelled");
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"interrupted","items":[],"goal":{"status":"interrupted"}}})) })).await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        adapter.output.try_recv().is_err(),
+        "late completion is dropped"
+    );
+    assert!(adapter.input.try_recv().is_err());
+    adapter.close().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn close_with_a_stalled_turn_completes_at_its_deadline_without_retrying() {
     let mut adapter = Adapter::new().await;
     adapter

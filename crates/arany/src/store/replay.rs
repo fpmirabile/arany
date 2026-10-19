@@ -85,8 +85,21 @@ pub(super) fn list_session_page(
     workspace_identity: WorkspaceIdentity,
     after: Option<(SessionId, u64)>,
     limit: usize,
-    mut budget: usize,
+    budget: usize,
 ) -> Result<SessionPage, StoreError> {
+    list_page_in_snapshot(connection, workspace_identity, after, limit, budget, || {})
+}
+
+pub(super) fn list_page_in_snapshot(
+    connection: &Connection,
+    workspace_identity: WorkspaceIdentity,
+    after: Option<(SessionId, u64)>,
+    limit: usize,
+    mut budget: usize,
+    after_ordering: impl FnOnce(),
+) -> Result<SessionPage, StoreError> {
+    let snapshot = connection.unchecked_transaction()?;
+    let connection = &*snapshot;
     let mut tails = Vec::<(u64, SessionId)>::new();
     {
         let mut statement = connection
@@ -164,6 +177,7 @@ pub(super) fn list_session_page(
         }
         None => 0,
     };
+    after_ordering();
     let mut timestamp =
         connection.prepare("SELECT strftime('%Y-%m-%d %H:%M:%S', ?1 / 1000, 'unixepoch')")?;
     let mut format_timestamp = |millis: i64| -> Result<String, StoreError> {
@@ -178,7 +192,8 @@ pub(super) fn list_session_page(
             more = true;
             break;
         }
-        let cost = lineage_event_count(connection, chain)?;
+        let passes = if chain.len() > 1 { 2 } else { 1 };
+        let cost = lineage_event_count(connection, chain)?.saturating_mul(passes);
         if !items.is_empty() && cost > budget {
             more = true;
             break;

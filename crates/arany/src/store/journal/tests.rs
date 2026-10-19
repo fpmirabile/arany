@@ -1,4 +1,4 @@
-use super::super::replay::list_session_page;
+use super::super::replay::{list_page_in_snapshot, list_session_page};
 use super::*;
 use crate::session::WorkspaceIdentity;
 use crate::session::payload_version;
@@ -544,4 +544,59 @@ fn budget_limited_listing_pages_without_skips_or_duplicates() {
     let first = list_session_page(&connection, mine, None, 3, usize::MAX).expect("limit page");
     assert_eq!(first.items.len(), 3);
     assert!(first.more);
+}
+
+#[test]
+fn listing_page_orders_and_reads_from_one_snapshot() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let mut connection = open_connection(&root, false).expect("file-backed store");
+    let mut hot_session = None;
+    let mine = WorkspaceIdentity {
+        device: 1,
+        inode: 1,
+    };
+    let older = seed_session(&mut connection, &mut hot_session, mine, 3);
+    let newer = seed_session(&mut connection, &mut hot_session, mine, 3);
+    let old_tail: i64 = connection
+        .query_row(
+            "SELECT MAX(sequence) FROM events WHERE session_id = ?1",
+            [older.to_string()],
+            |row| row.get(0),
+        )
+        .expect("tail");
+    let reader = open_connection(&root, true).expect("read-only store");
+    let mut writer_state = None;
+    let page = list_page_in_snapshot(&reader, mine, None, 10, usize::MAX, || {
+        let mut writer = open_connection(&root, false).expect("concurrent writer");
+        assert!(
+            append(
+                &mut writer,
+                &mut writer_state,
+                older,
+                Event::SessionRenamed {
+                    title: "later".into()
+                },
+            )
+            .is_err(),
+            "history cannot change under an open listing snapshot"
+        );
+    })
+    .expect("snapshot page");
+    assert_eq!(
+        page.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+        [newer, older]
+    );
+    assert_eq!(page.items[1].last_sequence, old_tail as u64);
+    append(
+        &mut connection,
+        &mut hot_session,
+        older,
+        Event::SessionRenamed {
+            title: "later".into(),
+        },
+    )
+    .expect("append after the snapshot ends");
+    let relisted = list_session_page(&reader, mine, None, 10, usize::MAX).expect("fresh page");
+    assert_eq!(relisted.items[0].id, older);
 }
