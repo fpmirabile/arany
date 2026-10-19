@@ -203,6 +203,11 @@ fn list_error(error: StoreError) -> EngineError {
     match error {
         StoreError::TooManySessions => EngineError::TooManySessions,
         StoreError::StaleCursor => EngineError::InvalidRequest,
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.code == rusqlite::ErrorCode::DatabaseBusy =>
+        {
+            EngineError::Store(StoreError::ListingBusy)
+        }
         other => EngineError::Store(other),
     }
 }
@@ -302,4 +307,21 @@ pub(super) fn lock_session(
         StoreError::SessionBusy => EngineError::SessionBusy,
         other => EngineError::Store(other),
     })
+}
+
+#[cfg(test)]
+mod list_error_tests {
+    use super::*;
+
+    #[test]
+    fn busy_reads_become_the_retryable_listing_error() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        );
+        assert!(matches!(
+            list_error(StoreError::Sqlite(busy)),
+            EngineError::Store(StoreError::ListingBusy)
+        ));
+    }
 }

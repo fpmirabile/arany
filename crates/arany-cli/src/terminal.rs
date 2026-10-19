@@ -956,11 +956,6 @@ impl AttachedTerminal {
                 self.prepare_frame()?;
                 self.terminal.as_mut().expect("classic viewport").clear()?;
             }
-            if self.mode == TerminalMode::Classic
-                && let Some(mut mouse) = self.mouse_capture.take()
-            {
-                mouse.release()?;
-            }
             self.transcript_open = false;
         } else {
             self.open_transcript_panel()?;
@@ -1297,11 +1292,6 @@ impl AttachedTerminal {
         });
         self.prepare_frame()?;
         self.sync_native(view)?;
-        if (self.mode == TerminalMode::Fullscreen || self.transcript_open)
-            && self.mouse_capture.is_none()
-        {
-            self.mouse_capture = Some(MouseCapture::acquire()?);
-        }
         if self.mode == TerminalMode::Classic
             && !self.transcript_open
             && let Some(TerminalNotice::History(text)) = notice

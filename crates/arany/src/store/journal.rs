@@ -130,6 +130,10 @@ fn admit_in_transaction(
     Ok(())
 }
 
+const WRITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+// A committing writer holds PENDING/EXCLUSIVE across its fsyncs, which stall for far longer than 250 ms on loaded disks.
+const READ_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub(super) fn open_connection(root: &StateRoot, read_only: bool) -> Result<Connection, StoreError> {
     let path = root.path().join(DATABASE_FILE);
     let access = if read_only {
@@ -143,7 +147,11 @@ pub(super) fn open_connection(root: &StateRoot, read_only: bool) -> Result<Conne
     if !connection.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)? {
         return Err(StoreError::InvalidStateDirectory);
     }
-    connection.busy_timeout(std::time::Duration::from_millis(250))?;
+    connection.busy_timeout(if read_only {
+        READ_BUSY_TIMEOUT
+    } else {
+        WRITE_BUSY_TIMEOUT
+    })?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let fresh = version == 0
         && !read_only

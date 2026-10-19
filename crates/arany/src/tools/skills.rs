@@ -479,6 +479,15 @@ pub(super) fn definition_document(bytes: &[u8]) -> Result<(Value, &str), ToolErr
 }
 
 pub(crate) fn parse_json(bytes: &[u8], max_bytes: usize) -> Result<Value, ToolError> {
+    parse_json_bounded(bytes, max_bytes, 4096, 32)
+}
+
+pub(crate) fn parse_json_bounded(
+    bytes: &[u8],
+    max_bytes: usize,
+    max_nodes: usize,
+    max_depth: usize,
+) -> Result<Value, ToolError> {
     if bytes.len() > max_bytes {
         return Err(ToolError::Limit);
     }
@@ -486,9 +495,9 @@ pub(crate) fn parse_json(bytes: &[u8], max_bytes: usize) -> Result<Value, ToolEr
         count_keys: false,
         nodes: 0,
         bytes: 0,
-        max_nodes: 4096,
+        max_nodes,
         max_bytes,
-        max_depth: 32,
+        max_depth,
     };
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     let value = Bounded {

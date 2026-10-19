@@ -5,6 +5,22 @@ use std::{
 };
 
 const OPEN_DEADLINE: Duration = Duration::from_secs(5);
+const LAUNCH_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/snap/bin";
+const LAUNCH_ENV: [&str; 13] = [
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "XDG_RUNTIME_DIR",
+    "XDG_DATA_DIRS",
+    "XDG_CONFIG_DIRS",
+    "XDG_SESSION_TYPE",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_CURRENT_DESKTOP",
+    "DISPLAY",
+    "XAUTHORITY",
+    "WAYLAND_DISPLAY",
+];
 
 pub(crate) async fn open_authorization_url(
     url: &AuthorizationUrl,
@@ -37,17 +53,14 @@ fn open_blocking(target: &str) -> Result<(), AuthorizationError> {
     return Err(AuthorizationError::Unavailable);
 
     let mut command = Command::new(program);
-    command.args(args).arg(target).env_clear().current_dir("/");
-    for name in [
-        "HOME",
-        "USER",
-        "LOGNAME",
-        "XDG_RUNTIME_DIR",
-        "DBUS_SESSION_BUS_ADDRESS",
-        "XDG_CURRENT_DESKTOP",
-        "DISPLAY",
-        "WAYLAND_DISPLAY",
-    ] {
+    // A cold browser start runs the desktop entry itself, so it needs the display session and a system PATH.
+    command
+        .args(args)
+        .arg(target)
+        .env_clear()
+        .env("PATH", LAUNCH_PATH)
+        .current_dir("/");
+    for name in LAUNCH_ENV {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }
@@ -87,6 +100,29 @@ impl Drop for OwnedChild {
 mod tests {
     use super::*;
     use reqwest::Url;
+
+    #[test]
+    fn cold_browser_start_keeps_the_display_session_without_secrets() {
+        for name in [
+            "XAUTHORITY",
+            "XDG_SESSION_TYPE",
+            "XDG_DATA_DIRS",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+        ] {
+            assert!(LAUNCH_ENV.contains(&name), "{name}");
+        }
+        assert!(
+            LAUNCH_ENV
+                .iter()
+                .all(|name| !name.contains("KEY") && !name.contains("TOKEN"))
+        );
+        assert!(
+            !LAUNCH_PATH
+                .split(':')
+                .any(|dir| !dir.starts_with('/') || dir.contains(".."))
+        );
+    }
 
     #[tokio::test]
     async fn browser_launch_rejects_token_hints_and_other_destinations_before_a_process() {

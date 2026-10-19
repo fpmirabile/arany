@@ -4,7 +4,8 @@
 
 This contract owns `arany acp`, an ACP v1 subprocess on stdio. The current
 surface includes core turns, guarded Tools, one-use permissions, rich prompts,
-stored Session loading/resumption, closure/discovery and live approval modes.
+stored Session loading/resumption, closure/discovery, live approval modes,
+budget stop reasons and committed Goal plans.
 [Serve](./serve.md) owns the shared Server loop, admission, committed projections, cancellation and shutdown;
 [Session](./session.md), [Goals](./goals.md), [execution](./execution.md) and
 [Tools](./tools.md) retain Engine policy. ACP translates the serve vocabulary;
@@ -17,9 +18,10 @@ journal-first truth and avoids chunks that cannot be retracted after a failed
 Provider validation. The hand-written wire subset is checked against the
 [pinned upstream v1 schema fixture](../../crates/arany-cli/tests/fixtures/acp/README.md).
 
-Audio, model selection and
-Goal commands are unavailable. Their remaining slices belong to
-[NEXT_STEPS item 13](../../NEXT_STEPS.md#pursue-in-order). Unadvertised requests
+Audio and model selection are unavailable. Goal pause/resume slash commands
+and `available_commands_update` are deliberately omitted under the accepted
+default; add them only if dogfooding requires them. A slash-prefixed prompt
+remains ordinary user text, never a Goal control. Unadvertised requests
 fail with method-not-found; unsupported prompt blocks fail invalid-params.
 
 ## Behavior
@@ -215,10 +217,34 @@ commentary and uncommitted display text are absent. The prompt response follows
 all its queued updates. Text passes through as model markdown; the editor owns
 inert rendering. This transport makes no claim about editor auto-fetching.
 
-On a tap gap, or a completed turn missing its answer, the translator reconciles
-committed `MessageCommitted`, `ToolStarted` and `ToolFinished` facts through
+### Goal plans
+
+With Tools enabled, the adapter subscribes to serve's bounded committed Event
+pages after turn acceptance. A `GoalPlanContractRecorded` for the active Run
+produces a full replacement `plan`: two entries, the mission followed by the
+success criterion, each with priority `medium`. The mission starts `in_progress`
+and the criterion `pending`. Only committed completion of the Goal marks both
+`completed`; failure or interruption returns both to `pending`, since ACP has
+no failed plan-entry status. No plan or step is invented when the Goal has no
+contract. Plans describe the current prompt's Goal; load/resume retain their
+message/Tool history projection and do not resume an old Goal or its plan.
+
+Plan content is untrusted plain text. Control/bidi characters are escaped with
+the Tool display helper; paths and markup are never resolved, executed or
+interpreted as instructions. Editors must render entries inertly. Exact-content
+criteria name the file without disclosing the expected bytes; Tool criteria
+show the bounded journaled call as data. Plans never change grants or budgets.
+Duplicate/older contract Events and Events for another Session or Run are
+ignored. Only one current plan is retained per active prompt. Its two content
+strings are each capped at 2,048 UTF-8 bytes after escaping, plus the existing
+Session-history truncation marker; the ordinary outbound line check still applies.
+
+On a tap gap, a completed turn missing its answer, or completion with Tools
+enabled, the translator reconciles committed `MessageCommitted`, `ToolStarted`,
+`ToolFinished` and Goal plan facts through
 serve `events/subscribe`, paging from the last reconciled Session sequence and filtering by the active Run.
-Already sent answers and Tool phases are suppressed. Event paging preserves the
+Already sent answers, Tool phases and plan revisions are suppressed; the final
+plan replacement precedes the prompt response. Event paging preserves the
 loaded thread's pinned settings, whereas `thread/resume` would re-admit and replace them.
 A replay refusal produces one fixed diagnostic and
 `result._meta["arany.incompleteUpdates"]:true`. During EOF/stop shutdown no new
@@ -231,7 +257,7 @@ response with this marker. A new process never resumes or retries a Goal implici
 | Run finished and Goal completed | `stopReason:"end_turn"` |
 | Client cancellation or process stop | `stopReason:"cancelled"`, including a teardown error after cancellation; `_meta["arany.uncertainEffects"]` reports observed uncertain Tools when nonzero |
 | Failed Run, uncertain effect or hook stop | `-32603` with compiled recovery guidance and `data.reason:"turnFailed"`, `"effectUncertain"` or `"stoppedByHook"` |
-| Budget stop | `-32603 goalBudgetExhausted`; token/action stop reasons await a closed serve reason in the remaining slices |
+| Budget stop | Serve `stopReason:actionBudgetExhausted` maps to `max_turn_requests`; `tokenBudgetExhausted` maps to `max_tokens`. Cancellation keeps `cancelled` and observed uncertain effects keep the failure path. An admission failure without a committed turn stays an RPC error. |
 
 Failure is never `end_turn`; `refusal` is unused because journal context is
 retained. A submission without a committed terminal Run retains serve's fatal
@@ -278,13 +304,14 @@ Shared bounds and their Engine behavior belong to [serve limits](./serve.md#limi
 | Incoming/outgoing line including newline | Serve's 1 MiB. Incoming overflow is discarded through newline, then null-ID `-32600 messageTooLarge`; malformed JSON gets `-32700`. The next line remains usable. |
 | Reader buffer / serve inbound | 64 KiB / 64 messages with backpressure. JSON depth uses serde_json's recursion bound. |
 | Serve outbound / ACP outbound | 256 messages each. Projection waits for ACP capacity independently of input/cancel. If immediate replies fill ACP output, input fails closed and starts shutdown rather than holding cancellation behind stdout. |
-| Pending translations | 64, with 62 available to client requests and two reserved for control/reconciliation; excess requests fail `busy`. Integer internal IDs are checked and never reused. |
+| Pending translations | 64, with 61 available to client requests and three reserved for control, plan subscription and reconciliation; excess requests fail `busy`. Integer internal IDs are checked and never reused. |
 | Sessions / active prompt | Serve's 64 / 1, with `threadLimit` / `busy`, no eviction. Close frees a slot after cancellation settles. |
 | Prompt blocks / aggregate text after rich-content conversion | 64 / 64 KiB UTF-8, including mention/context syntax; excess or empty/whitespace-only text without images fails `invalidParams`. |
 | Images | [Serve](./serve.md#limits-and-compatibility) and [terminal](./terminal.md#paste-and-attachments) image limits; reject overflow without truncation. |
 | Session list | Serve default page size and cursor/line bounds; no client page-size option is advertised. |
-| Mode selectors | One config selector and exactly three mode values; no client-supplied selector list is retained. Setters share the 62 client-request slots, 64 Sessions and line cap; invalid values refuse without changing state. |
+| Mode selectors | One config selector and exactly three mode values; no client-supplied selector list is retained. Setters share the 61 client-request slots, 64 Sessions and line cap; invalid values refuse without changing state. |
 | Tool content / title | 64 KiB / 256 bytes of escaped text plus a Session-history truncation marker. Fences are longer than every contained backtick run. If the full line still exceeds the cap, optional raw input/output and locations are omitted and content becomes a history marker. |
+| Goal plan | Two entries and one retained revision per active prompt; each entry has 2,048 UTF-8 bytes of escaped content plus a history marker; overflow truncates at a UTF-8 boundary. Event paging and live forwarding reuse serve bounds. |
 | Pending permissions | One, with serve's immutable intent deadline; oversize denies unsent. |
 | Oversized answer projection | Cut at a UTF-8 boundary to at most 128 KiB text plus `[truncated; see arany show SESSION_ID]`; worst-case JSON escaping still fits the line cap. Other oversized projections fail closed. |
 | Reconciliation | Serve's bounded Event pages and Session Event cap; no retained history beyond the current page, one active answer, at most 10,000 deduplication entries for Tool phases per prompt, and one cursor plus original cwd per Session; deduplication overflow suppresses further Tool projections and marks incompleteUpdates. |
@@ -305,6 +332,7 @@ State storage and all per-action resource limits remain unchanged.
 |---|---|---|
 | Core committed turn | Canonical transcript validates against pinned upstream v1 schema; update equals reopened MessageCommitted and precedes end_turn; durable RunFinished and reduced Session agree | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs), [golden](../../crates/arany-cli/tests/fixtures/acp/basic.jsonl) |
 | Negotiation and unavailable auth | Integer version negotiation, malformed versions, duplicate init, unknown auth method, unauthenticated prompt, unknown Session and unsupported method refusals | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
+| Optional surfaces | Closed action/token budget reasons map exactly, without treating ordinary failure at a budget boundary as exhaustion; bounded mission/criterion plans use committed facts, neutralize controls, suppress duplicate/foreign Events and precede the response; unadvertised controls refuse | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Approval modes | New/load/resume selectors and both update notifications agree; either setter changes both surfaces; unsupported/oversized modes, boolean config and unknown Sessions refuse; mid-turn switch retains a pending permission, changes the next approval, and cannot widen settings Ask | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs), including its native Guard journey for automatic edits |
 | Session lifecycle | Close frees capacity after 64, keeps durable history and cancels a turn before replying; uncertain outcomes retain unknown metadata without retry; list paginates within bounds, refuses invalid/foreign cursors and exposes only Workspace metadata with escaped titles | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Cancellation and capacity | Busy refusal runs no second prompt; session and request cancellation, pre-accept latch, EOF and stalled output produce bounded interruption without invented success | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
