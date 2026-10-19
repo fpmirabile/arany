@@ -586,7 +586,12 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
         RunStatus::Failed => {
-            if let Some(reason) = run.failure.and_then(run_failure_notice) {
+            let budget_stop = run.failure == Some(arany::RunFailure::BudgetExhausted);
+            if let Some(reason) = run
+                .failure
+                .filter(|_| !budget_stop)
+                .and_then(run_failure_notice)
+            {
                 let detail = if run.failure == Some(arany::RunFailure::ProposalRefused) {
                     run.agents
                         .iter()
@@ -608,6 +613,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                 .filter(|agent| agent.status == AgentStatus::Failed)
                 .filter_map(|agent| agent.provider_calls.last())
                 .filter(|call| call.phase != arany::AgentPhase::ToolReview)
+                .filter(|_| !budget_stop)
                 .find_map(provider_failure_notice);
             if let Some(reason) = reason {
                 return Some(format!(
@@ -654,10 +660,14 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
             if run.primary_tool_limit_reached() {
                 return Some("Error: Tool continuation budget exhausted. No answer was committed; completed Tool observations remain in the Session.".into());
             }
-            Some(
-                "Error: Run failed. No answer was committed. Use /agents to inspect this Run."
-                    .into(),
-            )
+            Some(format!(
+                "Error: Run failed. {}No answer was committed. Use /agents to inspect this Run.",
+                if budget_stop {
+                    "The Goal budget refused the next action. "
+                } else {
+                    ""
+                }
+            ))
         }
         RunStatus::StoppedByHook => Some(match run.hook_stop_reason().flatten() {
             Some(reason) => format!("Run stopped by hook: {}", escape_terminal(reason)),
@@ -673,8 +683,10 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
 fn run_failure_notice(cause: arany::RunFailure) -> Option<&'static str> {
     use arany::RunFailure;
     Some(match cause {
-        RunFailure::ProviderCall => return None,
+        RunFailure::ProviderCall | RunFailure::ToolStopped => return None,
         RunFailure::ProposalRefused => "Arany refused the proposed operation before dispatch.",
+        RunFailure::BudgetExhausted => "The Goal budget refused the next action.",
+        RunFailure::DefinitionInvalid => "An agent definition could not be loaded.",
         RunFailure::PlanAdmission => {
             "Arany could not admit the proposed plan. The proposed action did not run."
         }
@@ -686,41 +698,45 @@ fn run_failure_notice(cause: arany::RunFailure) -> Option<&'static str> {
 }
 
 fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
-    use arany::ProposalRefusalCause::*;
+    use arany::ProposalRefusalCause as Cause;
     match cause {
-        InvalidArguments => {
+        Cause::InvalidArguments => {
             "Arany refused invalid operation arguments. The proposed action did not run."
         }
-        Phase => {
+        Cause::Phase => {
             "Arany refused an operation unavailable in this phase. The proposed action did not run."
         }
-        PlanMissing => {
+        Cause::PlanMissing => {
             "Arany refused the operation because its required plan was missing. The proposed action did not run."
         }
-        PlanInvalid => "Arany refused an invalid or changed plan. The proposed action did not run.",
-        PlanBudgetOutsideGoal => {
+        Cause::PlanInvalid => {
+            "Arany refused an invalid or changed plan. The proposed action did not run."
+        }
+        Cause::PlanBudgetOutsideGoal => {
             "Arany refused a plan budget outside the Goal budget. The proposed action did not run."
         }
-        PlanBudgetSpent => {
+        Cause::PlanBudgetSpent => {
             "Arany refused a plan budget already spent by this Run. The proposed action did not run."
         }
-        PlanScopeExcludesCall => {
+        Cause::PlanScopeExcludesCall => {
             "Arany refused an operation outside the plan scope. The proposed action did not run."
         }
-        PlanOutsideGrant => {
+        Cause::PlanOutsideGrant => {
             "Arany refused a plan outside the admitted grant. The proposed action did not run."
         }
-        ArgumentBytes => {
+        Cause::ArgumentBytes => {
             "Arany refused operation arguments above the byte limit. The proposed action did not run."
         }
-        LeaseOverlap => {
+        Cause::LeaseOverlap => {
             "Arany refused an operation overlapping an active worker lease. The proposed action did not run."
         }
-        NotOffered => {
+        Cause::NotOffered => {
             "Arany refused an operation that was not offered. The proposed action did not run."
         }
-        FinishInvalid => "Arany refused an invalid Finish answer.",
-        DelegateInvalid => "Arany refused an invalid delegation. No children were started for it.",
+        Cause::FinishInvalid => "Arany refused an invalid Finish answer.",
+        Cause::DelegateInvalid => {
+            "Arany refused an invalid delegation. No children were started for it."
+        }
     }
 }
 

@@ -373,7 +373,7 @@ impl RunLoop<'_> {
                 AbortReason::Failed if self.ledger().active_time_exhausted() => {
                     self.settle_stopped_primary().await
                 }
-                AbortReason::Failed => self.fail_primary(super::RunFailure::ProviderCall).await,
+                AbortReason::Failed => self.fail_primary(super::RunFailure::ToolStopped).await,
                 AbortReason::PlanAdmission => {
                     self.fail_primary(super::RunFailure::PlanAdmission).await
                 }
@@ -415,7 +415,7 @@ impl RunLoop<'_> {
             };
             if !continues {
                 return self
-                    .fail_primary(super::RunFailure::ProviderCall)
+                    .fail_primary(super::RunFailure::ToolStopped)
                     .await
                     .map(|()| false);
             }
@@ -738,7 +738,7 @@ impl RunLoop<'_> {
                 let valid = self.ledger().tokens_within_limit()
                     && abort_reason.is_none()
                     && !queue.budget_stopped
-                    && matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tools(requests), .. }) if self.well_formed_tools(requests).is_ok() && requests.iter().all(|r| r.call.is_process() || self.primary_lease_allows(&r.call).is_ok()));
+                    && matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tools(requests), .. }) if matches!(self.well_formed_tools(requests), Ok(Ok(()))) && requests.iter().all(|r| r.call.is_process() || matches!(self.primary_lease_allows(&r.call), Ok(Ok(())))));
                 let mut record = call_record(AgentPhase::RootSynthesis, &result, valid, None, None);
                 if !valid
                     && self.ledger().tokens_within_limit()
@@ -814,7 +814,7 @@ impl RunLoop<'_> {
                                     }
                                     Err(EngineError::ContextTooLarge) => {
                                         abort_reason = Some(AbortReason::ToolContextFull);
-                                        true
+                                        false
                                     }
                                     Err(error) => return Err(error),
                                 }

@@ -2141,6 +2141,12 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
         invalid[field] = value;
         assert!(decode_call(&invalid, 10).is_err(), "field {field}");
     }
+    let mut worker_phase = valid.clone();
+    worker_phase["phase"] = serde_json::json!("child_work");
+    assert!(decode_call(&worker_phase, 10).is_err());
+    let mut synthesis = valid.clone();
+    synthesis["phase"] = serde_json::json!("root_synthesis");
+    assert!(decode_call(&synthesis, 10).is_ok());
     let mut missing = valid.clone();
     missing.as_object_mut().unwrap().remove("refusal");
     assert!(decode_call(&missing, 10).is_err());
@@ -2151,6 +2157,9 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
         ("cancelled", serde_json::json!("provider_call"), false),
         ("stopped_by_hook", serde_json::json!("provider_call"), false),
         ("failed", serde_json::json!("unknown"), false),
+        ("failed", serde_json::json!("budget_exhausted"), true),
+        ("failed", serde_json::json!("tool_stopped"), true),
+        ("failed", serde_json::json!("definition_invalid"), true),
         ("finished", serde_json::Value::Null, true),
     ] {
         let value =
