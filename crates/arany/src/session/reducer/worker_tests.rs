@@ -4064,6 +4064,82 @@ fn set_command_criterion(f: &mut Fixture) {
 }
 
 #[test]
+fn worker_protocol_call_criterion_must_be_runnable_inside_the_lease() {
+    for (call, ok) in [
+        (
+            ToolCall::Command {
+                program: "check".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+            true,
+        ),
+        (
+            ToolCall::Command {
+                program: "check".into(),
+                args: Vec::new(),
+                cwd: "elsewhere".into(),
+            },
+            false,
+        ),
+        (
+            ToolCall::Mkdir {
+                path: "src/a/d".into(),
+            },
+            false,
+        ),
+        (
+            ToolCall::Write {
+                path: "src/b".into(),
+                expected_digest: None,
+                content: "x".into(),
+            },
+            false,
+        ),
+    ] {
+        let mut f = command_fixture();
+        let criterion = GoalSuccessCriterion::ToolCallSucceeded {
+            call: Box::new(call),
+        };
+        check_criterion_admission(&mut f, criterion, ok);
+    }
+    for (path, ok) in [("src/a", true), ("src/b", false)] {
+        let mut f = command_fixture();
+        let criterion = GoalSuccessCriterion::WorkspaceFileContent {
+            path: path.into(),
+            content: "x".into(),
+        };
+        check_criterion_admission(&mut f, criterion, ok);
+    }
+}
+
+fn check_criterion_admission(f: &mut Fixture, criterion: GoalSuccessCriterion, ok: bool) {
+    {
+        for e in &mut f.events {
+            match e {
+                Event::ProviderCallRecorded { record, .. } => {
+                    if let Some(d) = &mut record.delegation
+                        && let ChildAssignment::Editor { assignment } = &mut d[0]
+                    {
+                        assignment.criterion = criterion.clone();
+                    }
+                }
+                Event::AgentSpawned {
+                    assignment: Some(p),
+                    ..
+                } => p.request.criterion = criterion.clone(),
+                _ => (),
+            }
+        }
+        assert_eq!(
+            SessionView::replay(f.session, &f.envelopes()).is_ok(),
+            ok,
+            "{criterion:?}"
+        );
+    }
+}
+
+#[test]
 fn worker_protocol_rejected_command_capture_preserves_revision_and_continues() {
     for cause in [
         PrivateCaptureRejection::OutOfLease,

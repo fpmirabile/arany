@@ -500,6 +500,14 @@ fn validate_request(
         || match &request.criterion {
             GoalSuccessCriterion::ToolCallSucceeded { call } => {
                 !plan.allows_call(call)
+                    || matches!(call.as_ref(), ToolCall::Mkdir { .. })
+                    || !policy
+                        .parent_grant
+                        .clone()
+                        .narrowed_for_editor(request, &plan.commands, |tool| {
+                            definition.allows_worker_tool(tool)
+                        })
+                        .allows(call)
                     || matches!(call.as_ref(), ToolCall::Command { program, .. } if !request.commands.contains(program))
             }
             GoalSuccessCriterion::WorkspaceFileContent { path, .. }

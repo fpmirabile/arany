@@ -1259,9 +1259,19 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
         )
         .unwrap();
     let mut lost = false;
+    let mut tail = std::collections::VecDeque::new();
     let result = loop {
         tokio::select! {
-            result = &mut handle.result => break result.unwrap(),
+            result = &mut handle.result => match result {
+                Ok(result) => break result,
+                Err(error) => panic!("{case}: {error:?}; last committed Events {tail:?}"),
+            },
+            Some(crate::journal::Tapped::Committed(envelope)) = handle.events.next() => {
+                if tail.len() == 8 {
+                    tail.pop_front();
+                }
+                tail.push_back((envelope.sequence, envelope.event.kind()));
+            }
             Some(approval) = inbox.next() => {
                 assert!(!approval.intent.call.is_unguarded());
                 if case == "command_loss" && matches!(approval.intent.target, crate::worker::EffectTarget::WorkerView { .. }) {

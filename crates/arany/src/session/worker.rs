@@ -127,6 +127,27 @@ impl WorkerGrant {
                 .all(|s| parent.mcp_servers.contains(s))
     }
 
+    pub(crate) fn narrowed_for_editor(
+        mut self,
+        request: &EditorAssignment,
+        plan_commands: &[String],
+        allows_tool: impl Fn(WorkerTool) -> bool,
+    ) -> Self {
+        self.read_paths = request.lease.clone();
+        self.write_paths = request.lease.clone();
+        self.tools.retain(|tool| {
+            !matches!(tool, WorkerTool::Skill | WorkerTool::McpList) && allows_tool(*tool)
+        });
+        self.commands.retain(|c| {
+            request.commands.contains(c)
+                && plan_commands.contains(c)
+                && allows_tool(WorkerTool::Command)
+        });
+        self.skills.clear();
+        self.mcp_servers.clear();
+        self
+    }
+
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         WorkerTool::of(call).is_some_and(|t| self.tools.contains(&t))
             && match call {

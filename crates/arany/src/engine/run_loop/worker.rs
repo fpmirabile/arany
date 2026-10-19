@@ -151,7 +151,7 @@ impl RunLoop<'_> {
 
     pub(super) fn editor_grant(&self, a: &EditorAssignment) -> Result<WorkerGrant, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        let mut grant = runtime
+        let parent = runtime
             .worker_policy()
             .ok_or(EngineError::InvalidRequest)?
             .parent_grant;
@@ -160,23 +160,12 @@ impl RunLoop<'_> {
             .get()
             .and_then(|d| d.get(&a.definition))
             .ok_or(EngineError::InvalidRequest)?;
-        grant.read_paths = a.lease.clone();
-        grant.write_paths = a.lease.clone();
-        grant.tools.retain(|tool| {
-            !matches!(tool, WorkerTool::Skill | WorkerTool::McpList)
-                && def.allows_worker_tool(*tool)
-        });
         let plan = self
             .ledger()
             .plan_contract()?
             .ok_or(EngineError::InvalidRequest)?;
-        grant.commands.retain(|c| {
-            a.commands.contains(c)
-                && plan.commands.contains(c)
-                && def.allows_worker_tool(WorkerTool::Command)
-        });
-        grant.skills.clear();
-        grant.mcp_servers.clear();
+        let mut grant =
+            parent.narrowed_for_editor(a, &plan.commands, |tool| def.allows_worker_tool(tool));
         grant.permission_mode = def.permission_mode;
         Ok(grant)
     }
@@ -559,6 +548,17 @@ impl RunLoop<'_> {
         Box::pin(self.begin_worker_inner(root, assignment))
     }
 
+    // A catalog over its bound refuses the proposal before any view, base or lease exists.
+    fn editor_catalog_fits(
+        &self,
+        runtime: &ToolRuntime,
+        assignment: &EditorAssignment,
+    ) -> Result<bool, EngineError> {
+        Ok(runtime
+            .editor_context(&self.editor_grant(assignment)?, 16)
+            .is_ok())
+    }
+
     async fn begin_worker_inner(
         &self,
         root: &mut ProviderRequest,
@@ -600,6 +600,9 @@ impl RunLoop<'_> {
             }
         }
         let allowance = u32::try_from(allowance).map_err(|_| EngineError::CoordinatorFailed)?;
+        if !self.editor_catalog_fits(runtime, &assignment)? {
+            return Ok(None);
+        }
         let id = AgentRunId::new();
         self.worker_data_bytes
             .lock()
@@ -609,13 +612,7 @@ impl RunLoop<'_> {
             .lock()
             .map_err(|_| EngineError::CoordinatorFailed)?
             .insert(id, (*assignment).clone());
-        let observation = match self.prepare_worker_base(root, id, allowance).await {
-            Ok(observation) => observation,
-            Err(EngineError::GoalBudgetExhausted) => {
-                return Err(EngineError::GoalBudgetExhausted);
-            }
-            Err(error) => return Err(error),
-        };
+        let observation = self.prepare_worker_base(root, id, allowance).await?;
         let Some(observation) = observation else {
             return Ok(None);
         };

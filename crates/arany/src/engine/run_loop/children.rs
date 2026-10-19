@@ -882,6 +882,17 @@ impl RunLoop<'_> {
                     && !self.observe_worker_stop().await?
                     && children[index].turns_remaining > 0
                     && children[index].tool_calls_remaining > 0
+                    && self
+                        .controls
+                        .tools
+                        .zip(children[index].tools.as_ref())
+                        .zip(match &result {
+                            CallResult::Response(ProviderResponse { turn, .. }) => Some(turn),
+                            _ => None,
+                        })
+                        .is_some_and(|((runtime, tools), turn)| {
+                            tools.has_stop_room(turn, runtime.context_limit_bytes())
+                        })
                     && Instant::now() < deadline
                     && self.ledger().can_start_provider_call()
                     && self.ledger().remaining_calls() != Some(0)
