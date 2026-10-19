@@ -167,13 +167,8 @@ impl Action {
     }
 }
 
-pub(crate) const DRAIN_EVENTS_PER_EDITOR: usize = 4;
-
-pub(crate) fn drain_headroom(in_flight: u32) -> usize {
-    usize::try_from(in_flight)
-        .unwrap_or(usize::MAX)
-        .saturating_mul(DRAIN_EVENTS_PER_EDITOR)
-}
+// ProviderCallRecorded or ToolFinished, AgentFinished, WorkerHandoverDiscarded and WorkerLeaseReleased.
+const DRAIN_EVENTS_PER_EDITOR: usize = 4;
 
 pub(super) fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
@@ -367,9 +362,27 @@ impl GoalLedger {
         self.read(|_, in_flight| in_flight.children).unwrap_or(0)
     }
 
-    // Admission holds nothing back, so a primary step reserves the Events that draining each in-flight editor appends.
+    // Admission holds nothing back, so a primary step reserves what draining every editor still holding its lease appends,
+    // whether that editor waits in a Provider call, a worker Tool, an approval or Guard capacity.
     pub(super) fn drain_headroom(&self) -> usize {
-        drain_headroom(self.in_flight_children())
+        self.view(|view| {
+            let Some(run) = view.runs.last() else {
+                return 0;
+            };
+            let editors = run
+                .agents
+                .iter()
+                .filter(|agent| {
+                    agent
+                        .assignment
+                        .as_ref()
+                        .is_some_and(|worker| worker.released.is_none())
+                })
+                .count();
+            let supervised = run.config.as_ref().is_some_and(|c| c.supervisor.is_some());
+            editors.saturating_mul(DRAIN_EVENTS_PER_EDITOR + usize::from(supervised))
+        })
+        .unwrap_or(0)
     }
 
     pub(super) fn admits(&self, action: Action) -> bool {

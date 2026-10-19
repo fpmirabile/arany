@@ -109,6 +109,8 @@ fn admit_in_transaction(
     {
         return Err(StoreError::ReplayLimit);
     }
+    #[cfg(any(test, feature = "test-support"))]
+    crate::test_support::admissions::record(session_id, count, event_slots);
     let page_count: i64 = transaction.query_row("PRAGMA page_count", [], |row| row.get(0))?;
     let page_size: i64 = transaction.query_row("PRAGMA page_size", [], |row| row.get(0))?;
     let slots = i64::try_from(event_slots).map_err(|_| StoreError::ReplayLimit)?;

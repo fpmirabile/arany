@@ -31,6 +31,8 @@ pub async fn replayed(
 
 /// Splits a journal at each action's first admission and asserts that the action's bound covers the
 /// Events up to the next admission, or up to the end of the journal (the terminal Events).
+const MAX_ACTION_SLOTS: usize = 200;
+
 pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, steering: bool) {
     use crate::Action;
     let primaries: std::collections::HashSet<_> = events
@@ -264,7 +266,6 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
         .map(|(index, ..)| *index)
         .chain(markers)
         .collect();
-    let mut reaches: Vec<(usize, usize)> = Vec::new();
     for (index, action, end) in &points {
         let end = end.unwrap_or_else(|| {
             boundaries
@@ -319,7 +320,19 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
         // A primary step also reserves the Events that draining each in-flight editor appends.
         let bound = bound
             + if matches!(action, Action::Tool | Action::ProviderCall { .. }) {
-                crate::engine::drain_headroom(in_flight(*index))
+                let held = events[..*index]
+                    .iter()
+                    .map(|event| match event.event {
+                        Event::AgentSpawned {
+                            assignment: Some(_),
+                            ..
+                        } => 1_i64,
+                        Event::WorkerLeaseReleased { .. } => -1,
+                        _ => 0,
+                    })
+                    .sum::<i64>();
+                // Each editor still holding its lease drains with four Events and one shadow verdict.
+                usize::try_from(held).unwrap_or(0) * (4 + usize::from(verdicts > 0))
             } else {
                 0
             };
@@ -327,15 +340,15 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
             bound >= observed,
             "{action:?} at {index} bounds {bound} Events but appends {observed}",
         );
-        reaches.push((*index, bound + hook_events));
     }
-    // Admission checks headroom once and holds nothing back, so each Event needs an earlier admission whose slots reach it.
-    let first = reaches.iter().map(|(index, _)| *index).min().unwrap_or(0);
-    let mut reach = 0;
-    for (position, envelope) in events.iter().enumerate().skip(first) {
-        for (index, slots) in reaches.iter().filter(|(index, _)| *index == position) {
-            reach = reach.max(index + slots);
-        }
+    // Admission checks headroom once and holds nothing back, so each Event needs an earlier Store admission whose slots reach it.
+    // Sealed-data allowances budget their own chunks, so only call, Tool and settlement admissions count as headroom.
+    let admissions: Vec<_> = super::admissions::recorded(events[0].session_id)
+        .into_iter()
+        .filter(|(_, slots)| *slots <= MAX_ACTION_SLOTS)
+        .collect();
+    let first = admissions.iter().map(|(count, _)| *count).min();
+    for (position, envelope) in events.iter().enumerate() {
         let admitted_elsewhere = matches!(
             envelope.event,
             Event::GoalStarted { .. }
@@ -349,9 +362,14 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                     ..
                 }
         );
+        if admitted_elsewhere || first.is_none_or(|first| position < first) {
+            continue;
+        }
         assert!(
-            admitted_elsewhere || position < reach,
-            "{:?} at {position} is past every earlier admission (reach {reach})",
+            admissions
+                .iter()
+                .any(|(count, slots)| *count <= position && position < count + slots),
+            "{:?} at {position} is past every earlier Store admission",
             envelope.event.kind(),
         );
     }

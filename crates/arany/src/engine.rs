@@ -40,8 +40,6 @@ use hints::HintPublisher;
 pub use hints::{DisplayUpdate, RunHints, RunPreview};
 pub use ledger::Action;
 use ledger::GoalLedger;
-#[cfg(feature = "test-support")]
-pub(crate) use ledger::drain_headroom;
 pub use lifecycle::{
     continue_session, create_session, fork_session, list_sessions, list_sessions_page,
     rename_session, resume_session, set_session_defaults,
