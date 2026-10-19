@@ -588,11 +588,30 @@ fn attached_pty_refusal(
     let deadline = started + Duration::from_secs(120);
     let mut first_byte = None;
     loop {
-        drain_attached_output(&mut master, &mut transcript, "attached PTY");
+        let closed = drain_attached_output(&mut master, &mut transcript, "attached PTY");
         if first_byte.is_none() && !transcript.is_empty() {
             first_byte = Some(Instant::now());
         }
         drain_attached_output(&mut stdout, &mut stdout_bytes, "attached stdout");
+        let status = child.child().try_wait().unwrap();
+        if (closed || status.is_some()) && !consent_declined {
+            crate::process::decline_workspace_consent(
+                &mut input,
+                &transcript,
+                &mut consent_declined,
+            );
+            assert!(
+                consent_declined,
+                "{}",
+                crate::process::terminal_wait_report(
+                    "attached child ended before folder consent",
+                    started,
+                    first_byte,
+                    &transcript,
+                    status,
+                )
+            );
+        }
         crate::process::decline_workspace_consent(&mut input, &transcript, &mut consent_declined);
         if transcript
             .windows(b"Do you trust this folder?".len())
