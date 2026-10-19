@@ -3091,3 +3091,58 @@ async fn native_private_guard_target_keeps_edits_disposable_and_reads_assignment
     .await
     .unwrap();
 }
+
+#[test]
+fn native_private_guard_target_commands_fit_a_one_and_a_half_mebibyte_stack() {
+    std::thread::Builder::new()
+        .name("worker-command-stack-canary".into())
+        .stack_size(1536 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(Box::pin(private_guard_command_cases()))
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn private_guard_command_cases() {
+    use std::os::unix::fs::PermissionsExt;
+    arany::test_support::isolate_account_root();
+    for case in ["success", "outside", "nonzero", "link", "lost", "cancelled"] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(workspace.join("owned")).unwrap();
+        std::fs::write(workspace.join("owned/a"), b"original").unwrap();
+        std::fs::create_dir(workspace.join(".git")).unwrap();
+        let hostile = format!(
+            "[core]\nfsmonitor = touch {}\n",
+            temp.path().join("git-executed").display()
+        );
+        std::fs::write(workspace.join(".git/config"), &hostile).unwrap();
+        let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let shell = std::fs::canonicalize("/bin/sh").unwrap();
+        let config = serde_json::json!({"version":1,"workspace_paths":["owned"],"write":true,
+            "commands":[{"name":"sh","interpreter":false,"executable":shell,"sha256":Sha256::digest(std::fs::read(&shell).unwrap()).iter().map(|b| format!("{b:02x}")).collect::<String>(),"inputs":[]}],"skills":[],"mcp":[]});
+        let config_path = state.path().join("tools.json");
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        arany::test_support::exercise_private_guard_command(
+            &state,
+            &workspace,
+            env!("CARGO_BIN_EXE_arany").into(),
+            case,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".git/config")).unwrap(),
+            hostile
+        );
+        assert!(!temp.path().join("git-executed").exists());
+        assert!(!workspace.join("outside").exists());
+    }
+}

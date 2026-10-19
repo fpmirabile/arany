@@ -123,9 +123,30 @@ pub(crate) struct BuildCacheLease {
     archive_limit: u64,
     candidate_limit: u64,
     defer_recovery: bool,
+    shared: bool,
 }
 
 impl BuildCacheLease {
+    pub(crate) fn generation(&self) -> Result<Option<[u8; 32]>, StoreError> {
+        let Some((file, _)) = self.archive()? else {
+            return Ok(None);
+        };
+        let metadata = file.metadata()?;
+        let mut hash = Sha256::new();
+        hash.update(b"arany.build-cache.generation.v1");
+        for value in [metadata.dev(), metadata.ino(), metadata.len()] {
+            hash.update(value.to_le_bytes());
+        }
+        for value in [
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        ] {
+            hash.update(value.to_le_bytes());
+        }
+        Ok(Some(hash.finalize().into()))
+    }
     pub(crate) fn candidate_limit(&self) -> u64 {
         self.candidate_limit
     }
@@ -364,7 +385,7 @@ impl BuildCacheLease {
 
 impl Drop for BuildCacheLease {
     fn drop(&mut self) {
-        if self.defer_recovery {
+        if self.defer_recovery || self.shared {
             return;
         }
         if let Ok(_aggregate) = lock_file(&self.dir, AGGREGATE_LOCK, true) {
@@ -374,6 +395,65 @@ impl Drop for BuildCacheLease {
 }
 
 impl StateRoot {
+    fn admit_identity(&self, identity: &BuildCacheIdentity) -> Result<(), StoreError> {
+        if !valid_identity_path(Path::new(&identity.path)) || identity.inode == 0 {
+            return Err(StoreError::InvalidStateDirectory);
+        }
+        let workspace = crate::private_fs::open_workspace_directory(Path::new(&identity.path))
+            .map_err(StoreError::from)?;
+        self.ensure_outside_workspace(&workspace)?;
+        let metadata = workspace.dir_metadata()?;
+        if metadata.dev() != identity.device || metadata.ino() != identity.inode {
+            return Err(StoreError::InvalidStateDirectory);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_build_cache(
+        &self,
+        identity: BuildCacheIdentity,
+        archive_limit: u64,
+    ) -> Result<BuildCacheLease, StoreError> {
+        if archive_limit == 0 || archive_limit > MAX_ARCHIVE_BYTES {
+            return Err(StoreError::InvalidBuildCache);
+        }
+        self.admit_identity(&identity)?;
+        let dir = cache_directory(self, true)?;
+        let token = identity.token();
+        let _namespace = lock_file(&dir, NAMESPACE_LOCK, true)?;
+        if identity_count(&dir)? >= MAX_IDENTITIES && !contains_cache_identity(&dir, &token)? {
+            return Err(StoreError::StorageFull);
+        }
+        let (file, _) = open_lock_file(&dir, &identity_lock_name(&token))?;
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockShared) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::WOULDBLOCK) => return Err(StoreError::BuildCacheBusy),
+            Err(error) => return Err(StoreError::Io(io::Error::from(error))),
+        }
+        let identity_lock = FlockGuard(file);
+        // Readers never recover, reserve, collect or publish an archive.
+        if file_exists(&dir, &transaction_name(&token))?
+            || file_exists(&dir, &transaction_next_name(&token))?
+        {
+            return Err(StoreError::BuildCacheBusy);
+        }
+        let archive = match open_regular(&dir, &archive_name(&token), archive_limit) {
+            Ok(file) => Some(file),
+            Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => None,
+            Err(error) => return Err(error),
+        };
+        Ok(BuildCacheLease {
+            dir,
+            _identity_lock: identity_lock,
+            identity,
+            token,
+            archive,
+            archive_limit,
+            candidate_limit: 0,
+            defer_recovery: false,
+            shared: true,
+        })
+    }
     #[cfg(test)]
     pub(crate) fn begin_build_cache(
         &self,
@@ -397,13 +477,7 @@ impl StateRoot {
         if requested == 0 {
             return Ok((0, 0));
         }
-        let workspace = crate::private_fs::open_workspace_directory(Path::new(&identity.path))
-            .map_err(StoreError::from)?;
-        self.ensure_outside_workspace(&workspace)?;
-        let metadata = workspace.dir_metadata()?;
-        if metadata.dev() != identity.device || metadata.ino() != identity.inode {
-            return Err(StoreError::InvalidStateDirectory);
-        }
+        self.admit_identity(identity)?;
         let dir = cache_directory(self, true)?;
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
         remove_stale_candidates(&dir)?;
@@ -448,17 +522,7 @@ impl StateRoot {
         {
             return Err(StoreError::InvalidBuildCache);
         }
-        if !valid_identity_path(Path::new(&identity.path)) || identity.inode == 0 {
-            return Err(StoreError::InvalidStateDirectory);
-        }
-        let workspace = crate::private_fs::open_workspace_directory(Path::new(&identity.path))
-            .map_err(StoreError::from)?;
-        self.ensure_outside_workspace(&workspace)?;
-        let workspace_metadata = workspace.dir_metadata()?;
-        if workspace_metadata.dev() != identity.device || workspace_metadata.ino() != identity.inode
-        {
-            return Err(StoreError::InvalidStateDirectory);
-        }
+        self.admit_identity(&identity)?;
         let dir = cache_directory(self, true)?;
         let token = identity.token();
         let _namespace = lock_file(&dir, NAMESPACE_LOCK, true)?;
@@ -524,20 +588,12 @@ impl StateRoot {
             archive_limit,
             candidate_limit,
             defer_recovery: false,
+            shared: false,
         })
     }
 
     pub(crate) fn clear_build_cache(&self, identity: BuildCacheIdentity) -> Result<(), StoreError> {
-        if !valid_identity_path(Path::new(&identity.path)) || identity.inode == 0 {
-            return Err(StoreError::InvalidStateDirectory);
-        }
-        let workspace = crate::private_fs::open_workspace_directory(Path::new(&identity.path))
-            .map_err(StoreError::from)?;
-        self.ensure_outside_workspace(&workspace)?;
-        let metadata = workspace.dir_metadata()?;
-        if metadata.dev() != identity.device || metadata.ino() != identity.inode {
-            return Err(StoreError::InvalidStateDirectory);
-        }
+        self.admit_identity(&identity)?;
         let dir = match cache_directory(self, false) {
             Ok(dir) => dir,
             Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => return Ok(()),
@@ -2228,6 +2284,98 @@ mod tests {
         lease
             .publish(&mut candidate, exclusions)
             .expect("atomic cache publish");
+    }
+
+    #[test]
+    fn worker_cache_shared_reads_pin_generation_and_never_publish_or_recover() {
+        if crate::test_process::isolate_test() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("state");
+        let workspace = temp.path().join("workspace");
+        private_dir(&state_path);
+        private_dir(&workspace);
+        let state = StateRoot::admit(&state_path).unwrap();
+        let identity = identity(&workspace);
+        let source = workspace.join("source");
+        std::fs::create_dir_all(source.join("target")).unwrap();
+        std::fs::write(source.join("target/marker"), b"committed").unwrap();
+        let bytes = archive(&identity, &source, &[]);
+        let empty = state
+            .read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES)
+            .unwrap();
+        assert_eq!(empty.generation().unwrap(), None);
+        assert!(matches!(
+            state.begin_build_cache(identity.clone()),
+            Err(StoreError::BuildCacheBusy)
+        ));
+        drop(empty);
+        publish(&state, identity.clone(), &bytes, &[]);
+        let mut first = state
+            .read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES)
+            .unwrap();
+        let second = state
+            .read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES)
+            .unwrap();
+        let generation = first.generation().unwrap().expect("committed generation");
+        assert_eq!(second.generation().unwrap(), Some(generation));
+        assert!(matches!(
+            first.candidate_writer(),
+            Err(StoreError::StorageFull)
+        ));
+        assert!(matches!(
+            first.publish(&mut bytes.as_slice(), &[]),
+            Err(StoreError::StorageFull)
+        ));
+        assert!(matches!(
+            state.begin_build_cache(identity.clone()),
+            Err(StoreError::BuildCacheBusy)
+        ));
+        assert!(matches!(
+            state.clear_build_cache(identity.clone()),
+            Err(StoreError::BuildCacheBusy)
+        ));
+        assert!(matches!(
+            state.clear_all_build_caches(),
+            Err(StoreError::BuildCacheBusy)
+        ));
+        drop(first);
+        assert!(matches!(
+            state.begin_build_cache(identity.clone()),
+            Err(StoreError::BuildCacheBusy)
+        ));
+        drop(second);
+        let exclusive = state.begin_build_cache(identity.clone()).unwrap();
+        assert!(matches!(
+            state.read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES),
+            Err(StoreError::BuildCacheBusy)
+        ));
+        drop(exclusive);
+        std::fs::write(source.join("target/marker"), b"replacement").unwrap();
+        publish(
+            &state,
+            identity.clone(),
+            &archive(&identity, &source, &[]),
+            &[],
+        );
+        let replaced = state
+            .read_build_cache(identity.clone(), DEFAULT_ARCHIVE_BYTES)
+            .unwrap();
+        assert_ne!(replaced.generation().unwrap(), Some(generation));
+        drop(replaced);
+        let dir = cache_directory(&state, false).unwrap();
+        let token = identity.token();
+        let mut marker = create_private_file(&dir, &transaction_name(&token)).unwrap();
+        marker.write_all(b"malformed").unwrap();
+        assert!(matches!(
+            state.read_build_cache(identity, DEFAULT_ARCHIVE_BYTES),
+            Err(StoreError::BuildCacheBusy)
+        ));
+        assert_eq!(
+            std::fs::read(state_path.join(DIRECTORY).join(transaction_name(&token))).unwrap(),
+            b"malformed"
+        );
     }
 
     #[test]

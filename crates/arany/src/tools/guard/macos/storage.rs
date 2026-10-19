@@ -336,7 +336,12 @@ pub(super) async fn prepare_command_storage(
     let resources = directory
         .open_dir_nofollow("runtime")
         .map_err(|_| ToolError::Path)?;
-    crate::tools::fs::snapshot_into(&workspace, &runtime.config, Some(&volumes[0]), &resources)?;
+    crate::tools::fs::snapshot_into(
+        &workspace,
+        &runtime.config,
+        runtime.worker.is_none().then_some(&volumes[0]),
+        &resources,
+    )?;
     Ok(volumes)
 }
 

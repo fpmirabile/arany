@@ -2661,3 +2661,44 @@ fn hook_task_fit_check_matches_the_encoded_task_ceiling() {
     let padded = "x".repeat(super::guard::TASK_BYTES_CAP);
     assert!(!runtime.with_hook_stdin(&padded).hook_task_fits(&intent));
 }
+
+#[test]
+fn guard_refuses_a_forged_cache_generation_after_the_host_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let mut runtime = in_process_runtime(&workspace, config_value());
+    runtime.cache_state = Some(std::sync::Arc::new(state));
+    let mut intent = runtime.intent(
+        crate::RunId::new(),
+        crate::AgentRunId::new(),
+        ToolCall::Command {
+            program: "sh".into(),
+            args: vec![],
+            cwd: ".".into(),
+        },
+    );
+    intent.target = crate::session::worker::EffectTarget::WorkerView {
+        assignment_id: intent.agent_run_id,
+        base_digest: [1; 32],
+        revision: 0,
+        cache_generation: Some([9; 32]),
+    };
+    intent.limits.cache_bytes = 1 << 20;
+    assert!(matches!(
+        super::guard::build_cache_session(&runtime, &intent),
+        Err(super::ToolError::ChangedInput)
+    ));
+    if let crate::session::worker::EffectTarget::WorkerView {
+        cache_generation, ..
+    } = &mut intent.target
+    {
+        *cache_generation = None;
+    }
+    assert!(
+        super::guard::build_cache_session(&runtime, &intent)
+            .unwrap()
+            .is_some()
+    );
+}
