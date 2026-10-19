@@ -875,14 +875,14 @@ impl RunLoop<'_> {
         Ok(true)
     }
 
-    fn plan_allows(&self, call: &ToolCall) -> bool {
-        matches!(self.primary_lease_allows(call), Ok(Ok(())))
+    fn plan_allows(&self, call: &ToolCall) -> Result<bool, EngineError> {
+        Ok(self.primary_lease_allows(call)?.is_ok()
             && (matches!(
                 call,
                 ToolCall::ApplyChangeset {
                     source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
                 }
-            ) || self.ledger().allows_tool(call))
+            ) || self.ledger().allows_tool(call)))
     }
 
     pub(super) fn primary_lease_allows(
@@ -926,7 +926,7 @@ impl RunLoop<'_> {
         permission: Permission,
     ) -> Result<bool, EngineError> {
         Ok(self.ledger().command_timeout_limit(call)?.is_none()
-            && self.plan_allows(call)
+            && self.plan_allows(call)?
             && runtime.allows(call)
             && permission
                 .narrow_terminal(self.terminal_mode(), call)
@@ -1037,7 +1037,7 @@ impl RunLoop<'_> {
                     && permission.decision != Decision::Deny
                     && timeout_limit.is_none()
                     && match grant {
-                        Grant::Primary { .. } => self.plan_allows(&intent.call),
+                        Grant::Primary { .. } => self.plan_allows(&intent.call)?,
                         Grant::Researcher { .. } => self.ledger().allows_tool(&intent.call),
                     } =>
             {
@@ -1212,7 +1212,7 @@ impl RunLoop<'_> {
             }
         }
         let mut unsaved_rule = false;
-        let goal_allows = intent.call.is_internal() || self.plan_allows(&intent.call);
+        let goal_allows = intent.call.is_internal() || self.plan_allows(&intent.call)?;
         let mut approved = true;
         let mut active_time_exhausted = false;
         if goal_allows
