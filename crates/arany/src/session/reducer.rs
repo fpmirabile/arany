@@ -815,14 +815,14 @@ impl SessionView {
     }
 
     pub fn replay(id: SessionId, events: &[EventEnvelope]) -> Result<Option<Self>, ReplayError> {
-        Self::replay_prefix(id, events, true, None)
+        Self::replay_prefix(id, events, true, None, None)
     }
 
     pub(crate) fn replay_open(
         id: SessionId,
         events: &[EventEnvelope],
     ) -> Result<Option<Self>, ReplayError> {
-        Self::replay_prefix(id, events, false, None)
+        Self::replay_prefix(id, events, false, None, None)
     }
 
     pub(crate) fn replay_forked(
@@ -831,7 +831,16 @@ impl SessionView {
         close_history: bool,
         inherited: &ForkInheritance,
     ) -> Result<Option<Self>, ReplayError> {
-        Self::replay_prefix(id, events, close_history, Some(inherited))
+        Self::replay_prefix(id, events, close_history, Some(inherited), None)
+    }
+
+    pub(crate) fn replay_for_corpus(
+        id: SessionId,
+        events: &[EventEnvelope],
+        inherited: Option<&ForkInheritance>,
+        corpus: &mut crate::supervisor::corpus::Corpus,
+    ) -> Result<Option<Self>, ReplayError> {
+        Self::replay_prefix(id, events, true, inherited, Some(corpus))
     }
 
     fn replay_prefix(
@@ -839,6 +848,7 @@ impl SessionView {
         events: &[EventEnvelope],
         close_history: bool,
         inherited: Option<&ForkInheritance>,
+        mut corpus: Option<&mut crate::supervisor::corpus::Corpus>,
     ) -> Result<Option<Self>, ReplayError> {
         let mut view: Option<Self> = None;
         let mut prior = 0;
@@ -923,6 +933,9 @@ impl SessionView {
             }
             let current = view.as_mut().ok_or(ReplayError::InvalidTransition)?;
             current.apply_committed(envelope)?;
+            if let Some(corpus) = &mut corpus {
+                corpus.observe(current, envelope);
+            }
         }
         if close_history && let Some(current) = &mut view {
             if let Some(last) = current.runs.last_mut() {

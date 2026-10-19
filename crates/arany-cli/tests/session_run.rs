@@ -114,6 +114,10 @@ mod tools_researcher;
 mod tool_replay;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "session_run/supervisor.rs"]
+mod supervisor;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)

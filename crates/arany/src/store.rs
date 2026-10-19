@@ -181,6 +181,10 @@ impl From<ReplayError> for StoreError {
 }
 
 enum Request {
+    SupervisorCorpus {
+        session_id: SessionId,
+        reply: oneshot::Sender<Result<String, crate::supervisor::CorpusError>>,
+    },
     AdmitOperation {
         session_id: SessionId,
         event_slots: usize,
@@ -364,6 +368,9 @@ impl Store {
                                 error => error,
                             };
                             let _ = reply.send(result);
+                        }
+                        Request::SupervisorCorpus { session_id, reply } => {
+                            let _ = reply.send(replay::supervisor_corpus(&connection, session_id));
                         }
                         Request::Load { session_id, reply } => {
                             let _ = reply.send(load_session(&connection, session_id));
@@ -561,6 +568,20 @@ impl Store {
 
     async fn evidence(&self, op: EvidenceOp) -> Result<Option<EvidenceRecord>, StoreError> {
         self.call(|reply| Request::Evidence { op, reply }).await
+    }
+
+    pub(crate) async fn supervisor_corpus(
+        &self,
+        session_id: SessionId,
+    ) -> Result<String, crate::supervisor::CorpusError> {
+        let (reply, receiver) = oneshot::channel();
+        self.requests
+            .as_ref()
+            .ok_or(StoreError::Closed)?
+            .send(Request::SupervisorCorpus { session_id, reply })
+            .await
+            .map_err(|_| StoreError::Closed)?;
+        receiver.await.map_err(|_| StoreError::Closed)?
     }
 
     pub async fn load_session(
