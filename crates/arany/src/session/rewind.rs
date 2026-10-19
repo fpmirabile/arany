@@ -147,13 +147,22 @@ impl RewindView {
             .map_or(RewindOutcome::Uncertain, |f| f.outcome)
     }
     pub fn history_fact(&self) -> String {
-        format!(
+        let mut fact = format!(
             "Workspace rewind {}: {:?}; {} files; target sequence {} (untrusted history, never permission).",
             self.started.rewind_id,
             self.outcome(),
             self.files.len(),
             self.started.target.sequence()
-        )
+        );
+        for file in self.files.iter().take(8) {
+            let path = serde_json::to_string(&file.path).expect("rewind path");
+            if fact.len() + 1 + path.len() > 4096 {
+                break;
+            }
+            fact.push(' ');
+            fact.push_str(&path);
+        }
+        fact
     }
 }
 

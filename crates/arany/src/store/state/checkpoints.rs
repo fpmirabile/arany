@@ -71,11 +71,21 @@ const LIMITS: Limits = Limits {
     refs: 262_144,
 };
 
+#[derive(Clone, Copy)]
+pub(crate) enum CaptureOwner {
+    Tool {
+        goal: GoalId,
+        run: RunId,
+        intent_id: uuid::Uuid,
+    },
+    Rewind {
+        rewind_id: uuid::Uuid,
+    },
+}
+
 pub(crate) struct Capture {
     pub(crate) session: SessionId,
-    pub(crate) goal: GoalId,
-    pub(crate) run: RunId,
-    pub(crate) intent_id: uuid::Uuid,
+    pub(crate) owner: CaptureOwner,
     pub(crate) files: Vec<(String, Vec<u8>)>,
 }
 
@@ -576,8 +586,18 @@ fn capture_inner(
     in_time(deadline)?;
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let session = capture.session.to_string();
-    let goal = capture.goal.to_string();
-    let run = capture.run.to_string();
+    let (goal, run_id, rewind_id) = match capture.owner {
+        CaptureOwner::Tool { goal, run, .. } => (goal.to_string(), Some(run.to_string()), None),
+        CaptureOwner::Rewind { rewind_id } => (
+            capture.session.to_string(),
+            None,
+            Some(rewind_id.to_string()),
+        ),
+    };
+    let run = run_id
+        .as_ref()
+        .or(rewind_id.as_ref())
+        .ok_or(StoreError::CheckpointUnavailable)?;
     let sequence = i64::try_from(sequence).map_err(|_| StoreError::CheckpointUnavailable)?;
     for (path, content) in &capture.files {
         if !crate::tools::types::valid_relative(path, false) || path.len() > 4096 {
@@ -622,7 +642,7 @@ fn capture_inner(
             &tx,
             "goal_id=?1",
             &goal,
-            &run,
+            run,
             &incoming,
             &mut pruned,
             |freed, _| goal_bytes - freed + bytes <= limits.goal_bytes,
@@ -640,7 +660,7 @@ fn capture_inner(
     )? + i64::from(
         scalar(
             &tx,
-            "SELECT COUNT(*) FROM refs WHERE session_id=?1 AND run_id=?2",
+            "SELECT COUNT(*) FROM refs WHERE session_id=?1 AND COALESCE(run_id,rewind_id)=?2",
             params![session, run],
         )? == 0,
     );
@@ -651,7 +671,7 @@ fn capture_inner(
             &tx,
             "session_id=?1",
             &session,
-            &run,
+            run,
             &incoming,
             &mut pruned,
             |freed, groups| {
@@ -699,7 +719,7 @@ fn capture_inner(
         if &stored != content {
             return Err(StoreError::CheckpointUnavailable);
         }
-        tx.execute("INSERT INTO refs(session_id,goal_id,run_id,rewind_id,tool_sequence,path,digest,len,captured_at_ms) VALUES(?1,?2,?3,NULL,?4,?5,?6,?7,?8)", params![session,goal,run,sequence,path,digest.as_slice(),content.len() as i64,now])?;
+        tx.execute("INSERT INTO refs(session_id,goal_id,run_id,rewind_id,tool_sequence,path,digest,len,captured_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![session,goal,run_id,rewind_id,sequence,path,digest.as_slice(),content.len() as i64,now])?;
     }
     in_time(deadline)?;
     tx.commit()?;

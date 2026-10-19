@@ -231,6 +231,39 @@ impl ToolRuntime {
         runtime
     }
 
+    pub(crate) fn rewind_path_allowed(&self, path: &str) -> bool {
+        self.config.write
+            && self.config.in_workspace_scope(path)
+            && self.permissions().is_none_or(|permissions| {
+                permissions
+                    .evaluate(&ToolCall::Write {
+                        path: path.into(),
+                        expected_digest: None,
+                        content: String::new(),
+                    })
+                    .0
+                    != permissions::Decision::Deny
+            })
+    }
+
+    pub(crate) fn rewind_file(&self, path: &str) -> Result<Option<FileVersion>, ToolError> {
+        if !self.rewind_path_allowed(path) {
+            return Err(ToolError::Path);
+        }
+        fs::validate_workspace(self)?;
+        let reads = self
+            .reads
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let _permit = reads
+            .slots
+            .try_acquire()
+            .map_err(|_| ToolError::QueueFull)?;
+        let file = fs::rewind_file(&reads.root, path)?;
+        fs::validate_workspace(self)?;
+        Ok(file)
+    }
+
     pub(crate) fn checkpoint_bytes(
         &self,
         intent: &EffectIntent,
@@ -912,6 +945,7 @@ impl ToolRuntime {
             intent.call,
             ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
+                    | crate::session::worker::ChangesetSource::Rewind { .. }
             }
         ) && let Some(bytes) = &self.handover
         {

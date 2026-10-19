@@ -1302,6 +1302,9 @@ fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, ToolError> {
     let mut created = BTreeMap::new();
     let mut affected = false;
     for (change, mut parent) in files.iter().zip(parents) {
+        if change.before.is_none() && change.after.is_none() {
+            continue;
+        }
         let result = (|| {
             verify_change_parent(root, &parent)?;
             for part in &parent.missing {
@@ -1746,4 +1749,40 @@ pub(super) fn worker_publication_paths(root: &Dir, files: &[FileChange]) -> Resu
         }
     }
     Ok(())
+}
+
+pub(super) fn rewind_file(root: &Dir, path: &str) -> Result<Option<FileVersion>, ToolError> {
+    if !valid_relative(path, false) {
+        return Err(ToolError::Path);
+    }
+    worker_publication_paths(
+        root,
+        &[FileChange {
+            path: path.into(),
+            before: None,
+            after: None,
+        }],
+    )?;
+    let parent = change_parent(root, path)?;
+    if !parent.missing.is_empty() {
+        return Ok(None);
+    }
+    match parent.directory.symlink_metadata(&parent.leaf) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(ToolError::Path),
+        Ok(_) => {
+            let file = open_file(&parent.directory, &parent.leaf)?;
+            use std::os::unix::fs::PermissionsExt;
+            let mode = file
+                .metadata()
+                .map_err(|_| ToolError::Path)?
+                .permissions()
+                .mode();
+            if mode & 0o6000 != 0 {
+                return Err(ToolError::Path);
+            }
+            let bytes = read_regular(file, MAX_FILE_BYTES)?;
+            Ok(Some(FileVersion::from_bytes(&bytes, mode & 0o111 != 0)))
+        }
+    }
 }

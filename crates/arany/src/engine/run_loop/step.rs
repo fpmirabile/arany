@@ -1582,9 +1582,11 @@ impl RunLoop<'_> {
             };
             let capture = crate::store::CheckpointCapture {
                 session: self.session_id,
-                goal: self.goal()?,
-                run: self.run_id,
-                intent_id,
+                owner: crate::store::CheckpointOwner::Tool {
+                    goal: self.goal()?,
+                    run: self.run_id,
+                    intent_id,
+                },
                 files,
             };
             #[cfg(any(test, feature = "test-support"))]

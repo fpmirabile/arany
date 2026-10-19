@@ -8,7 +8,7 @@ Goal segment telemetry is specified in [telemetry](./telemetry.md).
 
 Every accepted task, including `exec`, has one durable Goal. There is no Run-without-Goal path. The Goal owns its pinned budget and resource settings across Runs, long Tool loops, delegation, review and in-Goal compaction. Budgeted execution reserves each actual Provider call and active action at its dispatch boundary. Active-Run Tool-history compaction includes the admitted objective, exact live instruction and include snapshots, the current approved plan, typed Goal facts and selected acknowledged observations. Between-Run compaction uses the canonical objective, plan, budget, resource settings, usage facts and history; it does not reconstruct discarded instruction or include contents, and the next Run supplies its newly admitted snapshots. Both request shapes fit the 256 KiB compaction input bound.
 
-Delivered: Goal lifecycle, atomic Provider-call reservations, Run-level active-time settlement with crash ceilings, the initial plan contract and typed success receipt, bounded reports, cross-StateRoot Workspace writer exclusion, Ctrl+C pause (any cancelled Goal stays Interrupted), coexistence with new prompts, `/goal resume`, Engine steering delivery, pause boundaries, the terminal steering composer and `/goal pause`. Rewind replay and evidence invalidation are available as canonical projection only. Context reinjection, approved contract revision and runtime rewind remain unavailable.
+Delivered: Goal lifecycle, atomic Provider-call reservations, Run-level active-time settlement with crash ceilings, the initial plan contract and typed success receipt, bounded reports, cross-StateRoot Workspace writer exclusion, Ctrl+C pause (any cancelled Goal stays Interrupted), coexistence with new prompts, `/goal resume`, Engine steering delivery, pause boundaries, the terminal steering composer and `/goal pause`. Guarded code rewind, replay and evidence invalidation follow the [rewind contract](./tools.md#checkpoints-and-rewind). Context reinjection and approved contract revision remain unavailable.
 
 Editing constraints: [security rules](../../agents/security.md).
 
@@ -72,7 +72,7 @@ Budget exhaustion is terminal and an exhausted Goal is never reopened. `/goal co
 
 ## Rewind and Goal recovery
 
-A restored Workspace rewind leaves a paused Goal paused and charges or refunds no call, token, Run or active time. It invalidates file success evidence for changed paths and effect/command criteria that may depend on them; fresh verification is required. A later initial plan cannot reuse a pre-rewind read for a changed path. Worker verification for overlapping leased paths is invalidated across historical Runs. The bounded rewind history fact enters subsequent resume context and the Goal report. An open or Uncertain rewind after the Goal's last Run blocks GoalResumed and budget continuation, including after reopen; it is never retried. A fresh Goal may inspect the Workspace, but this does not clear the earlier Goal's uncertainty. Fork inheritance never copies Goal budgets. [Session replay](./session.md#rewind-planning-and-replay) owns checkpoint chains and sealing. Runtime rewind remains unavailable.
+A restored Workspace rewind leaves a paused Goal paused and charges or refunds no call, token, Run or active time. It invalidates file success evidence for changed paths and effect/command criteria that may depend on them; fresh verification is required. A later initial plan cannot reuse a pre-rewind read for a changed path. Worker verification for overlapping leased paths is invalidated across historical Runs. The bounded rewind history fact enters subsequent resume context and the Goal report. An open or Uncertain rewind after the Goal's last Run blocks GoalResumed and budget continuation, including after reopen; it is never retried. A fresh Goal may inspect the Workspace, but this does not clear the earlier Goal's uncertainty. Fork inheritance never copies Goal budgets. [Session replay](./session.md#rewind-planning-and-replay) owns checkpoint chains and sealing. Runtime code restore follows [Tools](./tools.md#checkpoints-and-rewind).
 
 ## Initial plan contract and success receipt
 
@@ -102,7 +102,7 @@ A user may send a steering note to a running Goal, and may pause it at its next 
 
 ## Acceptance scenarios and evidence owners
 
-These rows define the acceptance of the delivered Goal behavior, including pause and resume. Context reinjection, approved contract revision and rewind are follow-on behavior and are not implementation claims.
+These rows define the acceptance of the delivered Goal behavior, including pause and resume. Context reinjection and approved contract revision are follow-on behavior and are not implementation claims.
 
 | Scenario | Required outcome | Owner |
 |---|---|---|

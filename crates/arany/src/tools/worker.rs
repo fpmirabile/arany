@@ -905,11 +905,28 @@ pub(super) struct Action {
     pub(super) contained: std::sync::atomic::AtomicBool,
 }
 
-pub(super) fn handover_ref(intent: &EffectIntent) -> Option<&WorkerDataRef> {
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PublicationTransfer {
+    bytes: u32,
+    sha256: [u8; 32],
+}
+
+pub(super) fn handover_ref(intent: &EffectIntent) -> Option<PublicationTransfer> {
     match &intent.call {
-        ToolCall::ApplyChangeset {
-            source: ChangesetSource::WorkerHandover { data, .. },
-        } if intent.target == EffectTarget::Workspace => Some(data),
+        ToolCall::ApplyChangeset { source } if intent.target == EffectTarget::Workspace => {
+            match source {
+                ChangesetSource::WorkerHandover { data, .. } => Some(PublicationTransfer {
+                    bytes: data.bytes,
+                    sha256: data.sha256,
+                }),
+                ChangesetSource::Rewind { bytes, sha256, .. } => Some(PublicationTransfer {
+                    bytes: *bytes,
+                    sha256: *sha256,
+                }),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -927,7 +944,21 @@ pub(super) fn decode_handover(
     {
         return Err(ToolError::ChangedInput);
     }
-    decode_data(bytes, data.purpose).map_err(|_| ToolError::Limit)?;
+    if matches!(
+        intent.call,
+        ToolCall::ApplyChangeset {
+            source: ChangesetSource::Rewind { .. }
+        }
+    ) {
+        crate::session::worker::decode_rewind_data(bytes).map_err(|_| ToolError::Limit)?;
+    } else if let ToolCall::ApplyChangeset {
+        source: ChangesetSource::WorkerHandover { data, .. },
+    } = &intent.call
+    {
+        decode_data(bytes, data.purpose).map_err(|_| ToolError::Limit)?;
+    } else {
+        return Err(ToolError::Configuration);
+    }
     let changes: WorkerChangeset =
         serde_json::from_slice(bytes).map_err(|_| ToolError::Configuration)?;
     if changes.files.is_empty()
@@ -1761,6 +1792,28 @@ mod tests {
         };
         let bytes = encode(vec![change.clone()]);
         let changes = decode_handover(&call(&bytes), &bytes, &runtime.config).unwrap();
+        let rewind = runtime.intent(
+            view.run_id,
+            AgentRunId::new(),
+            ToolCall::ApplyChangeset {
+                source: ChangesetSource::Rewind {
+                    plan_digest: [7; 32],
+                    bytes: bytes.len() as u32,
+                    sha256: digest(&bytes),
+                },
+            },
+        );
+        assert_eq!(
+            decode_handover(&rewind, &bytes, &runtime.config).unwrap(),
+            changes
+        );
+        let mut tampered = bytes.clone();
+        tampered.push(b' ');
+        assert!(decode_handover(&rewind, &tampered, &runtime.config).is_err());
+        let mut readonly = runtime.config.clone();
+        readonly.write = false;
+        assert!(decode_handover(&rewind, &bytes, &readonly).is_err());
+
         assert!(
             !super::super::CommandChangeset {
                 files: changes.files.clone()
