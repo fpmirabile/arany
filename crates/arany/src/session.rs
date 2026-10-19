@@ -7,6 +7,8 @@ pub(crate) mod input;
 mod lineage;
 mod reducer;
 pub mod rewind;
+#[cfg(test)]
+pub(crate) mod tests;
 pub mod worker;
 
 pub(crate) const MAX_CONTEXT_CONTENT_BYTES: usize = 376 * 1024;

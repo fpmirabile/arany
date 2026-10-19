@@ -47,9 +47,9 @@ pub use native_check::{
     check_native_model_with_credentials,
 };
 pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
-pub(crate) use render::history_tool_block;
 #[cfg(feature = "test-support")]
 pub use render::semantic;
+pub(crate) use render::{history_tool_block, history_unanswered_block};
 pub use streaming::{PreviewText, ResponsePreview};
 
 fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {

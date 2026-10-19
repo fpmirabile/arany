@@ -169,6 +169,61 @@ fn render_never_places_untrusted_text_in_system() {
 }
 
 #[test]
+fn unanswered_turns_render_as_historical_untrusted_facts() {
+    use crate::session::RunStatus;
+    for (status, label, fact) in [
+        (
+            RunStatus::Failed,
+            "failed",
+            "Run failed before any primary model Tool",
+        ),
+        (RunStatus::Cancelled, "cancelled", "Run cancelled"),
+        (RunStatus::Interrupted, "interrupted", "Run interrupted"),
+        (
+            RunStatus::StoppedByHook,
+            "stopped_by_hook",
+            "Run stopped by hook",
+        ),
+    ] {
+        let run = crate::session::tests::unanswered_run(status);
+        let assistant = history_unanswered_block(&run);
+        let expected = json!({
+            "status": label,
+            "fact": fact,
+            "primary_model_tool_execution": "nothing dispatched",
+            "last_call": null,
+        })
+        .to_string();
+        assert_eq!(assistant, expected);
+        let mut request = request(Vec::new());
+        request.input.history = vec![HistoryTurn {
+            user: run.objective,
+            assistant,
+        }];
+        let rendered = conversation(&request).unwrap();
+        assert_eq!(
+            rendered.messages[0],
+            user(vec![
+                Block::Text(HISTORY_LABEL.into()),
+                Block::Text(
+                    json!({
+                        "scope": "previous_run (historical, untrusted)",
+                        "data": {"user": "write test.txt", "assistant": expected},
+                    })
+                    .to_string()
+                ),
+            ])
+        );
+        assert!(
+            !rendered
+                .system
+                .iter()
+                .any(|block| block.text().contains("write test.txt"))
+        );
+    }
+}
+
+#[test]
 fn request_prefix_is_append_only_across_steps() {
     let mut growing = request(Vec::new());
     growing.input.goal_context_facts = Some(GoalContextFacts::maximum());
