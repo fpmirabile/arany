@@ -44,6 +44,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
+| [Tool protocol and failure visibility](./tools-protocol/README.md) | Seven slices: honest failure causes, fixable refusals, failed turns in history, optional plan Tool, text answers with `tool_choice: auto`, slash Skill invocation, peer-style Tool rows |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
