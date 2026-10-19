@@ -256,6 +256,7 @@ pub(crate) struct View {
     enforcement_digest: [u8; 32],
     process_enforcement_digest: [u8; 32],
     last_intent_digest: Option<[u8; 32]>,
+    last_enforcement_digest: Option<[u8; 32]>,
     sealed: Option<WorkerDataRef>,
     cache_lease: Option<crate::store::BuildCacheLease>,
     cache_generation: Option<[u8; 32]>,
@@ -325,6 +326,7 @@ impl View {
             enforcement_digest: runtime.enforcement_digest,
             process_enforcement_digest: runtime.process_enforcement_digest,
             last_intent_digest: None,
+            last_enforcement_digest: None,
             sealed: None,
             cache_lease: None,
             cache_generation: None,
@@ -345,6 +347,7 @@ impl View {
 
     pub(crate) fn note_intent(&mut self, intent: &EffectIntent) {
         self.last_intent_digest = Some(intent.digest());
+        self.last_enforcement_digest = Some(intent.enforcement_digest);
     }
 
     pub(crate) fn reusable_data(&self, bytes: &[u8]) -> Option<WorkerDataRef> {
@@ -555,7 +558,7 @@ impl View {
         });
         let mut private = runtime.clone();
         private.worker = Some(action.clone());
-        self.last_intent_digest = Some(intent.digest());
+        self.note_intent(&intent);
         self.pending = Some(intent.id);
         let result = super::guard::execute(&private, &intent, cancellation).await;
         self.receive(intent, &action, result)
@@ -768,7 +771,9 @@ impl View {
             assignment_id: self.assignment,
             base_digest: self.base_digest,
             revision: self.revision,
-            enforcement_digest: self.enforcement_digest,
+            enforcement_digest: self
+                .last_enforcement_digest
+                .unwrap_or(self.enforcement_digest),
             last_intent_digest: self.last_intent_digest,
         })
     }
@@ -2073,6 +2078,24 @@ mod tests {
                 .expect(case);
             assert_eq!(retried.disposition, ToolDisposition::Denied, "{case}");
         }
+    }
+
+    #[test]
+    fn cleanup_binds_the_enforcement_of_the_last_intent_class() {
+        let (_dir, runtime, mut view) = fixture();
+        view.process_enforcement_digest = [9; 32];
+        let command = ToolCall::Command {
+            program: "sh".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        };
+        let mut intent = intent(&runtime, &view, command);
+        intent.enforcement_digest = view.process_enforcement_digest;
+        assert_ne!(view.enforcement_digest, view.process_enforcement_digest);
+        view.note_intent(&intent);
+        let cleanup = view.dispose().unwrap();
+        assert_eq!(cleanup.enforcement_digest, intent.enforcement_digest);
+        assert_eq!(cleanup.last_intent_digest, Some(intent.digest()));
     }
 
     #[test]
