@@ -111,10 +111,7 @@ impl CompiledContext {
             if selected.len() == MAX_HISTORY_RUNS {
                 break;
             }
-            if run
-                .finished_sequence
-                .is_some_and(|sequence| sequence <= covered_sequence)
-            {
+            if run.accepted_sequence <= covered_sequence {
                 continue;
             }
             let assistant = if run.model_tools().is_empty() && run.worker_history().is_empty() {

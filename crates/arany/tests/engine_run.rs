@@ -1161,10 +1161,16 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
             .expect("accepted objective");
         store.close().await.expect("store shutdown");
 
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "finished".into(),
-            result: "Finished answer".into(),
-        })])
+        let provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Finish(Finish {
+                summary: "finished".into(),
+                result: "Finished answer".into(),
+            }),
+            ProviderOutcome::Finish(Finish {
+                summary: "follow-up".into(),
+                result: "Follow-up answer".into(),
+            }),
+        ])
         .with_compactions(vec![Ok(CompactionResponse {
             summary: "Unfinished then finished".into(),
             response_id: None,
@@ -1176,6 +1182,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
             wire_provenance: None,
         })]);
         let compact_requests = Arc::clone(&provider.compact_requests);
+        let observed = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
         let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state readmission"),
@@ -1208,9 +1215,24 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
             ));
         }
         let fork_id = engine
-            .fork_session(session_id, workspace, None)
+            .fork_session(session_id, workspace.clone(), None)
             .await
             .expect("fork after interruption");
+        let mut follow_up = request(&workspace, "Question after compaction");
+        follow_up.session_id = Some(session_id);
+        follow_up.title = None;
+        run_to_end(&engine, &provider, follow_up)
+            .await
+            .expect("Run after compaction");
+        {
+            let requests = observed.lock().expect("request lock");
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                requests[1].input.context_summary.as_deref(),
+                Some("Unfinished then finished")
+            );
+            assert!(requests[1].input.history.is_empty());
+        }
         engine.close().await.expect("engine shutdown");
         let store = Store::open(StateRoot::admit(&state_path).expect("state readmission"))
             .expect("reopened store");
