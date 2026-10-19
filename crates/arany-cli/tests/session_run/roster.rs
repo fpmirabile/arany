@@ -682,7 +682,7 @@ fn attached_pty_refusal(
             Instant::now() < stdout_deadline,
             "attached stdout did not close"
         );
-        thread::yield_now();
+        std::thread::yield_now();
     }
     assert!(
         stdout_bytes.is_empty(),
