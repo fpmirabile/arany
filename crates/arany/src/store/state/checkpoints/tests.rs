@@ -369,8 +369,8 @@ fn checkpoints_pin_the_owner_accepted_bounds() {
     assert_eq!(BUSY, Duration::from_millis(2000));
 }
 
-#[test]
-fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_session() {
+#[tokio::test(start_paused = true)]
+async fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_session() {
     let (_temp, root) = fixture();
     let (foreign, session, goal) = (SessionId::new(), SessionId::new(), GoalId::new());
     let foreign_run = RunId::new();
