@@ -322,7 +322,6 @@ pub struct ForegroundWorkerProvider {
     pub budget: crate::GoalBudget,
     pub requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     pub violations: std::sync::Mutex<Vec<&'static str>>,
-    pub clock_paused: std::sync::atomic::AtomicBool,
     background_started: tokio::sync::Notify,
     identity: crate::ProviderIdentity,
     deadline_identity: crate::ProviderIdentity,
@@ -343,7 +342,6 @@ impl ForegroundWorkerProvider {
             budget,
             requests: Default::default(),
             violations: Default::default(),
-            clock_paused: Default::default(),
             background_started: Default::default(),
             identity,
             deadline_identity,
@@ -452,16 +450,11 @@ impl crate::Provider for ForegroundWorkerProvider {
                 },
                 Some(Box::new(self.plan())),
             ),
-            (AgentPhase::RootPlan, 1) => {
-                if self.case.contains("deadline") {
-                    tokio::time::pause();
-                    self.clock_paused
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                }
-                self.delegation(&request)
-            }
+            (AgentPhase::RootPlan, 1) => self.delegation(&request),
             (AgentPhase::ChildWork, 0) if self.case == "tool_deadline" => {
+                tokio::time::pause();
                 tokio::time::advance(std::time::Duration::from_secs(1192)).await;
+                tokio::time::resume();
                 super::scenario::tool_outcome(
                     ToolCall::Write {
                         path: "notes/a".into(),
@@ -496,7 +489,9 @@ impl crate::Provider for ForegroundWorkerProvider {
                     self.case,
                     "hook_stop_deadline" | "hook_stop_deadline_last_turn"
                 ) {
+                    tokio::time::pause();
                     tokio::time::advance(std::time::Duration::from_secs(1192)).await;
+                    tokio::time::resume();
                 }
                 finish_with("Candidate worker result")
             }

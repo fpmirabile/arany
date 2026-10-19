@@ -230,15 +230,9 @@ pub(super) async fn worker_case(case: &'static str) {
         .unwrap()
         .result;
     let mut injected = false;
-    let deadline_case = case.contains("deadline");
-    let watchdog = std::time::Instant::now();
     let result = loop {
         tokio::select! {
             result = &mut running => break result,
-            // Keep paused time from auto-advancing during real Guard and journal I/O.
-            () = tokio::task::yield_now(), if deadline_case => {
-                assert!(watchdog.elapsed() < Duration::from_secs(60), "{case}: Run stalled");
-            }
             Some(approval) = inbox.next(), if case != "no_channel" => {
                 let private = matches!(approval.intent.target, EffectTarget::WorkerView { .. });
                 if !injected && (case == "private_loss" && private || case == "publication_loss" && !private) {
@@ -249,12 +243,6 @@ pub(super) async fn worker_case(case: &'static str) {
         }
     };
     drop(running);
-    if provider
-        .clock_paused
-        .load(std::sync::atomic::Ordering::SeqCst)
-    {
-        tokio::time::resume();
-    }
     let violations = provider.violations.lock().unwrap().clone();
     assert!(violations.is_empty(), "{case}: {violations:?}");
     let calls = provider.requests.lock().unwrap().clone();
