@@ -373,7 +373,7 @@ impl RunLoop<'_> {
                 AbortReason::Failed if self.ledger().active_time_exhausted() => {
                     self.settle_stopped_primary().await
                 }
-                AbortReason::Failed => self.fail_primary(super::RunFailure::ToolStopped).await,
+                AbortReason::Failed => self.fail_primary(self.tool_stop_cause()).await,
                 AbortReason::PlanAdmission => {
                     self.fail_primary(super::RunFailure::PlanAdmission).await
                 }
@@ -415,7 +415,7 @@ impl RunLoop<'_> {
             };
             if !continues {
                 return self
-                    .fail_primary(super::RunFailure::ToolStopped)
+                    .fail_primary(self.tool_stop_cause())
                     .await
                     .map(|()| false);
             }

@@ -3009,8 +3009,49 @@ async fn active_time_left_below_one_second_stops_the_tool_step_without_a_context
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     let run = &view.runs[0];
-    assert_eq!(run.failure, Some(arany::RunFailure::ToolStopped));
+    assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
     assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+}
+
+#[tokio::test]
+async fn tool_context_overflow_fails_with_the_context_cause() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(37_768)).expect("instructions");
+    std::fs::write(workspace.join("notes/facts.txt"), "f".repeat(40 * 1024)).expect("facts");
+    std::fs::write(workspace.join("big1.txt"), "b".repeat(127 * 1024)).expect("include");
+    std::fs::write(workspace.join("big2.txt"), "c".repeat(127 * 1024)).expect("include");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_provider_calls: Some(30),
+        ..arany::GoalBudget::default()
+    };
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget = budget;
+    let mut script = vec![crate::tool_outcome(facts_read(), Some(Box::new(plan)))];
+    script.extend((0..11).map(|_| crate::tool_outcome(facts_read(), None)));
+    script.push(finish_with("done"));
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, &"x".repeat(60 * 1024));
+    input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
+    input.goal = arany::GoalRequest::new(budget, arany::GoalPhase::Implementation);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("context-full Run");
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(run.failure, Some(arany::RunFailure::ToolContextFull));
 }
 
 #[tokio::test]

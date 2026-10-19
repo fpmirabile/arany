@@ -257,14 +257,12 @@ impl RunLoop<'_> {
                             .await?;
                         return Ok(false);
                     }
-                    Err(SizingRefusal::ActiveTime) => return Ok(false),
-                    Err(SizingRefusal::ContextFull) => {
-                        return if matches!(grant, Grant::Primary { .. }) {
-                            Err(EngineError::ContextTooLarge)
-                        } else {
-                            Ok(false)
-                        };
+                    Err(SizingRefusal::ActiveTime) => {
+                        self.active_time_floor
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        return Ok(false);
                     }
+                    Err(SizingRefusal::ContextFull) => return Self::context_overflow(&grant),
                 };
             let command = matches!(intent.call, ToolCall::Command { .. })
                 && matches!(intent.target, crate::worker::EffectTarget::Workspace);
@@ -304,10 +302,11 @@ impl RunLoop<'_> {
             let Some(changeset) = changeset.filter(|changeset| !changeset.files.is_empty()) else {
                 break;
             };
-            if self.controls.cancellation.is_cancelled()
-                || grant.context()?.reserved_len(&step, &[]) > runtime.context_limit_bytes()
-            {
+            if self.controls.cancellation.is_cancelled() {
                 return Ok(false);
+            }
+            if grant.context()?.reserved_len(&step, &[]) > runtime.context_limit_bytes() {
+                return Self::context_overflow(&grant);
             }
             call = ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::CommandReceipt {
@@ -364,8 +363,21 @@ impl RunLoop<'_> {
                 return Ok(false);
             }
         }
-        Ok(!self.hook_requested_stop()?
-            && grant.context()?.rendered_len() <= runtime.context_limit_bytes())
+        if self.hook_requested_stop()? {
+            return Ok(false);
+        }
+        if grant.context()?.rendered_len() > runtime.context_limit_bytes() {
+            return Self::context_overflow(&grant);
+        }
+        Ok(true)
+    }
+
+    fn context_overflow(grant: &Grant<'_>) -> Result<bool, EngineError> {
+        if matches!(grant, Grant::Primary { .. }) {
+            Err(EngineError::ContextTooLarge)
+        } else {
+            Ok(false)
+        }
     }
 
     fn sized_intent(
@@ -2139,6 +2151,8 @@ impl RunLoop<'_> {
                 raw_digest: file.digest,
             };
             let Some(mut intent) = self.primary_intent(runtime, call)? else {
+                self.active_time_floor
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 return Ok(false);
             };
             intent.limits.result_bytes = MAX_TOOL_RESULT_BYTES as u32;
