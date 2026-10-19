@@ -228,6 +228,13 @@ fn append_steps(
 fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>, ProviderError> {
     let mut requests = step.requests.iter();
     let mut results = Vec::new();
+    if let Some(plan) = &step.plan {
+        results.push(Block::ToolResult {
+            id: plan.id.clone(),
+            output: plan.result(),
+            is_error: false,
+        });
+    }
     let mut integrations = Vec::new();
     for (index, observation) in step.observations.iter().enumerate() {
         let narrowed = step.narrowed(index);
@@ -257,7 +264,7 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
     }
     let mut blocks = results;
     blocks.extend(integrations);
-    if step.requests.is_empty() && !request.input.child_results.is_empty() {
+    if step.requests.is_empty() && step.plan.is_none() && !request.input.child_results.is_empty() {
         blocks.push(child_results_block(request));
     }
     if !step.steering_notes.is_empty() {
@@ -277,13 +284,12 @@ fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
     let remediation = match refusal.cause {
         InvalidArguments => "Send one call with valid arguments matching its schema.",
         Phase => "Choose an outcome allowed in this phase; team planning requires Delegate.",
-        PlanMissing => "Supply a valid plan_contract before a non-prelude Tool call.",
-        PlanInvalid => "Supply a valid plan_contract; do not replace a recorded contract.",
+        PlanInvalid => "Send a valid arany_plan; do not replace a recorded contract.",
         PlanBudgetOutsideGoal => "The plan budget must not exceed the Goal budget.",
         PlanBudgetSpent => "The plan budget must cover usage already spent and the next action.",
         PlanScopeExcludesCall => "Choose a call within the plan scope.",
         PlanOutsideGrant => "Choose a plan within the admitted Tool grant.",
-        ArgumentBytes => "Reduce the call and plan_contract to the argument byte limit.",
+        ArgumentBytes => "Reduce the function arguments to the argument byte limit.",
         LeaseOverlap => "Wait for worker settlement or choose paths outside active leases.",
         NotOffered => "Choose an offered operation.",
         FinishInvalid => "Send a Finish with nonempty summary and result within their byte limits.",

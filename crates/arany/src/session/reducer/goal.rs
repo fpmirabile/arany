@@ -154,20 +154,14 @@ impl SessionView {
             .filter(|run| run.id == *run_id)
             .ok_or(ReplayError::InvalidTransition)?;
         let primary = run.primary().ok_or(ReplayError::InvalidTransition)?;
-        let valid_previous_tools = run
-            .tools
-            .iter()
-            .all(|tool| tool.intent.call.is_goal_plan_prelude() && tool.settled_without_stop());
         let valid_contract_call = run.status == RunStatus::Active
             && primary.role == AgentRole::Primary
-            && primary.provider_calls.last().is_some_and(|call| {
-                call.disposition == ProviderCallDisposition::ToolRequested
-                    && matches!(call.phase, AgentPhase::RootPlan | AgentPhase::RootSynthesis)
-            })
-            && valid_previous_tools
-            // The contract precedes the step's first started request, so every request of the step is pending.
-            && pending_tool_requests(run)
-                == Some(primary.provider_calls.last().map_or(0, |call| usize::from(call.requested_tools)));
+            && primary
+                .provider_calls
+                .last()
+                .is_some_and(|call| call.disposition == ProviderCallDisposition::PlanRecorded)
+            && run.tools.iter().all(ToolView::settled_without_stop)
+            && pending_tool_requests(run) == Some(0);
         // Pre-plan inspections count: folding every Run's observations decides the criterion.
         let mut success_state = contract.initial_success_state();
         let invalidated_after = self

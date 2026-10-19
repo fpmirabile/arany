@@ -50,7 +50,7 @@ pub use provider::{
     HistoryTurn, ImageAttachment, ImageOrigin, MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_IMAGE_BYTES,
     MAX_MESSAGE_IMAGES, MAX_NATIVE_API_KEY_BYTES, MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_SWITCHES,
     ModelEntry, NamedProviderRoutes, NativeApiCredentials, NativeCheckError, OpenAiProvider,
-    OutputTokenBound, PreviewText, PromptRole, Provenance, Provider, ProviderError,
+    OutputTokenBound, PlanRequest, PreviewText, PromptRole, Provenance, Provider, ProviderError,
     ProviderFailureReason, ProviderFallback, ProviderIdentity, ProviderImage, ProviderOutcome,
     ProviderRequest, ProviderResponse, ProviderRole, ProviderRoutes, ProviderTurn,
     ProviderWireProvenance, Providers, ResponsePreview, RosterSnapshot, RunInput, ToolUseId,

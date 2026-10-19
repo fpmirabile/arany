@@ -421,14 +421,11 @@ fn researcher_bindings(
 }
 
 fn read_facts() -> ProviderOutcome {
-    tool_outcome(
-        arany::ToolCall::Read {
-            path: "notes/facts.txt".into(),
-            offset: 0,
-            limit: 4096,
-        },
-        None,
-    )
+    tool_outcome(arany::ToolCall::Read {
+        path: "notes/facts.txt".into(),
+        offset: 0,
+        limit: 4096,
+    })
 }
 
 #[tokio::test]

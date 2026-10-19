@@ -354,7 +354,6 @@ pub enum RunFailure {
 pub enum ProposalRefusalCause {
     InvalidArguments,
     Phase,
-    PlanMissing,
     PlanInvalid,
     PlanBudgetOutsideGoal,
     PlanBudgetSpent,
@@ -376,12 +375,14 @@ pub struct ProposalRefusal {
 
 impl ProposalRefusal {
     fn valid(&self) -> bool {
-        matches!(self.operation.as_str(), "finish" | "delegate")
-            || self.operation.strip_prefix("arany_").is_some_and(|name| {
-                crate::tools::catalog::ALL
-                    .iter()
-                    .any(|facts| facts.name == name)
-            })
+        matches!(
+            self.operation.as_str(),
+            "finish" | "delegate" | "arany_plan"
+        ) || self.operation.strip_prefix("arany_").is_some_and(|name| {
+            crate::tools::catalog::ALL
+                .iter()
+                .any(|facts| facts.name == name)
+        })
     }
 }
 
@@ -514,6 +515,7 @@ pub enum ProviderCallDisposition {
     Finished,
     Delegated,
     ToolRequested,
+    PlanRecorded,
     Unavailable,
     Rejected,
     InvalidResponse,
@@ -572,6 +574,12 @@ impl ProviderCallRecord {
                 .refusal
                 .as_ref()
                 .is_some_and(|refusal| !refusal.valid())
+            || self.disposition == ProviderCallDisposition::PlanRecorded
+                && !matches!(
+                    self.phase,
+                    crate::provider::AgentPhase::RootPlan
+                        | crate::provider::AgentPhase::RootSynthesis
+                )
             || self.requested_tools > MAX_STEP_TOOL_CALLS
             || (self.disposition == ProviderCallDisposition::ToolRequested)
                 != (self.requested_tools > 0)
@@ -646,6 +654,7 @@ impl ProviderCallRecord {
                 ProviderCallDisposition::Finished
                     | ProviderCallDisposition::Delegated
                     | ProviderCallDisposition::ToolRequested
+                    | ProviderCallDisposition::PlanRecorded
                     | ProviderCallDisposition::InvalidResponse
             ) && (self.response_id.is_some()
                 || self.input_tokens.is_some()

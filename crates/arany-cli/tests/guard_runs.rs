@@ -1541,6 +1541,18 @@ async fn tool_step_events(
         _ => run_with(&engine, &provider, input, controls).await,
     }
     .expect("Tool Run");
+    if setup.write && outcome.run.status == RunStatus::Finished {
+        assert_eq!(
+            std::fs::read(workspace.join("notes/new.txt")).expect("unplanned Write published"),
+            b"New"
+        );
+    }
+    assert!(
+        !outcome.run.agents[0]
+            .provider_calls
+            .iter()
+            .any(|call| call.disposition == arany::ProviderCallDisposition::PlanRecorded)
+    );
     engine.close().await.expect("engine shutdown");
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
         .expect("read-only Store");
@@ -1631,14 +1643,11 @@ async fn primary_tool_step_events_match_the_snapshot() {
         path: "notes".into(),
     };
     let write = || {
-        tool_outcome(
-            arany::ToolCall::Write {
-                path: "notes/new.txt".into(),
-                expected_digest: None,
-                content: "New".into(),
-            },
-            Some(Box::new(write_plan())),
-        )
+        tool_outcome(arany::ToolCall::Write {
+            path: "notes/new.txt".into(),
+            expected_digest: None,
+            content: "New".into(),
+        })
     };
     let granted = |approvals| StepSetup {
         write: true,
@@ -1649,13 +1658,13 @@ async fn primary_tool_step_events_match_the_snapshot() {
     for (case, outcomes, setup, expected) in [
         (
             "in-process read",
-            vec![tool_outcome(read, None), finish("answer")],
+            vec![tool_outcome(read), finish("answer")],
             READ_ONLY,
             PRIMARY_READ,
         ),
         (
             "guard read",
-            vec![tool_outcome(git, None), finish("answer")],
+            vec![tool_outcome(git), finish("answer")],
             READ_ONLY,
             PRIMARY_GIT,
         ),
@@ -1668,14 +1677,11 @@ async fn primary_tool_step_events_match_the_snapshot() {
         (
             "repaired mutation",
             vec![
-                tool_outcome(
-                    arany::ToolCall::Write {
-                        path: "notes/new.txt".into(),
-                        expected_digest: None,
-                        content: "New".into(),
-                    },
-                    None,
-                ),
+                tool_outcome(arany::ToolCall::Write {
+                    path: "../outside".into(),
+                    expected_digest: None,
+                    content: "New".into(),
+                }),
                 write(),
                 finish("answer"),
             ],
@@ -1744,7 +1750,7 @@ async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit(
                     profile: None,
                 }],
             }),
-            tool_outcome(read(), None),
+            tool_outcome(read()),
             finish(),
             finish(),
         ],
@@ -1753,7 +1759,7 @@ async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit(
     .await;
     let primary = tool_step_events(
         CollaborationPolicy::Single,
-        vec![tool_outcome(read(), None), finish()],
+        vec![tool_outcome(read()), finish()],
         READ_ONLY,
     )
     .await;
@@ -1797,7 +1803,7 @@ async fn researcher_tool_step_events_match_the_snapshot() {
                     profile: None,
                 }],
             }),
-            tool_outcome(call, None),
+            tool_outcome(call),
             finish(),
             finish(),
         ];
@@ -1862,7 +1868,6 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalPlanContractRecorded
 ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Denied
 GoalProviderCallReserved
@@ -1880,7 +1885,6 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalPlanContractRecorded
 ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
@@ -1901,7 +1905,6 @@ GoalProviderCallReserved
 ProviderCallRecorded RootPlan
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalPlanContractRecorded
 ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
@@ -1920,7 +1923,6 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalPlanContractRecorded
 ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 GoalProviderCallReserved
 ProviderCallRecorded ToolReview
@@ -1941,7 +1943,6 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-GoalPlanContractRecorded
 ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
@@ -2024,30 +2025,11 @@ mod goals {
         ) -> Result<ProviderResponse, ProviderError> {
             let (outcome, input_tokens, output_tokens) = match request.phase {
                 AgentPhase::RootPlan => (
-                    crate::tool_outcome(
-                        arany::ToolCall::Write {
-                            path: "notes/a.txt".into(),
-                            expected_digest: None,
-                            content: "x".into(),
-                        },
-                        Some(Box::new(arany::GoalPlanContract {
-                            mission: "Write one note".into(),
-                            resource_class: arany::ToolResourceClass::Default,
-                            command_timeout_ms: None,
-                            paths: vec!["notes".into()],
-                            commands: Vec::new(),
-                            skills: Vec::new(),
-                            mcp_tools: Vec::new(),
-                            success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                                path: "notes/a.txt".into(),
-                                content: "x".into(),
-                            },
-                            budget: arany::GoalBudget {
-                                max_tokens: Some(10),
-                                ..arany::GoalBudget::default()
-                            },
-                        })),
-                    ),
+                    crate::tool_outcome(arany::ToolCall::Write {
+                        path: "notes/a.txt".into(),
+                        expected_digest: None,
+                        content: "x".into(),
+                    }),
                     3,
                     2,
                 ),
@@ -2159,13 +2141,8 @@ mod goals {
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
-        let provider = ScriptedProvider::new(vec![crate::tool_outcome(
-            arany::ToolCall::Write {
-                path: "notes/facts.txt".into(),
-                expected_digest: None,
-                content: "changed".into(),
-            },
-            Some(Box::new(arany::GoalPlanContract {
+        let provider = ScriptedProvider::new(vec![
+            arany::test_support::scenario::plan_outcome(arany::GoalPlanContract {
                 mission: "Change the facts".into(),
                 resource_class: arany::ToolResourceClass::Default,
                 command_timeout_ms: None,
@@ -2178,8 +2155,13 @@ mod goals {
                     content: "changed".into(),
                 },
                 budget: arany::GoalBudget::default(),
-            })),
-        )]);
+            }),
+            crate::tool_outcome(arany::ToolCall::Write {
+                path: "notes/facts.txt".into(),
+                expected_digest: None,
+                content: "changed".into(),
+            }),
+        ]);
         let provider = Arc::new(provider);
         let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state"),
@@ -2249,27 +2231,25 @@ mod goals {
         let steering = RunSteering::new();
         let pause = steering.clone();
         let provider = ScriptedProvider::new(vec![
-            crate::tool_outcome(
-                arany::ToolCall::Write {
+            arany::test_support::scenario::plan_outcome(arany::GoalPlanContract {
+                mission: "Change the facts".into(),
+                resource_class: arany::ToolResourceClass::Default,
+                command_timeout_ms: None,
+                paths: vec!["notes".into()],
+                commands: Vec::new(),
+                skills: Vec::new(),
+                mcp_tools: Vec::new(),
+                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
                     path: "notes/facts.txt".into(),
-                    expected_digest: None,
                     content: "changed".into(),
                 },
-                Some(Box::new(arany::GoalPlanContract {
-                    mission: "Change the facts".into(),
-                    resource_class: arany::ToolResourceClass::Default,
-                    command_timeout_ms: None,
-                    paths: vec!["notes".into()],
-                    commands: Vec::new(),
-                    skills: Vec::new(),
-                    mcp_tools: Vec::new(),
-                    success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                        path: "notes/facts.txt".into(),
-                        content: "changed".into(),
-                    },
-                    budget: arany::GoalBudget::default(),
-                })),
-            ),
+                budget: arany::GoalBudget::default(),
+            }),
+            crate::tool_outcome(arany::ToolCall::Write {
+                path: "notes/facts.txt".into(),
+                expected_digest: None,
+                content: "changed".into(),
+            }),
             finish_with("never reached"),
         ]);
         let requests = provider.requests.clone();
@@ -2349,27 +2329,25 @@ mod goals {
         let steering = RunSteering::new();
         let pause = steering.clone();
         let provider = ScriptedProvider::new(vec![
-            crate::tool_outcome(
-                arany::ToolCall::Write {
+            arany::test_support::scenario::plan_outcome(arany::GoalPlanContract {
+                mission: "Change the facts".into(),
+                resource_class: arany::ToolResourceClass::Default,
+                command_timeout_ms: None,
+                paths: vec!["notes".into()],
+                commands: Vec::new(),
+                skills: Vec::new(),
+                mcp_tools: Vec::new(),
+                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
                     path: "notes/facts.txt".into(),
-                    expected_digest: None,
                     content: "changed".into(),
                 },
-                Some(Box::new(arany::GoalPlanContract {
-                    mission: "Change the facts".into(),
-                    resource_class: arany::ToolResourceClass::Default,
-                    command_timeout_ms: None,
-                    paths: vec!["notes".into()],
-                    commands: Vec::new(),
-                    skills: Vec::new(),
-                    mcp_tools: Vec::new(),
-                    success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                        path: "notes/facts.txt".into(),
-                        content: "changed".into(),
-                    },
-                    budget: arany::GoalBudget::default(),
-                })),
-            ),
+                budget: arany::GoalBudget::default(),
+            }),
+            crate::tool_outcome(arany::ToolCall::Write {
+                path: "notes/facts.txt".into(),
+                expected_digest: None,
+                content: "changed".into(),
+            }),
             ProviderOutcome::Finish(Finish {
                 summary: "Ask the user".into(),
                 result: "ask".into(),
@@ -2443,27 +2421,25 @@ mod goals {
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            crate::tool_outcome(
-                arany::ToolCall::Write {
+            arany::test_support::scenario::plan_outcome(arany::GoalPlanContract {
+                mission: "Change the facts".into(),
+                resource_class: arany::ToolResourceClass::Default,
+                command_timeout_ms: None,
+                paths: vec!["notes".into()],
+                commands: Vec::new(),
+                skills: Vec::new(),
+                mcp_tools: Vec::new(),
+                success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
                     path: "notes/a.txt".into(),
-                    expected_digest: None,
                     content: "x".into(),
                 },
-                Some(Box::new(arany::GoalPlanContract {
-                    mission: "Change the facts".into(),
-                    resource_class: arany::ToolResourceClass::Default,
-                    command_timeout_ms: None,
-                    paths: vec!["notes".into()],
-                    commands: Vec::new(),
-                    skills: Vec::new(),
-                    mcp_tools: Vec::new(),
-                    success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                        path: "notes/a.txt".into(),
-                        content: "x".into(),
-                    },
-                    budget: arany::GoalBudget::default(),
-                })),
-            ),
+                budget: arany::GoalBudget::default(),
+            }),
+            crate::tool_outcome(arany::ToolCall::Write {
+                path: "notes/a.txt".into(),
+                expected_digest: None,
+                content: "x".into(),
+            }),
             finish_with("approve"),
             finish_with("x"),
         ]);
@@ -2538,19 +2514,17 @@ mod goals {
             content: "one".into(),
         };
         let provider = Arc::new(ScriptedProvider::new(vec![
-            crate::tool_outcome(
-                arany::ToolCall::Write {
-                    path: "notes/facts.txt".into(),
-                    expected_digest: Some(
-                        Sha256::digest(b"original")
-                            .iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect(),
-                    ),
-                    content: "one".into(),
-                },
-                Some(Box::new(plan)),
-            ),
+            arany::test_support::scenario::plan_outcome(plan),
+            crate::tool_outcome(arany::ToolCall::Write {
+                path: "notes/facts.txt".into(),
+                expected_digest: Some(
+                    Sha256::digest(b"original")
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect(),
+                ),
+                content: "one".into(),
+            }),
             finish_with("one"),
         ]));
         arany::FaultPlan::stall_checkpoint(session);
@@ -2614,20 +2588,17 @@ mod goals {
             if unavailable {
                 std::fs::write(state_path.join("checkpoints.sqlite"), b"malformed").unwrap();
             }
-            let write = |before: &str, after: &str, plan| {
-                crate::tool_outcome(
-                    arany::ToolCall::Write {
-                        path: "notes/facts.txt".into(),
-                        expected_digest: Some(
-                            Sha256::digest(before.as_bytes())
-                                .iter()
-                                .map(|b| format!("{b:02x}"))
-                                .collect(),
-                        ),
-                        content: after.into(),
-                    },
-                    plan,
-                )
+            let write = |before: &str, after: &str| {
+                crate::tool_outcome(arany::ToolCall::Write {
+                    path: "notes/facts.txt".into(),
+                    expected_digest: Some(
+                        Sha256::digest(before.as_bytes())
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect(),
+                    ),
+                    content: after.into(),
+                })
             };
             let mut plan = write_plan();
             plan.paths = vec!["notes/facts.txt".into()];
@@ -2640,9 +2611,10 @@ mod goals {
             let external = path.clone();
             let provider = Arc::new(
                 ScriptedProvider::new(vec![
-                    write("original", "one", Some(Box::new(plan))),
-                    write("one", "two", None),
-                    write("external", "three", None),
+                    arany::test_support::scenario::plan_outcome(plan),
+                    write("original", "one"),
+                    write("one", "two"),
+                    write("external", "three"),
                     finish_with("three"),
                 ])
                 .with_before_call(2, move || std::fs::write(&external, b"external").unwrap()),
@@ -2799,7 +2771,8 @@ mod routing {
         };
         let primary = route(
             ScriptedProvider::new(vec![
-                tool_outcome(write, Some(Box::new(plan))),
+                arany::test_support::scenario::plan_outcome(plan),
+                crate::tool_outcome(write),
                 finish("done"),
             ])
             .with_profile("scripted", "primary"),
@@ -2896,14 +2869,11 @@ mod routing {
             ])
             .with_profile("scripted", "primary"),
         );
-        let mut first = ScriptedProvider::new(vec![tool_outcome(
-            arany::ToolCall::Read {
-                path: "notes/facts.txt".into(),
-                offset: 0,
-                limit: 4096,
-            },
-            None,
-        )])
+        let mut first = ScriptedProvider::new(vec![tool_outcome(arany::ToolCall::Read {
+            path: "notes/facts.txt".into(),
+            offset: 0,
+            limit: 4096,
+        })])
         .with_profile("scripted", "spare-first");
         first
             .responses
@@ -3186,4 +3156,83 @@ async fn private_guard_command_cases() {
         assert!(!temp.path().join("git-executed").exists());
         assert!(!workspace.join("outside").exists());
     }
+}
+
+#[tokio::test]
+async fn attached_shape_write_without_a_plan_dispatches_after_ask_approval() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().expect("fixture");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state).expect("state"),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .expect("engine");
+    let config = state.join("tools.json");
+    std::fs::write(
+        &config,
+        br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("grant");
+    std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600))
+        .expect("private grant");
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_outcome(arany::ToolCall::Write {
+            path: "test.txt".into(),
+            expected_digest: None,
+            content: "hello".into(),
+        }),
+        ProviderOutcome::Finish(Finish {
+            summary: "Written".into(),
+            result: "Wrote test.txt".into(),
+        }),
+    ]));
+    let mut input = request(&workspace, "write test.txt containing hello");
+    input.policy = CollaborationPolicy::Single;
+    input.include_paths.clear();
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        approvals: Some(approvals),
+        ..Default::default()
+    };
+    let execution = async {
+        tokio::join!(run_with(&engine, &provider, input, controls), async {
+            let approval = inbox.next().await.expect("Ask approval");
+            assert!(
+                !workspace.join("test.txt").exists(),
+                "approval precedes dispatch"
+            );
+            approval.decide(true);
+        })
+        .0
+    };
+    let result = tokio::time::timeout(Duration::from_secs(30), execution)
+        .await
+        .expect("bounded journey")
+        .expect("Run");
+    engine.close().await.expect("shutdown");
+    let (events, view) = arany::test_support::routing::reopen(&state, result.session_id).await;
+    assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert!(!view.goals[0].autonomous);
+    assert!(view.goals[0].plan_contract.is_none());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::GoalPlanContractRecorded { .. }))
+    );
+    assert_eq!(
+        std::fs::read(workspace.join("test.txt")).expect("published Write"),
+        b"hello"
+    );
+    let observation = view.runs[0].tools[0].observation.as_ref().expect("receipt");
+    assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+    assert!(observation.attestation.is_some());
+    assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+    assert!(provider.responses.lock().expect("script").is_empty());
 }

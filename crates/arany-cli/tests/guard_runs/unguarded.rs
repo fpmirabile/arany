@@ -225,8 +225,9 @@ fn script(
     extra: Vec<ProviderOutcome>,
 ) -> Vec<ProviderOutcome> {
     let mut outcomes = vec![
-        tool_outcome(first.clone(), Some(Box::new(plan(second)))),
-        tool_outcome(second.clone(), None),
+        arany::test_support::scenario::plan_outcome(plan(second)),
+        tool_outcome(first.clone()),
+        tool_outcome(second.clone()),
     ];
     outcomes.extend(extra);
     outcomes.push(finish("answer"));
@@ -405,7 +406,7 @@ async fn unguarded_rerun_is_never_ai_reviewed_and_dont_ask_or_deny_rules_refuse_
         )
         .await;
     assert_eq!(seen.prompts.len(), 1);
-    assert_eq!(seen.requests, 4, "the unguarded run adds no review call");
+    assert_eq!(seen.requests, 5, "the unguarded run adds no review call");
     let verdict = last_tool(&seen).permission_verdict.as_ref().unwrap();
     assert_eq!(verdict.source, PermissionSource::Human);
     assert_eq!(verdict.mode, Some(arany::permissions::PermissionMode::Auto));
@@ -518,7 +519,7 @@ async fn restricted_approval_channels_never_dispatch_unguarded_even_with_an_exac
             )
             .await;
         assert_eq!(seen.unconsumed, 0);
-        assert_eq!(seen.requests, 2);
+        assert_eq!(seen.requests, 3);
         assert!(seen.prompts.is_empty());
         denied(&seen, "Human-only approval is unavailable");
         assert!(!host.workspace.join("ran.txt").exists());
@@ -563,9 +564,10 @@ async fn always_allow_records_the_exact_rule_for_this_project_only_and_applies_n
         .run(
             &host.workspace,
             vec![
-                tool_outcome(first.clone(), Some(Box::new(plan(&second)))),
-                tool_outcome(second.clone(), None),
-                tool_outcome(second.clone(), None),
+                arany::test_support::scenario::plan_outcome(plan(&second)),
+                tool_outcome(first.clone()),
+                tool_outcome(second.clone()),
+                tool_outcome(second.clone()),
                 finish("answer"),
             ],
             Some(ApprovalMode::Request),
@@ -664,9 +666,10 @@ async fn hook_unguarded_rerun_requires_the_exact_command_and_a_fresh_human_ask_t
                 .run(
                     &host.workspace,
                     vec![
-                        tool_outcome(first, Some(Box::new(plan(&exact)))),
-                        tool_outcome(wrong, None),
-                        tool_outcome(exact.clone(), None),
+                        arany::test_support::scenario::plan_outcome(plan(&exact)),
+                        tool_outcome(first),
+                        tool_outcome(wrong),
+                        tool_outcome(exact.clone()),
                         finish("answer"),
                     ],
                     Some(ApprovalMode::Auto),
@@ -692,8 +695,8 @@ async fn hook_unguarded_rerun_requires_the_exact_command_and_a_fresh_human_ask_t
                     why: arany::permissions::HookIgnoreReason::NotCompleted,
                 }
             );
-            let next = seen.calls[1].input.tools.as_ref().unwrap();
-            let feedback = &next.steps[0].hook_feedback[&0];
+            let next = seen.calls[2].input.tools.as_ref().unwrap();
+            let feedback = &next.steps[1].hook_feedback[&0];
             assert!(
                 feedback
                     .iter()
@@ -754,16 +757,14 @@ async fn hook_stop_unguarded_rerun_uses_a_bounded_continuation_and_human_approva
             .run(
                 &host.workspace,
                 vec![
-                    tool_outcome(
-                        ToolCall::Read {
-                            path: "notes/input".into(),
-                            offset: 0,
-                            limit: 64,
-                        },
-                        Some(Box::new(plan(&call))),
-                    ),
+                    arany::test_support::scenario::plan_outcome(plan(&call)),
+                    tool_outcome(ToolCall::Read {
+                        path: "notes/input".into(),
+                        offset: 0,
+                        limit: 64,
+                    }),
                     finish("candidate"),
-                    tool_outcome(call.clone(), None),
+                    tool_outcome(call.clone()),
                     finish("answer"),
                 ],
                 Some(ApprovalMode::Auto),
@@ -776,9 +777,9 @@ async fn hook_stop_unguarded_rerun_uses_a_bounded_continuation_and_human_approva
             .await;
         assert_eq!(seen.prompts.len(), 1);
         assert_eq!(seen.intents[0].call, call);
-        assert_eq!(seen.calls.len(), if allow { 4 } else { 3 });
+        assert_eq!(seen.calls.len(), if allow { 5 } else { 4 });
         assert!(
-            seen.calls[2].input.stop_hook_feedback[0]
+            seen.calls[3].input.stop_hook_feedback[0]
                 .text
                 .contains("command_unguarded")
         );
@@ -824,16 +825,14 @@ async fn child_hook_unguarded_rerun_is_refused_without_explicit_inheritance() {
                             profile: None,
                         }],
                     }),
-                    tool_outcome(
-                        ToolCall::Read {
-                            path: "notes/input".into(),
-                            offset: 0,
-                            limit: 64,
-                        },
-                        None,
-                    ),
+                    tool_outcome(ToolCall::Read {
+                        path: "notes/input".into(),
+                        offset: 0,
+                        limit: 64,
+                    }),
                     finish("fact"),
-                    tool_outcome(call.clone(), Some(Box::new(plan(&call)))),
+                    arany::test_support::scenario::plan_outcome(plan(&call)),
+                    tool_outcome(call.clone()),
                     finish("answer"),
                 ],
                 Some(ApprovalMode::Auto),
@@ -857,7 +856,7 @@ async fn child_hook_unguarded_rerun_is_refused_without_explicit_inheritance() {
             })
         );
         let primary_catalog: Value =
-            serde_json::from_str(&seen.calls[3].input.tools.as_ref().unwrap().catalog).unwrap();
+            serde_json::from_str(&seen.calls[4].input.tools.as_ref().unwrap().catalog).unwrap();
         assert_eq!(primary_catalog.get("hook_reruns").is_some(), explicit);
         let session = seen.outcome.session_id;
         let (_, view) = host.reopen(session).await;

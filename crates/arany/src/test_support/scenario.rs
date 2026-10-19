@@ -17,15 +17,18 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 /// A scripted one-request Tool step; the id only has to be unique within its step.
-pub fn tool_outcome(
-    call: crate::ToolCall,
-    plan_contract: Option<Box<crate::GoalPlanContract>>,
-) -> crate::ProviderOutcome {
+pub fn tool_outcome(call: crate::ToolCall) -> crate::ProviderOutcome {
     crate::ProviderOutcome::Tools(vec![crate::ToolRequest {
         id: crate::ToolUseId::new("call_1").expect("scripted Tool id"),
         call,
-        plan_contract,
     }])
+}
+
+pub fn plan_outcome(contract: crate::GoalPlanContract) -> crate::ProviderOutcome {
+    crate::ProviderOutcome::Plan(Box::new(crate::PlanRequest {
+        id: crate::ToolUseId::new("plan_1").expect("scripted plan id"),
+        contract,
+    }))
 }
 
 pub struct ScriptedProvider {

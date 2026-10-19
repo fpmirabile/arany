@@ -808,14 +808,11 @@ async fn load_replays_tool_results_and_interrupted_intents_without_execution() {
     std::fs::set_permissions(&tools_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let provider = Arc::new(
         ScriptedProvider::new(vec![
-            arany::test_support::scenario::tool_outcome(
-                arany::ToolCall::Read {
-                    path: "facts.txt".into(),
-                    offset: 0,
-                    limit: 32,
-                },
-                None,
-            ),
+            arany::test_support::scenario::tool_outcome(arany::ToolCall::Read {
+                path: "facts.txt".into(),
+                offset: 0,
+                limit: 32,
+            }),
             arany::ProviderOutcome::Finish(arany::Finish {
                 summary: "Answer".into(),
                 result: "Fact".into(),
@@ -1949,14 +1946,11 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
                     result: "Answer".into(),
                 })
             } else {
-                tool_outcome(
-                    arany::ToolCall::Read {
-                        path: "facts.txt".into(),
-                        offset: 0,
-                        limit: 32,
-                    },
-                    None,
-                )
+                tool_outcome(arany::ToolCall::Read {
+                    path: "facts.txt".into(),
+                    offset: 0,
+                    limit: 32,
+                })
             }])
             .with_profile("openai", "gpt-5.4")
             .with_reported_usage(arany::Usage {
@@ -2758,34 +2752,11 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
         expected_digest: None,
         content: "Next".into(),
     };
-    let plan = write.then(|| {
-        Box::new(arany::GoalPlanContract {
-            mission: "Write the selected note".into(),
-            paths: if live_edits {
-                vec!["new.txt".into(), "next.txt".into()]
-            } else {
-                vec!["new.txt".into()]
-            },
-            commands: vec![],
-            resource_class: arany::ToolResourceClass::Default,
-            command_timeout_ms: None,
-            skills: vec![],
-            mcp_tools: vec![],
-            success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
-                call: Box::new(if live_edits {
-                    second.clone()
-                } else {
-                    call.clone()
-                }),
-            },
-            budget: arany::GoalBudget::default(),
-        })
-    });
-    let mut outcomes = vec![tool_outcome(call, plan)];
+    let mut outcomes = vec![tool_outcome(call)];
     if case == PermissionCase::ModeSwitch {
         outcomes.push(outcomes[0].clone());
     } else if live_edits {
-        outcomes.push(tool_outcome(second, None));
+        outcomes.push(tool_outcome(second));
     }
     if allow {
         outcomes.push(arany::ProviderOutcome::Finish(arany::Finish {

@@ -28,14 +28,10 @@ fn account_path_uses_the_private_binary_fixture() {
     }
 }
 
-fn tool_outcome(
-    call: arany::ToolCall,
-    plan_contract: Option<Box<arany::GoalPlanContract>>,
-) -> arany::ProviderOutcome {
+fn tool_outcome(call: arany::ToolCall) -> arany::ProviderOutcome {
     arany::ProviderOutcome::Tools(vec![arany::ToolRequest {
         id: arany::ToolUseId::new("call_1").expect("scripted Tool id"),
         call,
-        plan_contract,
     }])
 }
 

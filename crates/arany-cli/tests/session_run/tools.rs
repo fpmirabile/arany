@@ -26,35 +26,6 @@ fn assert_seed_retired(id: uuid::Uuid) {
     }
 }
 
-fn journey_plan_contract() -> arany::GoalPlanContract {
-    arany::GoalPlanContract {
-        mission: "Update and verify the synthetic Workspace files".into(),
-        paths: vec!["src".into()],
-        commands: vec!["bash".into()],
-        resource_class: arany::ToolResourceClass::Default,
-        command_timeout_ms: None,
-        skills: vec![
-            arany::GoalSkillBinding {
-                name: "synthetic".into(),
-                resource: None,
-            },
-            arany::GoalSkillBinding {
-                name: "synthetic".into(),
-                resource: Some("references/note.txt".into()),
-            },
-        ],
-        mcp_tools: vec![arany::GoalMcpTool {
-            server: "synthetic".into(),
-            tool: "echo".into(),
-        }],
-        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-            path: "src/main.c".into(),
-            content: "int main(void) { return 0; }\n".into(),
-        },
-        budget: arany::GoalBudget::default(),
-    }
-}
-
 fn proposal_plan_contract(call: &ToolCall) -> Option<arany::GoalPlanContract> {
     match call {
         ToolCall::McpList { .. } => None,
@@ -202,10 +173,7 @@ impl Provider for Journey {
         requests.push(request);
         Ok(ProviderResponse {
             turn: arany::ProviderTurn::scripted(),
-            outcome: crate::tool_outcome(
-                call,
-                (step == 0).then(|| Box::new(journey_plan_contract())),
-            ),
+            outcome: crate::tool_outcome(call),
             response_id: None,
             usage: arany::Usage {
                 input_tokens: None,
@@ -534,23 +502,36 @@ impl Provider for Proposal {
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let mut requests = self.requests.lock().unwrap();
-        let request_index = requests.len();
+        let planned = request.input.goal_plan_contract.is_some()
+            || request
+                .input
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()));
+        let request_index = requests.len().saturating_sub(usize::from(planned));
+        if !planned
+            && !self.omit_plan
+            && request_index == usize::from(self.inspect_first && !self.plan_on_inspection)
+            && let Some(contract) = proposal_plan_contract(&self.call)
+        {
+            requests.push(request);
+            return Ok(ProviderResponse {
+                turn: arany::ProviderTurn::scripted(),
+                outcome: arany::test_support::scenario::plan_outcome(contract),
+                response_id: None,
+                usage: arany::Usage::default(),
+                wire_provenance: None,
+            });
+        }
         if self.inspect_first && request_index == 0 {
             requests.push(request);
             return Ok(ProviderResponse {
                 turn: arany::ProviderTurn::scripted(),
-                outcome: crate::tool_outcome(
-                    ToolCall::Read {
-                        path: "src/current.txt".into(),
-                        offset: 0,
-                        limit: 64,
-                    },
-                    if self.plan_on_inspection {
-                        proposal_plan_contract(&self.call).map(Box::new)
-                    } else {
-                        None
-                    },
-                ),
+                outcome: crate::tool_outcome(ToolCall::Read {
+                    path: "src/current.txt".into(),
+                    offset: 0,
+                    limit: 64,
+                }),
                 response_id: None,
                 usage: arany::Usage {
                     input_tokens: None,
@@ -562,28 +543,18 @@ impl Provider for Proposal {
         }
         let step = request_index.saturating_sub(if self.inspect_first { 1 } else { 0 });
         let outcome = match (step, &self.call) {
-            (0, call) => crate::tool_outcome(
-                call.clone(),
-                if self.omit_plan || self.plan_on_inspection {
-                    None
-                } else {
-                    proposal_plan_contract(call).map(Box::new)
-                },
-            ),
+            (0, call) => crate::tool_outcome(call.clone()),
             (1, ToolCall::McpList { .. } | ToolCall::McpCall { .. }) | (2, _) => {
                 ProviderOutcome::Finish(Finish {
                     summary: "Observed result".into(),
                     result: "Observed the Tool result without retrying.".into(),
                 })
             }
-            (1, _) => crate::tool_outcome(
-                ToolCall::Read {
-                    path: "src/current.txt".into(),
-                    offset: 0,
-                    limit: 64,
-                },
-                None,
-            ),
+            (1, _) => crate::tool_outcome(ToolCall::Read {
+                path: "src/current.txt".into(),
+                offset: 0,
+                limit: 64,
+            }),
             _ => return Err(ProviderError::InvalidOutcome),
         };
         requests.push(request);
@@ -647,29 +618,19 @@ impl Provider for OverTimeoutCommand {
             requests.push(request);
             step
         };
-        let outcome = if step == 0 {
+        let outcome = if step <= 1 {
             let call = ToolCall::Command {
                 program: "bash".into(),
                 args: vec!["-c".into(), "touch src/not-dispatched".into()],
                 cwd: "".into(),
             };
-            crate::tool_outcome(
-                call.clone(),
-                Some(Box::new(arany::GoalPlanContract {
-                    mission: "Run the bounded command only within the saved limit".into(),
-                    paths: vec!["src".into()],
-                    commands: vec!["bash".into()],
-                    resource_class: arany::ToolResourceClass::Default,
-                    command_timeout_ms: Some(2_000),
-                    skills: Vec::new(),
-                    mcp_tools: Vec::new(),
-                    success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                        path: "src/current.txt".into(),
-                        content: "current".into(),
-                    },
-                    budget: arany::GoalBudget::default(),
-                })),
-            )
+            if step == 0 {
+                let mut contract = proposal_plan_contract(&call).unwrap();
+                contract.command_timeout_ms = Some(2_000);
+                arany::test_support::scenario::plan_outcome(contract)
+            } else {
+                crate::tool_outcome(call)
+            }
         } else {
             ProviderOutcome::Finish(arany::Finish {
                 summary: "The requested command exceeded the pinned timeout".into(),
@@ -749,7 +710,7 @@ async fn over_max_command_is_closed_as_a_non_dispatched_limit() {
             .contains("Lower request or change /settings")
     );
     assert!(!workspace.join("src/not-dispatched").exists());
-    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert_eq!(requests.lock().unwrap().len(), 3);
 
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();
@@ -818,22 +779,16 @@ impl Provider for InProcessReads {
                 summary: "Inspected the Workspace".into(),
                 result: "Read, listed and searched in process.".into(),
             }),
-            0 => crate::tool_outcome(
-                ToolCall::Read {
-                    path: "src/main.c".into(),
-                    offset: 0,
-                    limit: 65536,
-                },
-                None,
-            ),
-            1 => crate::tool_outcome(ToolCall::List { path: "src".into() }, None),
-            _ => crate::tool_outcome(
-                ToolCall::Search {
-                    path: "src".into(),
-                    query: "main".into(),
-                },
-                None,
-            ),
+            0 => crate::tool_outcome(ToolCall::Read {
+                path: "src/main.c".into(),
+                offset: 0,
+                limit: 65536,
+            }),
+            1 => crate::tool_outcome(ToolCall::List { path: "src".into() }),
+            _ => crate::tool_outcome(ToolCall::Search {
+                path: "src".into(),
+                query: "main".into(),
+            }),
         };
         Ok(ProviderResponse {
             turn: arany::ProviderTurn::scripted(),
@@ -974,31 +929,12 @@ impl arany::Provider for ExactTokenTool {
         self.requests.lock().unwrap().push(request);
         Ok(arany::ProviderResponse {
             turn: arany::ProviderTurn::scripted(),
-            outcome: crate::tool_outcome(
-                ToolCall::Edit {
-                    path: "src/current.txt".into(),
-                    expected_digest: hash(b"current"),
-                    old: "current".into(),
-                    new: "after".into(),
-                },
-                Some(Box::new(arany::GoalPlanContract {
-                    mission: "Change the exact selected file".into(),
-                    paths: vec!["src".into()],
-                    commands: Vec::new(),
-                    resource_class: arany::ToolResourceClass::Default,
-                    command_timeout_ms: None,
-                    skills: Vec::new(),
-                    mcp_tools: Vec::new(),
-                    success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                        path: "src/current.txt".into(),
-                        content: "after".into(),
-                    },
-                    budget: arany::GoalBudget {
-                        max_tokens: Some(8),
-                        ..arany::GoalBudget::default()
-                    },
-                })),
-            ),
+            outcome: crate::tool_outcome(ToolCall::Edit {
+                path: "src/current.txt".into(),
+                expected_digest: hash(b"current"),
+                old: "current".into(),
+                new: "after".into(),
+            }),
             response_id: None,
             usage: arany::Usage {
                 input_tokens: Some(0),
@@ -1422,7 +1358,14 @@ async fn mcp_stdio_corpus_rejects_unnegotiated_authority_and_hostile_results() {
 }
 
 fn assert_proposal_requests(requests: &[ProviderRequest], count: usize) {
-    assert_eq!(requests.len(), count);
+    let planned = requests.iter().any(|request| {
+        request
+            .input
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()))
+    });
+    assert_eq!(requests.len(), count + usize::from(planned));
     for (index, request) in requests.iter().enumerate() {
         assert_eq!(request.phase, AgentPhase::RootPlan);
         assert_eq!(request.model, "guard-model");
@@ -1437,7 +1380,16 @@ fn assert_proposal_requests(requests: &[ProviderRequest], count: usize) {
         );
         assert_eq!(request.max_output_tokens, 4096);
         let observations = request.input.tools.as_ref().unwrap().observations().len();
-        assert_eq!(observations, index);
+        let plans = request
+            .input
+            .tools
+            .as_ref()
+            .unwrap()
+            .steps
+            .iter()
+            .filter(|step| step.plan.is_some())
+            .count();
+        assert_eq!(observations, index - plans);
     }
 }
 
@@ -1446,22 +1398,6 @@ struct BoundedLoop {
     team: bool,
 }
 
-fn bounded_loop_plan() -> arany::GoalPlanContract {
-    arany::GoalPlanContract {
-        mission: "Append the stated line after verifying the file".into(),
-        paths: vec!["src".into()],
-        commands: Vec::new(),
-        resource_class: arany::ToolResourceClass::Default,
-        command_timeout_ms: None,
-        skills: Vec::new(),
-        mcp_tools: Vec::new(),
-        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-            path: "src/current.txt".into(),
-            content: "current\n2026-10-06\n".into(),
-        },
-        budget: arany::GoalBudget::default(),
-    }
-}
 #[async_trait::async_trait]
 impl Provider for BoundedLoop {
     fn identity(&self) -> &arany::ProviderIdentity {
@@ -1488,15 +1424,12 @@ impl Provider for BoundedLoop {
                     summary: "Child reasoning".into(),
                     result: "Read-only child result".into(),
                 }),
-                2 => crate::tool_outcome(
-                    ToolCall::Edit {
-                        path: "src/current.txt".into(),
-                        expected_digest: hash(b"current"),
-                        old: "current".into(),
-                        new: "current\n2026-10-06\n".into(),
-                    },
-                    Some(Box::new(bounded_loop_plan())),
-                ),
+                2 => crate::tool_outcome(ToolCall::Edit {
+                    path: "src/current.txt".into(),
+                    expected_digest: hash(b"current"),
+                    old: "current".into(),
+                    new: "current\n2026-10-06\n".into(),
+                }),
                 3 => {
                     assert_eq!(
                         request
@@ -1519,30 +1452,11 @@ impl Provider for BoundedLoop {
                 _ => return Err(ProviderError::InvalidOutcome),
             }
         } else {
-            crate::tool_outcome(
-                ToolCall::Read {
-                    path: "src/unselected.txt".into(),
-                    offset: 0,
-                    limit: 1,
-                },
-                (requests.is_empty()).then(|| {
-                    Box::new(arany::GoalPlanContract {
-                        mission: "Verify the requested Workspace file without following links"
-                            .into(),
-                        paths: vec!["src".into()],
-                        commands: Vec::new(),
-                        resource_class: arany::ToolResourceClass::Default,
-                        command_timeout_ms: None,
-                        skills: Vec::new(),
-                        mcp_tools: Vec::new(),
-                        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                            path: "src/current.txt".into(),
-                            content: "current".into(),
-                        },
-                        budget: arany::GoalBudget::default(),
-                    })
-                }),
-            )
+            crate::tool_outcome(ToolCall::Read {
+                path: "src/unselected.txt".into(),
+                offset: 0,
+                limit: 1,
+            })
         };
         requests.push(request);
         Ok(ProviderResponse {
@@ -1950,9 +1864,9 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
             ToolCall::Write {
                 path: "src/unplanned.txt".into(),
                 expected_digest: None,
-                content: "must not be written".into(),
+                content: "written without a plan".into(),
             },
-            ToolDisposition::Denied,
+            ToolDisposition::Succeeded,
         ),
         (
             "parent",
@@ -2045,16 +1959,8 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         .expect("path-case parent deadline")
         .unwrap();
         engine.close().await.unwrap();
-        let rejected_by_plan = matches!(name, "scope" | "unplanned");
-        assert_eq!(
-            outcome.run.status,
-            if rejected_by_plan {
-                RunStatus::Failed
-            } else {
-                RunStatus::Finished
-            },
-            "case {name}"
-        );
+        let rejected_by_plan = name == "scope";
+        assert_eq!(outcome.run.status, RunStatus::Finished, "case {name}");
         for tool in &outcome.run.tools {
             if matches!(tool.intent.call, ToolCall::Read { .. }) {
                 assert_eq!(tool.intent.limits.runtime_ms, 60_000, "case {name}");
@@ -2062,15 +1968,15 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
         }
         assert_proposal_requests(
             &requests.lock().unwrap(),
-            if rejected_by_plan {
-                2
+            if matches!(name, "scope" | "unplanned" | "long-mkdir") {
+                4
             } else {
-                if name == "long-mkdir" { 4 } else { 3 }
+                3
             },
         );
         if rejected_by_plan {
             assert!(
-                outcome.run.tools.len() == 1
+                outcome.run.tools.len() == 2
                     && matches!(outcome.run.tools[0].intent.call, ToolCall::Read { .. })
                     && outcome.run.tools[0]
                         .observation
@@ -2081,9 +1987,12 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
                 "out-of-plan call is never dispatched"
             );
             assert!(!workspace.join("unselected.txt").exists());
-            assert!(!workspace.join("src/unplanned.txt").exists());
         } else {
-            let tool_index = if name == "long-mkdir" { 1 } else { 0 };
+            let tool_index = if matches!(name, "long-mkdir" | "unplanned") {
+                1
+            } else {
+                0
+            };
             let observation = outcome.run.tools[tool_index].observation.as_ref().unwrap();
             assert_eq!(observation.disposition, expected, "case {name}");
             if name.starts_with("root-search-") {
@@ -2744,26 +2653,10 @@ impl Provider for ApprovalJourney {
         if review && self.review == "error" {
             return Err(ProviderError::InvalidOutcome);
         }
-        let plan_contract = arany::GoalPlanContract {
-            mission: "Perform the exact approved Tool action".into(),
-            paths: vec![".".into()],
-            commands: match &self.call {
-                ToolCall::Command { program, .. } => vec![program.clone()],
-                _ => Vec::new(),
-            },
-            resource_class: arany::ToolResourceClass::Default,
-            command_timeout_ms: None,
-            skills: Vec::new(),
-            mcp_tools: Vec::new(),
-            success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
-                call: Box::new(self.call.clone()),
-            },
-            budget: arany::GoalBudget::default(),
-        };
         Ok(ProviderResponse {
             turn: arany::ProviderTurn::scripted(),
             outcome: if first {
-                crate::tool_outcome(self.call.clone(), Some(Box::new(plan_contract)))
+                crate::tool_outcome(self.call.clone())
             } else {
                 ProviderOutcome::Finish(Finish {
                     summary: "Synthetic decision".into(),
@@ -3055,32 +2948,23 @@ impl Provider for GitJourney {
         let step = requests.len();
         requests.push(request);
         let outcome = match step {
-            0 => crate::tool_outcome(ToolCall::GitStatus { path: ".".into() }, None),
-            1 => crate::tool_outcome(
-                ToolCall::GitDiff {
-                    path: "src".into(),
-                    base: None,
-                    head: None,
-                    staged: false,
-                },
-                None,
-            ),
-            2 => crate::tool_outcome(
-                ToolCall::GitLog {
-                    path: ".".into(),
-                    revision: None,
-                    max_count: 5,
-                },
-                None,
-            ),
-            3 => crate::tool_outcome(
-                ToolCall::GitLog {
-                    path: ".".into(),
-                    revision: Some("missing-branch".into()),
-                    max_count: 1,
-                },
-                None,
-            ),
+            0 => crate::tool_outcome(ToolCall::GitStatus { path: ".".into() }),
+            1 => crate::tool_outcome(ToolCall::GitDiff {
+                path: "src".into(),
+                base: None,
+                head: None,
+                staged: false,
+            }),
+            2 => crate::tool_outcome(ToolCall::GitLog {
+                path: ".".into(),
+                revision: None,
+                max_count: 5,
+            }),
+            3 => crate::tool_outcome(ToolCall::GitLog {
+                path: ".".into(),
+                revision: Some("missing-branch".into()),
+                max_count: 1,
+            }),
             4 => ProviderOutcome::Finish(Finish {
                 summary: "Inspected".into(),
                 result: "Git state observed".into(),

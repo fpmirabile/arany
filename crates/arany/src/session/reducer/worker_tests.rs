@@ -152,6 +152,7 @@ impl Fixture {
                     ProviderCallDisposition::Finished
                         | ProviderCallDisposition::Delegated
                         | ProviderCallDisposition::ToolRequested
+                        | ProviderCallDisposition::PlanRecorded
                 )
                 .then_some(0),
                 output_tokens: matches!(
@@ -159,6 +160,7 @@ impl Fixture {
                     ProviderCallDisposition::Finished
                         | ProviderCallDisposition::Delegated
                         | ProviderCallDisposition::ToolRequested
+                        | ProviderCallDisposition::PlanRecorded
                 )
                 .then_some(0),
                 cache_read_input_tokens: None,
@@ -662,7 +664,7 @@ fn fixture_with_manifest(
     f.call(
         primary,
         AgentPhase::RootPlan,
-        ProviderCallDisposition::ToolRequested,
+        ProviderCallDisposition::PlanRecorded,
         None,
     );
     let contract = GoalPlanContract {
@@ -684,6 +686,12 @@ fn fixture_with_manifest(
         run_id: run,
         contract: contract.clone(),
     });
+    f.call(
+        primary,
+        AgentPhase::RootPlan,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
     let read = f.intent(
         primary,
         ToolCall::Read {
@@ -1509,7 +1517,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
     let expected = [
         ("RunStarted", 16),
         ("AgentSpawned", 11),
-        ("ProviderCallRecorded", 10),
+        ("ProviderCallRecorded", 11),
         ("AgentFinished", 10),
         ("ToolStarted", 12),
         ("ToolFinished", 16),

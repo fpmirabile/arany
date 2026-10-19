@@ -1,5 +1,5 @@
 use super::PromptRole;
-use crate::tools::catalog::{by_name, catalog_call_schemas, facts_of, plan_contract_property};
+use crate::tools::catalog::{by_name, catalog_call_schemas, facts_of, plan_schema};
 use serde_json::Value;
 
 pub(crate) const NAME_PREFIX: &str = "arany_";
@@ -24,23 +24,17 @@ pub(crate) fn specs(catalog: &Value, role: PromptRole) -> Vec<ToolSpec> {
             facts_of(call).is_some_and(|facts| facts.family == crate::tools::catalog::Family::File)
         });
     }
-    let contract = (role == PromptRole::Primary).then(|| plan_contract_property(&calls));
-    calls
+    let plan = (role == PromptRole::Primary).then(|| ToolSpec {
+        name: name_of("plan"),
+        description: "Optionally record a bounded Goal plan and exact success criterion. A recorded plan only narrows scope and cannot be replaced.",
+        parameters: plan_schema(&calls),
+    });
+    let mut specs: Vec<_> = calls
         .into_iter()
-        .map(|mut call| {
-            if let Some(contract) = &contract {
-                call["properties"]
-                    .as_object_mut()
-                    .expect("typed Tool schema")
-                    .insert("plan_contract".into(), contract.clone());
-                call["required"]
-                    .as_array_mut()
-                    .expect("typed Tool required fields")
-                    .push("plan_contract".into());
-            }
-            spec(call, "operation")
-        })
-        .collect()
+        .map(|call| spec(call, "operation"))
+        .collect();
+    specs.extend(plan);
+    specs
 }
 
 pub(crate) fn outcome_specs(outcome: &Value) -> Vec<ToolSpec> {
@@ -120,7 +114,8 @@ mod tests {
                 "arany_edit",
                 "arany_command",
                 "arany_mcp_call",
-                "arany_command_unguarded"
+                "arany_command_unguarded",
+                "arany_plan"
             ]
         );
         assert!(primary.iter().all(|spec| !spec.description.is_empty()
@@ -129,36 +124,23 @@ mod tests {
     }
 
     #[test]
-    fn primary_tools_carry_a_required_nullable_plan_contract() {
-        for spec in specs(&catalog(), PromptRole::Primary) {
-            let required = spec.parameters["required"].as_array().unwrap();
-            assert!(required.contains(&json!("plan_contract")), "{}", spec.name);
-            let contract = &spec.parameters["properties"]["plan_contract"]["anyOf"];
-            assert_eq!(contract[1], json!({"type": "null"}), "{}", spec.name);
-            assert_eq!(
-                contract[0]["properties"]["skills"]["items"]["required"],
-                json!(["name", "resource"])
-            );
+    fn only_the_optional_plan_function_carries_the_contract() {
+        let primary = specs(&catalog(), PromptRole::Primary);
+        for spec in &primary {
+            assert!(spec.parameters["properties"].get("plan_contract").is_none());
         }
-        let criterion = &specs(&catalog(), PromptRole::Primary)[0].parameters["properties"]["plan_contract"]
-            ["anyOf"][0]["properties"]["success_criterion"]["anyOf"][0]["properties"]["call"]["anyOf"];
-        let eligible: Vec<_> = criterion
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|call| call["properties"]["operation"]["enum"][0].as_str().unwrap())
-            .collect();
+        let plan = primary.iter().find(|s| s.name == "arany_plan").unwrap();
         assert_eq!(
-            eligible,
-            [
-                "skill",
-                "mkdir",
-                "write",
-                "edit",
-                "command",
-                "mcp_call",
-                "command_unguarded"
-            ]
+            plan.parameters["properties"]["skills"]["items"]["required"],
+            json!(["name", "resource"])
+        );
+        assert!(
+            jsonschema::validator_for(&plan.parameters)
+                .unwrap()
+                .is_valid(
+                    &serde_json::to_value(crate::provider::test_support::goal_plan_contract())
+                        .unwrap()
+                )
         );
     }
 
@@ -167,7 +149,7 @@ mod tests {
         let read_only = json!({"write": false, "commands": [], "skills": [], "mcp_servers": [], "git": "unavailable"});
         assert_eq!(
             names(&specs(&read_only, PromptRole::Primary)),
-            ["arany_list", "arany_read", "arany_search"]
+            ["arany_list", "arany_read", "arany_search", "arany_plan"]
         );
         let primary = specs(&catalog(), PromptRole::Primary);
         let command = primary

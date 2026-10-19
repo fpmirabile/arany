@@ -994,6 +994,7 @@ impl From<ProviderCallDisposition> for ProviderTraceOutcome {
         match disposition {
             ProviderCallDisposition::Finished
             | ProviderCallDisposition::Delegated
+            | ProviderCallDisposition::PlanRecorded
             | ProviderCallDisposition::ToolRequested => Self::Finished,
             ProviderCallDisposition::Unavailable => Self::Failed(TraceFailure::Unavailable),
             ProviderCallDisposition::Rejected => Self::Failed(TraceFailure::Rejected),

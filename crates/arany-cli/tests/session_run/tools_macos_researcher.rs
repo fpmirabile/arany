@@ -235,12 +235,7 @@ done
                     profile: None,
                 }],
             })];
-            outcomes.extend(
-                calls
-                    .iter()
-                    .cloned()
-                    .map(|call| crate::tool_outcome(call, None)),
-            );
+            outcomes.extend(calls.iter().cloned().map(|call| crate::tool_outcome(call)));
             outcomes.extend(
                 ["Native research report", "Synthesized native facts"].map(|result| {
                     ProviderOutcome::Finish(Finish {

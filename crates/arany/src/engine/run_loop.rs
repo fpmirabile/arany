@@ -427,29 +427,6 @@ impl<'a> RunLoop<'a> {
         requested
     }
 
-    pub(super) async fn admit_plan_contract(
-        &self,
-        contract: crate::session::GoalPlanContract,
-    ) -> Result<bool, EngineError> {
-        if !self.ledger().can_narrow(&contract) {
-            return Ok(false);
-        }
-        self.journal
-            .admit(
-                self.session_id,
-                Action::Tool.remaining(0, &self.routing.providers),
-                Action::Tool.tool_observations(),
-            )
-            .await?;
-        self.append(Event::GoalPlanContractRecorded {
-            goal_id: self.goal()?,
-            run_id: self.run_id,
-            contract,
-        })
-        .await?;
-        Ok(true)
-    }
-
     pub(super) async fn execute(
         &self,
         mut root_request: ProviderRequest,
@@ -496,34 +473,7 @@ impl<'a> RunLoop<'a> {
                 }
                 Err(error) => return Err(error),
             };
-            let (validation, budget_admits) = match &first {
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Finish(finish),
-                    ..
-                }) => (self.well_formed_finish(finish, planning), true),
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Delegate(delegation),
-                    ..
-                }) => (
-                    if !planning && !self.wave_settled()? {
-                        Err(ProposalRefusalCause::Phase)
-                    } else {
-                        self.well_formed_delegation(
-                            &delegation.children,
-                            delegation.agent.as_deref(),
-                        )
-                    },
-                    self.ledger().can_start_provider_call(),
-                ),
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Tools(requests),
-                    ..
-                }) => (
-                    self.well_formed_primary_tools(requests)?,
-                    self.ledger().admits(Action::Tool),
-                ),
-                _ => (Ok(()), true),
-            };
+            let (validation, budget_admits) = self.validate_primary_outcome(&first, planning)?;
             let refusal = validation
                 .err()
                 .and_then(|cause| proposal_refusal(&first, cause));
@@ -561,6 +511,19 @@ impl<'a> RunLoop<'a> {
                 continue;
             }
             match first {
+                CallResult::Response(ProviderResponse {
+                    outcome: ProviderOutcome::Plan(plan),
+                    turn,
+                    ..
+                }) if valid_response => {
+                    match self.record_plan_step(root_request, *plan, turn).await {
+                        Ok(()) => continue,
+                        Err(EngineError::ContextTooLarge) => {
+                            break Exit::Failed(RunFailure::ToolContextFull);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
                     turn,
@@ -623,6 +586,42 @@ impl<'a> RunLoop<'a> {
             Exit::Budget => self.fail_for_budget().await,
             Exit::Settled => Ok(()),
         }
+    }
+
+    fn validate_primary_outcome(
+        &self,
+        first: &CallResult,
+        planning: bool,
+    ) -> Result<(Result<(), ProposalRefusalCause>, bool), EngineError> {
+        Ok(match first {
+            CallResult::Response(ProviderResponse {
+                outcome: ProviderOutcome::Finish(finish),
+                ..
+            }) => (self.well_formed_finish(finish, planning), true),
+            CallResult::Response(ProviderResponse {
+                outcome: ProviderOutcome::Delegate(delegation),
+                ..
+            }) => (
+                if !planning && !self.wave_settled()? {
+                    Err(ProposalRefusalCause::Phase)
+                } else {
+                    self.well_formed_delegation(&delegation.children, delegation.agent.as_deref())
+                },
+                self.ledger().can_start_provider_call(),
+            ),
+            CallResult::Response(ProviderResponse {
+                outcome: ProviderOutcome::Tools(requests),
+                ..
+            }) => (
+                self.well_formed_primary_tools(requests)?,
+                self.ledger().admits(Action::Tool),
+            ),
+            CallResult::Response(ProviderResponse {
+                outcome: ProviderOutcome::Plan(plan),
+                ..
+            }) => (self.check_plan(plan)?, true),
+            _ => (Ok(()), true),
+        })
     }
 
     fn primary_tools<'b>(
@@ -987,22 +986,15 @@ impl<'a> RunLoop<'a> {
         let [request] = requests else {
             return Ok(Err(ProposalRefusalCause::InvalidArguments));
         };
-        let existing = self.ledger().plan_contract()?;
-        let budget = self.ledger().effective_budget()?;
-        Ok(self.check_tool(&request.call, &request.plan_contract, existing, &budget))
+        Ok(self.check_tool(&request.call, self.ledger().plan_contract()?.as_ref()))
     }
 
     fn check_tool(
         &self,
         call: &crate::tools::ToolCall,
-        plan_contract: &Option<Box<crate::session::GoalPlanContract>>,
-        existing: Option<crate::session::GoalPlanContract>,
-        budget: &crate::session::GoalBudget,
+        contract: Option<&crate::session::GoalPlanContract>,
     ) -> Result<(), ProposalRefusalCause> {
-        use ProposalRefusalCause::{
-            ArgumentBytes, InvalidArguments, NotOffered, Phase, PlanBudgetOutsideGoal,
-            PlanBudgetSpent, PlanInvalid, PlanMissing, PlanOutsideGrant, PlanScopeExcludesCall,
-        };
+        use ProposalRefusalCause::*;
         if self.controls.tools.is_none()
             || matches!(
                 call,
@@ -1024,31 +1016,7 @@ impl<'a> RunLoop<'a> {
         if self.controls.goal_phase != GoalPhase::Implementation && !call.is_goal_plan_prelude() {
             return Err(Phase);
         }
-        // Restating the recorded contract is a no-op; only a different one is a widening attempt.
-        let plan_contract = if existing.as_ref() == plan_contract.as_deref() {
-            &None
-        } else {
-            plan_contract
-        };
-        if plan_contract.as_ref().is_some_and(|contract| {
-            !serde_json::to_vec(&(call, contract))
-                .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
-        }) {
-            return Err(ArgumentBytes);
-        }
-        if existing.is_some() && plan_contract.is_some() {
-            return Err(PlanInvalid);
-        }
-        let contract = existing.as_ref().or(plan_contract.as_deref());
         if let Some(contract) = contract {
-            if existing.is_none() {
-                if !contract.budget.is_within(budget) {
-                    return Err(PlanBudgetOutsideGoal);
-                }
-                if contract.validate().is_err() {
-                    return Err(PlanInvalid);
-                }
-            }
             if !contract.allows_call(call) {
                 return Err(PlanScopeExcludesCall);
             }
@@ -1059,11 +1027,79 @@ impl<'a> RunLoop<'a> {
             {
                 return Err(PlanOutsideGrant);
             }
-            if plan_contract.is_some() && !self.ledger().can_narrow(contract) {
-                return Err(PlanBudgetSpent);
-            }
-        } else if !call.is_goal_plan_prelude() {
-            return Err(PlanMissing);
+        }
+        Ok(())
+    }
+
+    fn check_plan(
+        &self,
+        plan: &crate::provider::PlanRequest,
+    ) -> Result<Result<(), ProposalRefusalCause>, EngineError> {
+        use ProposalRefusalCause::*;
+        let existing = self.ledger().plan_contract()?;
+        let budget = self.ledger().effective_budget()?;
+        let contract = &plan.contract;
+        let cause = if self.controls.tools.is_none() {
+            Some(NotOffered)
+        } else if !serde_json::to_vec(contract)
+            .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
+        {
+            Some(ArgumentBytes)
+        } else if existing.is_some() || contract.validate().is_err() {
+            Some(PlanInvalid)
+        } else if !contract.budget.is_within(&budget) {
+            Some(PlanBudgetOutsideGoal)
+        } else if !self
+            .controls
+            .tools
+            .is_some_and(|tools| tools.allows_goal_contract(contract))
+        {
+            Some(PlanOutsideGrant)
+        } else if !self.ledger().can_narrow(contract) {
+            Some(PlanBudgetSpent)
+        } else {
+            None
+        };
+        Ok(cause.map_or(Ok(()), Err))
+    }
+
+    async fn record_plan_step(
+        &self,
+        root: &mut ProviderRequest,
+        plan: crate::provider::PlanRequest,
+        turn: crate::provider::ProviderTurn,
+    ) -> Result<(), EngineError> {
+        self.append(Event::GoalPlanContractRecorded {
+            goal_id: self.goal()?,
+            run_id: self.run_id,
+            contract: plan.contract.clone(),
+        })
+        .await?;
+        let tools = root
+            .input
+            .tools
+            .as_mut()
+            .ok_or(EngineError::InvalidRequest)?;
+        tools.steps.push(crate::tools::ToolStep {
+            plan: Some(plan),
+            turn,
+            requests: Vec::new(),
+            observations: Vec::new(),
+            facts: None,
+            steering_notes: Vec::new(),
+            calls_remaining: None,
+            hook_feedback: Default::default(),
+        });
+        self.compact_tool_context_if_needed(root).await?;
+        if root.input.tools.as_ref().is_none_or(|tools| {
+            tools.rendered_len()
+                > self
+                    .controls
+                    .tools
+                    .expect("plan runtime")
+                    .context_limit_bytes()
+        }) {
+            return Err(EngineError::ContextTooLarge);
         }
         Ok(())
     }
@@ -1072,16 +1108,7 @@ impl<'a> RunLoop<'a> {
         &self,
         requests: Vec<crate::tools::ToolRequest>,
     ) -> Result<Option<crate::tools::ToolRequest>, EngineError> {
-        let Ok([mut request]) = <[_; 1]>::try_from(requests) else {
-            return Ok(None);
-        };
-        if let Some(contract) = request.plan_contract.take()
-            && self.ledger().plan_contract()?.as_ref() != Some(&*contract)
-            && !self.admit_plan_contract(*contract).await?
-        {
-            return Ok(None);
-        }
-        Ok(Some(request))
+        Ok(<[_; 1]>::try_from(requests).ok().map(|[request]| request))
     }
 
     async fn finish_primary(&self, finish: Finish) -> Result<(), EngineError> {
@@ -1360,6 +1387,7 @@ fn proposal_refusal(result: &CallResult, cause: ProposalRefusalCause) -> Option<
         return None;
     };
     let operation = match &response.outcome {
+        ProviderOutcome::Plan(_) => "arany_plan".to_owned(),
         ProviderOutcome::Finish(_) => "finish".to_owned(),
         ProviderOutcome::Delegate(_) => "delegate".to_owned(),
         ProviderOutcome::Tools(requests) => format!("arany_{}", requests.first()?.call.label()),
@@ -1387,6 +1415,10 @@ fn call_record(
             outcome: ProviderOutcome::Tools(_),
             ..
         }) if valid_response => ProviderCallDisposition::ToolRequested,
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Plan(_),
+            ..
+        }) if valid_response => ProviderCallDisposition::PlanRecorded,
         CallResult::Response(_) => ProviderCallDisposition::InvalidResponse,
         CallResult::Failed(failure) => match failure {
             CallFailure::Timeout => ProviderCallDisposition::TimedOut,

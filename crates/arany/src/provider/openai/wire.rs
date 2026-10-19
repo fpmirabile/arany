@@ -1,5 +1,5 @@
 use crate::provider::conversation::{Block, Conversation, Role};
-use crate::provider::decode::{function_outcome, structured_outcome, tool_request, tools_outcome};
+use crate::provider::decode::{function_outcome, structured_outcome, tool_function};
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, outcome_specs};
 use crate::provider::{
@@ -177,13 +177,15 @@ pub(crate) fn outcome_failure_diagnostic(
         let Ok(mut fields) = call.fields() else {
             return (Stage::OutcomeContract, None);
         };
+        if operation == "plan" {
+            return (Stage::OutcomeFields, None);
+        }
         if matches!(operation, "finish" | "delegate") {
             return match function_outcome(operation, fields) {
                 Err(_) => (Stage::OutcomeFields, None),
                 Ok(_) => (Stage::OutcomeContract, None),
             };
         }
-        fields.remove("plan_contract");
         fields.insert("operation".into(), json!(operation));
         return match serde_json::from_value::<crate::tools::ToolCall>(Value::Object(fields)) {
             Err(_) => (Stage::OutcomeFields, None),
@@ -628,10 +630,8 @@ impl FunctionCall {
         let fields = self.fields()?;
         match operation {
             "finish" | "delegate" => function_outcome(operation, fields),
-            _ => ToolUseId::new(self.call_id.clone()).and_then(|id| {
-                tool_request(id, operation, Value::Object(fields))
-                    .and_then(|request| tools_outcome(vec![request]))
-            }),
+            _ => ToolUseId::new(self.call_id.clone())
+                .and_then(|id| tool_function(id, operation, Value::Object(fields))),
         }
         .map_err(|_| ResponseError::Outcome)
     }

@@ -1023,22 +1023,6 @@ impl SessionView {
             )
             && !matches!(
                 &envelope.event,
-                Event::ToolStarted { intent, .. }
-                    if intent.call.is_goal_plan_prelude()
-            )
-            && !matches!(
-                &envelope.event,
-                Event::ToolFinished { observation, .. }
-                    if observation.intent.call.is_goal_plan_prelude()
-            )
-            && !matches!(
-                &envelope.event,
-                Event::ToolPermissionDecided { .. }
-                    | Event::HookStarted { .. }
-                    | Event::HookFinished { .. }
-            )
-            && !matches!(
-                &envelope.event,
                 Event::GoalResumed { goal_id } if *goal_id == awaiting
             )
             && !matches!(

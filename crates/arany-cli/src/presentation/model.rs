@@ -914,10 +914,6 @@ mod tests {
                 "Arany refused an operation unavailable in this phase. The proposed action did not run.",
             ),
             (
-                arany::ProposalRefusalCause::PlanMissing,
-                "Arany refused the operation because its required plan was missing. The proposed action did not run.",
-            ),
-            (
                 arany::ProposalRefusalCause::PlanInvalid,
                 "Arany refused an invalid or changed plan. The proposed action did not run.",
             ),

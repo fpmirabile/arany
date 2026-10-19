@@ -20,10 +20,10 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let run = RunId::new();
     let primary = AgentRunId::new();
     const AGENT_SPAWNED: usize = 5;
-    const TOOL_STARTED: usize = 9;
-    const TOOL_FINISHED: usize = 10;
-    const NEXT_CALL_RESERVED: usize = 11;
-    const NEXT_CALL_RECORDED: usize = 12;
+    const TOOL_STARTED: usize = 11;
+    const TOOL_FINISHED: usize = 12;
+    const NEXT_CALL_RESERVED: usize = 13;
+    const NEXT_CALL_RECORDED: usize = 14;
     const COMMAND_STARTED: usize = TOOL_STARTED;
     const COMMAND_FINISHED: usize = TOOL_STARTED + 1;
     const INTEGRATION_STARTED: usize = TOOL_STARTED + 2;
@@ -174,7 +174,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             agent_run_id: primary,
             active_ceiling_ms: 0,
         },
-        record(ProviderCallDisposition::ToolRequested),
+        record(ProviderCallDisposition::PlanRecorded),
         Event::GoalPlanContractRecorded {
             goal_id: goal,
             run_id: run,
@@ -193,6 +193,13 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 budget: arany::GoalBudget::default(),
             },
         },
+        Event::GoalProviderCallReserved {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: primary,
+            active_ceiling_ms: 0,
+        },
+        record(ProviderCallDisposition::ToolRequested),
         Event::ToolStarted {
             run_id: run,
             agent_run_id: primary,
@@ -392,7 +399,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let view = replay(reviewed.clone()).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Finished);
     assert_eq!(
-        view.runs[0].agents[0].provider_calls[1].input_tokens,
+        view.runs[0].agents[0].provider_calls[2].input_tokens,
         Some(3)
     );
     for case in 0..6 {
@@ -665,7 +672,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     let view = replay(integrated.clone()).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Finished);
     assert_eq!(view.runs[0].tools.len(), 2);
-    assert_eq!(view.runs[0].agents[0].provider_calls.len(), 2);
+    assert_eq!(view.runs[0].agents[0].provider_calls.len(), 3);
     let mut reviewed_integration = integrated.clone();
     reviewed_integration.splice(
         COMMAND_FINISHED..COMMAND_FINISHED,
@@ -693,7 +700,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     );
     let view = replay(reviewed_integration).unwrap().unwrap();
     assert_eq!(view.runs[0].status, RunStatus::Finished);
-    assert_eq!(view.runs[0].agents[0].provider_calls.len(), 4);
+    assert_eq!(view.runs[0].agents[0].provider_calls.len(), 5);
     let mut duplicate_review = integrated.clone();
     duplicate_review.splice(
         INTEGRATION_STARTED + 1..INTEGRATION_STARTED + 1,
@@ -1015,7 +1022,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     );
     for (count, accepted) in [(63, true), (64, false)] {
         let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
-        for call_index in 0..count {
+        for _ in 0..count {
             let mut start = prefix[TOOL_STARTED].clone();
             let Event::ToolStarted { intent, .. } = &mut start else {
                 unreachable!()
@@ -1040,9 +1047,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 },
                 record(ProviderCallDisposition::ToolRequested),
             ]);
-            if call_index == 0 {
-                rows.push(prefix[TOOL_STARTED - 1].clone());
-            }
             rows.extend([start, result]);
         }
         rows.extend(suffix.clone());
@@ -1095,12 +1099,20 @@ pub(super) async fn native_command_changeset_corpus(
             &self,
             request: ProviderRequest,
         ) -> Result<ProviderResponse, ProviderError> {
+            let planned = request.input.goal_plan_contract.is_some()
+                || request
+                    .input
+                    .tools
+                    .as_ref()
+                    .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()));
+
             let mut requests = self.requests.lock().unwrap();
             let review = request.phase == AgentPhase::ToolReview;
             let step = requests
                 .iter()
                 .filter(|request| request.phase != AgentPhase::ToolReview)
-                .count();
+                .count()
+                .saturating_sub(usize::from(planned));
             let catalog = request
                 .input
                 .tools
@@ -1170,7 +1182,11 @@ pub(super) async fn native_command_changeset_corpus(
                                 }
                             })
                             .map(Box::new);
-                        crate::tool_outcome(call, plan_contract)
+                        if !planned && let Some(contract) = plan_contract {
+                            arany::test_support::scenario::plan_outcome(*contract)
+                        } else {
+                            crate::tool_outcome(call)
+                        }
                     },
                 )
             };
@@ -1500,15 +1516,15 @@ pub(super) async fn native_command_changeset_corpus(
         assert_eq!(
             requests.len(),
             if stopped {
-                1
-            } else if case == "nonzero" {
-                3
-            } else if case == "ai-approve" {
-                4
-            } else if case == "scope-auto" {
-                3
-            } else {
                 2
+            } else if case == "nonzero" {
+                4
+            } else if case == "ai-approve" {
+                5
+            } else if case == "scope-auto" {
+                4
+            } else {
+                3
             },
             "{case}: no retry"
         );
@@ -1746,7 +1762,7 @@ pub(super) async fn native_command_changeset_corpus(
         } else if matches!(case, "nonzero" | "ai-approve") {
             if case == "nonzero" {
                 assert_eq!(
-                    requests[1]
+                    requests[2]
                         .input
                         .tools
                         .as_ref()

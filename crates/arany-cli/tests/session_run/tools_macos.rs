@@ -174,8 +174,15 @@ impl Provider for Journey {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let planned = request.input.goal_plan_contract.is_some()
+            || request
+                .input
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()));
+
         let mut requests = self.requests.lock().unwrap();
-        let step = requests.len();
+        let step = requests.len().saturating_sub(usize::from(planned));
         let context = request
             .input
             .tools
@@ -310,7 +317,11 @@ impl Provider for Journey {
                     })
                     .flatten()
                     .map(Box::new);
-                crate::tool_outcome(call, plan_contract)
+                if !planned && let Some(contract) = plan_contract {
+                    arany::test_support::scenario::plan_outcome(*contract)
+                } else {
+                    crate::tool_outcome(call)
+                }
             },
         );
         requests.push(request);
@@ -578,7 +589,7 @@ async fn native_file_journey_helper() {
     );
     {
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), calls.len() + 1);
+        assert_eq!(requests.len(), calls.len() + 2);
         for request in requests.iter() {
             assert_eq!(request.phase, arany::AgentPhase::RootPlan);
             assert_eq!(request.model, "file-tool-model");
@@ -870,9 +881,16 @@ impl Provider for RuntimeJourney {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let planned = request.input.goal_plan_contract.is_some()
+            || request
+                .input
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()));
+
         let step = {
             let mut requests = self.requests.lock().unwrap();
-            let step = requests.len();
+            let step = requests.len().saturating_sub(usize::from(planned));
             requests.push(request);
             step
         };
@@ -910,7 +928,11 @@ impl Provider for RuntimeJourney {
             } else {
                 None
             };
-            crate::tool_outcome(call, plan_contract)
+            if !planned && let Some(contract) = plan_contract {
+                arany::test_support::scenario::plan_outcome(*contract)
+            } else {
+                crate::tool_outcome(call)
+            }
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Runtime profile checked".into(),
@@ -1488,7 +1510,7 @@ async fn native_runtime_mount_journey_helper() {
     );
     {
         let accepted_requests = accepted_requests.lock().unwrap();
-        assert_eq!(accepted_requests.len(), 4);
+        assert_eq!(accepted_requests.len(), 5);
         assert!(
             accepted_requests[0]
                 .input
@@ -1498,7 +1520,7 @@ async fn native_runtime_mount_journey_helper() {
                 .observations()
                 .is_empty()
         );
-        let first_output = &accepted_requests[1]
+        let first_output = &accepted_requests[2]
             .input
             .tools
             .as_ref()
@@ -1507,7 +1529,7 @@ async fn native_runtime_mount_journey_helper() {
             .output;
         let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
         assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
-        let overflow_observation = &accepted_requests[3]
+        let overflow_observation = &accepted_requests[4]
             .input
             .tools
             .as_ref()
@@ -1520,7 +1542,7 @@ async fn native_runtime_mount_journey_helper() {
             overflow_observation.cache_update,
             arany::CacheUpdate::Rejected
         );
-        let provider_observations = accepted_requests[2]
+        let provider_observations = accepted_requests[3]
             .input
             .tools
             .as_ref()

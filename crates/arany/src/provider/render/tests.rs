@@ -38,11 +38,11 @@ fn read(path: &str) -> ToolCall {
 
 fn step(id: &str, path: &str) -> ToolStep {
     ToolStep {
+        plan: None,
         turn: ProviderTurn::scripted(),
         requests: vec![ToolRequest {
             id: ToolUseId::new(id).unwrap(),
             call: read(path),
-            plan_contract: None,
         }],
         observations: vec![observation(read(path), "result canary")],
         facts: Some(GoalContextFacts::maximum()),
@@ -247,6 +247,7 @@ fn results_pair_with_request_ids_and_integrations_are_labelled_data() {
 #[test]
 fn delegate_step_carries_child_results_once() {
     let mut delegated = request(vec![ToolStep {
+        plan: None,
         turn: ProviderTurn::scripted(),
         requests: Vec::new(),
         observations: Vec::new(),
@@ -556,7 +557,6 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
     for cause in [
         InvalidArguments,
         Phase,
-        PlanMissing,
         PlanInvalid,
         PlanBudgetOutsideGoal,
         PlanBudgetSpent,
@@ -611,10 +611,10 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
                     .is_empty()
             );
             assert_eq!(notes[0].as_object().expect("closed note").len(), 3);
-            if cause == PlanMissing {
+            if cause == PlanInvalid {
                 assert_eq!(
                     notes[0]["remediation"],
-                    "Supply a valid plan_contract before a non-prelude Tool call."
+                    "Send a valid arany_plan; do not replace a recorded contract."
                 );
             }
             if cause == PlanBudgetOutsideGoal {
@@ -630,7 +630,7 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
     let mut request = request(Vec::new());
     request.input.last_answer_refused = Some(crate::session::ProposalRefusal {
         operation: "arany_write".into(),
-        cause: crate::session::ProposalRefusalCause::PlanMissing,
+        cause: crate::session::ProposalRefusalCause::PlanInvalid,
     });
     for catalog in [
         json!({"padding": "x".repeat(MAX_TOOL_CATALOG_BYTES - 20)}).to_string(),

@@ -484,13 +484,8 @@ async fn fallback_after_a_tool_observation_never_redispatches_the_tool() {
         limit: 4096,
     };
     let mut primary = ScriptedProvider::new(vec![]).with_profile("scripted", "primary");
-    primary.responses = Mutex::new(
-        vec![
-            Ok(tool_outcome(read, None)),
-            Err(ProviderError::RemoteHttp(503)),
-        ]
-        .into(),
-    );
+    primary.responses =
+        Mutex::new(vec![Ok(tool_outcome(read)), Err(ProviderError::RemoteHttp(503))].into());
     let primary = route(primary);
     let fallback =
         route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "fallback"));
@@ -1292,14 +1287,11 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
     let fallback = |model| {
         route(
             ScriptedProvider::new(vec![
-                tool_outcome(
-                    arany::ToolCall::Read {
-                        path: "notes/facts.txt".into(),
-                        offset: 0,
-                        limit: 4096,
-                    },
-                    None,
-                ),
+                tool_outcome(arany::ToolCall::Read {
+                    path: "notes/facts.txt".into(),
+                    offset: 0,
+                    limit: 4096,
+                }),
                 finish("read facts"),
             ])
             .with_profile("scripted", model),

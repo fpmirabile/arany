@@ -3820,7 +3820,7 @@ mod goal_replay_tests {
                         ),
                         record(
                             AgentPhase::RootPlan,
-                            ProviderCallDisposition::ToolRequested,
+                            ProviderCallDisposition::PlanRecorded,
                             Some(0),
                         ),
                     ],
@@ -4015,7 +4015,7 @@ mod goal_replay_tests {
                         result: None,
                         provider_calls: vec![record(
                             AgentPhase::RootPlan,
-                            ProviderCallDisposition::ToolRequested,
+                            ProviderCallDisposition::PlanRecorded,
                             Some(0),
                         )],
                         grant: None,
@@ -4113,7 +4113,7 @@ mod goal_replay_tests {
         use crate::session::{ProposalRefusal, ProposalRefusalCause};
         let same = ProposalRefusal {
             operation: "arany_write".into(),
-            cause: ProposalRefusalCause::PlanMissing,
+            cause: ProposalRefusalCause::PlanInvalid,
         };
         for (middle, limited) in [
             (same.clone(), true),
@@ -4126,7 +4126,7 @@ mod goal_replay_tests {
             ),
             (
                 ProposalRefusal {
-                    cause: ProposalRefusalCause::PlanInvalid,
+                    cause: ProposalRefusalCause::InvalidArguments,
                     ..same.clone()
                 },
                 false,
@@ -4177,6 +4177,33 @@ mod goal_replay_tests {
             assert_eq!(
                 rejected(&view, reserve_child_call(goal, run, agent)),
                 limited
+            );
+        }
+    }
+
+    #[test]
+    fn unplanned_effects_obey_the_goal_phase() {
+        for phase in [
+            GoalPhase::Implementation,
+            GoalPhase::Research,
+            GoalPhase::Plan,
+        ] {
+            let (mut view, goal, run, agent) = primary_tool_session(false);
+            view.goals[0].phase = phase;
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+            let intent = child_intent(
+                run,
+                agent,
+                ToolCall::Write {
+                    path: "src/new".into(),
+                    expected_digest: None,
+                    content: "written".into(),
+                },
+            );
+            assert_eq!(
+                apply(&mut view, tool_started(run, agent, &intent)).is_ok(),
+                phase == GoalPhase::Implementation
             );
         }
     }

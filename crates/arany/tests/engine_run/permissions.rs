@@ -43,14 +43,11 @@ async fn permission_dispatch_invalid_or_unsafe_settings_refuse_before_provider()
             _ => unreachable!(),
         }
         let provider = Arc::new(ScriptedProvider::new(vec![
-            tool_outcome(
-                arany::ToolCall::Read {
-                    path: "notes/facts.txt".into(),
-                    offset: 0,
-                    limit: 32,
-                },
-                None,
-            ),
+            tool_outcome(arany::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: 0,
+                limit: 32,
+            }),
             arany::test_support::goals::finish_with("answer"),
         ]));
         let mut input = request(&workspace, "Inspect the task");

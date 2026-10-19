@@ -349,8 +349,8 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
     calls
 }
 
-pub(crate) fn plan_contract_property(calls: &[Value]) -> Value {
-    json!({"anyOf":[plan_contract_schema(goal_success_call_schema(calls).as_ref()), {"type":"null"}]})
+pub(crate) fn plan_schema(calls: &[Value]) -> Value {
+    plan_contract_schema(goal_success_call_schema(calls).as_ref())
 }
 
 // None because JSON Schema anyOf must not be empty.

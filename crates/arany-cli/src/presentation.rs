@@ -706,9 +706,6 @@ fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
         Cause::Phase => {
             "Arany refused an operation unavailable in this phase. The proposed action did not run."
         }
-        Cause::PlanMissing => {
-            "Arany refused the operation because its required plan was missing. The proposed action did not run."
-        }
         Cause::PlanInvalid => {
             "Arany refused an invalid or changed plan. The proposed action did not run."
         }
@@ -833,6 +830,7 @@ fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
         ProviderCallDisposition::Finished
         | ProviderCallDisposition::Delegated
         | ProviderCallDisposition::ToolRequested
+        | ProviderCallDisposition::PlanRecorded
         | ProviderCallDisposition::Cancelled => return None,
     })
 }

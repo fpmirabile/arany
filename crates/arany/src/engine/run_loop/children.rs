@@ -250,6 +250,7 @@ impl RunLoop<'_> {
         }
         if let Some(tools) = root_request.input.tools.as_mut() {
             tools.steps.push(ToolStep {
+                plan: None,
                 turn: delegate_turn.clone(),
                 requests: Vec::new(),
                 observations: Vec::new(),
@@ -752,7 +753,7 @@ impl RunLoop<'_> {
                         ProviderOutcome::Delegate(_) => {
                             crate::provider::ProviderFailureReason::WorkerDelegateRefused
                         }
-                        ProviderOutcome::Tools(_) => {
+                        ProviderOutcome::Plan(_) | ProviderOutcome::Tools(_) => {
                             crate::provider::ProviderFailureReason::WorkerToolRefused
                         }
                     });
@@ -854,7 +855,7 @@ impl RunLoop<'_> {
                             ProviderOutcome::Delegate(_) => {
                                 "Delegate refused: workers are still active."
                             }
-                            ProviderOutcome::Tools(_) => {
+                            ProviderOutcome::Plan(_) | ProviderOutcome::Tools(_) => {
                                 "Tool request refused: it was malformed or edits inside a live worker lease."
                             }
                         });
@@ -1889,8 +1890,7 @@ impl RunLoop<'_> {
 
     fn valid_child_tools(&self, child: &ChildWork, requests: &[ToolRequest]) -> bool {
         matches!(requests, [request]
-        if request.plan_contract.is_none()
-            && child.tools.is_some()
+        if child.tools.is_some()
             && child.tool_calls_remaining > 0 && child.turns_remaining > 0
             && request.call.valid()
             && (if child.editor {

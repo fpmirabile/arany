@@ -5349,7 +5349,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
     for (plan_calls, cause, goal_calls, expected_calls, failure) in [
         (
             None,
-            ProposalRefusalCause::PlanMissing,
+            ProposalRefusalCause::PlanInvalid,
             8,
             3,
             Some(RunFailure::RefusalLimit),
@@ -5363,7 +5363,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
         ),
         (
             None,
-            ProposalRefusalCause::PlanMissing,
+            ProposalRefusalCause::PlanInvalid,
             2,
             2,
             Some(RunFailure::BudgetExhausted),
@@ -5385,40 +5385,33 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
         std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#).expect("grant");
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
             .expect("private grant");
-        let plan = plan_calls.map(|calls| {
-            Box::new(GoalPlanContract {
-                mission: "write test.txt containing hello".into(),
-                resource_class: arany::ToolResourceClass::Default,
-                command_timeout_ms: None,
-                paths: vec!["test.txt".into()],
-                commands: Vec::new(),
-                skills: Vec::new(),
-                mcp_tools: Vec::new(),
-                success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
-                    path: "test.txt".into(),
-                    sha256: Sha256::digest(b"hello")
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect(),
-                },
-                budget: GoalBudget {
-                    max_provider_calls: Some(calls),
-                    ..GoalBudget::default()
-                },
-            })
-        });
+        let plan = GoalPlanContract {
+            mission: if plan_calls.is_some() {
+                "write test.txt containing hello".into()
+            } else {
+                String::new()
+            },
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            paths: vec!["test.txt".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                path: "test.txt".into(),
+                sha256: Sha256::digest(b"hello")
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            },
+            budget: GoalBudget {
+                max_provider_calls: plan_calls.or(Some(8)),
+                ..GoalBudget::default()
+            },
+        };
         let provider = Arc::new(ScriptedProvider::new(
             (0..expected_calls)
-                .map(|index| {
-                    tool_outcome(
-                        arany::ToolCall::Write {
-                            path: "test.txt".into(),
-                            content: format!("PRIVATE_ARGUMENT_{index}"),
-                            expected_digest: None,
-                        },
-                        plan.clone(),
-                    )
-                })
+                .map(|_| arany::test_support::scenario::plan_outcome(plan.clone()))
                 .collect(),
         ));
         let mut input = request(&workspace, "write test.txt containing hello");
@@ -5485,7 +5478,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
             Some(arany::ProviderFailureReason::ProposalRefused)
         );
         let refusal = call.refusal.as_ref().expect("closed refusal");
-        assert_eq!(refusal.operation, "arany_write");
+        assert_eq!(refusal.operation, "arany_plan");
         assert_eq!(refusal.cause, cause);
         assert_eq!(call.requested_tools, 0);
         assert!(!events.iter().any(|event| matches!(
@@ -5545,7 +5538,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
             assert_eq!(requests.len(), 1);
             let history = &requests[0].input.history;
             assert_eq!(history.len(), 1);
-            assert!(history[0].assistant.contains("plan_missing"));
+            assert!(history[0].assistant.contains("plan_invalid"));
             assert!(history[0].assistant.contains("nothing dispatched"));
         }
     }

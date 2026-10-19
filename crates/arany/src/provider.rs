@@ -557,8 +557,8 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
         && let Some(agents) = catalog["agents"].as_array()
     {
         let calls = crate::tools::catalog::catalog_call_schemas(&catalog);
-        let contract = crate::tools::catalog::plan_contract_property(&calls);
-        let criterion = contract["anyOf"][0]["properties"]["success_criterion"].clone();
+        let contract = crate::tools::catalog::plan_schema(&calls);
+        let criterion = contract["properties"]["success_criterion"].clone();
         let items =
             &mut schema["properties"]["outcome"]["anyOf"][1]["properties"]["children"]["items"];
         let mut branches = vec![items.clone()];
@@ -745,7 +745,23 @@ pub struct Delegate {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlanRequest {
+    pub id: ToolUseId,
+    pub contract: crate::session::GoalPlanContract,
+}
+
+impl PlanRequest {
+    pub(crate) fn result(&self) -> Value {
+        json!({"status":"plan_recorded", "scope": {
+            "paths": self.contract.paths, "commands": self.contract.commands,
+            "skills": self.contract.skills, "mcp_tools": self.contract.mcp_tools
+        }})
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderOutcome {
+    Plan(Box<PlanRequest>),
     Finish(Finish),
     Delegate(Delegate),
     /// Non-empty, in model order; the Engine accepts exactly one per step.
@@ -814,6 +830,11 @@ impl ProviderResponse {
                                     .is_some_and(|name| name.contains(secret))
                         })
                 }
+                ProviderOutcome::Plan(plan) => {
+                    plan.id.as_str().contains(secret)
+                        || serde_json::to_value(&plan.contract)
+                            .is_ok_and(|value| streaming::reflects_secret(&value, secret))
+                }
                 ProviderOutcome::Tools(requests) => requests
                     .iter()
                     .any(|request| tool_request_reflects_secret(request, secret)),
@@ -832,9 +853,6 @@ fn tool_request_reflects_secret(request: &crate::tools::ToolRequest, secret: &st
         } else {
             false
         }
-        || request.plan_contract.as_ref().is_some_and(|contract| {
-            serde_json::to_value(contract).is_ok_and(|value| value_reflects_secret(&value, secret))
-        })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1298,15 +1316,10 @@ stop_bytes: 0,
         });
         assert!(response.reflects_secret(secret));
         let tool = |contract: Option<crate::session::GoalPlanContract>| {
-            ProviderOutcome::Tools(vec![crate::tools::ToolRequest {
-                id: ToolUseId::new("call_1").unwrap(),
-                call: crate::tools::ToolCall::Write {
-                    path: "src/main.rs".into(),
-                    expected_digest: None,
-                    content: "safe".into(),
-                },
-                plan_contract: contract.map(Box::new),
-            }])
+            ProviderOutcome::Plan(Box::new(PlanRequest {
+                id: ToolUseId::new("plan_1").unwrap(),
+                contract: contract.unwrap(),
+            }))
         };
         let contract = |mission: String| crate::session::GoalPlanContract {
             mission,
@@ -1332,7 +1345,14 @@ stop_bytes: 0,
             response.reflects_secret(secret),
             "a skill name carries the secret"
         );
-        response.outcome = tool(None);
+        response.outcome = ProviderOutcome::Tools(vec![crate::tools::ToolRequest {
+            id: ToolUseId::new("call_1").unwrap(),
+            call: crate::tools::ToolCall::Write {
+                path: "src/main.rs".into(),
+                expected_digest: None,
+                content: "safe".into(),
+            },
+        }]);
         assert!(!response.reflects_secret(secret));
         let ProviderOutcome::Tools(requests) = &mut response.outcome else {
             unreachable!("scripted Tool outcome");

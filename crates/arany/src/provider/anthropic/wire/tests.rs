@@ -56,7 +56,7 @@ fn tool_use(id: &str, name: &str, input: Value) -> Value {
 }
 
 fn read_input() -> Value {
-    json!({"path": "src/main.rs", "offset": 0, "limit": 4096, "plan_contract": null})
+    json!({"path": "src/main.rs", "offset": 0, "limit": 4096})
 }
 
 fn tool_names(body: &Value) -> Vec<&str> {
@@ -120,16 +120,16 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
             "arany_edit",
             "arany_command",
             "arany_mcp_call",
-            "arany_command_unguarded"
+            "arany_command_unguarded",
+            "arany_plan"
         ]
     );
     assert!(body["tools"].as_array().unwrap().iter().all(|tool| {
         tool.get("strict").is_none()
             && tool["input_schema"]["additionalProperties"] == false
-            && tool["input_schema"]["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("plan_contract"))
+            && tool["input_schema"]["properties"]
+                .get("plan_contract")
+                .is_none()
     }));
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(
@@ -208,7 +208,7 @@ fn inbound_tool_use_stop_yields_one_request_and_keeps_text_and_thinking_in_turn(
     };
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].id.as_str(), "toolu_1");
-    assert!(requests[0].plan_contract.is_none());
+
     assert_eq!(
         serde_json::to_value(&requests[0].call).unwrap(),
         json!({"operation": "read", "path": "src/main.rs", "offset": 0, "limit": 4096})
@@ -229,11 +229,7 @@ fn tool_use_stop_records_its_own_wire_provenance() {
         &request,
         &response(
             "tool_use",
-            json!([tool_use(
-                "toolu_1",
-                "arany_list",
-                json!({"path": "src", "plan_contract": null})
-            )]),
+            json!([tool_use("toolu_1", "arany_list", json!({"path": "src"}))]),
         ),
     )
     .unwrap();
@@ -265,30 +261,33 @@ fn tool_use_stop_records_its_own_wire_provenance() {
 }
 
 #[test]
-fn inbound_plan_contract_is_lifted_out_of_the_tool_input() {
+fn plan_is_a_separate_optional_function() {
     let request = primary_request(MODEL);
     let contract = serde_json::to_value(goal_plan_contract()).unwrap();
-    let mut input = json!({"path": "src/new.rs", "expected_digest": null, "content": "verified\n"});
-    input["plan_contract"] = contract.clone();
     let answer = decode(
         &request,
         &response(
             "tool_use",
-            json!([tool_use("toolu_1", "arany_write", input)]),
+            json!([tool_use("toolu_1", "arany_plan", contract.clone())]),
         ),
     )
     .unwrap();
-    let ProviderOutcome::Tools(requests) = answer.outcome else {
-        panic!("Tool request");
-    };
-    assert_eq!(
-        serde_json::to_value(requests[0].plan_contract.as_deref().unwrap()).unwrap(),
-        contract
+    assert!(
+        matches!(answer.outcome, ProviderOutcome::Plan(plan) if serde_json::to_value(&plan.contract).unwrap() == contract)
     );
-    assert!(matches!(
-        requests[0].call,
-        crate::tools::ToolCall::Write { .. }
-    ));
+    for value in [Value::Null, contract] {
+        let legacy = json!({"path":"src/new.rs", "expected_digest":null, "content":"x", "plan_contract":value});
+        assert!(
+            decode(
+                &request,
+                &response(
+                    "tool_use",
+                    json!([tool_use("toolu_old", "arany_write", legacy)])
+                )
+            )
+            .is_err()
+        );
+    }
     let prelude = decode(
         &request,
         &response(
@@ -297,15 +296,13 @@ fn inbound_plan_contract_is_lifted_out_of_the_tool_input() {
         ),
     )
     .unwrap();
-    assert!(
-        matches!(&prelude.outcome, ProviderOutcome::Tools(requests) if requests[0].plan_contract.is_none())
-    );
+    assert!(matches!(&prelude.outcome, ProviderOutcome::Tools(_)));
     for bad in [
-        json!({"path": "src/new.rs", "content": "x", "plan_contract": null}),
+        json!({"path": "src/new.rs", "content": "x"}),
         json!({"path": "src/new.rs", "expected_digest": null, "content": "x", "plan_contract": {"mission": "x"}}),
-        json!({"path": "../outside", "expected_digest": null, "content": "x", "plan_contract": null}),
-        json!({"operation": "write", "path": "a", "expected_digest": null, "content": "x", "plan_contract": null}),
-        json!({"path": "a", "expected_digest": null, "content": "x", "network": true, "plan_contract": null}),
+        json!({"path": "../outside", "expected_digest": null, "content": "x"}),
+        json!({"operation": "write", "path": "a", "expected_digest": null, "content": "x"}),
+        json!({"path": "a", "expected_digest": null, "content": "x", "network": true}),
     ] {
         assert!(
             decode(
@@ -427,7 +424,7 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
         .is_err(),
         "a Tool that was not offered does not exist"
     );
-    let large = json!({"path": "a", "expected_digest": null, "content": "x".repeat(20_000), "plan_contract": null});
+    let large = json!({"path": "a", "expected_digest": null, "content": "x".repeat(20_000)});
     assert!(
         decode(
             &request,
@@ -940,7 +937,7 @@ fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewe
     let fragments = [
         "{\"path\":\"src/",
         "main.rs\",\"offset\":0,",
-        "\"limit\":4096,\"plan_contract\":null}",
+        "\"limit\":4096}",
     ];
     let mut events = vec![
         message_start(),
@@ -1182,13 +1179,14 @@ fn git_reads_join_the_native_tools_when_cataloged() {
             "arany_search",
             "arany_git_status",
             "arany_git_diff",
-            "arany_git_log"
+            "arany_git_log",
+            "arany_plan"
         ]
     );
     let plain = with_catalog(&mut request, json!("unavailable"));
     assert_eq!(
         tool_names(&plain),
-        ["arany_list", "arany_read", "arany_search"]
+        ["arany_list", "arany_read", "arany_search", "arany_plan"]
     );
 }
 
@@ -1337,7 +1335,7 @@ fn a_quoted_preamble_before_tool_use_does_not_break_the_stream() {
         json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":preamble}}),
         json!({"type":"content_block_stop","index":0}),
         json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"arany_read","input":{}}}),
-        json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a\",\"offset\":0,\"limit\":10,\"plan_contract\":null}"}}),
+        json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a\",\"offset\":0,\"limit\":10}"}}),
         json!({"type":"content_block_stop","index":1}),
         json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":8}}),
         json!({"type":"message_stop"}),

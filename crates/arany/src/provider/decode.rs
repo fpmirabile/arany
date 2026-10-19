@@ -60,6 +60,24 @@ pub(crate) fn function_outcome(
     structured_outcome(&json!({"outcome": fields}).to_string())
 }
 
+pub(crate) fn tool_function(
+    id: ToolUseId,
+    operation: &str,
+    input: Value,
+) -> Result<ProviderOutcome, ProviderError> {
+    if operation == "plan" {
+        if !serde_json::to_vec(&input).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        let contract = serde_json::from_value(input).map_err(|_| ProviderError::InvalidOutcome)?;
+        return Ok(ProviderOutcome::Plan(Box::new(super::PlanRequest {
+            id,
+            contract,
+        })));
+    }
+    tool_request(id, operation, input).and_then(|request| tools_outcome(vec![request]))
+}
+
 pub(crate) fn tool_request(
     id: ToolUseId,
     operation: &str,
@@ -72,10 +90,6 @@ pub(crate) fn tool_request(
     if serde_json::to_vec(&fields).map_err(invalid)?.len() > MAX_TOOL_ARGUMENT_BYTES {
         return Err(ProviderError::InvalidOutcome);
     }
-    let plan_contract = match fields.remove("plan_contract") {
-        None | Some(Value::Null) => None,
-        Some(contract) => Some(Box::new(serde_json::from_value(contract).map_err(invalid)?)),
-    };
     if fields
         .insert("operation".into(), json!(operation))
         .is_some()
@@ -93,11 +107,7 @@ pub(crate) fn tool_request(
     {
         return Err(ProviderError::InvalidOutcome);
     }
-    Ok(ToolRequest {
-        id,
-        call,
-        plan_contract,
-    })
+    Ok(ToolRequest { id, call })
 }
 
 const STEP_TOOL_CALLS: usize = 1;
