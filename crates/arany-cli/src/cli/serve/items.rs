@@ -115,6 +115,7 @@ pub(super) fn in_progress(id: RunId, goal_id: GoalId) -> Turn {
         id,
         goal_id,
         status: TurnStatus::InProgress,
+        stop_reason: None,
         items: Vec::new(),
         error: None,
         goal: None,
@@ -137,6 +138,17 @@ pub(super) fn turn_summary(run: &RunView, goal: &GoalView, history: bool) -> Tur
     Turn {
         id: run.id,
         goal_id: goal.id,
+        stop_reason: (goal.budget_closed && goal.run_ids.last() == Some(&run.id)).then(|| {
+            if goal
+                .effective_budget()
+                .max_tokens
+                .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens >= limit)
+            {
+                TurnStopReason::TokenBudgetExhausted
+            } else {
+                TurnStopReason::ActionBudgetExhausted
+            }
+        }),
         status: match run.status {
             RunStatus::Pending | RunStatus::Active => TurnStatus::InProgress,
             RunStatus::Finished => TurnStatus::Completed,
