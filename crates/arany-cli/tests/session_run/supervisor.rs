@@ -114,6 +114,7 @@ async fn supervisor_corpus_show_is_private_recomputed_and_export_local() {
         assert!(serialized.contains(canary), "missing fixture canary");
     }
     assert_eq!(view.runs[0].supervisor.verdicts().len(), 3);
+    arany::test_support::goals::assert_action_bounds(&events, false, false);
     std::fs::remove_dir_all(&workspace).unwrap();
     let mut exports = Vec::new();
     for _ in 0..2 {
@@ -187,6 +188,93 @@ async fn supervisor_corpus_show_is_private_recomputed_and_export_local() {
             .status
             .success()
     );
+    let lock_path = state.join(format!("session-{}.lock", result.session_id));
+    for case in [
+        "corrupt",
+        "damaged",
+        "missing",
+        "symlink",
+        "permissions",
+        "hardlink",
+    ] {
+        let journal = state.join("events.sqlite3");
+        match case {
+            "corrupt" => {
+                let db = rusqlite::Connection::open(&journal).unwrap();
+                db.execute(
+                    "UPDATE events SET payload='{}' WHERE kind='SupervisorVerdictRecorded'",
+                    [],
+                )
+                .unwrap();
+            }
+            "damaged" => std::fs::write(&journal, b"not a SQLite journal").unwrap(),
+            "missing" => std::fs::remove_file(&lock_path).unwrap(),
+            "symlink" => {
+                std::fs::remove_file(&lock_path).unwrap();
+                std::os::unix::fs::symlink("absent-lock-target", &lock_path).unwrap();
+            }
+            "permissions" => {
+                std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o644))
+                    .unwrap()
+            }
+            "hardlink" => std::fs::hard_link(&lock_path, state.join("lock-alias")).unwrap(),
+            _ => unreachable!(),
+        }
+        let before_entries = directory_entries(temp.path());
+        let before_journal = std::fs::read(&journal).unwrap();
+        let output = export(&state, temp.path(), result.session_id);
+        assert!(!output.status.success(), "{case}");
+        assert!(
+            output.stdout.is_empty(),
+            "{case}: refused export wrote stdout"
+        );
+        let expected = match case {
+            "corrupt" => "error: corrupt or unsupported Event history\n",
+            "damaged" => "error: SQLite operation failed\n",
+            "missing" => "error: invalid state directory\n",
+            "symlink" => "error: state filesystem operation failed\n",
+            "permissions" | "hardlink" => "error: state directory is not private\n",
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            output.stderr,
+            expected.as_bytes(),
+            "{case}: refusal diagnostic"
+        );
+        assert_eq!(
+            directory_entries(temp.path()),
+            before_entries,
+            "{case}: export created directory entries"
+        );
+        assert_eq!(
+            std::fs::read(&journal).unwrap(),
+            before_journal,
+            "{case}: export changed journal"
+        );
+        match case {
+            "corrupt" | "damaged" => std::fs::write(&journal, &original).unwrap(),
+            "missing" | "symlink" => {
+                if case == "symlink" {
+                    std::fs::remove_file(&lock_path).unwrap();
+                }
+                std::fs::write(&lock_path, []).unwrap();
+                std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+            }
+            "permissions" => {
+                std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+                    .unwrap()
+            }
+            "hardlink" => std::fs::remove_file(state.join("lock-alias")).unwrap(),
+            _ => unreachable!(),
+        }
+        assert!(
+            export(&state, temp.path(), result.session_id)
+                .status
+                .success(),
+            "{case}: restored control"
+        );
+    }
 }
 
 #[test]
@@ -212,4 +300,20 @@ fn supervisor_corpus_is_a_show_output_only_and_validates_ids_before_state_access
         assert!(output.stdout.is_empty());
         assert_eq!(output.stderr, expected.as_bytes());
     }
+}
+
+fn directory_entries(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut pending = vec![root.to_owned()];
+    let mut entries = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            }
+            entries.push(entry.path());
+        }
+    }
+    entries.sort();
+    entries
 }
