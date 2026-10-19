@@ -62,7 +62,7 @@ async fn fork_title_uses_the_inherited_committed_prefix() {
     run_to_end(&engine, &provider, later).await.unwrap();
     engine.close().await.unwrap();
     let (nested, _) = committed(root.path(), nested_id).await;
-    assert!(render_session(&nested, &[], Output::Text).contains("\nTitle: first\n"));
+    assert!(render_session(&nested, &[], Output::Text).contains("\nTitle: First question\n"));
 }
 
 #[tokio::test]
@@ -124,10 +124,10 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     })));
                 }
                 responses.push_back(response);
-                if case == "invalid finish" && !cancel {
+                if case == "invalid answer" && !cancel {
                     for _ in 0..2 {
                         responses.push_back(Ok(ProviderOutcome::Answer(Answer {
-                            text: "Unaccepted result".into(),
+                            text: String::new(),
                         })));
                     }
                 }

@@ -4531,7 +4531,7 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         let nested_item = listed.iter().find(|item| item.id == nested_id).unwrap();
         assert_eq!(
             nested_item.title, "First question",
-            "later source objectives must not enter the fork preview"
+            "later source objectives and answers must not enter the fork preview"
         );
         assert_eq!(
             nested.inherited_title.as_deref(),
@@ -4917,9 +4917,9 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     };
                     responses.push_back(response);
                     let mut expected_phases = expected_phases;
-                    if case == "invalid finish" && !cancel {
+                    if case == "invalid answer" && !cancel {
                         for _ in 0..2 {
-                            responses.push_back(Ok(ProviderOutcome::Answer(Answer { text: "Unaccepted result".into() })));
+                            responses.push_back(Ok(ProviderOutcome::Answer(Answer { text: String::new() })));
                             expected_phases.push(phase);
                         }
                     }
@@ -4973,7 +4973,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     assert_eq!(record.input_tokens, None);
                     assert_eq!(
                         record.output_tokens,
-                        matches!(case, "invalid finish" | "accepted finish").then_some(8)
+                        matches!(case, "invalid answer" | "accepted answer").then_some(8)
                     );
                     assert_eq!(record.wire_provenance, None);
                     assert_eq!(

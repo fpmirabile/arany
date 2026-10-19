@@ -359,7 +359,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         );
         let listed = list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace.clone()).await.unwrap();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].title, "First question", "later answers must not rename the conversation");
+        assert_eq!(listed[0].title, "First question", "the conversation keeps its first objective as the title");
         assert!(arany_cli::presentation::render_session(&view, &events, arany_cli::presentation::Output::Text).starts_with(&format!("Session: {}\nTitle: {}\n", view.id, listed[0].title)));
         assert_eq!(listed[0].defaults.provider.as_deref(), Some("openai"));
         assert_eq!(listed[0].defaults.model.as_deref(), Some("gpt-5.4"));

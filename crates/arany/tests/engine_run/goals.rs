@@ -10,7 +10,7 @@ async fn goal_lifecycle_bounds_report_and_requires_goal_replay_linkage() {
     let state_path = temp.path().join("state");
     // Control characters escape to six JSON bytes each, so the serialized report budget shortens this summary.
     let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
-        text: "accepted result".into(),
+        text: "\u{1}".repeat(2000),
     })]);
     let provider = Arc::new(provider);
     let engine = engine_support::open(
@@ -490,7 +490,7 @@ async fn goal_failure_and_cancellation_have_distinct_terminal_receipts() {
                 (0..3)
                     .map(|_| {
                         ProviderOutcome::Answer(Answer {
-                            text: "invalid finish".into(),
+                            text: " \n ".into(),
                         })
                     })
                     .collect(),
@@ -994,7 +994,7 @@ async fn refused_answer_on_the_last_allowed_call_is_a_budget_close() {
     let state_path = temp.path().join("state");
     let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(
         Answer {
-            text: "invalid finish".into(),
+            text: " \n ".into(),
         },
     )]));
     let engine = engine_support::open(
