@@ -174,6 +174,9 @@ pub async fn list_sessions_page(
     after: Option<(SessionId, u64)>,
     limit: usize,
 ) -> Result<SessionPage, EngineError> {
+    if limit == 0 {
+        return Err(EngineError::InvalidRequest);
+    }
     let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
     let store = Store::open_read_only(state)?;
     let page = list_page(&store, identity, after, limit, None).await;
