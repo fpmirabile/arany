@@ -1,9 +1,8 @@
 use super::{ResolvedSession, SessionPage, StoreError, event_payload_limit};
 use crate::session::ForkInheritance;
 use crate::session::{
-    AgentDisposition, AgentRole, AgentRunId, Event, EventEnvelope, ForkLineage, RunConfig,
-    RunDisposition, RunId, SessionDefaults, SessionId, SessionListItem, SessionView,
-    WorkspaceIdentity, prefix_digest, validate_compaction_references,
+    AgentRunId, Event, EventEnvelope, ForkLineage, RunConfig, RunId, SessionDefaults, SessionId,
+    SessionListItem, SessionView, WorkspaceIdentity, prefix_digest, validate_compaction_references,
 };
 use rusqlite::{Connection, OptionalExtension, Row};
 use std::collections::HashMap;
@@ -59,9 +58,6 @@ struct SessionHead {
     last_activity_at_ms: i64,
     explicit_title: bool,
     fallback_title: Option<(u64, String)>,
-    ai_title: Option<(u64, String)>,
-    primary: Option<(RunId, AgentRunId)>,
-    pending_title: Option<String>,
     defaults: SessionDefaults,
     run_defaults: SessionDefaults,
 }
@@ -334,10 +330,9 @@ impl SessionListing {
                 title: if head.explicit_title {
                     head.title.clone()
                 } else {
-                    head.ai_title
+                    head.fallback_title
                         .as_ref()
                         .map(|(_, title)| title.clone())
-                        .or_else(|| head.fallback_title.as_ref().map(|(_, title)| title.clone()))
                         .unwrap_or_else(|| "Empty conversation".into())
                 },
                 last_sequence: head.last_sequence,
@@ -389,8 +384,6 @@ fn scan_session_heads(
                 return Err(StoreError::InvalidHistory);
             }
             if let Event::RunStarted { config, .. } = &envelope.event {
-                head.primary = None;
-                head.pending_title = None;
                 head.run_defaults = selection_from_run(config);
                 let identity = WorkspaceIdentity {
                     device: config.workspace_device,
@@ -414,36 +407,6 @@ fn scan_session_heads(
                     head.fallback_title =
                         Some((envelope.sequence, crate::session::title_preview(text)));
                 }
-                Event::AgentSpawned {
-                    run_id,
-                    agent_run_id,
-                    role: AgentRole::Primary,
-                    ..
-                } => {
-                    head.primary = Some((*run_id, *agent_run_id));
-                }
-                Event::AgentFinished {
-                    run_id,
-                    agent_run_id,
-                    disposition: AgentDisposition::Finished,
-                    summary: Some(summary),
-                    ..
-                } if head.primary == Some((*run_id, *agent_run_id)) && head.ai_title.is_none() => {
-                    head.pending_title = Some(crate::session::title_preview(summary));
-                }
-                Event::RunFinished {
-                    run_id,
-                    disposition: RunDisposition::Finished,
-                    ..
-                } if head
-                    .primary
-                    .is_some_and(|(primary_run, _)| primary_run == *run_id) =>
-                {
-                    if let Some(title) = head.pending_title.take() {
-                        head.ai_title = Some((envelope.sequence, title));
-                    }
-                }
-                Event::RunFinished { .. } => head.pending_title = None,
                 _ => {}
             }
             head.last_activity_at_ms = envelope.created_at_ms;
@@ -472,15 +435,12 @@ fn scan_session_heads(
                     created_at_ms: envelope.created_at_ms,
                     last_activity_at_ms: envelope.created_at_ms,
                     fallback_title: None,
-                    ai_title: None,
                     source_sequence: match &envelope.event {
                         Event::SessionForked {
                             source_sequence, ..
                         } => Some(*source_sequence),
                         _ => None,
                     },
-                    primary: None,
-                    pending_title: None,
                     defaults: SessionDefaults::default(),
                     run_defaults: SessionDefaults::default(),
                     direct_identity,
@@ -543,17 +503,10 @@ fn inherit_fork_metadata(
             }
             let source_head = heads.get(&source).ok_or(StoreError::InvalidHistory)?;
             let title = source_head
-                .ai_title
+                .fallback_title
                 .as_ref()
                 .filter(|(title_sequence, _)| *title_sequence <= sequence)
                 .cloned()
-                .or_else(|| {
-                    source_head
-                        .fallback_title
-                        .as_ref()
-                        .filter(|(title_sequence, _)| *title_sequence <= sequence)
-                        .cloned()
-                })
                 .or_else(|| inherited.get(&source).and_then(|(_, title)| title.clone()));
             inherited.insert(
                 fork,
