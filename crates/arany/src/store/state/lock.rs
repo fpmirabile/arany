@@ -151,6 +151,43 @@ impl StateRoot {
         }
     }
 
+    pub(crate) fn lock_session_read_only(
+        &self,
+        session_id: SessionId,
+    ) -> Result<SessionRunLock, StoreError> {
+        #[cfg(unix)]
+        {
+            use cap_std::fs::MetadataExt;
+            use rustix::fs::{FlockOperation, flock};
+            let name = format!("session-{session_id}.lock");
+            let file = self
+                .open_private_record(&name, 0)?
+                .ok_or(StoreError::InvalidStateDirectory)?;
+            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => {}
+                Err(rustix::io::Errno::WOULDBLOCK) => return Err(StoreError::SessionBusy),
+                Err(error) => return Err(StoreError::Io(io::Error::from(error))),
+            }
+            let guard = SessionRunLock {
+                file,
+                dir: self.dir.try_clone()?,
+                name,
+                remove_on_drop: false,
+            };
+            let current = self.dir.symlink_metadata(&guard.name)?;
+            let held = guard.file.metadata()?;
+            if current.dev() != held.dev() || current.ino() != held.ino() {
+                return Err(StoreError::InvalidStateDirectory);
+            }
+            Ok(guard)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = session_id;
+            Err(StoreError::InvalidStateDirectory)
+        }
+    }
+
     pub(crate) fn lock_session(&self, session_id: SessionId) -> Result<SessionRunLock, StoreError> {
         #[cfg(unix)]
         {

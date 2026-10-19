@@ -94,6 +94,7 @@ struct ActiveTurn {
     events: arany::Subscription,
     cancel: RunCancellation,
     approvals: super::approvals::Approvals,
+    approval_mode: ToolApprovals,
     steering: RunSteering,
     pending_start: Option<RequestId>,
     result_done: bool,
@@ -247,6 +248,27 @@ pub(in crate::cli) async fn run_configured(
                                     .map_err(internal)?;
                                 Ok(None)
                             }
+                            "thread/settings/update" => {
+                                let input: ThreadSettingsUpdateParams = params(request.params)?;
+                                let loaded = threads
+                                    .map
+                                    .get_mut(&input.thread_id)
+                                    .ok_or_else(|| Fault::state(Reason::ThreadNotLoaded))?;
+                                loaded.approval_mode =
+                                    threads::approval_mode(&input.permission_mode);
+                                if let Some(turn) = active
+                                    .as_ref()
+                                    .filter(|turn| turn.thread_id == input.thread_id)
+                                {
+                                    turn.approval_mode.set_mode(loaded.approval_mode);
+                                }
+                                Ok(Some(
+                                    serde_json::to_value(ThreadSettingsUpdateResult {
+                                        permission_mode: input.permission_mode,
+                                    })
+                                    .expect("typed settings result"),
+                                ))
+                            }
                             "thread/resume" => {
                                 let input: ThreadResumeParams = params(request.params)?;
                                 if active
@@ -305,7 +327,7 @@ pub(in crate::cli) async fn run_configured(
                                 let steering = RunSteering::new();
                                 let controls = RunControls {
                                     tools: loaded.grant.clone(),
-                                    approvals: Some(approvals),
+                                    approvals: Some(approvals.clone()),
                                     steering: Some(steering.clone()),
                                     cancellation: RunCancellation::new(),
                                     hints: None,
@@ -340,6 +362,7 @@ pub(in crate::cli) async fn run_configured(
                                         return Err(Fault::engine(EngineError::CoordinatorFailed));
                                     }
                                 };
+                                let approval_mode = approvals;
                                 let approvals = super::approvals::Approvals::start(
                                     inbox,
                                     cancel.clone(),
@@ -369,6 +392,7 @@ pub(in crate::cli) async fn run_configured(
                                     events,
                                     cancel,
                                     approvals,
+                                    approval_mode,
                                     steering,
                                     pending_start: Some(id.clone()),
                                     result_done: false,
@@ -789,6 +813,7 @@ mod tests {
             events,
             cancel,
             approvals: super::super::approvals::Approvals::empty_for_test(),
+            approval_mode: ToolApprovals::new(arany::ApprovalMode::Request).0,
             steering: RunSteering::new(),
             pending_start: Some(RequestId::Integer(3)),
             result_done: true,

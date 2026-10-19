@@ -309,3 +309,137 @@ fn worker_protocol_store_cold_prefixes_and_old_versions_preserve_data() {
         }
     }
 }
+
+#[test]
+fn rewind_store_cold_prefixes_and_unsupported_versions_preserve_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = StateRoot::admit(&temp.path().join("state")).expect("private rewind State root");
+    let f = crate::session::worker_protocol_fixture();
+    let mut connection = open_connection(&root, false).unwrap();
+    let mut hot = None;
+    for event in &f.events {
+        append(&mut connection, &mut hot, f.session, event.clone()).unwrap();
+    }
+    let (_, view) = resolve_view(&connection, f.session, 0, &mut 0).unwrap();
+    let view = view.unwrap();
+    let event = crate::session::rewind_started_fixture(&view, view.rewinds.checkpoints[0].clone());
+    append(&mut connection, &mut hot, f.session, event).unwrap();
+    let (_, view) = resolve_view(&connection, f.session, 0, &mut 0).unwrap();
+    let view = view.unwrap();
+    assert!(view.rewinds.operations[0].finished.is_none());
+    assert_eq!(
+        view.rewinds.operations[0].outcome(),
+        crate::session::rewind::RewindOutcome::Uncertain
+    );
+    let event = crate::session::rewind_finished_fixture(
+        &view,
+        crate::session::rewind::RewindOutcome::Restored,
+    );
+    append(&mut connection, &mut hot, f.session, event).unwrap();
+    drop(hot);
+    for kind in ["WorkspaceRewindStarted", "WorkspaceRewindFinished"] {
+        {
+            connection
+                .execute("UPDATE events SET event_version=2 WHERE kind=?1", [kind])
+                .unwrap();
+            let before = std::fs::read(root.path().join(DATABASE_FILE)).unwrap();
+            let cold = open_connection(&root, true).unwrap();
+            assert!(resolve_view(&cold, f.session, 0, &mut 0).is_err());
+            drop(cold);
+            assert_eq!(
+                std::fs::read(root.path().join(DATABASE_FILE)).unwrap(),
+                before
+            );
+            connection
+                .execute("UPDATE events SET event_version=1 WHERE kind=?1", [kind])
+                .unwrap();
+        }
+    }
+    let cold = open_connection(&root, true).unwrap();
+    let (_, view) = resolve_view(&cold, f.session, 0, &mut 0).unwrap();
+    assert_eq!(
+        view.unwrap().rewinds.operations[0].outcome(),
+        crate::session::rewind::RewindOutcome::Restored
+    );
+}
+
+fn forked_rewind_fixture(
+    root: &StateRoot,
+) -> (Connection, Option<HotSession>, SessionId, SessionView) {
+    let f = crate::session::worker_protocol_fixture();
+    let mut connection = open_connection(root, false).unwrap();
+    let mut hot = None;
+    for event in &f.events {
+        append(&mut connection, &mut hot, f.session, event.clone()).unwrap();
+    }
+    let child = fork_session(&mut connection, f.session, "Fork".into()).unwrap();
+    let (_, view) = resolve_view(&connection, child, 0, &mut 0).unwrap();
+    (connection, hot, child, view.unwrap())
+}
+
+#[test]
+fn rewind_right_after_a_fork_survives_cold_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = StateRoot::admit(&temp.path().join("state")).expect("private rewind State root");
+    let (mut connection, mut hot, child, view) = forked_rewind_fixture(&root);
+    let event = crate::session::rewind_started_fixture(&view, view.rewinds.checkpoints[0].clone());
+    append(&mut connection, &mut hot, child, event).unwrap();
+    let (_, view) = resolve_view(&connection, child, 0, &mut 0).unwrap();
+    let event = crate::session::rewind_finished_fixture(
+        &view.unwrap(),
+        crate::session::rewind::RewindOutcome::Restored,
+    );
+    append(&mut connection, &mut hot, child, event).unwrap();
+    drop(hot);
+    let cold = open_connection(&root, true).unwrap();
+    let (_, view) = resolve_view(&cold, child, 0, &mut 0).unwrap();
+    assert_eq!(
+        view.unwrap().rewinds.operations[0].outcome(),
+        crate::session::rewind::RewindOutcome::Restored
+    );
+}
+
+#[test]
+fn forged_rewind_workspace_identity_is_rejected_on_append_and_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = StateRoot::admit(&temp.path().join("state")).expect("private rewind State root");
+    let (mut connection, mut hot, child, view) = forked_rewind_fixture(&root);
+    let event = crate::session::rewind_started_fixture(&view, view.rewinds.checkpoints[0].clone());
+    let Event::WorkspaceRewindStarted { record } = &event else {
+        unreachable!()
+    };
+    let mut forged = record.clone();
+    forged.workspace_inode += 1;
+    assert!(
+        append(
+            &mut connection,
+            &mut hot,
+            child,
+            Event::WorkspaceRewindStarted { record: forged }
+        )
+        .is_err()
+    );
+    append(&mut connection, &mut hot, child, event).unwrap();
+    drop(hot);
+    let payload: String = connection
+        .query_row(
+            "SELECT payload FROM events WHERE kind='WorkspaceRewindStarted'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let inode = view.workspace_identity.unwrap().inode;
+    let tampered = payload.replace(
+        &format!("\"workspace_inode\":{inode}"),
+        &format!("\"workspace_inode\":{}", inode + 1),
+    );
+    assert_ne!(tampered, payload);
+    connection
+        .execute(
+            "UPDATE events SET payload=?1 WHERE kind='WorkspaceRewindStarted'",
+            [tampered],
+        )
+        .unwrap();
+    let cold = open_connection(&root, true).unwrap();
+    assert!(resolve_view(&cold, child, 0, &mut 0).is_err());
+}

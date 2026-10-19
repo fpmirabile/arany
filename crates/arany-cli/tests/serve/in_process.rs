@@ -1750,3 +1750,87 @@ async fn oversized_resume_does_not_load_the_thread() {
 mod goal_controls;
 #[path = "history.rs"]
 mod history_tests;
+
+#[tokio::test]
+async fn thread_settings_update_accepts_only_loaded_threads_and_closed_modes() {
+    let _deadline = deadline();
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.path().join("state");
+    let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+    let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+    let server = server::run_with_threads(
+        engine(&state),
+        state.clone(),
+        inbound,
+        outbound,
+        threads::Threads::with_provider(scripted()),
+    );
+    let client = async {
+        input.send(initialize()).await.unwrap();
+        assert!(
+            next(&mut output).await["result"]["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("thread_settings_update_v1"))
+        );
+        input.send(thread_start(&workspace)).await.unwrap();
+        let thread = next(&mut output).await["result"]["thread"]["id"].clone();
+        next(&mut output).await;
+        for mode in ["default", "acceptEdits", "auto"] {
+            input
+                .send(request(
+                    9,
+                    "thread/settings/update",
+                    json!({"threadId":thread,"permissionMode":mode}),
+                ))
+                .await
+                .unwrap();
+            let result = next(&mut output).await;
+            assert_eq!(result["result"], json!({"permissionMode":mode}));
+            let schema = protocol_schema();
+            let part = json!({"$defs":schema["$defs"],"$ref":schema["methods"]["thread/settings/update"]["result"]["$ref"]});
+            assert!(
+                jsonschema::validator_for(&part)
+                    .unwrap()
+                    .is_valid(&result["result"])
+            );
+        }
+        for mode in [
+            json!("plan"),
+            json!("dontAsk"),
+            json!("bypassPermissions"),
+            json!("x".repeat(65536)),
+            json!({"auto":null}),
+            json!(42),
+            json!(null),
+            json!("unknown"),
+        ] {
+            input
+                .send(request(
+                    9,
+                    "thread/settings/update",
+                    json!({"threadId":thread,"permissionMode":mode}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(next(&mut output).await["error"]["code"], -32602);
+        }
+        input
+            .send(request(
+                9,
+                "thread/settings/update",
+                json!({"threadId":arany::SessionId::new(),"permissionMode":"default"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next(&mut output).await["error"]["data"]["reason"],
+            "threadNotLoaded"
+        );
+        input.send(ClientMessage::Eof).await.unwrap();
+    };
+    let (result, ()) = tokio::join!(server, client);
+    result.unwrap();
+}

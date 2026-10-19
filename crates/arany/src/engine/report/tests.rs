@@ -195,6 +195,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         budget_closed: false,
     };
     let view = crate::session::SessionView {
+        rewinds: Default::default(),
         id: session_id,
         title: "Report bounded evidence".into(),
         title_is_explicit: false,
@@ -763,6 +764,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         active_ceiling_ms: 0,
     };
     let view = crate::session::SessionView {
+        rewinds: Default::default(),
         id: SessionId::new(),
         title: "Report".into(),
         title_is_explicit: false,
@@ -918,4 +920,114 @@ fn unresolved_facts_always_leave_room_for_the_omission_marker() {
     }
     assert!(omitted);
     assert!(goal_report_fits_with_omission(&mut report));
+}
+
+#[test]
+fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated() {
+    let f = crate::session::worker_protocol_fixture();
+    let mut view = crate::session::SessionView::replay(f.session, &f.envelopes())
+        .unwrap()
+        .unwrap();
+    let start = crate::session::rewind_started_fixture(&view, view.rewinds.checkpoints[0].clone());
+    for finish in [false, true] {
+        let event = if finish {
+            crate::session::rewind_finished_fixture(
+                &view,
+                crate::session::rewind::RewindOutcome::Restored,
+            )
+        } else {
+            start.clone()
+        };
+        view.apply_committed(&crate::session::EventEnvelope {
+            sequence: view.last_sequence + 1,
+            session_id: view.id,
+            run_id: None,
+            agent_run_id: None,
+            event,
+            created_at_ms: 0,
+        })
+        .unwrap();
+    }
+    let goal = view.goal(f.goal).unwrap();
+    let report = super::goal_report(&view, &view.runs[0], goal);
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .any(|line| line.contains("Workspace rewind"))
+    );
+    assert!(serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES);
+    assert!(!goal.success_criterion_satisfied);
+    assert!(!view.runs[0].worker_history()[0].verified);
+
+    let template = view.rewinds.operations[0].clone();
+    for index in 1..10 {
+        let mut operation = template.clone();
+        operation.started.rewind_id = Uuid::now_v7();
+        operation.started_sequence = view.last_sequence + index;
+        operation.finished = None;
+        operation.finished_sequence = None;
+        view.rewinds.operations.push(operation);
+    }
+    view.last_sequence += 10;
+    let facts = crate::session::rewind::history_facts(&view, 0, view.last_sequence).unwrap();
+    assert!(facts.len() > 512);
+    let report = goal_report(&view, &view.runs[0], view.goal(f.goal).unwrap());
+    let newest = view.rewinds.operations.last().unwrap().history_fact();
+    assert_eq!(
+        report.unresolved[..8],
+        view.rewinds
+            .operations
+            .iter()
+            .rev()
+            .take(8)
+            .map(|operation| operation.history_fact())
+            .collect::<Vec<_>>()
+    );
+    assert!(report.unresolved[8].starts_with("Older Workspace rewind facts omitted"));
+    report.validate().unwrap();
+
+    let mut later_goal = view.goal(f.goal).unwrap().clone();
+    later_goal.id = GoalId::new();
+    later_goal.started_sequence = view.last_sequence + 1;
+    later_goal.run_ids.clear();
+    let mut later_view = view.clone();
+    later_view.last_sequence = later_goal.started_sequence;
+    let later_report = goal_report(&later_view, &view.runs[0], &later_goal);
+    assert_eq!(later_report.unresolved, report.unresolved[..9]);
+    later_report.validate().unwrap();
+
+    let run = &mut view.runs[0];
+    let template = run
+        .agents
+        .iter()
+        .find(|agent| agent.assignment.is_some())
+        .unwrap()
+        .clone();
+    let mut uncertain_tool = run.tools[0].clone();
+    uncertain_tool.observation = None;
+    for _ in 0..25 {
+        let mut agent = template.clone();
+        agent.id = AgentRunId::new();
+        agent.tools = vec![uncertain_tool.clone()];
+        run.agents.push(agent);
+    }
+    let report = goal_report(&view, &view.runs[0], view.goal(f.goal).unwrap());
+    assert_eq!(report.unresolved[25], newest);
+    assert!(report.unresolved[..25].iter().all(|line| {
+        line.starts_with("Worker ") && line.contains("private_outcome_unknown=true")
+    }));
+    assert_eq!(report.unresolved.last().unwrap(), GOAL_REPORT_OMISSION);
+    assert!(report.unresolved.len() < GOAL_REPORT_ITEM_LIMIT);
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .filter(|line| line.starts_with("Workspace rewind "))
+            .count()
+            < 8
+    );
+    let bytes = serde_json::to_vec(&report).unwrap();
+    assert!(bytes.len() > crate::session::MAX_GOAL_REPORT_BYTES * 3 / 4);
+    report.validate().unwrap();
 }

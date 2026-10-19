@@ -114,6 +114,10 @@ mod tools_researcher;
 mod tool_replay;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "session_run/supervisor.rs"]
+mod supervisor;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
@@ -252,6 +256,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     .draw_setup(4, "Synthetic setup", "Returning to chat", 0, None)
                     .unwrap();
                 let mut view = SessionView {
+                    rewinds: Default::default(),
                     id: SessionId::new(),
                     title: "New Session".into(),
                     title_is_explicit: false,

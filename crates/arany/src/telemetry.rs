@@ -1084,6 +1084,8 @@ impl From<&Event> for TraceEventKind {
             | Event::SessionStarted { .. }
             | Event::SessionDefaultChanged { .. }
             | Event::SessionForked { .. }
+            | Event::WorkspaceRewindStarted { .. }
+            | Event::WorkspaceRewindFinished { .. }
             | Event::SessionRenamed { .. } => Self::Unmarked,
         }
     }

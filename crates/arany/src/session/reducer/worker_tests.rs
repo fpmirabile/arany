@@ -1509,7 +1509,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         ("ProviderCallRecorded", 9),
         ("AgentFinished", 10),
         ("ToolStarted", 11),
-        ("ToolFinished", 14),
+        ("ToolFinished", 15),
         ("WorkerStopObserved", 1),
         ("WorkerHandoverDiscarded", 1),
         ("WorkerDataChunk", 1),
@@ -2070,7 +2070,7 @@ fn worker_protocol_verification_cannot_skip_a_later_workspace_mutation() {
         &intent,
         ToolDisposition::Succeeded,
         Some(Attestation::for_site(&intent)),
-        &serde_json::json!({"sha256":crate::tools::types::hex_digest(b"other")}).to_string(),
+        &serde_json::json!({"sha256":crate::tools::types::hex_digest(b"other"), "bytes":5, "executable":false, "before":{"sha256":crate::tools::types::hex_digest(b"new"),"bytes":3,"executable":false}}).to_string(),
     );
     refused(&f, verification, "stale positive evidence after a mutation");
 }
@@ -3446,8 +3446,7 @@ fn worker_protocol_researcher_only_run_rejects_a_call_after_an_invalid_synthesis
     refused(&again, recorded, "synthesis after an invalid synthesis");
 }
 
-#[test]
-fn supervisor_handover_verdict_preserves_the_original_integration_subject() {
+fn supervised_handover() -> (Fixture, u64, WorkerDataRef, Event) {
     let mut f = fixture();
     for event in &mut f.events {
         match event {
@@ -3498,6 +3497,28 @@ fn supervisor_handover_verdict_preserves_the_original_integration_subject() {
     assert!(
         matches!(&verdict,Event::SupervisorVerdictRecorded {verdict,..} if verdict.site==crate::supervisor::Site::Handover && verdict.subject_sequence==subject)
     );
+    (f, subject, data, verdict)
+}
+
+#[test]
+fn supervisor_verdicts_are_part_of_the_canonical_journal_prefix() {
+    let (mut f, _, _, verdict) = supervised_handover();
+    let without = f.envelopes();
+    let omitted = crate::session::prefix_digest(&without, without.len() as u64).unwrap();
+    f.push(verdict);
+    let envelopes = f.envelopes();
+    let canonical = crate::session::prefix_digest(&envelopes, envelopes.len() as u64).unwrap();
+    assert_ne!(canonical, omitted);
+    let view = SessionView::replay_open(f.session, &envelopes)
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.rewinds.prefix.digest(), canonical);
+    assert_ne!(view.rewinds.prefix.digest(), omitted);
+}
+
+#[test]
+fn supervisor_handover_verdict_preserves_the_original_integration_subject() {
+    let (mut f, subject, data, verdict) = supervised_handover();
     f.push(verdict);
     let wrong = f.intent(
         f.primary,

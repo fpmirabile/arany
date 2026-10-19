@@ -20,13 +20,19 @@ pub(super) fn apply(
                 .runs
                 .last()
                 .filter(|run| run.accepted_sequence > current.created_sequence);
-            let boundary = if let Some(run) = own_last {
+            let mut boundary = if let Some(run) = own_last {
                 run.finished_sequence.map(|sequence| (run.id, sequence))
             } else {
                 current
                     .lineage
                     .map(|lineage| (lineage.source_run_id, current.created_sequence))
             };
+            if let Some((_, sequence)) = &mut boundary
+                && let Some(rewind) = current.rewinds.operations.last()
+            {
+                *sequence =
+                    (*sequence).max(rewind.finished_sequence.unwrap_or(rewind.started_sequence));
+            }
             if boundary != Some((record.covered_run_id, record.covered_sequence)) {
                 return Err(ReplayError::InvalidSnapshot);
             }

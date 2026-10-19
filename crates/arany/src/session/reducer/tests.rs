@@ -49,6 +49,7 @@ mod goal_recovery_tests {
             finished_sequence: disposition.map(|_| 2),
         };
         SessionView {
+            rewinds: Default::default(),
             id: session_id,
             title: "Interrupted Goal".into(),
             title_is_explicit: false,
@@ -2675,6 +2676,7 @@ mod goal_replay_tests {
             },
         };
         SessionView {
+            rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
             title_is_explicit: false,
@@ -3018,6 +3020,18 @@ mod goal_replay_tests {
                     observation: observation_for(intent, b"ok"),
                 },
             );
+            if i == 2 {
+                let mut corpus = crate::supervisor::corpus::Corpus::new().unwrap();
+                let interrupted =
+                    SessionView::replay_for_corpus(session, &envelopes, None, &mut corpus)
+                        .unwrap()
+                        .unwrap();
+                let output = corpus.finish(&interrupted).unwrap();
+                let last: serde_json::Value =
+                    serde_json::from_str(output.lines().last().unwrap()).unwrap();
+                assert_eq!(last["features"]["loop"]["repeat_identical"], 3);
+                assert!(last["journaled_level"].is_null());
+            }
             let pending = view.runs[0].supervisor.pending_event();
             assert_eq!(
                 view.runs[0].supervisor.verdicts().len(),
@@ -3123,6 +3137,125 @@ mod goal_replay_tests {
             view
         );
         assert!(view.runs[0].supervisor.pending_event().is_none());
+        append(&mut view, &mut envelopes, reserve());
+        append(
+            &mut view,
+            &mut envelopes,
+            Event::GoalSteeringNoteRecorded {
+                goal_id: goal,
+                run_id: run,
+                text: "private-steering-canary".into(),
+            },
+        );
+        let mut corpus = crate::supervisor::corpus::Corpus::new().unwrap();
+        let closed = SessionView::replay_for_corpus(session, &envelopes, None, &mut corpus)
+            .unwrap()
+            .unwrap();
+        let output = corpus.finish(&closed).unwrap();
+        let lines: Vec<serde_json::Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(!output.contains("private-steering-canary"));
+        assert!(!output.contains("src/lib.rs"));
+        assert!(!output.contains(&session.to_string()));
+        assert!(!output.contains(&run.to_string()));
+        assert!(!output.contains(&actor.to_string()));
+        for (index, line) in lines[1..].iter().enumerate() {
+            assert_eq!(line["labels"]["steering"], index >= 256);
+            assert_eq!(line["labels"]["pause_or_cancel"], false);
+        }
+        let mut second = crate::supervisor::corpus::Corpus::new().unwrap();
+        let reopened = SessionView::replay_for_corpus(session, &envelopes, None, &mut second)
+            .unwrap()
+            .unwrap();
+        let second = second.finish(&reopened).unwrap();
+        let second: Vec<serde_json::Value> = second
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0], second[0]);
+        for (first, second) in lines[1..].iter().zip(&second[1..]) {
+            assert_ne!(first["salted_call_key"], second["salted_call_key"]);
+            assert_ne!(first["salted_outcome_key"], second["salted_outcome_key"]);
+            assert_eq!(first["features"], second["features"]);
+        }
+        for failed in [false, true] {
+            let mut terminal_view = view.clone();
+            let mut terminal_events = envelopes.clone();
+            for event in [
+                Event::AgentFinished {
+                    run_id: run,
+                    agent_run_id: actor,
+                    disposition: if failed {
+                        AgentDisposition::Failed
+                    } else {
+                        AgentDisposition::Cancelled
+                    },
+                    summary: None,
+                    result: None,
+                    worker: None,
+                },
+                Event::RunFinished {
+                    run_id: run,
+                    disposition: if failed {
+                        RunDisposition::Failed
+                    } else {
+                        RunDisposition::Cancelled
+                    },
+                    active_ms: 0,
+                },
+            ] {
+                append(&mut terminal_view, &mut terminal_events, event);
+            }
+            if failed {
+                append(
+                    &mut terminal_view,
+                    &mut terminal_events,
+                    Event::GoalFinished {
+                        goal_id: goal,
+                        status: GoalStatus::Failed,
+                        active_ms: 0,
+                        exhausted: false,
+                        report: GoalReport {
+                            summary: "private-failure-canary".into(),
+                            changes: Vec::new(),
+                            evidence: Vec::new(),
+                            unresolved: Vec::new(),
+                            cached_input_tokens: 0,
+                        },
+                    },
+                );
+            }
+            let mut corpus = crate::supervisor::corpus::Corpus::new().unwrap();
+            let closed =
+                SessionView::replay_for_corpus(session, &terminal_events, None, &mut corpus)
+                    .unwrap()
+                    .unwrap();
+            let output = corpus.finish(&closed).unwrap();
+            assert!(!output.contains("private-failure-canary"));
+            let records: Vec<serde_json::Value> = output
+                .lines()
+                .skip(1)
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            for (index, record) in records.iter().enumerate() {
+                assert_eq!(record["labels"]["pause_or_cancel"], !failed && index >= 256);
+                assert_eq!(record["labels"]["goal_failed"], failed && index >= 256);
+            }
+        }
+        assert_eq!(lines.len(), 261);
+        assert_eq!(lines[1]["features"]["loop"]["repeat_identical"], 1);
+        assert!(lines[1]["journaled_level"].is_null());
+        assert_eq!(lines[3]["journaled_level"], "notice");
+        assert_eq!(lines[4]["journaled_level"], "would_narrow");
+        assert_eq!(lines[260]["features"]["loop"]["repeat_identical"], 32);
+        assert!(lines[260]["journaled_level"].is_null());
+        for (index, line) in lines[1..].iter().enumerate() {
+            assert_eq!(line["relative_step"], index + 1);
+            assert_eq!(line["salted_call_key"], lines[1]["salted_call_key"]);
+            assert_eq!(line["salted_outcome_key"], lines[1]["salted_outcome_key"]);
+        }
     }
 
     #[test]
@@ -3514,15 +3647,36 @@ mod goal_replay_tests {
     }
 
     fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObservation {
+        let output = if matches!(intent.call, ToolCall::Write { .. } | ToolCall::Edit { .. }) {
+            let expected = match &intent.call {
+                ToolCall::Write {
+                    expected_digest, ..
+                } => expected_digest.clone(),
+                ToolCall::Edit {
+                    expected_digest, ..
+                } => Some(expected_digest.clone()),
+                _ => unreachable!(),
+            };
+            serde_json::to_string(&crate::session::rewind::FilePublicationResult {
+                sha256: crate::tools::types::hex_digest(content),
+                bytes: content.len() as u32,
+                executable: false,
+                before: expected.map(|sha256| crate::session::rewind::FileState {
+                    sha256,
+                    bytes: 0,
+                    executable: false,
+                }),
+            })
+            .unwrap()
+        } else {
+            serde_json::json!({ "sha256": crate::tools::types::hex_digest(content) }).to_string()
+        };
         ToolObservation {
             enforcement_cause: None,
             attestation: Some(crate::tools::Attestation::for_site(&intent)),
             intent,
             disposition: ToolDisposition::Succeeded,
-            output: serde_json::json!({
-                "sha256": crate::tools::types::hex_digest(content)
-            })
-            .to_string(),
+            output,
             cache_update: CacheUpdate::NotApplicable,
         }
     }
@@ -3548,6 +3702,7 @@ mod goal_replay_tests {
             budget: GoalBudget::default(),
         };
         let mut view = SessionView {
+            rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
             title_is_explicit: false,
@@ -3654,6 +3809,21 @@ mod goal_replay_tests {
                 budget_closed: false,
             }],
         };
+        for path in ["unrelated", "src/main.rs"] {
+            let mut after_rewind = view.clone();
+            let mut rewind = super::super::rewind_tests::restored_operation();
+            rewind.files[0].path = path.into();
+            rewind.finished_sequence = Some(3);
+            after_rewind.rewinds.operations.push(rewind);
+            after_rewind.last_sequence = 4;
+            after_rewind
+                .record_goal_plan_contract(&goal_id, &run_id, &contract)
+                .unwrap();
+            assert_eq!(
+                after_rewind.goals[0].success_criterion_satisfied,
+                path == "unrelated"
+            );
+        }
         view.apply_committed(&EventEnvelope {
             sequence: 2,
             session_id,
@@ -3698,6 +3868,7 @@ mod goal_replay_tests {
             budget: GoalBudget::default(),
         };
         let mut view = SessionView {
+            rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
             title_is_explicit: false,

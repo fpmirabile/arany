@@ -576,6 +576,18 @@ async fn checkpoints_prune_notices_survive_discarded_captures_until_journal_comm
             assert_eq!(checkpoint.pruned_before_run, (index == 0).then_some(f.run));
             assert_eq!(checkpoint.status, CheckpointStatus::Captured);
             let mut observation = observation.clone();
+            observation.output =
+                serde_json::to_string(&crate::session::rewind::FilePublicationResult {
+                    sha256: crate::tools::types::hex_digest(b"new"),
+                    bytes: 3,
+                    executable: false,
+                    before: Some(crate::session::rewind::FileState {
+                        sha256: crate::tools::types::hex_digest(b"before"),
+                        bytes: 6,
+                        executable: false,
+                    }),
+                })
+                .unwrap();
             observation.intent = intent.clone();
             observation.attestation = Some(Attestation::for_site(&intent));
             let finished = Event::ToolFinished {

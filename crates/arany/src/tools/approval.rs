@@ -150,3 +150,31 @@ impl ToolApprovals {
         response.await.unwrap_or(ApprovalReply::Deny)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_changes_never_restore_human_only_asks() {
+        let call = ToolCall::CommandUnguarded {
+            program: "x".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+            justification: "j".into(),
+        };
+        let (approvals, _inbox) = ToolApprovals::new(ApprovalMode::Request);
+        let approvals = approvals.without_human_only();
+        for mode in [
+            ApprovalMode::Auto,
+            ApprovalMode::AutoEdits,
+            ApprovalMode::Request,
+        ] {
+            approvals.set_mode(mode);
+            assert_eq!(approvals.mode(), mode);
+            assert!(!approvals.admits_human_only(&call, false));
+            assert!(!approvals.admits_human_only(&ToolCall::Mkdir { path: "d".into() }, true));
+            assert!(approvals.admits_human_only(&ToolCall::Mkdir { path: "d".into() }, false));
+        }
+    }
+}

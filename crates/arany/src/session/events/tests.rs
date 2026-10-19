@@ -1480,9 +1480,9 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(14));
+        assert_eq!(payload_version("ToolFinished"), Some(15));
         assert_eq!(
-            Event::decode("ToolFinished", 14, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 15, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1490,7 +1490,7 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                13,
+                14,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1502,9 +1502,9 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 14, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", 15, &invalid, Some(run), Some(agent)).is_err());
         }
-        for previous in [13, 12, 11, 10, 9, 8, 7] {
+        for previous in [14, 13, 12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)

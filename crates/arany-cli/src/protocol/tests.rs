@@ -142,6 +142,7 @@ fn every_conformance_message_validates_against_the_schema() {
         ("thread/start", json!({"cwd": "/workspace", "provider": "openai", "model": "model", "effort": "high", "permissionMode": "acceptEdits", "includePaths": ["/workspace/file"]}), json!({"thread": thread})),
         ("thread/resume", json!({"threadId": thread_id, "cwd": "/workspace", "provider": "custom:local", "model": "model"}), json!({"thread": thread, "turns": [turn.clone()]})),
         ("turn/start", json!({"threadId": thread_id, "input": [{"type": "text", "text": "Hello"}, {"type": "image", "mediaType": "image/png", "data": "aW1hZ2U="}], "goal": {"autonomous": false}}), json!({"turn": turn})),
+        ("thread/settings/update", json!({"threadId":thread_id,"permissionMode":"acceptEdits"}), json!({"permissionMode":"acceptEdits"})),
         ("thread/fork", json!({"threadId": thread_id, "cwd": "/workspace", "title": "Fork"}), json!({"thread": thread})),
         ("events/subscribe", json!({"threadId": thread_id, "since": 0}), json!({"events": [], "nextSince": null})),
         ("receipt/get", json!({"threadId": thread_id, "goalId": goal_id}), json!({"goal": {"id": goal_id, "status": "completed", "objective": "Hello", "budget": {"maxProviderCalls": 64, "maxTokens": null, "maxActiveMs": 1800000, "maxRuns": 16}, "usage": {"runs": 1, "providerCalls": 1, "activeMs": 1, "uncertainActiveMs": 0, "knownTokens": 0, "knownCachedTokens": 0, "tokenUsageUnknown": true}, "report": {"summary": "Done", "changes": [], "evidence": [], "unresolved": [], "cachedInputTokens": 0}}})),
@@ -158,6 +159,7 @@ fn every_conformance_message_validates_against_the_schema() {
         match name {
             "initialize" => {serde_json::from_value::<InitializeParams>(params).unwrap();}
             "thread/start" => {serde_json::from_value::<ThreadStartParams>(params).unwrap();}
+            "thread/settings/update" => {serde_json::from_value::<ThreadSettingsUpdateParams>(params).unwrap();}
             "thread/resume" => {serde_json::from_value::<ThreadResumeParams>(params).unwrap();}
             "turn/start" => {serde_json::from_value::<TurnStartParams>(params).unwrap();}
             "turn/interrupt" => {serde_json::from_value::<TurnInterruptParams>(params).unwrap();}

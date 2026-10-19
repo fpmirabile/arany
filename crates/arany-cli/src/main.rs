@@ -10,9 +10,7 @@ use arany::test_support::process as test_process;
 use crate::presentation::render_session;
 use arany::{RunId, SessionId, StateRoot, Store, Telemetry};
 use clap::{ColorChoice, Parser, Subcommand, error::ErrorKind};
-use cli::{
-    CommandOutput, OutputArg, attached::AttachedArgs, exec::ExecArgs, provider::ProviderArgs,
-};
+use cli::{CommandOutput, attached::AttachedArgs, exec::ExecArgs, provider::ProviderArgs};
 use std::{io::Write, path::PathBuf, process::ExitCode, str::FromStr};
 
 #[derive(Parser)]
@@ -24,6 +22,13 @@ struct Cli {
     attached: AttachedArgs,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ShowOutput {
+    Text,
+    Jsonl,
+    SupervisorCorpus,
 }
 
 #[derive(Subcommand)]
@@ -40,7 +45,7 @@ enum Command {
         #[arg(long)]
         state_dir: Option<PathBuf>,
         #[arg(long)]
-        output: OutputArg,
+        output: ShowOutput,
         #[arg(value_name = "SESSION_OR_RUN_ID")]
         session_id: String,
     },
@@ -180,9 +185,7 @@ async fn run(command: Command, telemetry: Telemetry) -> Result<CommandOutput, St
             output,
             session_id,
         } => {
-            let stdout = show(state_dir, output, &session_id)
-                .await
-                .map_err(str::to_owned)?;
+            let stdout = show(state_dir, output, &session_id).await?;
             Ok(CommandOutput {
                 stdout,
                 stderr: String::new(),
@@ -194,14 +197,19 @@ async fn run(command: Command, telemetry: Telemetry) -> Result<CommandOutput, St
 
 async fn show(
     state_dir: Option<PathBuf>,
-    output: OutputArg,
+    output: ShowOutput,
     session_id: &str,
-) -> Result<String, &'static str> {
+) -> Result<String, String> {
     let mut id = SessionId::from_str(session_id).map_err(|_| "invalid Session or Run ID")?;
     let run_id = RunId::from_str(session_id).map_err(|_| "invalid Session or Run ID")?;
     let state_dir = cli::state_dir(state_dir)?;
     let root = StateRoot::open_existing(&state_dir)
         .map_err(|_| "state directory unavailable or unsafe")?;
+    if matches!(output, ShowOutput::SupervisorCorpus) {
+        return arany::supervisor::export_corpus(root, id)
+            .await
+            .map_err(|error| error.to_string());
+    }
     let store = Store::open_read_only(root).map_err(|_| "state store unavailable")?;
     let mut events = store
         .load_session(id)
@@ -227,11 +235,16 @@ async fn show(
     store.close().await.map_err(|_| "store shutdown failed")?;
     if run_selected {
         if !view.runs.iter().any(|run| run.id == run_id) {
-            return Err("Session history unavailable or invalid");
+            return Err("Session history unavailable or invalid".into());
         }
         events.retain(|event| event.run_id == Some(run_id));
     }
-    Ok(render_session(&view, &events, output.into()))
+    let output = match output {
+        ShowOutput::Text => presentation::Output::Text,
+        ShowOutput::Jsonl => presentation::Output::Jsonl,
+        ShowOutput::SupervisorCorpus => unreachable!("corpus returned before ordinary show"),
+    };
+    Ok(render_session(&view, &events, output))
 }
 
 #[cfg(test)]

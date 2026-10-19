@@ -1,5 +1,8 @@
 use arany::SessionId;
-use arany_cli::protocol::{methods::ClientInfo, rpc::*};
+use arany_cli::protocol::{
+    methods::{ClientInfo, PermissionMode, deserialize_permission_mode},
+    rpc::*,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -317,4 +320,57 @@ fn context_body(text: &str) -> String {
     }
     safe.push_str(&text[start..]);
     safe
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetMode {
+    pub session_id: SessionId,
+    #[serde(deserialize_with = "deserialize_permission_mode")]
+    pub mode_id: PermissionMode,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetConfigOption {
+    pub session_id: SessionId,
+    pub config_id: String,
+    #[serde(deserialize_with = "deserialize_permission_mode")]
+    pub value: PermissionMode,
+    #[serde(rename = "type")]
+    pub value_type: Option<String>,
+}
+
+pub(super) fn mode_state(mode: &PermissionMode) -> Value {
+    let options = [
+        (
+            PermissionMode::Default,
+            "Default",
+            "Request one-use approvals",
+        ),
+        (
+            PermissionMode::AcceptEdits,
+            "Accept edits",
+            "Pre-approve typed edits; commands and MCP still ask",
+        ),
+        (
+            PermissionMode::Auto,
+            "Auto",
+            "Review approval-needing actions with AI",
+        ),
+    ];
+    json!({
+        "modes": {"currentModeId":mode, "availableModes":options.iter().map(|(id,name,description)|
+            json!({"id":id,"name":name,"description":description})).collect::<Vec<_>>()},
+        "configOptions": [{"id":"mode","name":"Session Mode","category":"mode","type":"select",
+            "currentValue":mode,"options":options.iter().map(|(value,name,description)|
+                json!({"value":value,"name":name,"description":description})).collect::<Vec<_>>()}]
+    })
+}
+
+pub(super) fn mode_updates(session: SessionId, mode: &PermissionMode) -> [Value; 2] {
+    [
+        json!({"sessionUpdate":"current_mode_update","currentModeId":mode}),
+        json!({"sessionUpdate":"config_option_update","configOptions":mode_state(mode)["configOptions"]}),
+    ].map(|update| json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session,"update":update}}))
 }

@@ -21,6 +21,7 @@ Editing constraints: [security rules](../../agents/security.md).
 | `acp` | [ACP spec](./acp.md) owns the editor subprocess, capabilities and core text turns. |
 | `serve --stdio` (reserved), `generate-schema [--out DIR]` | [Serve spec](./serve.md) owns protocol framing, schema export and the accepted server surface. |
 | `show --output text\|jsonl SESSION_OR_RUN_ID` | Deterministic read-only replay without terminal modes. Session selection exposes direct canonical Events and the fork reference; Run selection exposes only that Run after strict parent validation. Invalid or conflicting ownership fails without output. It validates the Session-or-Run UUID before State access, opens only existing State read-only, never reads a credential and closes the Store before rendering. |
+| `show --output supervisor-corpus SESSION_ID` | Session-only calibration JSONL to stdout, with no terminal initialization. The [Supervisor adapter](./tools.md#supervisor-adapter) owns format, privacy, replay, locking and overflow. Refusal exits unsuccessfully with empty stdout and a fixed diagnostic (plus safe overflow counts) on stderr. |
 
 The command chooses the contract. An ineligible bare invocation fails before Engine entry and directs the caller to `exec`. Headless objective prefixes such as `/`, `@` and `!` are literal data.
 

@@ -27,6 +27,20 @@ impl Event {
                     Err(ReplayError::InvalidPayload)
                 }
             }
+            Self::WorkspaceRewindStarted { record } => {
+                if record.valid() {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
+            Self::WorkspaceRewindFinished { record } => {
+                if record.valid() {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
             Self::SessionStarted { title, .. } | Self::SessionRenamed { title } => {
                 bounded(title, 128)
             }

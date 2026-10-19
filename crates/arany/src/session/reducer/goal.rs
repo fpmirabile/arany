@@ -170,6 +170,17 @@ impl SessionView {
                 == Some(primary.provider_calls.last().map_or(0, |call| usize::from(call.requested_tools)));
         // Pre-plan inspections count: folding every Run's observations decides the criterion.
         let mut success_state = contract.initial_success_state();
+        let invalidated_after = self
+            .rewinds
+            .operations
+            .iter()
+            .filter(|r| {
+                r.outcome() == crate::session::rewind::RewindOutcome::Restored
+                    && crate::session::rewind::invalidates(contract, &r.files)
+            })
+            .filter_map(|r| r.finished_sequence)
+            .max()
+            .unwrap_or(0);
         for observation in self
             .runs
             .iter()
@@ -178,6 +189,10 @@ impl SessionView {
                     .is_some_and(|goal| goal.run_ids.contains(&run.id))
             })
             .flat_map(|run| run.tools.iter())
+            .filter(|tool| {
+                tool.finished_sequence
+                    .is_some_and(|s| s > invalidated_after)
+            })
             .filter_map(|tool| tool.observation.as_ref())
         {
             contract.observe_success(&mut success_state, observation);

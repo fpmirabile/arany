@@ -113,6 +113,16 @@ impl PreparedCompaction {
             }
             items.push(item);
         }
+        if let Some(facts) = super::rewind::history_facts(view, covered, view.last_sequence) {
+            used += facts.len() + 64;
+            if used > MAX_COMPACTION_INPUT_BYTES || items.len() == MAX_COMPACTION_TURNS {
+                return Err(CompactionInputError::TooLarge);
+            }
+            items.push(CompactionItem::Unanswered {
+                user: facts,
+                status: UnansweredStatus::Interrupted,
+            });
+        }
         if items.is_empty() {
             return Err(CompactionInputError::Empty);
         }
@@ -161,6 +171,11 @@ pub(crate) fn validate_compactions(events: &[EventEnvelope]) -> Result<(), Repla
             }
             Event::RunFinished { run_id, .. } => {
                 boundary = Some((*run_id, envelope.sequence, hasher.digest()));
+            }
+            Event::WorkspaceRewindStarted { .. } | Event::WorkspaceRewindFinished { .. } => {
+                if let Some((run_id, _, _)) = boundary {
+                    boundary = Some((run_id, envelope.sequence, hasher.digest()));
+                }
             }
             _ => {}
         }

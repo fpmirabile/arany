@@ -1,8 +1,14 @@
 use super::{EventEnvelope, ReplayError};
 use sha2::{Digest, Sha256};
 
+#[derive(Clone, Debug)]
 pub(crate) struct PrefixHasher(Sha256);
 
+impl Default for PrefixHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl PrefixHasher {
     pub(crate) fn new() -> Self {
         let mut hasher = Sha256::new();
