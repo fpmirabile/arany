@@ -257,6 +257,8 @@ pub(crate) fn git_operations() -> Vec<&'static str> {
 
 pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..65536, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)";
 pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..65536, whole-file sha256), search (literal UTF-8 content in a file or directory)";
+pub(crate) const WORKER_COMMAND_CONTRACT: &str = "Explicit argv only. Use ARANY_TOOL_WORKSPACE and ARANY_TOOL_INPUTS for private paths. Commands reconstruct the current private assignment image offline; accepted captures update that view. Only the primary publishes a handover and re-verifies it in the Workspace. Cache changes are discarded.";
+
 pub(crate) const COMMAND_CONTRACT: &str = if cfg!(target_os = "macos") {
     "Explicit argv only. Private selected-project cwd; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. command_unguarded re-runs an identical failed command on the host only after the user approves it."
 } else {

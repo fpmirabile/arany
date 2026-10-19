@@ -851,14 +851,85 @@ impl RunLoop<'_> {
                     _ => false,
                 };
             let step_disposition = if children[index].editor {
+                let gate_failed = valid_response
+                    && matches!(
+                        &result,
+                        CallResult::Response(ProviderResponse {
+                            outcome: ProviderOutcome::Finish(_),
+                            ..
+                        })
+                    )
+                    && self.criterion_unmet(children[index].agent_run_id)?;
+                let mut record = call_record(
+                    AgentPhase::ChildWork,
+                    &result,
+                    valid_response && !gate_failed,
+                    None,
+                );
+                if gate_failed {
+                    record.failure_reason =
+                        Some(crate::provider::ProviderFailureReason::CriterionNotMetInView);
+                }
                 self.append(Event::ProviderCallRecorded {
                     run_id: self.run_id,
                     agent_run_id: children[index].agent_run_id,
-                    record: call_record(AgentPhase::ChildWork, &result, valid_response, None),
+                    record,
                 })
                 .await?;
                 self.ledger().child_call_finished()?;
+                if gate_failed
+                    && abort_reason.is_none()
+                    && !self.observe_worker_stop().await?
+                    && children[index].turns_remaining > 0
+                    && children[index].tool_calls_remaining > 0
+                    && self
+                        .controls
+                        .tools
+                        .zip(children[index].tools.as_ref())
+                        .zip(match &result {
+                            CallResult::Response(ProviderResponse { turn, .. }) => Some(turn),
+                            _ => None,
+                        })
+                        .is_some_and(|((runtime, tools), turn)| {
+                            tools.has_stop_room(turn, runtime.context_limit_bytes())
+                        })
+                    && Instant::now() < deadline
+                    && self.ledger().can_start_provider_call()
+                    && self.ledger().remaining_calls() != Some(0)
+                    && self.ledger().view(|v| {
+                        v.runs
+                            .last()
+                            .expect("active Run")
+                            .agents
+                            .iter()
+                            .find(|a| a.id == children[index].agent_run_id)
+                            .and_then(|a| a.assignment.as_ref())
+                            .is_some_and(|w| w.gate_continuations < 3)
+                    })?
+                {
+                    if let CallResult::Response(ProviderResponse { turn, .. }) = &result {
+                        let child = &mut children[index];
+                        let text = "Finish refused: criterion_not_met_in_view. Obtain current passing private evidence before Finish; at most three continuations are allowed.".to_owned();
+                        if let Some(tools) = child.tools.as_mut() {
+                            tools.add_stop_feedback(turn, &text);
+                        }
+                        child
+                            .stop_hook_feedback
+                            .push(crate::provider::StopHookFeedback {
+                                after_step: child.tools.as_ref().map_or(0, |t| t.steps.len()),
+                                turn: turn.clone(),
+                                text,
+                                facts: None,
+                                steering_notes: Vec::new(),
+                            });
+                    }
+                    queue.pending.push_back(index);
+                    self.fill_slots(queue, children, root_request, segments, deadline)
+                        .await?;
+                    continue;
+                }
                 let mut failure = match &result {
+                    _ if gate_failed => WorkerCause::CriterionUnverified,
                     CallResult::Response(ProviderResponse {
                         outcome: ProviderOutcome::Tools(_),
                         ..
@@ -878,7 +949,7 @@ impl RunLoop<'_> {
                         outcome: ProviderOutcome::Finish(f),
                         turn,
                         ..
-                    }) if valid_response && abort_reason.is_none() => {
+                    }) if valid_response && !gate_failed && abort_reason.is_none() => {
                         match self
                             .subagent_stop(
                                 &mut children[index],
@@ -928,19 +999,16 @@ impl RunLoop<'_> {
                             Err(error) => return Err(error),
                         };
                         child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
-                        let succeeded = self.ledger().view(|v| {
+                        let can_continue = self.ledger().view(|v| {
                             v.runs
                                 .last()
                                 .and_then(|r| r.agents.iter().find(|a| a.id == child.agent_run_id))
                                 .and_then(|a| a.tools.last())
-                                .and_then(|t| t.observation.as_ref())
-                                .is_some_and(|o| {
-                                    o.disposition == crate::tools::ToolDisposition::Succeeded
-                                        || o.disposition == crate::tools::ToolDisposition::Denied
-                                            && matches!(o.intent.call, ToolCall::Command { .. })
+                                .is_some_and(|t| {
+                                    t.observation.is_some() && !crate::session::private_failure(t)
                                 })
                         })?;
-                        if continues && succeeded {
+                        if continues && can_continue {
                             queue.pending.push_back(index);
                             if let Err(error) = self
                                 .fill_slots(queue, children, root_request, segments, deadline)

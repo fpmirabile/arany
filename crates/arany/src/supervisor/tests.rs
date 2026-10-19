@@ -252,6 +252,56 @@ fn supervisor_call_equality_excludes_intent_identity_and_hashes_content() {
 }
 
 #[test]
+fn supervisor_worker_command_outcomes_ignore_seal_sequences_and_keep_the_exit_class() {
+    use crate::worker::{PrivateCapture, WorkerCommandResult, WorkerDataPurpose, WorkerDataRef};
+    let fixture = crate::session::worker_protocol_fixture();
+    let view = SessionView::replay(fixture.session, &fixture.envelopes())
+        .unwrap()
+        .unwrap();
+    let mut envelope = fixture
+        .envelopes()
+        .into_iter()
+        .find(|e| matches!(&e.event, Event::ToolFinished { observation, .. } if matches!(observation.intent.call, ToolCall::Write { .. })))
+        .unwrap();
+    let mut outcome = |n: u64, exit_code: i32| {
+        envelope.sequence = n;
+        let Event::ToolFinished { observation, .. } = &mut envelope.event else {
+            unreachable!()
+        };
+        observation.intent.call = ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "true".into()],
+            cwd: ".".into(),
+        };
+        observation.attestation = None;
+        observation.disposition = ToolDisposition::Succeeded;
+        observation.output = serde_json::to_string(&WorkerCommandResult {
+            exit_code: Some(exit_code),
+            stdout: String::new(),
+            stderr: String::new(),
+            private_capture: PrivateCapture::Sealed {
+                data: WorkerDataRef {
+                    assignment_id: fixture.child,
+                    purpose: WorkerDataPurpose::Mutation,
+                    first_sequence: n,
+                    seal_sequence: n + 1,
+                    chunks: 1,
+                    bytes: 1,
+                    sha256: [1; 32],
+                },
+            },
+        })
+        .unwrap();
+        subject(&view.runs[0], fixture.child, &envelope)
+            .unwrap()
+            .1
+            .outcome
+    };
+    assert_eq!(outcome(10, 0), outcome(20, 0));
+    assert_ne!(outcome(10, 0), outcome(10, 1));
+}
+
+#[test]
 fn supervisor_footprint_uses_only_leased_base_and_evicts_whole_actor_steps() {
     let fixture = crate::session::worker_protocol_fixture();
     let mut view = SessionView::replay(fixture.session, &fixture.envelopes())
