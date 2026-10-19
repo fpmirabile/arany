@@ -999,7 +999,7 @@ async fn malformed_oversized_and_hostile_params_recover_over_stdio() {
         .await;
         assert_eq!(next(&mut reader).await["error"]["code"], -32602);
     }
-    send(&mut writer, json!(9), "session/list", json!({})).await;
+    send(&mut writer, json!(9), "session/delete", json!({})).await;
     assert_eq!(next(&mut reader).await["error"]["code"], -32601);
     writer.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
