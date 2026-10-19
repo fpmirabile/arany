@@ -344,7 +344,9 @@ impl Store {
                                     if pending_prunes.get(&session_id).is_some_and(|pending| pending <= &pruned) {
                                         pending_prunes.remove(&session_id);
                                     }
-                                    pruning_notified_run = run;
+                                    if run.is_some() {
+                                        pruning_notified_run = run;
+                                    }
                                 }
                             }
                             #[cfg(any(test, feature = "test-support"))]

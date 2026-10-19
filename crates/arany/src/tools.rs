@@ -165,6 +165,14 @@ struct QueueWait {
     elapsed: Duration,
 }
 
+pub(crate) struct RewindPin {
+    pub(crate) workspace_device: u64,
+    pub(crate) workspace_inode: u64,
+    pub(crate) policy_digest: [u8; 32],
+    pub(crate) enforcement_digest: [u8; 32],
+    pub(crate) expires_at_ms: u64,
+}
+
 pub(crate) struct CheckpointRequest {
     pub(crate) reply: tokio::sync::oneshot::Sender<()>,
     pub(crate) go_deadline: tokio::time::Instant,
@@ -244,6 +252,30 @@ impl ToolRuntime {
                     .0
                     != permissions::Decision::Deny
             })
+    }
+
+    pub(crate) fn rewind_pin(&self) -> RewindPin {
+        RewindPin {
+            workspace_device: self.workspace_identity.device,
+            workspace_inode: self.workspace_identity.inode,
+            policy_digest: self.config.digest(),
+            enforcement_digest: self.enforcement_digest,
+            expires_at_ms: now_ms().saturating_add(60_000),
+        }
+    }
+
+    pub(crate) fn rewind_batch(&self, files: &[FileChange]) -> Result<(), ToolError> {
+        fs::validate_workspace(self)?;
+        let reads = self
+            .reads
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let _permit = reads
+            .slots
+            .try_acquire()
+            .map_err(|_| ToolError::QueueFull)?;
+        fs::worker_publication_paths(&reads.root, files)?;
+        fs::validate_workspace(self)
     }
 
     pub(crate) fn rewind_file(&self, path: &str) -> Result<Option<FileVersion>, ToolError> {

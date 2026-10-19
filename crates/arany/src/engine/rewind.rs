@@ -175,13 +175,23 @@ impl Engine {
         cancellation: RunCancellation,
     ) -> Result<RewindFinished, EngineError> {
         let bytes = serde_json::to_vec(&changeset).map_err(|_| EngineError::InvalidRequest)?;
+        let files = changeset
+            .files
+            .iter()
+            .filter_map(|f| f.before.as_ref().map(|v| (f.path.clone(), v)))
+            .map(|(p, v)| {
+                v.bytes_with_limit(1024 * 1024)
+                    .map(|bytes| (p, bytes))
+                    .ok_or(EngineError::InvalidHistory)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut intent = runtime.intent(
             RunId::new(),
             AgentRunId::new(),
             ToolCall::ApplyChangeset {
                 source: ChangesetSource::Rewind {
                     plan_digest: started.plan_digest,
-                    bytes: bytes.len() as u32,
+                    bytes: u32::try_from(bytes.len()).map_err(|_| EngineError::RewindTooLarge)?,
                     sha256: crate::tools::types::digest(&bytes),
                 },
             },
@@ -207,16 +217,6 @@ impl Engine {
                 },
             )
             .await?;
-        let files = changeset
-            .files
-            .iter()
-            .filter_map(|f| f.before.as_ref().map(|v| (f.path.clone(), v)))
-            .map(|(p, v)| {
-                v.bytes_with_limit(1024 * 1024)
-                    .map(|bytes| (p, bytes))
-                    .ok_or(EngineError::InvalidHistory)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let checkpoint = if files.is_empty() {
             Checkpoint::not_needed()
         } else {
@@ -279,13 +279,12 @@ impl Engine {
                 }
             }
             if finished.outcome == RewindOutcome::Conflict {
-                // The publisher refuses the complete batch; its wire receipt does not name a single failing path.
-                finished.conflict_count = changeset.files.len() as u32;
-                finished.conflicts = changeset
-                    .files
-                    .iter()
+                let drifted = Self::drifted_paths(&runtime, &changeset).await;
+                finished.conflict_count =
+                    u32::try_from(drifted.len()).map_err(|_| EngineError::RewindTooLarge)?;
+                finished.conflicts = drifted
+                    .into_iter()
                     .take(rewind::MAX_REWIND_CONFLICTS)
-                    .map(|f| f.path.clone())
                     .collect();
             }
         }
@@ -298,6 +297,18 @@ impl Engine {
             )
             .await?;
         Ok(finished)
+    }
+
+    async fn drifted_paths(runtime: &ToolRuntime, changeset: &WorkerChangeset) -> Vec<String> {
+        let mut drifted = Vec::new();
+        for change in &changeset.files {
+            let (runtime, path) = (runtime.clone(), change.path.clone());
+            let live = tokio::task::spawn_blocking(move || runtime.rewind_file(&path)).await;
+            if !matches!(&live, Ok(Ok(version)) if *version == change.before) {
+                drifted.push(change.path.clone());
+            }
+        }
+        drifted
     }
 
     fn rewind_runtime(&self, request: &RewindRequest) -> Result<ToolRuntime, EngineError> {
@@ -341,30 +352,20 @@ impl Engine {
         if request.overwrite.windows(2).any(|p| p[0] >= p[1]) {
             return Err(EngineError::InvalidRequest);
         }
-        let mut files = Vec::new();
+        let mut files: Vec<RewindFile> = Vec::new();
         let mut changes = Vec::new();
         let mut overwrite = Vec::new();
         let mut current_bytes = 0u64;
         for file in &plan.files {
             let mut issues = Vec::new();
             let kept = request.kept.contains(&file.path);
-            let before = if !runtime.rewind_path_allowed(&file.path) {
-                issues.push(RewindIssue::OutsideGrant);
-                None
-            } else {
-                let (runtime, path) = (runtime.clone(), file.path.clone());
-                match tokio::task::spawn_blocking(move || runtime.rewind_file(&path)).await {
-                    Ok(Ok(v)) => v,
-                    _ => {
-                        issues.push(RewindIssue::Unsafe);
-                        None
-                    }
-                }
-            };
+            let before = live_version(&runtime, &file.path, kept, &mut issues).await?;
             let observed = before.as_ref().map(file_state).transpose()?;
-            current_bytes += observed.as_ref().map_or(0, |v| u64::from(v.bytes));
-            if current_bytes > rewind::MAX_REWIND_BYTES {
-                return Err(EngineError::RewindTooLarge);
+            if !kept {
+                current_bytes += observed.as_ref().map_or(0, |v| u64::from(v.bytes));
+                if current_bytes > rewind::MAX_REWIND_BYTES {
+                    return Err(EngineError::RewindTooLarge);
+                }
             }
             if issues.is_empty() && observed != file.expected_current {
                 issues.push(RewindIssue::Drifted);
@@ -426,23 +427,19 @@ impl Engine {
         if overwrite.len() != request.overwrite.len() {
             return Err(EngineError::InvalidRequest);
         }
+        check_batch(&runtime, &mut files, &mut changes).await?;
         let selected = plan
             .select(&request.kept, &overwrite)
             .map_err(|_| EngineError::RewindTooLarge)?;
-        let pin = runtime.intent(
-            RunId::new(),
-            AgentRunId::new(),
-            ToolCall::Mkdir {
-                path: "rewind".into(),
-            },
-        );
+        let pin = runtime.rewind_pin();
         let started = RewindStarted {
             rewind_id: uuid::Uuid::now_v7(),
             target: request.target.clone(),
             head_sequence: view.last_sequence,
             prefix_digest: view.rewinds.prefix.digest(),
             plan_digest: selected.digest(),
-            file_count: selected.files.len() as u32,
+            file_count: u32::try_from(selected.files.len())
+                .map_err(|_| EngineError::RewindTooLarge)?,
             restored_bytes: selected.restored_bytes(),
             kept: request.kept.clone(),
             overwrite,
@@ -468,13 +465,72 @@ impl Engine {
     }
 }
 
+async fn live_version(
+    runtime: &ToolRuntime,
+    path: &str,
+    kept: bool,
+    issues: &mut Vec<RewindIssue>,
+) -> Result<Option<FileVersion>, EngineError> {
+    use crate::tools::ToolError;
+    if !runtime.rewind_path_allowed(path) {
+        issues.push(RewindIssue::OutsideGrant);
+        return Ok(None);
+    }
+    if !crate::session::worker::writable_path(path) {
+        issues.push(RewindIssue::Unsafe);
+        return Ok(None);
+    }
+    let (runtime, path) = (runtime.clone(), path.to_owned());
+    match tokio::task::spawn_blocking(move || runtime.rewind_file(&path))
+        .await
+        .map_err(|_| ToolError::Operation)
+        .and_then(|read| read)
+    {
+        Ok(version) => Ok(version),
+        Err(ToolError::QueueFull) => Err(EngineError::Tool(ToolError::QueueFull)),
+        Err(ToolError::Limit) if !kept => Err(EngineError::RewindTooLarge),
+        Err(_) => {
+            issues.push(RewindIssue::Unsafe);
+            Ok(None)
+        }
+    }
+}
+
+async fn check_batch(
+    runtime: &ToolRuntime,
+    files: &mut [RewindFile],
+    changes: &mut Vec<FileChange>,
+) -> Result<(), EngineError> {
+    use crate::tools::ToolError;
+    let (runtime, batch) = (runtime.clone(), changes.clone());
+    match tokio::task::spawn_blocking(move || runtime.rewind_batch(&batch))
+        .await
+        .map_err(|_| ToolError::Operation)
+        .and_then(|checked| checked)
+    {
+        Ok(()) => {}
+        Err(ToolError::Limit) => return Err(EngineError::RewindTooLarge),
+        Err(ToolError::QueueFull) => return Err(EngineError::Tool(ToolError::QueueFull)),
+        Err(_) => {
+            for file in files.iter_mut().filter(|f| !f.kept && f.issues.is_empty()) {
+                file.issues.push(RewindIssue::Unsafe);
+            }
+            changes.clear();
+        }
+    }
+    Ok(())
+}
+
 fn file_state(version: &FileVersion) -> Result<FileState, EngineError> {
     Ok(FileState {
         sha256: version.sha256.clone(),
-        bytes: version
-            .bytes_with_limit(1024 * 1024)
-            .ok_or(EngineError::InvalidHistory)?
-            .len() as u32,
+        bytes: u32::try_from(
+            version
+                .bytes_with_limit(1024 * 1024)
+                .ok_or(EngineError::InvalidHistory)?
+                .len(),
+        )
+        .map_err(|_| EngineError::InvalidHistory)?,
         executable: version.executable,
     })
 }
@@ -528,6 +584,11 @@ mod tests {
     }
 
     fn publications(view: &mut SessionView, count: usize, bytes: u32) {
+        let paths: Vec<_> = (0..count).map(|index| format!("src/f{index:04}")).collect();
+        publications_at(view, &paths, bytes);
+    }
+
+    fn publications_at(view: &mut SessionView, paths: &[String], bytes: u32) {
         let tool = view.runs[0]
             .tools
             .iter()
@@ -550,9 +611,9 @@ mod tests {
             unreachable!()
         };
         files.clear();
-        for index in 0..count {
+        for path in paths {
             files.push(crate::session::worker::WorkerFileFact {
-                path: format!("src/f{index:04}"),
+                path: path.clone(),
                 before: WorkerBaseVersion::File {
                     sha256: crate::tools::types::hex_digest(b"old"),
                     bytes,
@@ -668,6 +729,19 @@ mod tests {
             .unwrap()
             .preview;
         assert_eq!(missing.files()[0].issues, [RewindIssue::Unavailable]);
+        for path in [
+            "src/caf\u{e9}".to_owned(),
+            format!("src/{}", ["d"; 16].join("/")),
+        ] {
+            publications_at(&mut view, std::slice::from_ref(&path), 3);
+            let refused = engine
+                .prepare_rewind(request(Vec::new(), Vec::new()), &view)
+                .await
+                .unwrap()
+                .preview;
+            assert!(refused.files()[0].issues.contains(&RewindIssue::Unsafe));
+            assert!(!refused.can_restore(), "{path}");
+        }
         engine.close().await.unwrap();
     }
 
@@ -717,11 +791,7 @@ mod tests {
                 overwrite: Vec::new(),
             })
             .unwrap();
-        let pin = runtime.intent(
-            RunId::new(),
-            AgentRunId::new(),
-            ToolCall::Mkdir { path: "src".into() },
-        );
+        let pin = runtime.rewind_pin();
         let started = RewindStarted {
             rewind_id: uuid::Uuid::now_v7(),
             target,
@@ -736,7 +806,7 @@ mod tests {
             workspace_inode: pin.workspace_inode,
             policy_digest: pin.policy_digest,
             enforcement_digest: pin.enforcement_digest,
-            expires_at_ms: pin.expires_at_ms as i64,
+            expires_at_ms: i64::try_from(pin.expires_at_ms).unwrap(),
         };
         let changeset = WorkerChangeset {
             files: vec![FileChange {

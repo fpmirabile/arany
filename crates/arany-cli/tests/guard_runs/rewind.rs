@@ -33,12 +33,17 @@ async fn case(case: &str) {
     grant(&state, true);
     let mut plan = write_plan();
     plan.paths = vec!["notes/facts.txt".into(), "notes/new.txt".into()];
+    let partial = case == "partial";
+    if partial {
+        std::fs::create_dir(workspace.join("notes/sub")).unwrap();
+        plan.paths.push("notes/sub/z.txt".into());
+    }
     plan.budget = arany::GoalBudget::default();
     plan.success_criterion = arany::GoalSuccessCriterion::WorkspaceFileContent {
         path: "notes/facts.txt".into(),
         content: "changed".into(),
     };
-    let provider = Arc::new(ScriptedProvider::new(vec![
+    let mut script = vec![
         tool_outcome(
             arany::ToolCall::Write {
                 path: "notes/facts.txt".into(),
@@ -56,7 +61,21 @@ async fn case(case: &str) {
             None,
         ),
         finish_with("changed"),
-    ]));
+    ];
+    if partial {
+        script.insert(
+            2,
+            tool_outcome(
+                arany::ToolCall::Write {
+                    path: "notes/sub/z.txt".into(),
+                    expected_digest: None,
+                    content: "z".into(),
+                },
+                None,
+            ),
+        );
+    }
+    let provider = Arc::new(ScriptedProvider::new(script));
     let mut input = request(&workspace, "Change two files");
     input.goal.finish_after_run = false;
     let result = run_with(
@@ -92,12 +111,7 @@ async fn case(case: &str) {
     }
     if case == "special" {
         std::fs::remove_file(&path).unwrap();
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &path,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        std::os::unix::net::UnixListener::bind(&path).unwrap();
     }
     if case == "grant" {
         grant(&state, false);
@@ -165,10 +179,22 @@ async fn case(case: &str) {
     if case == "cancel" {
         cancellation.cancel();
     }
-    let gate = ["go_race", "cancel_started"]
+    let gate = ["go_race", "cancel_started", "crash_captured"]
         .contains(&case)
         .then(|| arany::FaultPlan::gate_checkpoint(session));
-    let result = {
+    let ack = (case == "crash_started").then(|| {
+        arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+            matches!(event, Event::WorkspaceRewindStarted { .. })
+        })
+    });
+    if partial {
+        std::fs::set_permissions(
+            workspace.join("notes/sub"),
+            std::fs::Permissions::from_mode(0o500),
+        )
+        .unwrap();
+    }
+    let result = 'run: {
         let restore = engine.rewind(preview, cancellation.clone());
         tokio::pin!(restore);
         if let Some((entered, release)) = gate {
@@ -176,15 +202,41 @@ async fn case(case: &str) {
                 result = &mut restore => panic!("rewind completed before capture gate: {result:?}"),
                 entered = tokio::time::timeout(Duration::from_secs(120), entered) => entered.unwrap().unwrap(),
             }
-            if case == "go_race" {
-                std::fs::write(&path, "raced").unwrap();
-            } else {
-                cancellation.cancel();
+            match case {
+                "go_race" => std::fs::write(&path, "raced").unwrap(),
+                "crash_captured" => {
+                    drop(release);
+                    break 'run None;
+                }
+                _ => {
+                    cancellation.cancel();
+                }
             }
-            release.send(()).unwrap();
+            let _ = release.send(());
         }
-        restore.await
+        if let Some((entered, release)) = ack {
+            tokio::select! {
+                result = &mut restore => panic!("rewind completed before the Started acknowledgment: {result:?}"),
+                entered = tokio::time::timeout(Duration::from_secs(120), entered) => entered.unwrap().unwrap(),
+            }
+            drop(release);
+            assert!(restore.await.is_err());
+            break 'run None;
+        }
+        Some(restore.await)
     };
+    let Some(result) = result else {
+        let again = request(target.clone(), Vec::new(), Vec::new());
+        crash(engine, &workspace, &state, session, &view, &path, again).await;
+        return;
+    };
+    if partial {
+        std::fs::set_permissions(
+            workspace.join("notes/sub"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
     if ["race", "cancel"].contains(&case) {
         assert!(matches!(
             result,
@@ -202,6 +254,10 @@ async fn case(case: &str) {
             }
         );
         assert!(finished.attestation.is_none());
+        if case == "go_race" {
+            assert_eq!(finished.conflicts, ["notes/facts.txt"]);
+            assert_eq!(finished.conflict_count, 1);
+        }
         assert!(
             workspace.join("notes/new.txt").exists(),
             "no partial publication"
@@ -221,13 +277,13 @@ async fn case(case: &str) {
             let finished = result.unwrap();
             assert_eq!(
                 finished.outcome,
-                if case == "receipt_loss" {
+                if ["receipt_loss", "partial"].contains(&case) {
                     RewindOutcome::Uncertain
                 } else {
                     RewindOutcome::Restored
                 }
             );
-            if case != "receipt_loss" {
+            if !["receipt_loss", "partial"].contains(&case) {
                 assert_eq!(
                     finished.checkpoint.as_ref().unwrap().status,
                     CheckpointStatus::Captured
@@ -243,30 +299,15 @@ async fn case(case: &str) {
                 b"original".as_slice()
             }
         );
-        if ["receipt_loss", "finish_loss"].contains(&case) {
-            let blocked = engine
-                .rewind_preview(request(target.clone(), Vec::new(), Vec::new()))
-                .await
-                .unwrap();
-            assert!(!blocked.can_restore());
-            assert!(!blocked.plan().blockers.is_empty());
-            let mut resume = request_for_resume(&workspace, session, result_goal(&view));
-            resume.include_paths.clear();
-            let never = Arc::new(ScriptedProvider::new(Vec::new()));
-            assert!(
-                run_with(
-                    &engine,
-                    &never,
-                    resume,
-                    RunControls {
-                        tools: ToolGrant::Configured,
-                        ..Default::default()
-                    }
-                )
-                .await
-                .is_err()
-            );
-            assert!(never.requests.lock().unwrap().is_empty());
+        if ["receipt_loss", "finish_loss", "partial"].contains(&case) {
+            blocked(
+                &engine,
+                &workspace,
+                session,
+                &view,
+                request(target.clone(), Vec::new(), Vec::new()),
+            )
+            .await;
         } else if case != "keep" {
             let (_, restored) = replayed(&state, session).await;
             let boundary = restored.rewinds.checkpoints.iter().find(|c| matches!(c, CheckpointTarget::Rewind { rewind_id: id, .. } if *id == rewind_id)).unwrap().clone();
@@ -297,20 +338,90 @@ async fn case(case: &str) {
             );
         }
     }
+    settle(engine, &state, session, &path, case).await;
+}
+
+async fn crash(
+    engine: Engine,
+    workspace: &Path,
+    state: &Path,
+    session: SessionId,
+    view: &SessionView,
+    path: &Path,
+    again: arany::RewindRequest,
+) {
+    assert!(workspace.join("notes/new.txt").exists());
+    assert_eq!(std::fs::read(path).unwrap(), b"changed");
+    blocked(&engine, workspace, session, view, again).await;
+    settle(engine, state, session, path, "crash").await;
+}
+
+async fn blocked(
+    engine: &Engine,
+    workspace: &Path,
+    session: SessionId,
+    view: &SessionView,
+    again: arany::RewindRequest,
+) {
+    let blocked = engine.rewind_preview(again).await.unwrap();
+    assert!(!blocked.can_restore());
+    assert!(!blocked.plan().blockers.is_empty());
+    let mut resume = request_for_resume(workspace, session, result_goal(view));
+    resume.include_paths.clear();
+    let never = Arc::new(ScriptedProvider::new(Vec::new()));
+    assert!(
+        run_with(
+            engine,
+            &never,
+            resume,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(never.requests.lock().unwrap().is_empty());
+}
+
+async fn settle(engine: Engine, state: &Path, session: SessionId, path: &Path, case: &str) {
     engine.close().await.unwrap();
-    let before = std::fs::read(&path).unwrap();
-    let (events, first) = replayed(&state, session).await;
+    let before = std::fs::read(path).unwrap();
+    let (events, first) = replayed(state, session).await;
     let reopened = engine_support::open(
-        StateRoot::open_existing(&state).unwrap(),
+        StateRoot::open_existing(state).unwrap(),
         EngineConfig::default(),
     )
     .unwrap();
     reopened.close().await.unwrap();
-    let (again, second) = replayed(&state, session).await;
+    let (again, second) = replayed(state, session).await;
     assert_eq!(events, again, "reopen fabricates no Events");
+    let finished = events.iter().rev().find_map(|e| match &e.event {
+        Event::WorkspaceRewindFinished { record } => Some(record),
+        _ => None,
+    });
+    match case {
+        "receipt_loss" | "partial" => {
+            let finished = finished.expect("Finished is persisted");
+            assert_eq!(finished.outcome, RewindOutcome::Uncertain);
+            let reported = case == "partial";
+            assert_eq!(finished.attestation.is_some(), reported, "{case}");
+            assert_eq!(finished.checkpoint.is_some(), reported, "{case}");
+        }
+        "crash" | "finish_loss" => {
+            assert!(finished.is_none());
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e.event, Event::WorkspaceRewindStarted { .. }))
+            );
+        }
+        _ => {}
+    }
     assert_eq!(first, second);
     assert_eq!(
-        std::fs::read(&path).unwrap(),
+        std::fs::read(path).unwrap(),
         before,
         "strict replay never republishes"
     );
@@ -359,7 +470,13 @@ async fn guarded_rewind_refuses_missing_grant_links_special_files_and_stale_conf
 }
 #[tokio::test]
 async fn guarded_rewind_lost_receipt_and_crash_prefix_block_resume_without_reexecution() {
-    for name in ["receipt_loss", "finish_loss"] {
+    for name in [
+        "receipt_loss",
+        "finish_loss",
+        "partial",
+        "crash_started",
+        "crash_captured",
+    ] {
         case(name).await;
     }
 }
