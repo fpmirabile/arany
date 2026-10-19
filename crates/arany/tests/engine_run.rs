@@ -4121,12 +4121,29 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
                 summary: "fork".into(),
                 result: "fork answer".into(),
             }),
+            ProviderOutcome::Finish(Finish {
+                summary: "deep".into(),
+                result: "deep answer".into(),
+            }),
+            ProviderOutcome::Finish(Finish {
+                summary: "bounded".into(),
+                result: "bounded".into(),
+            }),
+            ProviderOutcome::Finish(Finish {
+                summary: "bounded".into(),
+                result: "bounded".into(),
+            }),
         ]);
         let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = engine_support::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
+        let engine = engine_support::open(
+            StateRoot::admit(&state_path).expect("private state"),
+            EngineConfig::default(),
+        )
         .expect("engine");
-        let first = run_to_end(&engine, &provider, request(&workspace, "First question"))
+        let mut first_request = request(&workspace, "First question");
+        first_request.goal.finish_after_run = false;
+        let first = run_to_end(&engine, &provider, first_request)
             .await
             .expect("source Run");
         let resumed = resume_session(
@@ -4154,8 +4171,8 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
                 first.session_id,
                 None,
             )
-            .await
-            , Err(EngineError::WorkspaceMismatch)
+            .await,
+            Err(EngineError::WorkspaceMismatch)
         ));
         assert!(matches!(
             rename_session(
@@ -4169,7 +4186,11 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         ));
         assert!(matches!(
             engine
-                .compact_session(&AdmittedProviders::single(provider.clone()), first.session_id, other_workspace)
+                .compact_session(
+                    &AdmittedProviders::single(provider.clone()),
+                    first.session_id,
+                    other_workspace
+                )
                 .await,
             Err(EngineError::WorkspaceMismatch)
         ));
@@ -4195,7 +4216,10 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         )
         .await
         .expect("fork in Session picker");
-        assert_eq!(listed.iter().map(|item| item.id).collect::<Vec<_>>(), [fork_id, first.session_id]);
+        assert_eq!(
+            listed.iter().map(|item| item.id).collect::<Vec<_>>(),
+            [fork_id, first.session_id]
+        );
         assert_eq!(listed[0].title, "Branch");
         assert_eq!(listed[0].defaults.model.as_deref(), Some("test-model"));
         let nested_id = engine
@@ -4206,15 +4230,24 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         let mut parent_request = request(&workspace, "Later source question");
         parent_request.session_id = Some(first.session_id);
         parent_request.title = None;
-        run_to_end(&engine, &provider, parent_request).await.expect("later source Run");
+        run_to_end(&engine, &provider, parent_request)
+            .await
+            .expect("later source Run");
 
         let mut child_request = request(&workspace, "Branch question");
         child_request.session_id = Some(fork_id);
         child_request.title = None;
-        let child = run_to_end(&engine, &provider, child_request).await.expect("fork Run");
+        let child = run_to_end(&engine, &provider, child_request)
+            .await
+            .expect("fork Run");
         assert_eq!(child.run.status, RunStatus::Finished);
         assert_eq!(
-            child.run.config.as_ref().expect("Run config").history_run_ids,
+            child
+                .run
+                .config
+                .as_ref()
+                .expect("Run config")
+                .history_run_ids,
             vec![first.run.id]
         );
         {
@@ -4223,6 +4256,170 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
             assert_eq!(observed[2].input.history.len(), 1);
             assert_eq!(observed[2].input.history[0].user, "First question");
             assert_eq!(observed[2].input.history[0].assistant, "first answer");
+        }
+        let boundary = first.run.finished_sequence.unwrap();
+        assert!(matches!(
+            engine
+                .fork_session_at(
+                    first.session_id,
+                    workspace.clone(),
+                    first.run.accepted_sequence,
+                    None
+                )
+                .await,
+            Err(EngineError::ForkNotAtRunBoundary)
+        ));
+        let earlier_id = engine
+            .fork_session_at(first.session_id, workspace.clone(), boundary, None)
+            .await
+            .unwrap();
+        let owner_id = engine
+            .fork_session_at(nested_id, workspace.clone(), boundary, None)
+            .await
+            .unwrap();
+        let store = Store::open(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+        let defaults = arany::SessionDefaults {
+            provider: Some("scripted".into()),
+            model: Some("test-model".into()),
+            policy: CollaborationPolicy::Single,
+            ..Default::default()
+        };
+        arany::set_session_defaults(
+            StateRoot::open_existing(&state_path).unwrap(),
+            workspace.clone(),
+            first.session_id,
+            defaults.clone(),
+        )
+        .await
+        .unwrap();
+        let source_before = store.load_session(first.session_id).await.unwrap();
+        let unsaved = engine
+            .rewind_conversation(first.session_id, workspace.clone(), first.run.id)
+            .await
+            .unwrap();
+        assert!(unsaved.session_id.is_none());
+        assert_eq!(unsaved.defaults, defaults);
+        assert_eq!(unsaved.prompt.as_deref(), Some("First question"));
+        assert_eq!(
+            source_before,
+            store.load_session(first.session_id).await.unwrap()
+        );
+        let source = store.load_view(first.session_id).await.unwrap().unwrap();
+        let restored = engine
+            .rewind_conversation(first.session_id, workspace.clone(), source.runs[1].id)
+            .await
+            .unwrap();
+        let restored = store
+            .load_view(restored.session_id.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.runs.len(), 1);
+        assert!(
+            restored.goals.is_empty(),
+            "an inherited paused Goal cannot be resumed or duplicate its budget"
+        );
+        let mut inherited_resume = request(&workspace, "Must not revive inherited Goal");
+        inherited_resume.session_id = Some(restored.id);
+        inherited_resume.title = None;
+        inherited_resume.goal = arany::GoalRequest::resume(source.goals[0].id, true);
+        assert!(matches!(
+            run_to_end(&engine, &provider, inherited_resume).await,
+            Err(EngineError::GoalUnavailable)
+        ));
+        assert_eq!(
+            store
+                .load_view(earlier_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .runs
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .load_view(owner_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .lineage
+                .unwrap()
+                .source_session_id,
+            first.session_id
+        );
+        let mut deepest = first.session_id;
+        for _ in 0..8 {
+            deepest = engine
+                .fork_session(deepest, workspace.clone(), None)
+                .await
+                .unwrap();
+        }
+        let heads_before = list_sessions(
+            StateRoot::open_existing(&state_path).unwrap(),
+            workspace.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            engine.fork_session(deepest, workspace.clone(), None).await,
+            Err(EngineError::Store(arany::StoreError::ReplayLimit))
+        ));
+        assert_eq!(
+            heads_before.len(),
+            list_sessions(
+                StateRoot::open_existing(&state_path).unwrap(),
+                workspace.clone()
+            )
+            .await
+            .unwrap()
+            .len()
+        );
+        let mut deep_request = request(&workspace, "Deep question");
+        deep_request.session_id = Some(deepest);
+        deep_request.title = None;
+        let deep = run_to_end(&engine, &provider, deep_request).await.unwrap();
+        assert!(matches!(
+            engine
+                .fork_session_at(
+                    deepest,
+                    workspace.clone(),
+                    deep.run.finished_sequence.unwrap(),
+                    None
+                )
+                .await,
+            Err(EngineError::ConversationRewindLimit)
+        ));
+        let avoided = engine
+            .rewind_conversation(deepest, workspace.clone(), deep.run.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load_view(avoided.session_id.unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+                .lineage
+                .unwrap()
+                .source_session_id,
+            first.session_id
+        );
+        store.close().await.unwrap();
+        for bytes in [8 * 1024, 8 * 1024 + 1] {
+            let prompt = "x".repeat(bytes);
+            let bounded = run_to_end(&engine, &provider, request(&workspace, &prompt))
+                .await
+                .unwrap();
+            let unsaved = engine
+                .rewind_conversation(bounded.session_id, workspace.clone(), bounded.run.id)
+                .await
+                .unwrap();
+            assert!(unsaved.session_id.is_none());
+            assert_eq!(
+                unsaved.prompt.as_deref(),
+                (bytes <= 8 * 1024).then_some(prompt.as_str())
+            );
         }
         engine.close().await.expect("engine shutdown");
 
@@ -4248,25 +4445,72 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         assert_eq!(nested.runs[0].id, first.run.id);
         store.close().await.expect("store shutdown");
 
-        let listed = list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace.clone()).await.unwrap();
+        let listed = list_sessions(
+            StateRoot::open_existing(&state_path).unwrap(),
+            workspace.clone(),
+        )
+        .await
+        .unwrap();
         let nested_item = listed.iter().find(|item| item.id == nested_id).unwrap();
-        assert_eq!(nested_item.title, "first", "later source summaries must not enter the fork preview");
-        assert_eq!(nested.inherited_title.as_deref(), Some(nested_item.title.as_str()));
+        assert_eq!(
+            nested_item.title, "first",
+            "later source summaries must not enter the fork preview"
+        );
+        assert_eq!(
+            nested.inherited_title.as_deref(),
+            Some(nested_item.title.as_str())
+        );
         assert_eq!(nested_item.defaults.model.as_deref(), Some("test-model"));
-        rename_session(StateRoot::open_existing(&state_path).unwrap(), workspace.clone(), nested_id, "New Session".into()).await.unwrap();
-        let renamed = resume_session(StateRoot::open_existing(&state_path).unwrap(), workspace.clone(), nested_id).await.unwrap();
+        rename_session(
+            StateRoot::open_existing(&state_path).unwrap(),
+            workspace.clone(),
+            nested_id,
+            "New Session".into(),
+        )
+        .await
+        .unwrap();
+        let renamed = resume_session(
+            StateRoot::open_existing(&state_path).unwrap(),
+            workspace.clone(),
+            nested_id,
+        )
+        .await
+        .unwrap();
         assert!(renamed.title_is_explicit);
-        assert_eq!(renamed.conversation_title(), "New Session", "a manual placeholder-looking name remains explicit after reopen");
-        let relisted = list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace.clone()).await.unwrap();
-        assert_eq!(relisted.iter().find(|item| item.id == nested_id).unwrap().title, renamed.conversation_title());
-
+        assert_eq!(
+            renamed.conversation_title(),
+            "New Session",
+            "a manual placeholder-looking name remains explicit after reopen"
+        );
+        let relisted = list_sessions(
+            StateRoot::open_existing(&state_path).unwrap(),
+            workspace.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            relisted
+                .iter()
+                .find(|item| item.id == nested_id)
+                .unwrap()
+                .title,
+            renamed.conversation_title()
+        );
 
         let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
             .expect("fault injection connection");
         connection
             .execute(
-                r#"UPDATE events SET payload='{"title":"Altered"}' WHERE session_id=?1 AND kind='SessionStarted'"#,
-                [first.session_id.to_string()],
+                "UPDATE events SET payload=?2 WHERE session_id=?1 AND kind='SessionStarted'",
+                rusqlite::params![
+                    first.session_id.to_string(),
+                    Event::SessionStarted {
+                        title: "Altered".into(),
+                        workspace_identity: resumed.workspace_identity.unwrap(),
+                    }
+                    .payload()
+                    .unwrap()
+                ],
             )
             .expect("altered source prefix");
         drop(connection);
@@ -4276,12 +4520,21 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
             store.load_session(fork_id).await,
             Err(arany::StoreError::InvalidHistory)
         ));
+        for id in [earlier_id, owner_id] {
+            assert!(matches!(
+                store.load_view(id).await,
+                Err(arany::StoreError::InvalidHistory)
+            ));
+        }
         store.close().await.expect("store shutdown after drift");
 
         let provider = ScriptedProvider::new(Vec::new());
         let attempted_calls = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
-        let engine = engine_support::open(StateRoot::admit(&state_path).expect("state readmission"), EngineConfig::default())
+        let engine = engine_support::open(
+            StateRoot::admit(&state_path).expect("state readmission"),
+            EngineConfig::default(),
+        )
         .expect("engine after drift");
         let mut rejected = request(&workspace, "Must not disclose");
         rejected.session_id = Some(fork_id);

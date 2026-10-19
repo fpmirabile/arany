@@ -1,7 +1,7 @@
 use super::replay::{MAX_SESSION_EVENTS, replay_through, resolve_open_view, resolve_view};
 use super::{DATABASE_FILE, MAX_DATABASE_BYTES, StateRoot, StoreError, event_payload_limit};
 use crate::session::{
-    CompactionStatus, Event, EventEnvelope, SessionId, SessionView, prefix_digest,
+    CompactionStatus, Event, EventEnvelope, ForkLineage, SessionId, SessionView, prefix_digest,
     validate_compaction_references,
 };
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, config::DbConfig, params};
@@ -15,6 +15,35 @@ mod tests;
 const ADMISSION_HEADROOM_BYTES: i64 = 4 * 1024 * 1024;
 const EVENT_SQLITE_OVERHEAD_PAGES: i64 = 16;
 const MAX_HOT_SESSION_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
+const NEXT_SEQUENCE_SQL: &str = "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events";
+
+const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
+            CREATE TABLE events (
+                sequence INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                run_id TEXT,
+                agent_run_id TEXT,
+                kind TEXT NOT NULL,
+                event_version INTEGER NOT NULL CHECK (event_version >= 1),
+                payload TEXT NOT NULL CHECK (json_valid(payload)),
+                created_at_ms INTEGER NOT NULL
+            ) STRICT;
+            CREATE INDEX events_by_session ON events (session_id, sequence);
+            CREATE INDEX events_by_run ON events (run_id, sequence) WHERE run_id IS NOT NULL;
+            CREATE TABLE provider_evidence (
+                profile_name TEXT PRIMARY KEY,
+                profile_digest BLOB NOT NULL CHECK(length(profile_digest) = 32),
+                addresses TEXT NOT NULL CHECK(json_valid(addresses)),
+                checked_at_ms INTEGER NOT NULL,
+                expires_at_ms INTEGER NOT NULL
+            ) STRICT;
+            CREATE TABLE native_provider_evidence (
+                fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
+                checked_at_ms INTEGER NOT NULL,
+                expires_at_ms INTEGER NOT NULL
+            ) STRICT;
+            PRAGMA user_version=4;
+            COMMIT;";
 
 pub(super) struct HotSession {
     session_id: SessionId,
@@ -25,6 +54,27 @@ pub(super) struct HotSession {
     global_sequence: u64,
 }
 
+fn begin_write<'a>(
+    connection: &'a mut Connection,
+    cached: Option<&HotSession>,
+) -> Result<Transaction<'a>, StoreError> {
+    let data_version: i64 = connection.query_row("PRAGMA data_version", [], |row| row.get(0))?;
+    let next_sequence: i64 = connection.query_row(NEXT_SEQUENCE_SQL, [], |row| row.get(0))?;
+    if cached.is_none_or(|cache| {
+        cache.data_version != data_version
+            || cache.global_sequence.checked_add(1) != u64::try_from(next_sequence).ok()
+    }) {
+        super::replay::validate_history(connection)?;
+    }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current_version: i64 =
+        transaction.query_row("PRAGMA data_version", [], |row| row.get(0))?;
+    if current_version != data_version {
+        return Err(StoreError::HistoryChanged);
+    }
+    Ok(transaction)
+}
+
 pub(super) fn admit_operation(
     connection: &mut Connection,
     session_id: SessionId,
@@ -32,9 +82,27 @@ pub(super) fn admit_operation(
     tool_observations: usize,
     run_start: bool,
 ) -> Result<(), StoreError> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction = begin_write(connection, None)?;
+    admit_in_transaction(
+        &transaction,
+        session_id,
+        event_slots,
+        tool_observations,
+        run_start,
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn admit_in_transaction(
+    transaction: &Transaction<'_>,
+    session_id: SessionId,
+    event_slots: usize,
+    tool_observations: usize,
+    run_start: bool,
+) -> Result<(), StoreError> {
     let mut count = 0;
-    resolve_open_view(&transaction, session_id, &mut count)?;
+    resolve_open_view(transaction, session_id, &mut count)?;
     if count
         .checked_add(event_slots)
         .is_none_or(|total| total > MAX_SESSION_EVENTS)
@@ -59,7 +127,6 @@ pub(super) fn admit_operation(
     {
         return Err(StoreError::StorageFull);
     }
-    transaction.commit()?;
     Ok(())
 }
 
@@ -125,35 +192,7 @@ pub(super) fn open_connection(root: &StateRoot, read_only: bool) -> Result<Conne
         }
     }
     match version {
-        0 if !read_only => connection.execute_batch(
-            "BEGIN IMMEDIATE;
-            CREATE TABLE events (
-                sequence INTEGER PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                run_id TEXT,
-                agent_run_id TEXT,
-                kind TEXT NOT NULL,
-                event_version INTEGER NOT NULL CHECK (event_version >= 1),
-                payload TEXT NOT NULL CHECK (json_valid(payload)),
-                created_at_ms INTEGER NOT NULL
-            ) STRICT;
-            CREATE INDEX events_by_session ON events (session_id, sequence);
-            CREATE INDEX events_by_run ON events (run_id, sequence) WHERE run_id IS NOT NULL;
-            CREATE TABLE provider_evidence (
-                profile_name TEXT PRIMARY KEY,
-                profile_digest BLOB NOT NULL CHECK(length(profile_digest) = 32),
-                addresses TEXT NOT NULL CHECK(json_valid(addresses)),
-                checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
-            ) STRICT;
-            CREATE TABLE native_provider_evidence (
-                fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
-                checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
-            ) STRICT;
-            PRAGMA user_version=4;
-            COMMIT;",
-        )?,
+        0 if !read_only => connection.execute_batch(SCHEMA_SQL)?,
         4 => {}
         _ => return Err(StoreError::InvalidHistory),
     }
@@ -167,7 +206,7 @@ pub(super) fn append(
     event: Event,
 ) -> Result<EventEnvelope, StoreError> {
     let cached = hot_session.take();
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let transaction = begin_write(connection, cached.as_ref())?;
     let (envelope, next_cache) = append_in_transaction(&transaction, cached, session_id, event)?;
     #[cfg(all(test, target_os = "linux"))]
     crash_tests::before_commit();
@@ -187,11 +226,7 @@ fn append_in_transaction(
         return Err(StoreError::StorageFull);
     }
     let data_version: i64 = transaction.query_row("PRAGMA data_version", [], |row| row.get(0))?;
-    let sequence: i64 = transaction.query_row(
-        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events",
-        [],
-        |row| row.get(0),
-    )?;
+    let sequence: i64 = transaction.query_row(NEXT_SEQUENCE_SQL, [], |row| row.get(0))?;
     let sequence = u64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?;
     let cached = cached.filter(|cache| {
         cache.session_id == session_id
@@ -327,48 +362,102 @@ fn bounded_payload_bytes(events: &[EventEnvelope]) -> Result<Option<usize>, Stor
     Ok(Some(bytes))
 }
 
+pub(super) fn prepare_fork(
+    connection: &mut Connection,
+    source_session_id: SessionId,
+    source_sequence: Option<u64>,
+) -> Result<ForkLineage, StoreError> {
+    let transaction = begin_write(connection, None)?;
+    let (mut events, view) = resolve_view(&transaction, source_session_id, 0, &mut 0)?;
+    let view = view.ok_or(StoreError::InvalidHistory)?;
+    let (owner, run_id, sequence) = if let Some(sequence) = source_sequence {
+        let run = view
+            .runs
+            .iter()
+            .find(|run| run.finished_sequence == Some(sequence))
+            .ok_or(StoreError::ForkNotAtRunBoundary)?;
+        let owner = super::replay::session_for_run(&transaction, run.id)?
+            .ok_or(StoreError::InvalidHistory)?;
+        if owner != source_session_id {
+            events = resolve_view(&transaction, owner, 0, &mut 0)?.0;
+        }
+        (owner, run.id, sequence)
+    } else {
+        let run = view
+            .runs
+            .last()
+            .filter(|run| run.status.is_outcome())
+            .ok_or(StoreError::ForkNotAtRunBoundary)?;
+        let sequence = events
+            .iter()
+            .rev()
+            .find_map(|envelope| match &envelope.event {
+                Event::RunFinished { run_id, .. }
+                | Event::SessionForked {
+                    source_run_id: run_id,
+                    ..
+                } if *run_id == run.id => Some(envelope.sequence),
+                _ => None,
+            })
+            .ok_or(StoreError::ForkNotAtRunBoundary)?;
+        (source_session_id, run.id, sequence)
+    };
+    let boundary = ForkLineage {
+        source_session_id: owner,
+        source_run_id: run_id,
+        source_sequence: sequence,
+        prefix_digest: prefix_digest(&events, sequence)?,
+    };
+    validate_fork(&transaction, boundary)?;
+    transaction.commit()?;
+    Ok(boundary)
+}
+
+fn validate_fork(transaction: &Transaction<'_>, boundary: ForkLineage) -> Result<(), StoreError> {
+    admit_in_transaction(transaction, boundary.source_session_id, 1, 0, false)?;
+    let id = SessionId::new();
+    let event = fork_event(boundary, "Forked Session".into());
+    let envelope = EventEnvelope {
+        sequence: boundary.source_sequence + 1,
+        session_id: id,
+        run_id: None,
+        agent_run_id: None,
+        event,
+        created_at_ms: 0,
+    };
+    replay_through(transaction, id, &[envelope], 0, &mut 1, false, None)?;
+    Ok(())
+}
+
+fn fork_event(boundary: ForkLineage, title: String) -> Event {
+    Event::SessionForked {
+        title,
+        source_session_id: boundary.source_session_id,
+        source_run_id: boundary.source_run_id,
+        source_sequence: boundary.source_sequence,
+        prefix_digest: boundary.prefix_digest,
+    }
+}
+
+pub(super) fn fork_at(
+    connection: &mut Connection,
+    boundary: ForkLineage,
+    title: String,
+) -> Result<SessionId, StoreError> {
+    let transaction = begin_write(connection, None)?;
+    validate_fork(&transaction, boundary)?;
+    let id = SessionId::new();
+    append_in_transaction(&transaction, None, id, fork_event(boundary, title))?;
+    resolve_view(&transaction, id, 0, &mut 0)?;
+    transaction.commit()?;
+    Ok(id)
+}
+
 pub(super) fn fork_session(
     connection: &mut Connection,
     source_session_id: SessionId,
     title: String,
 ) -> Result<SessionId, StoreError> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (events, view) = resolve_view(&transaction, source_session_id, 0, &mut 0)?;
-    let view = view.ok_or(StoreError::InvalidHistory)?;
-    let last_run = view.runs.last().ok_or(StoreError::InvalidHistory)?;
-    if !last_run.status.is_outcome() {
-        return Err(StoreError::InvalidHistory);
-    }
-    let source_run_id = last_run.id;
-    let source_sequence = events
-        .iter()
-        .rev()
-        .find_map(|envelope| match &envelope.event {
-            Event::RunFinished { run_id, .. } if *run_id == source_run_id => {
-                Some(envelope.sequence)
-            }
-            Event::SessionForked {
-                source_run_id: run_id,
-                ..
-            } if *run_id == source_run_id => Some(envelope.sequence),
-            _ => None,
-        })
-        .ok_or(StoreError::InvalidHistory)?;
-    let digest = prefix_digest(&events, source_sequence)?;
-    let id = SessionId::new();
-    append_in_transaction(
-        &transaction,
-        None,
-        id,
-        Event::SessionForked {
-            title,
-            source_session_id,
-            source_run_id,
-            source_sequence,
-            prefix_digest: digest,
-        },
-    )?;
-    resolve_view(&transaction, id, 0, &mut 0)?;
-    transaction.commit()?;
-    Ok(id)
+    let boundary = prepare_fork(connection, source_session_id, None)?;
+    fork_at(connection, boundary, title)
 }

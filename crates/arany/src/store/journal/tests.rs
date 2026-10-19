@@ -60,8 +60,11 @@ fn append_refuses_event_past_replay_limit() {
 #[test]
 fn other_connection_changes_invalidate_hot_history() {
     let temp = tempfile::tempdir().expect("private test root");
-    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
-    let mut connection = open_connection(&root, false).expect("file-backed store");
+    let path = temp.path().join(DATABASE_FILE);
+    let mut connection = Connection::open(&path).expect("file-backed store");
+    connection
+        .execute_batch(SCHEMA_SQL)
+        .expect("journal schema");
     let mut hot_session = None;
     let session_id = SessionId::new();
     append(
@@ -79,7 +82,7 @@ fn other_connection_changes_invalidate_hot_history() {
     .expect("first Event");
     assert!(hot_session.is_some());
 
-    let second = Connection::open(root.path().join(DATABASE_FILE)).expect("second connection");
+    let second = Connection::open(&path).expect("second connection");
     let other_id = SessionId::new();
     let other_start = Event::SessionStarted {
         title: "Other".into(),
@@ -100,6 +103,42 @@ fn other_connection_changes_invalidate_hot_history() {
             ],
         )
         .expect("other committed Session");
+    thread_local! {
+        static WRITER: std::cell::RefCell<Option<Connection>> = const { std::cell::RefCell::new(None) };
+    }
+    second
+        .execute_batch("BEGIN IMMEDIATE; UPDATE events SET created_at_ms=1 WHERE sequence=2;")
+        .expect("pending other writer");
+    WRITER.with(|writer| *writer.borrow_mut() = Some(second));
+    connection
+        .busy_handler(Some(|attempt| {
+            attempt == 0
+                && WRITER.with(|writer| {
+                    writer
+                        .borrow()
+                        .as_ref()
+                        .expect("pending other writer")
+                        .execute_batch("COMMIT")
+                        .is_ok()
+                })
+        }))
+        .expect("commit other writer when BEGIN IMMEDIATE blocks");
+    let refused = append(
+        &mut connection,
+        &mut hot_session,
+        session_id,
+        Event::SessionRenamed {
+            title: "Racing".into(),
+        },
+    );
+    connection.busy_handler(None).expect("remove test handler");
+    let second = WRITER.with(|writer| writer.borrow_mut().take()).unwrap();
+    assert!(
+        matches!(refused, Err(StoreError::HistoryChanged)),
+        "expected HistoryChanged, got {refused:?}"
+    );
+    assert!(hot_session.is_none());
+    assert!(connection.is_autocommit());
     let committed = append(
         &mut connection,
         &mut hot_session,
@@ -442,4 +481,162 @@ fn forged_rewind_workspace_identity_is_rejected_on_append_and_replay() {
         .unwrap();
     let cold = open_connection(&root, true).unwrap();
     assert!(resolve_view(&cold, child, 0, &mut 0).is_err());
+}
+
+#[test]
+fn fork_write_queries_search_indexes() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connection = Connection::open(temp.path().join(DATABASE_FILE)).unwrap();
+    connection.execute_batch(SCHEMA_SQL).unwrap();
+    let transaction = begin_write(&mut connection, None).unwrap();
+    for (sql, index) in [
+        (super::super::replay::RUN_OWNER_SQL, Some("events_by_run")),
+        (
+            super::super::replay::SESSION_EVENTS_SQL,
+            Some("events_by_session"),
+        ),
+        (NEXT_SEQUENCE_SQL, None),
+    ] {
+        let mut statement = transaction
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let parameters = vec!["0"; statement.parameter_count()];
+        let plan = statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|step| {
+                step.starts_with("SEARCH events") && index.is_none_or(|index| step.contains(index))
+            }),
+            "indexed search for {sql}: {plan:?}"
+        );
+        assert!(
+            plan.iter().all(|step| !step.starts_with("SCAN events")),
+            "no whole-table scan for {sql}: {plan:?}"
+        );
+    }
+    assert_eq!(
+        super::super::replay::session_for_run(&transaction, crate::session::RunId::new()).unwrap(),
+        None
+    );
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn fork_rejects_ambiguous_run_owners() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut connection = Connection::open(temp.path().join(DATABASE_FILE)).unwrap();
+    connection.execute_batch(SCHEMA_SQL).unwrap();
+    let f = crate::session::worker_protocol_fixture();
+    let mut hot = None;
+    for event in &f.events {
+        append(&mut connection, &mut hot, f.session, event.clone()).unwrap();
+    }
+    let (_, view) = resolve_view(&connection, f.session, 0, &mut 0).unwrap();
+    let run = view.unwrap().runs.last().unwrap().clone();
+    let sequence = run.finished_sequence.unwrap();
+    assert_eq!(
+        prepare_fork(&mut connection, f.session, Some(sequence))
+            .unwrap()
+            .source_session_id,
+        f.session
+    );
+    connection
+        .execute(
+            "INSERT INTO events
+         SELECT (SELECT MAX(sequence) + 1 FROM events), ?1, run_id, agent_run_id, kind,
+                event_version, payload, created_at_ms
+         FROM events WHERE run_id=?2 ORDER BY sequence LIMIT 1",
+            params![SessionId::new().to_string(), run.id.to_string()],
+        )
+        .unwrap();
+    assert!(matches!(
+        prepare_fork(&mut connection, f.session, Some(sequence)),
+        Err(StoreError::InvalidHistory)
+    ));
+}
+
+#[test]
+fn earlier_fork_revalidates_prepared_prefix_and_event_capacity_before_writing() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let mut connection = open_connection(&root, false).unwrap();
+    let f = crate::session::worker_protocol_fixture();
+    let mut hot = None;
+    for event in &f.events {
+        append(&mut connection, &mut hot, f.session, event.clone()).unwrap();
+    }
+    let (events, view) = resolve_view(&connection, f.session, 0, &mut 0).unwrap();
+    let sequence = view
+        .unwrap()
+        .runs
+        .last()
+        .unwrap()
+        .finished_sequence
+        .unwrap();
+    let boundary = prepare_fork(&mut connection, f.session, Some(sequence)).unwrap();
+    let count = || {
+        connection
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    };
+    let before = count();
+    connection
+        .execute(
+            "UPDATE events SET payload=json_set(payload, '$.title', 'Changed') WHERE sequence=?1",
+            [events[0].sequence as i64],
+        )
+        .unwrap();
+    assert!(matches!(
+        fork_at(&mut connection, boundary, "Refused".into()),
+        Err(StoreError::InvalidHistory)
+    ));
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        before
+    );
+    connection
+        .execute(
+            "UPDATE events SET payload=?1 WHERE sequence=?2",
+            params![
+                events[0].event.payload().unwrap(),
+                events[0].sequence as i64
+            ],
+        )
+        .unwrap();
+    let rename = Event::SessionRenamed {
+        title: "Capacity".into(),
+    };
+    let transaction = connection.transaction().unwrap();
+    for next in events.len() + 1..MAX_SESSION_EVENTS {
+        transaction.execute("INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![next as i64, f.session.to_string(), rename.kind(), rename.version(), rename.payload().unwrap()]).unwrap();
+    }
+    transaction.commit().unwrap();
+    assert_eq!(
+        prepare_fork(&mut connection, f.session, Some(sequence)).unwrap(),
+        boundary,
+        "exactly one fork Event fits"
+    );
+    append(&mut connection, &mut hot, f.session, rename).unwrap();
+    assert!(matches!(
+        prepare_fork(&mut connection, f.session, Some(sequence)),
+        Err(StoreError::ReplayLimit)
+    ));
+    assert!(matches!(
+        fork_at(&mut connection, boundary, "Refused".into()),
+        Err(StoreError::ReplayLimit)
+    ));
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        MAX_SESSION_EVENTS as i64
+    );
 }
