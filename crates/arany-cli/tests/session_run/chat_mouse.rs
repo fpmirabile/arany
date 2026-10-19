@@ -207,8 +207,11 @@ fn fullscreen_chat_keeps_mouse_reporting_off_at_every_returned_checkpoint() {
         &mut answered,
         "listing error",
         b"/resume\r",
+        // Fullscreen positions each word separately, so match the words of the error.
         &[
-            b"state directory unavailable or unsafe",
+            b"directory",
+            b"unavailable",
+            b"unsafe",
             b"\x1b[?25h\x1b[22;3H",
         ],
     );
