@@ -16,6 +16,8 @@ pub fn protocol_schema() -> Value {
         "thread/unsubscribe": method::<ThreadUnsubscribeParams, ThreadUnsubscribeResult>(&mut generator),
         "thread/list": method::<ThreadListParams, ThreadListResult>(&mut generator),
         "thread/fork": method::<ThreadForkParams, ThreadResult>(&mut generator),
+        "thread/rewind/preview": method::<ThreadRewindPreviewParams, ThreadRewindPreviewResult>(&mut generator),
+        "thread/rewind": method::<ThreadRewindParams, ThreadRewindResult>(&mut generator),
         "events/subscribe": method::<EventsSubscribeParams, EventsSubscribeResult>(&mut generator),
         "receipt/get": method::<ReceiptGetParams, ReceiptGetResult>(&mut generator),
         "turn/start": method::<TurnStartParams, TurnResult>(&mut generator),

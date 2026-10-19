@@ -15,6 +15,7 @@ pub enum InteractiveCommand {
     Status,
     New,
     Resume,
+    Rewind,
     Goal,
     Fork,
     Rename,
@@ -51,6 +52,7 @@ impl InteractiveCommand {
             | Self::Cache
             | Self::New
             | Self::Resume
+            | Self::Rewind
             | Self::Fork
             | Self::Rename
             | Self::Compact => CommandAvailability::Locked,
@@ -101,13 +103,14 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 19] = [
+const COMMANDS: [CommandSpec; 20] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
     spec("status", InteractiveCommand::Status, None, &[]),
     spec("new", InteractiveCommand::New, None, &[]),
     spec("clear", InteractiveCommand::New, None, &[]),
+    spec("rewind", InteractiveCommand::Rewind, None, &[]),
     spec(
         "resume",
         InteractiveCommand::Resume,
@@ -175,6 +178,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Status => "Session status",
         InteractiveCommand::New => "New Session",
         InteractiveCommand::Resume => "Resume Session",
+        InteractiveCommand::Rewind => "Restore code, conversation or both; compare changes",
         InteractiveCommand::Goal => {
             "Goal status; pause during a Run; resume, continue or start when idle"
         }
@@ -656,7 +660,7 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 19);
+        assert_eq!(COMMANDS.len(), 20);
         assert_eq!(completion_suffix("/c", &CommandChoices::default()), None);
         assert_eq!(
             completion_suffix("/ca", &CommandChoices::default()),

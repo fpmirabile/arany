@@ -55,6 +55,59 @@ fn schema_snapshot_is_byte_stable() {
 }
 
 #[test]
+fn rewind_conformance_covers_closed_states_receipts_and_selection_bounds() {
+    let schema = protocol_schema();
+    let thread = arany::SessionId::new();
+    let input = json!({"threadId":thread,"previewToken":"preview","restore":"code"});
+    for (field, value) in [
+        ("kept", json!(["a", "b"])),
+        ("overwrite", json!(["a", "b"])),
+    ] {
+        let mut row = input.clone();
+        row[field] = value;
+        validate(&schema, &schema["methods"]["thread/rewind"]["params"], &row);
+        assert!(serde_json::from_value::<ThreadRewindParams>(row).is_ok());
+    }
+    for paths in [vec!["a"; 65], vec!["b", "a"], vec!["a", "a"], vec![""]] {
+        for field in ["kept", "overwrite"] {
+            let mut row = input.clone();
+            row[field] = json!(paths);
+            assert!(serde_json::from_value::<ThreadRewindParams>(row).is_err());
+        }
+    }
+    for field in ["kept", "overwrite"] {
+        for (path, valid) in [
+            ("x".repeat(512), true),
+            ("x".repeat(513), false),
+            ("é".repeat(256), true),
+            ("é".repeat(257), false),
+            ("x".repeat(4097), false),
+        ] {
+            let mut row = input.clone();
+            row[field] = json!([path]);
+            assert_eq!(
+                serde_json::from_value::<ThreadRewindParams>(row).is_ok(),
+                valid
+            );
+        }
+    }
+    for outcome in [
+        "restored",
+        "conflict",
+        "denied",
+        "failed",
+        "cancelled",
+        "uncertain",
+    ] {
+        let row = json!({"rewind":{"id":null,"outcome":outcome,"conflicts":["src/\u{1b}]52;bad\u{7}"],"conflictCount":1},"notices":[]});
+        validate(&schema, &schema["methods"]["thread/rewind"]["result"], &row);
+        let result: ThreadRewindResult = serde_json::from_value(row.clone()).unwrap();
+        assert_eq!(serde_json::to_value(result).unwrap(), row);
+    }
+    assert!(CAPABILITIES.contains(&"thread_rewind_v1"));
+}
+
+#[test]
 fn codec_round_trips_requests_notifications_responses_and_errors() {
     for value in [
         json!({"id": "client-1", "method": "initialize", "params": {}}),
@@ -166,6 +219,8 @@ fn every_conformance_message_validates_against_the_schema() {
         ("turn/start", json!({"threadId": thread_id, "input": [{"type": "text", "text": "Hello"}, {"type": "image", "mediaType": "image/png", "data": "aW1hZ2U="}], "goal": {"autonomous": false}}), json!({"turn": turn})),
         ("thread/settings/update", json!({"threadId":thread_id,"permissionMode":"acceptEdits"}), json!({"permissionMode":"acceptEdits"})),
         ("thread/fork", json!({"threadId": thread_id, "cwd": "/workspace", "title": "Fork"}), json!({"thread": thread})),
+        ("thread/rewind/preview", json!({"threadId":thread_id,"turnId":run_id}), json!({"checkpoint":{"kind":"run","id":run_id,"sequence":4},"restore":["both","conversation","code"],"files":[{"path":"src/a","state":"drifted","added":1,"removed":2}],"blockers":[],"nonRewindable":[{"sequence":8,"effect":"mcp"}],"previewToken":"preview","expiresAtMs":60000})),
+        ("thread/rewind", json!({"threadId":thread_id,"previewToken":"preview","restore":"both","overwrite":["src/a"],"confirmOverwrite":true}), json!({"rewind":{"id":run_id,"outcome":"restored","conflicts":[],"conflictCount":0},"thread":thread,"conversation":{"threadId":thread_id,"prompt":"Selected prompt","imagesOmitted":false},"notices":["Restored 1 file to before Run 1"]})),
         ("thread/unsubscribe", json!({"threadId":thread_id}), json!({"status":"unsubscribed"})),
         ("thread/list", json!({"cwd":"/workspace","limit":100}), json!({"data":[{"id":thread_id,"title":"Example","cwd":"/workspace","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z"}],"nextCursor":null})),
         ("events/subscribe", json!({"threadId": thread_id, "since": 0}), json!({"events": [], "nextSince": null})),
@@ -191,6 +246,8 @@ fn every_conformance_message_validates_against_the_schema() {
             "goal/pause" => {serde_json::from_value::<GoalPauseParams>(params).unwrap();}
             "goal/resume" => {serde_json::from_value::<GoalResumeParams>(params).unwrap();}
             "thread/fork" => {serde_json::from_value::<ThreadForkParams>(params).unwrap();}
+            "thread/rewind/preview" => {serde_json::from_value::<ThreadRewindPreviewParams>(params).unwrap();}
+            "thread/rewind" => {serde_json::from_value::<ThreadRewindParams>(params).unwrap();}
             "thread/unsubscribe" => {serde_json::from_value::<ThreadUnsubscribeParams>(params).unwrap();}
             "thread/list" => {serde_json::from_value::<ThreadListParams>(params).unwrap();}
             "events/subscribe" => {serde_json::from_value::<EventsSubscribeParams>(params).unwrap();}

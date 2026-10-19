@@ -5,7 +5,7 @@
 This contract owns `arany serve --stdio`: its JSON-RPC vocabulary, bounded
 transport, thread and turn projection, and JSON Schema export. The server runs
 `initialize` / `initialized`, `thread/start|resume|fork|unsubscribe|list`, `turn/start|interrupt|steer`,
-`thread/settings/update`, `goal/pause|resume`, `events/subscribe` and `receipt/get`.
+`thread/settings/update`, `thread/rewind/preview`, `thread/rewind`, `goal/pause|resume`, `events/subscribe` and `receipt/get`.
 The server sends one-use human approval requests. The remaining work belongs to
 [NEXT_STEPS item 8](../../NEXT_STEPS.md#pursue-in-order).
 
@@ -138,6 +138,25 @@ it adds no elapsed wall time or inferred Provider usage. `budget` is the pinned
 Goal budget. `report` is the exact committed Goal report, including its cache
 counter and uncertainty facts. Objective and report text remain journal data.
 Unknown threads on all three methods return `threadNotLoaded`.
+
+## Rewind
+
+`thread_rewind_v1` advertises two idle, loaded-thread methods. Their vocabulary follows Codex app-server's thread/turn shape and Claude Agent SDK's explicit file-rewind embedding precedent. They call the same Engine as the [terminal](./terminal.md#rewind); [Tools](./tools.md#checkpoints-and-rewind) owns guarded publication, drift states, limits and uncertainty, and [Session](./session.md#conversation-rewind) owns fork semantics. No Tool approval mode, model response or repository text confirms a rewind.
+
+| Method | Params | Result |
+|---|---|---|
+| `thread/rewind/preview` | `{threadId,turnId}`; turnId identifies the selected Run, or the UUID of a Before rewind checkpoint | `{checkpoint:{kind:"run"\|"rewind",id,sequence},restore:["both"\|"conversation"\|"code"],files:[{path,state,added,removed}],blockers,nonRewindable:[{sequence,effect}],previewToken,expiresAtMs}` |
+| `thread/rewind` | `{threadId,previewToken,restore:"code"\|"conversation"\|"both",kept?:[path],overwrite?:[path],confirmOverwrite?:bool}` | `{rewind:{id:string\|null,outcome,conflicts,conflictCount},thread?,conversation?:{threadId:string\|null,prompt:string\|null,imagesOmitted},notices:[string]}` |
+
+Preview performs no publication or fork. Restore choices contain eligible modes, in terminal order; conversation stays available across unknown code outcomes or read-only access. Files use the closed camelCase states restore, delete, recreate, drifted, historyDrift, unavailable, unsafe, outsideGrant and kept. Added/removed counts use the [terminal comparison convention](./terminal.md#rewind), or null for binary/unavailable comparisons. Blockers are uncertainPublication, noWriteGrant or guardUnavailable; non-rewindable effects are unguardedCommand, mcp, cache or directory. Paths and text remain untrusted JSON data; clients render them inertly. Diff content is not sent on this surface.
+
+One opaque, one-use preview token is retained per connection; any new preview replaces it, and it is bound to thread, checkpoint, exact head/prefix, Engine plan, observed file states and the [Engine confirmation expiry](./tools.md#checkpoints-and-rewind). A new submission, unsubscribe or connection close discards it. Stale, foreign-thread, replaced, reused or expired tokens return `previewExpired`; no persistent token or renewed authority survives restart. Mutation consumes the token, including a refusal after admission. Live file/grant/blob/enforcement admission is rechecked by the Engine. Kept/overwrite selections follow the [Tools rewind limits](./tools.md#checkpoints-and-rewind); overflow is `invalidParams` before effects. Re-previewing a selection must retain the original observed states, so an edit after preview returns previewExpired rather than adopting a new overwrite precondition.
+
+The parent client is the explicit human confirmation channel. A `thread/rewind` request confirms exactly the previewed plan and named keep selection. Any overwrite selection additionally requires `confirmOverwrite:true`; omitted/false returns `overwriteConfirmationRequired` without consuming the token or writing. The client must present the listed paths, saved-current-content warning and a separate explicit overwrite decision, with Cancel initially selected, as the terminal does. This is never AI approval or automatic permission-mode approval. A restricted adapter such as ACP returns humanConfirmationRequired; it cannot inherit this capability as an automatic mutation path. Code admission follows the [Tools rewind policy](./tools.md#checkpoints-and-rewind); blocked publications return `rewindBlocked`.
+
+Code outcomes are restored, conflict, denied, failed, cancelled or uncertain. Conflict returns the bounded conflict list and total; notices include capture/pruning and unknown-outcome guidance. Raw subscriptions carry the canonical rewind Events. Existing turn/item notifications are unchanged. Both mode restores code before forking and preserves its receipt with a `Code restored; conversation unchanged` notice on later fork failure or cancellation. Conversation-only restoration has a null rewind ID and creates no Workspace rewind Events. A durable fork appears in thread and is loaded with the source execution configuration; the response precedes thread/started. Restoring the first prompt returns conversation.threadId null and no thread: the client opens an unsaved conversation, retaining the returned draft, and uses thread/start only on explicit submission. Omitted prompt text or images are identified by null prompt/imagesOmitted. Source history and Goal budgets remain intact.
+
+An active submission or another request during publication returns busy; an unknown loaded ID returns threadNotLoaded. An invalid checkpoint is invalidParams. Code refusals use rewindBlocked, previewExpired or rewindTooLarge; lineage overflow uses conversationRewindLimit. No method retries. Input EOF or process shutdown cancels an in-flight publication and uses the existing shutdown grace, retaining only committed outcomes. Responses and previews obey the 1 MiB line bound; a maximal receipt reservation rejects an oversized request ID before any effect or fork. The single pending Engine preview retains files and comparison versions only within the [Tool action, comparison and transfer limits](./tools.md#checkpoints-and-rewind).
 
 ## Notifications and items
 
@@ -284,7 +303,7 @@ The protocol uses capability strings for feature detection; schema artifact
 versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
 `items_v1`, `interrupt_receipt_v1`, `approvals_v1`, `events_subscribe_v1`,
 `receipt_get_v1`, `thread_fork_v1`, `turn_steer_v1`, `goal_pause_v1` (the latter also
-covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`. Breaking wire changes require a new
+covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`, `thread_rewind_v1`. Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
 pre-beta; stored formats retain their existing no-migration contract.
 
@@ -293,6 +312,7 @@ pre-beta; stored formats retain their existing no-migration contract.
 | Scenario | Required observation | Evidence owner |
 |---|---|---|
 | Stable schema contract | Byte-identical pretty JSON and final newline; intentional golden changes only; canonical Supervisor verdicts validate in raw pages and notifications | [Protocol tests](../../crates/arany-cli/src/protocol/tests.rs), [schema golden](../../crates/arany-cli/tests/fixtures/serve/schema.json) |
+| Rewind preview and human confirmation | Tokens bind thread/head/observed states, expire and consume once; default drift refuses, keep restores only the others, overwrite needs separate human confirmation and saves current content; unknown effects block code, bounds refuse before mutation, conversation forks preserve source and budgets, partial receipts stay honest | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [protocol conformance and bounds](../../crates/arany-cli/src/protocol/tests.rs), [Guard rewind corpus](../../crates/arany-cli/tests/guard_runs/rewind.rs) |
 | Envelope conformance and bounds | Both version forms accepted; malformed, ambiguous and oversized lines rejected; exact 1 MiB boundary accepted | [Protocol codec table](../../crates/arany-cli/src/protocol/tests.rs) |
 | Typed conformance | Method, item, notification and reserved approval examples validate against registered schemas | [Protocol conformance corpus](../../crates/arany-cli/src/protocol/tests.rs) |
 | CLI export and refusal | Fresh process output/file bytes and safe target replacement/refusal | [Schema process test](../../crates/arany-cli/tests/generate_schema.rs) |

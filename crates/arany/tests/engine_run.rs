@@ -4305,8 +4305,35 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
             store.load_session(first.session_id).await.unwrap()
         );
         let source = store.load_view(first.session_id).await.unwrap().unwrap();
+        for head in [
+            (source.last_sequence - 1, source.rewinds.prefix_digest()),
+            (source.last_sequence, [0; 32]),
+        ] {
+            assert!(matches!(
+                engine
+                    .rewind_conversation_at_head(
+                        first.session_id,
+                        workspace.clone(),
+                        source.runs[1].id,
+                        head,
+                        i64::MAX,
+                    )
+                    .await,
+                Err(EngineError::RewindPreviewExpired)
+            ));
+            assert_eq!(
+                source_before,
+                store.load_session(first.session_id).await.unwrap()
+            );
+        }
         let restored = engine
-            .rewind_conversation(first.session_id, workspace.clone(), source.runs[1].id)
+            .rewind_conversation_at_head(
+                first.session_id,
+                workspace.clone(),
+                source.runs[1].id,
+                (source.last_sequence, source.rewinds.prefix_digest()),
+                i64::MAX,
+            )
             .await
             .unwrap();
         let restored = store
