@@ -324,6 +324,7 @@ pub struct ForegroundWorkerProvider {
     pub violations: std::sync::Mutex<Vec<&'static str>>,
     background_started: tokio::sync::Notify,
     identity: crate::ProviderIdentity,
+    deadline_identity: crate::ProviderIdentity,
 }
 
 impl ForegroundWorkerProvider {
@@ -333,6 +334,8 @@ impl ForegroundWorkerProvider {
         if matches!(case, "headroom_background" | "headroom_race") {
             identity.limits.concurrency = 2;
         }
+        let mut deadline_identity = identity.clone();
+        deadline_identity.limits.deadline = std::time::Duration::from_secs(1200);
         Self {
             workspace: workspace.into(),
             case,
@@ -341,6 +344,7 @@ impl ForegroundWorkerProvider {
             violations: Default::default(),
             background_started: Default::default(),
             identity,
+            deadline_identity,
         }
     }
 
@@ -392,7 +396,16 @@ impl ForegroundWorkerProvider {
                 } else {
                     crate::worker::WorkerMode::Foreground
                 },
-                max_turns: 17,
+                max_turns: if matches!(
+                    self.case,
+                    "hook_stop_last_turn"
+                        | "hook_requested_stop_last_turn"
+                        | "hook_stop_deadline_last_turn"
+                ) {
+                    1
+                } else {
+                    17
+                },
                 wave: 1,
                 resumes: None,
                 supersedes: None,
@@ -408,7 +421,11 @@ impl ForegroundWorkerProvider {
 #[async_trait::async_trait]
 impl crate::Provider for ForegroundWorkerProvider {
     fn identity(&self) -> &crate::ProviderIdentity {
-        &self.identity
+        if self.case.contains("deadline") {
+            &self.deadline_identity
+        } else {
+            &self.identity
+        }
     }
 
     async fn invoke(
@@ -435,6 +452,19 @@ impl crate::Provider for ForegroundWorkerProvider {
                 Some(Box::new(self.plan())),
             ),
             (AgentPhase::RootPlan, 1) => self.delegation(&request),
+            (AgentPhase::ChildWork, 0) if self.case == "tool_deadline" => {
+                tokio::time::pause();
+                tokio::time::advance(std::time::Duration::from_secs(1192)).await;
+                tokio::time::resume();
+                super::scenario::tool_outcome(
+                    ToolCall::Write {
+                        path: "notes/a".into(),
+                        expected_digest: None,
+                        content: "too late".into(),
+                    },
+                    None,
+                )
+            }
             (AgentPhase::ChildWork, 0) if self.case == "headroom_race" => {
                 self.background_started.notified().await;
                 super::scenario::tool_outcome(
@@ -445,6 +475,26 @@ impl crate::Provider for ForegroundWorkerProvider {
                     },
                     None,
                 )
+            }
+            (AgentPhase::ChildWork, 0)
+                if matches!(
+                    self.case,
+                    "hook_stop_last_turn"
+                        | "hook_requested_stop_last_turn"
+                        | "hook_stop_tokens"
+                        | "hook_stop_deadline"
+                        | "hook_stop_deadline_last_turn"
+                ) =>
+            {
+                if matches!(
+                    self.case,
+                    "hook_stop_deadline" | "hook_stop_deadline_last_turn"
+                ) {
+                    tokio::time::pause();
+                    tokio::time::advance(std::time::Duration::from_secs(1192)).await;
+                    tokio::time::resume();
+                }
+                finish_with("Candidate worker result")
             }
             (AgentPhase::ChildWork, _) if self.case == "headroom_background" => {
                 self.background_started.notify_one();

@@ -109,10 +109,14 @@ pub(super) async fn worker_case(case: &'static str) {
             "hook_write" => {
                 serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("exit 0")]}],"PostToolUse":[{"matcher":"Write","hooks":[command("echo checked >&2; exit 2")]}]})
             }
-            "hook_stop_block" => {
+            "hook_stop_block"
+            | "hook_stop_last_turn"
+            | "hook_stop_tokens"
+            | "hook_stop_deadline"
+            | "hook_stop_deadline_last_turn" => {
                 serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command("echo verify-worker >&2; exit 2")]}]})
             }
-            "hook_stop" => {
+            "hook_stop" | "hook_requested_stop_last_turn" => {
                 serde_json::json!({"SubagentStop":[{"matcher":"editor","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
             }
             "hook_write_stop" => {
@@ -193,7 +197,7 @@ pub(super) async fn worker_case(case: &'static str) {
     };
     let budget = arany::GoalBudget {
         max_provider_calls: Some(if case == "calls" { 4 } else { 32 }),
-        max_tokens: (case == "tokens").then_some(12),
+        max_tokens: matches!(case, "tokens" | "hook_stop_tokens").then_some(12),
         ..Default::default()
     };
     let provider = Arc::new(ForegroundWorkerProvider::new(
@@ -269,6 +273,52 @@ pub(super) async fn worker_case(case: &'static str) {
         .iter()
         .filter(|r| r.phase == AgentPhase::RootSynthesis)
         .count();
+    if matches!(
+        case,
+        "tool_deadline"
+            | "hook_stop_last_turn"
+            | "hook_stop_tokens"
+            | "hook_stop_deadline"
+            | "hook_stop_deadline_last_turn"
+    ) {
+        result.expect(case);
+        assert_eq!(child_calls, 1, "{case}: no reprompt");
+        let outcome = &worker.outcome.as_ref().unwrap().1;
+        assert_eq!(outcome.disposition, WorkerDisposition::Failed, "{case}");
+        assert_eq!(
+            outcome.cause,
+            match case {
+                "tool_deadline" => arany::worker::WorkerCause::ToolFailed,
+                "hook_stop_last_turn" => arany::worker::WorkerCause::TurnLimit,
+                _ => arany::worker::WorkerCause::Budget,
+            },
+            "{case}"
+        );
+        assert!(worker.handover.is_none(), "{case}");
+        assert!(worker.released.is_some(), "{case}");
+        if case == "tool_deadline" {
+            let tool = &run.agents[1].tools[0];
+            let observation = tool.observation.as_ref().unwrap();
+            assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+            assert_eq!(
+                observation.output,
+                "Delegation deadline reached; no operation was dispatched"
+            );
+            assert!(observation.attestation.is_none());
+            assert!(tool.hooks.is_empty());
+        } else {
+            assert_eq!(
+                run.lifecycle_hooks.len(),
+                usize::from(!case.contains("deadline")),
+                "{case}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(workspace.join("notes/a")).unwrap(),
+            b"original a"
+        );
+        return;
+    }
     if matches!(
         case,
         "hook_uncertain" | "hook_stop_uncertain" | "hook_handover_uncertain"
@@ -501,18 +551,34 @@ pub(super) async fn worker_case(case: &'static str) {
         } else {
             assert_eq!(
                 run.status,
-                if matches!(case, "hook_stop" | "hook_write_stop") {
+                if matches!(
+                    case,
+                    "hook_stop" | "hook_requested_stop_last_turn" | "hook_write_stop"
+                ) {
                     RunStatus::StoppedByHook
                 } else {
                     RunStatus::Failed
                 },
                 "{case}"
             );
-            if matches!(case, "hook_stop" | "hook_write_stop") {
+            if matches!(
+                case,
+                "hook_stop" | "hook_requested_stop_last_turn" | "hook_write_stop"
+            ) {
                 assert_eq!(synthesis_calls, 0);
                 assert!(worker.handover.is_none());
                 assert_eq!(run.hook_stop_reason(), Some(Some("halt")));
                 assert_eq!(run.agents[1].status, arany::AgentStatus::StoppedByHook);
+                let outcome = &worker.outcome.as_ref().unwrap().1;
+                assert_eq!(outcome.disposition, WorkerDisposition::Failed, "{case}");
+                assert_eq!(
+                    outcome.cause,
+                    arany::worker::WorkerCause::StoppedByHook,
+                    "{case}"
+                );
+                if case == "hook_requested_stop_last_turn" {
+                    assert_eq!(child_calls, 1, "{case}: no reprompt");
+                }
             }
             if case == "hook_handover_deny" {
                 assert_eq!(
@@ -548,6 +614,25 @@ pub(super) async fn worker_case(case: &'static str) {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn foreground_worker_deadline_and_stop_refusals_keep_their_causes() {
+    for case in [
+        "tool_deadline",
+        "hook_stop_last_turn",
+        "hook_requested_stop_last_turn",
+        "hook_stop_tokens",
+        "hook_stop_deadline",
+        "hook_stop_deadline_last_turn",
+    ] {
+        // Each case advances paused time; a fresh runtime keeps that offset from leaking into the next case.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(worker_case(case));
     }
 }
 
@@ -726,6 +811,17 @@ async fn worker_id_resume_uses_fresh_guard_authority_base_and_identity() {
         env!("CARGO_BIN_EXE_arany"),
     )))
     .await;
+}
+
+#[tokio::test]
+async fn worker_recovery_with_an_open_child_or_worker_hook_refuses_resume_without_rerun() {
+    for checkpoint in ["child_hook", "worker_hook"] {
+        Box::pin(arany::test_support::worker_teams::recover_by_id(
+            Path::new(env!("CARGO_BIN_EXE_arany")),
+            checkpoint,
+        ))
+        .await;
+    }
 }
 
 #[tokio::test]

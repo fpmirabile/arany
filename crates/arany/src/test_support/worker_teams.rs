@@ -467,7 +467,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     }
     let state = directory.path().join("state");
     let root = StateRoot::admit(&state).unwrap();
-    let commands = if case.starts_with("hook_") {
+    let commands = if case.starts_with("hook_") || case == "order_hooks" {
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
         serde_json::json!([{"name":"sh", "executable":shell, "sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}])
     } else if matches!(case, "command" | "command_refused") {
@@ -496,10 +496,12 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         std::fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-    if case.starts_with("hook_") {
+    if case.starts_with("hook_") || case == "order_hooks" {
         let command =
             |script: &str| serde_json::json!({"type":"command","command":script,"timeout":5});
-        let hooks = if case == "hook_sibling_stop" {
+        let hooks = if case == "order_hooks" {
+            serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("exit 0")]}],"PostToolUse":[{"matcher":"Write","hooks":[command("exit 0")]}]})
+        } else if case == "hook_sibling_stop" {
             serde_json::json!({"SubagentStop":[{"matcher":"researcher","hooks":[command(r#"printf '%s' '{"continue":false,"stopReason":"halt"}'"#)]}]})
         } else {
             serde_json::json!({"PreToolUse":[{"matcher":"Write","hooks":[command("kill -9 $PPID")]}]})
@@ -619,7 +621,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                 match &envelope.event {
                     Event::WorkerIntegrationRecorded { record, .. } => {
                         integrated.push(record.assignment_id);
-                        if integrated.len() == 1 && matches!(case, "order" | "conflict" | "mixed" | "fallback" | "command_refused") { provider.gates[0].add_permits(1); }
+                        if integrated.len() == 1 && matches!(case, "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "command_refused") { provider.gates[0].add_permits(1); }
                     }
                     Event::AgentFinished { worker: Some(outcome), .. } if outcome.disposition == crate::worker::WorkerDisposition::Failed && case == "failure" => provider.gates[1].add_permits(1),
                     Event::ProviderCallRecorded { record, .. } if matches!(case, "leased_edit" | "defer_finish") && record.phase == AgentPhase::RootSynthesis && record.disposition == ProviderCallDisposition::InvalidResponse => { primary_seen = true; for gate in &provider.gates { gate.add_permits(1); } }
@@ -836,9 +838,35 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             b"host edit"
         );
     }
+    if case == "order_hooks" {
+        for worker in run.agents.iter().skip(1) {
+            let writes: Vec<_> = worker
+                .tools
+                .iter()
+                .filter(|tool| matches!(tool.intent.call, ToolCall::Write { .. }))
+                .collect();
+            assert_eq!(writes.len(), 1, "each worker performs one Write");
+            let tool = writes[0];
+            assert_eq!(tool.hooks.len(), 2, "worker Write runs both hooks");
+            assert_eq!(
+                tool.hooks[0].invocation.event,
+                crate::permissions::HookEvent::PreToolUse
+            );
+            assert_eq!(
+                tool.hooks[1].invocation.event,
+                crate::permissions::HookEvent::PostToolUse
+            );
+            assert!(tool.hooks.iter().all(|hook| {
+                matches!(
+                    hook.outcome.as_ref().map(|outcome| &outcome.result),
+                    Some(crate::tools::permissions::HookResult::Passed)
+                )
+            }));
+        }
+    }
     if matches!(
         case,
-        "order" | "conflict" | "mixed" | "fallback" | "command_refused"
+        "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "command_refused"
     ) {
         let ordinals = integrated
             .iter()
@@ -875,10 +903,11 @@ pub async fn recover_by_id(guard: &Path, checkpoint: &'static str) -> TeamObserv
 async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObservation {
     let mut original = Box::pin(run_case(
         guard,
-        if checkpoint.is_some() {
-            "order"
-        } else {
-            "cancel_foreground"
+        match checkpoint {
+            Some("child_hook") => "hook_sibling_stop",
+            Some("worker_hook") => "order_hooks",
+            Some(_) => "order",
+            None => "cancel_foreground",
         },
     ))
     .await;
@@ -904,6 +933,12 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
             .events
             .iter()
             .position(|e| match (checkpoint, &e.event) {
+                ("child_hook", Event::HookStarted { hook, .. }) => {
+                    hook.event == crate::permissions::HookEvent::SubagentStop
+                }
+                ("worker_hook", Event::HookStarted { hook, .. }) => {
+                    hook.event == crate::permissions::HookEvent::PreToolUse
+                }
                 ("private_intent" | "private_unknown", Event::ToolStarted { intent, .. }) => {
                     matches!(
                         intent.target,
@@ -987,6 +1022,19 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
     let old_grant = old_assignment.pins.policy_digest;
     std::fs::write(workspace.join("notes/0"), b"resume base").unwrap();
     std::fs::write(state.join("tools.json"), br#"{"version":1,"workspace_paths":["docs","notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    if checkpoint.is_none() {
+        std::fs::create_dir_all(workspace.join("docs")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let shell = std::fs::canonicalize("/bin/sh").unwrap();
+        let command = serde_json::json!({"name":"sh","executable":shell,"sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]});
+        std::fs::write(state.join("tools.json"), serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["docs","notes"],"write":true,"commands":[command],"skills":[],"mcp":[]})).unwrap()).unwrap();
+        std::fs::write(state.join("permissions.json"), br#"{"hooks":{"PreToolUse":[{"matcher":"Read|Write","hooks":[{"type":"command","command":"exit 0","timeout":5}]}],"PostToolUse":[{"matcher":"Read|Write","hooks":[{"type":"command","command":"exit 0","timeout":5}]}]}}"#).unwrap();
+        std::fs::set_permissions(
+            state.join("permissions.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     let engine = super::engine::open(
         StateRoot::open_existing(&state).unwrap(),
         EngineConfig {
@@ -1018,7 +1066,10 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
         max_active_children: 3,
     };
     input.goal = GoalRequest::resume(original.view.goals[0].id, false);
-    if checkpoint == Some("workspace_unknown") {
+    if matches!(
+        checkpoint,
+        Some("workspace_unknown" | "child_hook" | "worker_hook")
+    ) {
         let result = engine
             .submit(
                 AdmittedProviders::single(provider.clone()),
@@ -1035,7 +1086,14 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
         assert!(provider.requests.lock().unwrap().is_empty());
         engine.close().await.unwrap();
         let (events, view) = replayed(&state, original.session).await;
-        assert_eq!(events, original.events);
+        assert_eq!(
+            events, original.events,
+            "refused resume never reruns a historical hook or effect"
+        );
+        if checkpoint != Some("workspace_unknown") {
+            assert!(!view.runs[0].hooks_settled());
+            assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        }
         return TeamObservation {
             directory: original.directory,
             session: original.session,
@@ -1080,6 +1138,31 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
     assert_eq!(resumed.status, RunStatus::Finished);
     let worker = &resumed.agents[1];
     let assignment = worker.assignment.as_ref().unwrap();
+    if checkpoint.is_none() {
+        let tools: Vec<_> = worker
+            .tools
+            .iter()
+            .filter(|tool| !tool.intent.call.is_internal())
+            .collect();
+        assert!(!tools.is_empty(), "resumed worker uses Tools");
+        for tool in tools {
+            assert_eq!(tool.hooks.len(), 2, "resumed worker runs both Tool hooks");
+            assert_eq!(
+                tool.hooks[0].invocation.event,
+                crate::permissions::HookEvent::PreToolUse
+            );
+            assert_eq!(
+                tool.hooks[1].invocation.event,
+                crate::permissions::HookEvent::PostToolUse
+            );
+            assert!(
+                tool.hooks
+                    .iter()
+                    .all(|hook| hook.invocation.intent.agent_run_id == worker.id
+                        && hook.outcome.is_some())
+            );
+        }
+    }
     assert_ne!(worker.id, source);
     assert_ne!(resumed.id, original.view.runs[0].id);
     assert_eq!(assignment.pins.request.resumes, Some(source));

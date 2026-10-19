@@ -12,6 +12,7 @@ use crate::session::{
     MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
 };
 use crate::tools::{ToolCall, ToolContext, ToolRequest, ToolStep};
+use crate::worker::WorkerCause;
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use tokio::task::{Id, JoinError, JoinSet};
@@ -34,6 +35,15 @@ pub(super) struct ChildWork {
     pub(super) stop_hook_feedback: Vec<crate::provider::StopHookFeedback>,
     pub(super) tools: Option<ToolContext>,
     pub(super) tool_calls_remaining: usize,
+}
+
+impl ChildWork {
+    fn hook_subject(&self) -> &str {
+        self.definition.as_ref().map_or(
+            if self.editor { "editor" } else { "researcher" },
+            |definition| definition.name.as_str(),
+        )
+    }
 }
 
 struct Spawned {
@@ -886,12 +896,8 @@ impl RunLoop<'_> {
                                     .await?;
                                 continue;
                             }
-                            ChildStop::End(disposition) => {
-                                if disposition == AgentDisposition::Failed
-                                    && children[index].turns_remaining == 0
-                                {
-                                    failure = crate::worker::WorkerCause::TurnLimit;
-                                }
+                            ChildStop::End(_, cause) => {
+                                failure = cause;
                                 None
                             }
                         }
@@ -1072,7 +1078,7 @@ impl RunLoop<'_> {
                     {
                         ChildStop::Proceed => {}
                         ChildStop::Reprompt => return Ok(None),
-                        ChildStop::End(disposition) => return Ok(Some(disposition)),
+                        ChildStop::End(disposition, _) => return Ok(Some(disposition)),
                     }
                 }
                 self.finish_child(
@@ -1167,7 +1173,7 @@ impl RunLoop<'_> {
     ) -> Result<ChildStop, EngineError> {
         let agent_run_id = child.agent_run_id;
         let stop = self
-            .run_subagent_stop(child, "researcher", &finish.result, turn, deadline)
+            .run_subagent_stop(child, &finish.result, turn, deadline)
             .await;
         match stop {
             Ok(Some(())) => {}
@@ -1182,12 +1188,15 @@ impl RunLoop<'_> {
                         )
                         .await?;
                     }
-                    return Ok(ChildStop::End(AgentDisposition::StoppedByHook));
+                    return Ok(ChildStop::End(
+                        AgentDisposition::StoppedByHook,
+                        WorkerCause::StoppedByHook,
+                    ));
                 }
                 return Ok(ChildStop::Proceed);
             }
             // A cut-off or cancelled hook ends this child only, unless its outcome stops the Run.
-            Err(EngineError::GoalBudgetExhausted | EngineError::ContextTooLarge) => {
+            Err(error @ (EngineError::GoalBudgetExhausted | EngineError::ContextTooLarge)) => {
                 let settled = self.ledger().view(|view| {
                     view.runs
                         .iter()
@@ -1206,10 +1215,18 @@ impl RunLoop<'_> {
                     self.finish_child(agent_run_id, disposition, None, true)
                         .await?;
                 }
-                return Ok(ChildStop::End(disposition));
+                let cause = if matches!(error, EngineError::GoalBudgetExhausted) {
+                    WorkerCause::Budget
+                } else {
+                    WorkerCause::ToolFailed
+                };
+                return Ok(ChildStop::End(disposition, cause));
             }
             Err(EngineError::Tool(crate::tools::ToolError::Uncertain)) if child.editor => {
-                return Ok(ChildStop::End(AgentDisposition::Failed));
+                return Ok(ChildStop::End(
+                    AgentDisposition::Failed,
+                    WorkerCause::ToolFailed,
+                ));
             }
             Err(error) => return Err(error),
         };
@@ -1219,6 +1236,7 @@ impl RunLoop<'_> {
         if child.turns_remaining > 0
             && tokio::time::Instant::now() < deadline
             && self.ledger().can_start_provider_call()
+            && self.ledger().remaining_calls() != Some(0)
         {
             return Ok(ChildStop::Reprompt);
         }
@@ -1226,22 +1244,25 @@ impl RunLoop<'_> {
             self.finish_child(agent_run_id, AgentDisposition::Failed, None, false)
                 .await?;
         }
-        Ok(ChildStop::End(AgentDisposition::Failed))
+        let cause = if tokio::time::Instant::now() >= deadline
+            || !self.ledger().can_start_provider_call()
+            || self.ledger().remaining_calls() == Some(0)
+        {
+            WorkerCause::Budget
+        } else {
+            WorkerCause::TurnLimit
+        };
+        Ok(ChildStop::End(AgentDisposition::Failed, cause))
     }
 
     pub(super) async fn run_subagent_stop(
         &self,
         child: &mut ChildWork,
-        default_subject: &str,
         message: &str,
         turn: ProviderTurn,
         deadline: Instant,
     ) -> Result<Option<()>, EngineError> {
-        let subject = child
-            .definition
-            .as_ref()
-            .map_or(default_subject, |definition| definition.name.as_str())
-            .to_owned();
+        let subject = child.hook_subject().to_owned();
         let fits = self
             .controls
             .tools
@@ -1798,7 +1819,7 @@ impl RunLoop<'_> {
 pub(super) enum ChildStop {
     Proceed,
     Reprompt,
-    End(AgentDisposition),
+    End(AgentDisposition, WorkerCause),
 }
 
 fn classify_join(
@@ -1867,6 +1888,45 @@ fn restrict_catalog(
 #[cfg(test)]
 mod delegation_bound_tests {
     use super::*;
+
+    #[test]
+    fn missing_editor_definition_matches_editor_stop_hooks_only() {
+        use crate::tools::permissions::{HookEvent, PermissionConfig};
+        let config = PermissionConfig::parse(
+            br#"{"hooks":{"SubagentStop":[
+            {"matcher":"editor","hooks":[{"type":"command","command":"editor-check"}]},
+            {"matcher":"researcher","hooks":[{"type":"command","command":"researcher-check"}]}
+        ]}}"#,
+        )
+        .unwrap();
+        for editor in [false, true] {
+            let child = ChildWork {
+                agent_run_id: AgentRunId::new(),
+                objective: "Inspect assignment".into(),
+                definition: None,
+                turns_remaining: 0,
+                editor,
+                source_context: None,
+                stop_hook_feedback: Vec::new(),
+                tools: None,
+                tool_calls_remaining: 0,
+            };
+            let matched = config
+                .matched_hooks(HookEvent::SubagentStop, |group| {
+                    group.matches(child.hook_subject())
+                })
+                .unwrap();
+            assert_eq!(matched.len(), 1);
+            assert_eq!(
+                matched[0].2.command(),
+                if editor {
+                    "editor-check"
+                } else {
+                    "researcher-check"
+                }
+            );
+        }
+    }
 
     #[test]
     fn tool_free_delegation_is_capped_at_the_delegation_deadline() {
