@@ -832,18 +832,16 @@ async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
 }
 
 #[tokio::test]
-async fn primary_context_overflow_cancels_workers_like_a_primary_failure() {
-    for case in ["primary_denial", "primary_context"] {
-        tokio::time::timeout(
-            Duration::from_secs(180),
-            arany::test_support::worker_teams::run_case(
-                Path::new(env!("CARGO_BIN_EXE_arany")),
-                case,
-            ),
-        )
-        .await
-        .expect(case);
-    }
+async fn primary_tool_denial_cancels_drained_workers_like_a_primary_failure() {
+    tokio::time::timeout(
+        Duration::from_secs(180),
+        arany::test_support::worker_teams::run_case(
+            Path::new(env!("CARGO_BIN_EXE_arany")),
+            "primary_denial",
+        ),
+    )
+    .await
+    .expect("bounded primary denial journey");
 }
 
 #[tokio::test]

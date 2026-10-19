@@ -283,7 +283,24 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 )
             })
             .count();
-        let observed = end - index - hook_events;
+        // A drained worker settles calls admitted at its own reservations, so they never charge a Tool window.
+        let drained_worker_events = if matches!(action, Action::Tool) {
+            events[*index..end]
+                .iter()
+                .filter(|event| match &event.event {
+                    Event::ProviderCallRecorded { agent_run_id, .. }
+                    | Event::AgentFinished { agent_run_id, .. }
+                    | Event::WorkerHandoverDiscarded { agent_run_id, .. }
+                    | Event::WorkerLeaseReleased { agent_run_id, .. } => {
+                        workers.contains_key(agent_run_id)
+                    }
+                    _ => false,
+                })
+                .count()
+        } else {
+            0
+        };
+        let observed = end - index - hook_events - drained_worker_events;
         let config = events[..=*index]
             .iter()
             .rev()
@@ -317,7 +334,11 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
             );
         assert!(
             bound >= observed,
-            "{action:?} at {index} bounds {bound} Events but appends {observed}",
+            "{action:?} at {index} bounds {bound} Events but appends {observed}: {:?}",
+            events[*index..end]
+                .iter()
+                .map(|e| e.event.kind())
+                .collect::<Vec<_>>(),
         );
     }
 }
