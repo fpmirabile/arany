@@ -26,6 +26,7 @@ mod controls;
 mod models;
 mod permissions;
 mod picker;
+mod rewind;
 pub(crate) mod run;
 mod setup;
 use active::{CompactionOutcome, GoalStart, RunSubmission, compact_current, submit_objective};
@@ -616,6 +617,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
     }
     .map(Feedback::History);
     let mut empty_interrupt = None::<Instant>;
+    let mut idle_escape = None::<Instant>;
     if let Some(prompt) = startup_objective {
         require_access(access_authorized, notice.as_ref())?;
         active::validate_objective_inputs(&admission, &prompt)?;
@@ -705,7 +707,45 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         if terminal.handle_history_input(input, &view) {
             continue;
         }
+        if input != TerminalInput::Escape {
+            idle_escape = None;
+        }
         match input {
+            TerminalInput::Escape if !composer.has_open_menu() => {
+                if idle_escape
+                    .take()
+                    .is_some_and(|at| at.elapsed() <= EMPTY_INTERRUPT_WINDOW)
+                {
+                    if !composer.is_empty() {
+                        composer.remember_and_clear();
+                        notice = Some(Feedback::History(
+                            "Draft saved to input history; Up recalls it".into(),
+                        ));
+                    } else {
+                        notice = Some(Feedback::History(
+                            rewind::open(
+                                &engine,
+                                &mut terminal,
+                                &admission,
+                                &mut session_id,
+                                &mut view,
+                                &mut composer,
+                            )
+                            .await?,
+                        ));
+                    }
+                } else {
+                    idle_escape = Some(Instant::now());
+                    notice = Some(Feedback::Transient(
+                        if composer.is_empty() {
+                            "Esc again: rewind"
+                        } else {
+                            "Esc again: save and clear draft"
+                        }
+                        .into(),
+                    ));
+                }
+            }
             TerminalInput::CycleApprovalMode => {
                 notice = Some(Feedback::History(permissions::cycle(&mut composer)));
                 empty_interrupt = None;
@@ -858,6 +898,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 command,
                                 InteractiveCommand::New
                                     | InteractiveCommand::Resume
+                                    | InteractiveCommand::Rewind
                                     | InteractiveCommand::Fork
                             )
                         {
@@ -947,7 +988,19 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                         if command == InteractiveCommand::Exit {
                             break;
                         }
-                        if command == InteractiveCommand::Paste {
+                        if command == InteractiveCommand::Rewind {
+                            notice = Some(Feedback::History(
+                                rewind::open(
+                                    &engine,
+                                    &mut terminal,
+                                    &admission,
+                                    &mut session_id,
+                                    &mut view,
+                                    &mut composer,
+                                )
+                                .await?,
+                            ));
+                        } else if command == InteractiveCommand::Paste {
                             notice = Some(match terminal.request_clipboard_paste() {
                                 Ok(()) => Feedback::Transient(
                                     "Reading clipboard... draft retained".into(),

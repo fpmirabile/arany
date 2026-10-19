@@ -49,10 +49,19 @@ impl LinearState {
         lines: &[String],
         prompt: &str,
     ) -> io::Result<()> {
+        self.write_permission_prompt(&mut io::stderr(), id, lines, prompt)
+    }
+
+    fn write_permission_prompt(
+        &mut self,
+        writer: &mut impl Write,
+        id: uuid::Uuid,
+        lines: &[String],
+        prompt: &str,
+    ) -> io::Result<()> {
         if self.last_approval == Some(id) {
             return Ok(());
         }
-        let mut writer = io::stderr();
         if self.newline_pending || self.line_open {
             writeln!(writer)?;
         }
@@ -556,6 +565,64 @@ impl LinearState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewind_linear_parity_preserves_every_state_choice_and_hostile_path_without_clipping() {
+        let mut state = LinearState::new("screen-reader");
+        let mut output = Vec::new();
+        let rows = vec![
+            "Rewind: preview".into(),
+            "1. Run 1 · prompt · no code changes since".into(),
+            "2. Before rewind".into(),
+            "Restore code and conversation".into(),
+            "Restore conversation".into(),
+            "Restore code".into(),
+            "Never mind".into(),
+            "restore +1 -2".into(),
+            "delete +0 -2".into(),
+            "recreate +3 -0".into(),
+            "drifted".into(),
+            "unavailable".into(),
+            "unsafe".into(),
+            "outside grant".into(),
+            "kept".into(),
+            "Code restore blocked: unknown or open outcome; inspect files".into(),
+            "Not rewindable: MCP external effect".into(),
+            crate::presentation::rewind::KEEP.into(),
+            crate::presentation::rewind::OVERWRITE.into(),
+            "Compare".into(),
+            "Code restored; conversation unchanged".into(),
+            "Rewind outcome unknown: inspect files before continuing".into(),
+            "Older checkpoints pruned".into(),
+            escape_terminal(&format!(
+                "src/{}\u{1b}]52;bad\u{7}\r\u{202e}",
+                "long/".repeat(100)
+            )),
+        ];
+        let id = uuid::Uuid::now_v7();
+        state
+            .write_permission_prompt(
+                &mut output,
+                id,
+                &rows,
+                "Type a number or visible choice name; empty Enter cancels:",
+            )
+            .unwrap();
+        let length = output.len();
+        state
+            .write_permission_prompt(&mut output, id, &rows, "prompt")
+            .unwrap();
+        assert_eq!(output.len(), length);
+        let text = String::from_utf8(output).unwrap();
+        for row in rows {
+            assert!(text.contains(&row));
+        }
+        assert!(
+            !text
+                .chars()
+                .any(|c| (c.is_control() && c != '\n') || c == '\u{202e}')
+        );
+    }
     use arany::{
         AgentRole, AgentRunId, AgentStatus, AgentView, RunId, RunStatus, RunView, SessionDefaults,
     };
@@ -749,6 +816,7 @@ mod tests {
                 "Command: /status; Session status; during Run: available\n",
                 "Command: /new; New Session; during Run: locked\n",
                 "Command: /clear; New Session; during Run: locked\n",
+                "Command: /rewind; Restore code, conversation or both; compare changes; during Run: locked\n",
                 "Command: /resume [session-id]; Resume Session; during Run: locked\n",
                 "Command: /goal [pause|resume|continue|objective]; Goal status; pause during a Run; resume, continue or start when idle; during Run: available\n",
                 "Command: /fork [session-id]; Fork Session; during Run: locked\n",

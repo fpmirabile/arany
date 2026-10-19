@@ -243,18 +243,6 @@ Separately proposed D work, excluded from item 9 by decision O1: judge-only adap
 - **E2 Context.** Each phase Run receives the approved artifacts, Goal facts and
    its own capsule, not the full transcript; workers receive only their
    assignment capsule.
-- **E4 Checkpoints and rewind.** Cancellation keeps integrated changes, as in
-   other harnesses. A checkpoint is taken at every user prompt and Goal phase
-   boundary; `/rewind` restores code, conversation (through the existing
-   fork) or both. Pre-images are stored in Arany's private StateRoot, per
-   Session, only for files changed through Arany's validated changesets
-   (`ApplyChangeset`). Code rewind applies reverse changesets with digest
-   preconditions; drifted files reject and are listed. Command and MCP effects
-   are not rewindable, and rewind says so explicitly. Checkpoints are never Git
-   ghost commits in the user's repository. Rewind is never automatic.
-   Checkpoints are kept 30 days, bounded per file and per Goal, and pruned
-   automatically with a visible notice; exact numbers are decided in the E4
-   implementation change.
 - **E5 Supervisor override.** The user can override any Supervisor response
    with a one-use approval; overrides are journaled, feed threshold
    calibration and never change configuration.
@@ -340,7 +328,7 @@ Each slice that crosses one of these boundaries runs the
 - **Authority.** The Supervisor, judges and project rules can only narrow,
   except the explicit per-folder commit authorization and global
   disruptive-Git setting, which the user owns.
-- **Bounds.** Changesets, checkpoints (30-day retention, per-file and per-Goal bounds), progress
+- **Bounds.** Changesets, progress
   notes (160 characters), grilling (12 questions × 6 rounds), judge budgets,
   concurrent workers (default 4) and settings maxima are declared with
   overflow behavior. User-chosen unlimited usage applies only to Goal usage
@@ -373,10 +361,7 @@ its owning contract and uses existing evidence under [testing rules](../../agent
   worker Finish gate, one-use overrides and read-only changeset review. Keep
   thresholds data-dependent; verify detection, journaled verdicts, timeout,
   budget exhaustion and replay without another judge call.
-- **E2/E4/E8/E10 remaining Goal workflows.** Add phase capsules/artifacts,
-  checkpoint/rewind and headless RPI. Checkpoints remain frozen under the
-  roadmap. Goals, Tools and Terminal own drift rejection, retained integrated
-  changes, non-rewindable effects and explicit recovery.
+- **E2/E8/E10 remaining Goal workflows.** Add phase capsules/artifacts and headless RPI under the Goals and Terminal contracts.
 - **E6 Git writes.** A separate security-reviewed slice after the freeze;
   verify inert repository configuration, exact approval, protected remote
   operations and no authority from repository text alone.
@@ -393,13 +378,12 @@ subject under the existing telemetry contract.
 
 Owner: Fernando Mirabile. [Roadmap item 6](../../NEXT_STEPS.md#pursue-in-order)
 owns RPI exhaustion and Auto authority decisions; item 12 owns Supervisor
-threshold calibration. The [E4 freeze entry](../../NEXT_STEPS.md#frozen-areas)
-owns checkpoint quotas. Resolve each before its corresponding slice.
+threshold calibration. Resolve each before its corresponding slice.
 The [design rationale](./design-tree.md) explains the choices that remain live.
 
 ## Contract owners
 
-- [Goals](../../docs/specs/goals.md): lifecycle, phase artifacts, budgets, checkpoints and Goal facts.
+- [Goals](../../docs/specs/goals.md): lifecycle, phase artifacts, budgets and Goal facts.
 - [Execution](../../docs/specs/execution.md): Run admission, coordination, teams and recovery.
 - [Tools](../../docs/specs/tools.md): grants, effects, changesets, Guard and native differences.
 - [Terminal](../../docs/specs/terminal.md): interaction, Supervisor prompts and accessibility.

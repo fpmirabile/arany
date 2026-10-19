@@ -158,7 +158,10 @@ pub(super) fn draw_permission_frame(
         frame.render_widget(Clear, full);
         Rect::new(full.x + gutter, full.y, width, full.height)
     };
-    let body_height = usize::from(area.height - 5);
+    let choice_rows = u16::try_from(choices.len().max(3))
+        .unwrap_or(u16::MAX)
+        .min(area.height.saturating_sub(3));
+    let body_height = usize::from(area.height - choice_rows - 2);
     let pages = rows.len().div_ceil(body_height).max(1);
     let page = profile_rows
         .iter()
@@ -170,7 +173,7 @@ pub(super) fn draw_permission_frame(
         Paragraph::new(rows[start..rows.len().min(start + body_height)].to_vec()),
         Rect::new(area.x, area.y, width, body_height as u16),
     );
-    let options_y = area.bottom() - 4;
+    let options_y = area.bottom() - choice_rows - 1;
     if more {
         let prompt = if width < 24 {
             format!("Page {}/{} Enter", page + 1, pages)
@@ -352,7 +355,7 @@ impl Palette {
         }
     }
 
-    fn selection(self) -> Style {
+    pub(super) fn selection(self) -> Style {
         self.accent().add_modifier(Modifier::BOLD)
     }
 
