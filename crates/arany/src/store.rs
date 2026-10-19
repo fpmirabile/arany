@@ -2,8 +2,8 @@ use crate::provider::evidence::{
     EvidenceOp, EvidenceRecord, NativeEvidenceRecord, ProviderEvidenceRecord,
 };
 use crate::session::{
-    Event, EventEnvelope, ForkLineage, ReplayError, RunId, SessionId, SessionPage, SessionView,
-    WorkspaceIdentity, payload_version,
+    Event, EventEnvelope, ForkLineage, ReplayError, RunId, SessionId, SessionListItem, SessionPage,
+    SessionView, WorkspaceIdentity, payload_version,
 };
 use std::io;
 use std::sync::mpsc::sync_channel;
@@ -234,6 +234,10 @@ enum Request {
         watermark: Option<u64>,
         reply: oneshot::Sender<Result<(SessionPage, u64), StoreError>>,
     },
+    ListAllSessions {
+        workspace_identity: WorkspaceIdentity,
+        reply: oneshot::Sender<Result<Vec<SessionListItem>, StoreError>>,
+    },
     PrepareFork {
         source_session_id: SessionId,
         source_sequence: Option<u64>,
@@ -437,6 +441,9 @@ impl Store {
                                 replay::MAX_LIST_SCAN_EVENTS,
                                 watermark,
                             ));
+                        }
+                        Request::ListAllSessions { workspace_identity, reply } => {
+                            let _ = reply.send(replay::list_all_sessions(&connection, workspace_identity));
                         }
                         Request::PrepareFork { source_session_id, source_sequence, reply } => {
                             let _ = reply.send(journal::prepare_fork(&mut connection, source_session_id, source_sequence));
@@ -713,6 +720,17 @@ impl Store {
         workspace_identity: WorkspaceIdentity,
     ) -> Result<Option<SessionId>, StoreError> {
         self.call(|reply| Request::LatestSession {
+            workspace_identity,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn list_all_sessions(
+        &self,
+        workspace_identity: WorkspaceIdentity,
+    ) -> Result<Vec<SessionListItem>, StoreError> {
+        self.call(|reply| Request::ListAllSessions {
             workspace_identity,
             reply,
         })

@@ -150,10 +150,54 @@ pub(super) fn list_page_in_snapshot(
     workspace_identity: WorkspaceIdentity,
     after: Option<(SessionId, u64)>,
     limit: usize,
-    mut budget: usize,
+    budget: usize,
     watermark: Option<u64>,
     after_ordering: impl FnOnce(),
 ) -> Result<(SessionPage, u64), StoreError> {
+    let listing = discover_session_heads(connection, workspace_identity, watermark)?;
+    let start = match after {
+        Some((id, sequence)) => {
+            listing
+                .matching
+                .iter()
+                .position(|(tail, candidate, _)| *candidate == id && *tail == sequence)
+                .ok_or(StoreError::StaleCursor)?
+                + 1
+        }
+        None => 0,
+    };
+    after_ordering();
+    let page = listing.page(connection, start, limit, budget)?;
+    Ok((page, listing.watermark))
+}
+
+pub(super) fn list_all_sessions(
+    connection: &Connection,
+    workspace_identity: WorkspaceIdentity,
+) -> Result<Vec<SessionListItem>, StoreError> {
+    let listing = discover_session_heads(connection, workspace_identity, None)?;
+    let mut items = Vec::new();
+    loop {
+        let page = listing.page(connection, items.len(), 100, MAX_LIST_SCAN_EVENTS)?;
+        items.extend(page.items);
+        if !page.more {
+            return Ok(items);
+        }
+    }
+}
+
+struct SessionListing {
+    workspace_identity: WorkspaceIdentity,
+    watermark: u64,
+    tails: HashMap<SessionId, u64>,
+    matching: Vec<(u64, SessionId, Vec<SessionId>)>,
+}
+
+fn discover_session_heads(
+    connection: &Connection,
+    workspace_identity: WorkspaceIdentity,
+    watermark: Option<u64>,
+) -> Result<SessionListing, StoreError> {
     let watermark: i64 = match watermark {
         Some(sequence) => i64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?,
         None => connection.query_row(WATERMARK_SQL, [], |row| row.get(0))?,
@@ -233,78 +277,81 @@ pub(super) fn list_page_in_snapshot(
         }
     }
     matching.sort_unstable_by_key(|(tail, ..)| std::cmp::Reverse(*tail));
-    let start = match after {
-        Some((id, sequence)) => {
-            matching
+    Ok(SessionListing {
+        workspace_identity,
+        watermark: u64::try_from(watermark).map_err(|_| StoreError::InvalidHistory)?,
+        tails,
+        matching,
+    })
+}
+
+impl SessionListing {
+    fn page(
+        &self,
+        connection: &Connection,
+        start: usize,
+        limit: usize,
+        mut budget: usize,
+    ) -> Result<SessionPage, StoreError> {
+        let mut timestamp =
+            connection.prepare("SELECT strftime('%Y-%m-%d %H:%M:%S', ?1 / 1000, 'unixepoch')")?;
+        let mut format_timestamp = |millis: i64| -> Result<String, StoreError> {
+            Ok(timestamp
+                .query_row([millis], |row| row.get::<_, Option<String>>(0))?
+                .unwrap_or_else(|| "Unknown".into()))
+        };
+        let mut items = Vec::new();
+        let mut more = false;
+        for (_, id, chain) in self.matching.iter().skip(start) {
+            if items.len() == limit {
+                more = true;
+                break;
+            }
+            let bounded = chain
                 .iter()
-                .position(|(tail, candidate, _)| *candidate == id && *tail == sequence)
-                .ok_or(StoreError::StaleCursor)?
-                + 1
+                .map(|&member| {
+                    self.tails
+                        .get(&member)
+                        .map(|&tail| (member, tail))
+                        .ok_or(StoreError::InvalidHistory)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let passes = if chain.len() > 1 { 2 } else { 1 };
+            let cost = lineage_event_count(connection, &bounded)?.saturating_mul(passes);
+            if !items.is_empty() && cost > budget {
+                more = true;
+                break;
+            }
+            budget = budget.saturating_sub(cost);
+            let mut heads = scan_session_heads(connection, &bounded)?;
+            inherit_fork_metadata(connection, &bounded, &mut heads)?;
+            let head = heads.get(id).ok_or(StoreError::InvalidHistory)?;
+            if discovered_identity(*id, &heads, 0)? != Some(self.workspace_identity) {
+                return Err(StoreError::InvalidHistory);
+            }
+            items.push(SessionListItem {
+                id: *id,
+                title: if head.explicit_title {
+                    head.title.clone()
+                } else {
+                    head.ai_title
+                        .as_ref()
+                        .map(|(_, title)| title.clone())
+                        .or_else(|| head.fallback_title.as_ref().map(|(_, title)| title.clone()))
+                        .unwrap_or_else(|| "Empty conversation".into())
+                },
+                last_sequence: head.last_sequence,
+                created_at: format_timestamp(head.created_at_ms)?,
+                last_activity_at: format_timestamp(head.last_activity_at_ms)?,
+                defaults: if head.defaults.provider.is_some() {
+                    head.defaults.clone()
+                } else {
+                    head.run_defaults.clone()
+                },
+            });
         }
-        None => 0,
-    };
-    after_ordering();
-    let mut timestamp =
-        connection.prepare("SELECT strftime('%Y-%m-%d %H:%M:%S', ?1 / 1000, 'unixepoch')")?;
-    let mut format_timestamp = |millis: i64| -> Result<String, StoreError> {
-        Ok(timestamp
-            .query_row([millis], |row| row.get::<_, Option<String>>(0))?
-            .unwrap_or_else(|| "Unknown".into()))
-    };
-    let mut items = Vec::new();
-    let mut more = false;
-    for (_, id, chain) in matching.iter().skip(start) {
-        if items.len() == limit {
-            more = true;
-            break;
-        }
-        let bounded = chain
-            .iter()
-            .map(|&member| {
-                tails
-                    .get(&member)
-                    .map(|&tail| (member, tail))
-                    .ok_or(StoreError::InvalidHistory)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let passes = if chain.len() > 1 { 2 } else { 1 };
-        let cost = lineage_event_count(connection, &bounded)?.saturating_mul(passes);
-        if !items.is_empty() && cost > budget {
-            more = true;
-            break;
-        }
-        budget = budget.saturating_sub(cost);
-        let mut heads = scan_session_heads(connection, &bounded)?;
-        inherit_fork_metadata(connection, &bounded, &mut heads)?;
-        let head = heads.get(id).ok_or(StoreError::InvalidHistory)?;
-        if discovered_identity(*id, &heads, 0)? != Some(workspace_identity) {
-            return Err(StoreError::InvalidHistory);
-        }
-        items.push(SessionListItem {
-            id: *id,
-            title: if head.explicit_title {
-                head.title.clone()
-            } else {
-                head.ai_title
-                    .as_ref()
-                    .map(|(_, title)| title.clone())
-                    .or_else(|| head.fallback_title.as_ref().map(|(_, title)| title.clone()))
-                    .unwrap_or_else(|| "Empty conversation".into())
-            },
-            last_sequence: head.last_sequence,
-            created_at: format_timestamp(head.created_at_ms)?,
-            last_activity_at: format_timestamp(head.last_activity_at_ms)?,
-            defaults: if head.defaults.provider.is_some() {
-                head.defaults.clone()
-            } else {
-                head.run_defaults.clone()
-            },
-        });
+        Ok(SessionPage { items, more })
     }
-    Ok((
-        SessionPage { items, more },
-        u64::try_from(watermark).map_err(|_| StoreError::InvalidHistory)?,
-    ))
 }
 
 fn lineage_event_count(

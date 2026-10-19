@@ -179,9 +179,9 @@ pub async fn list_sessions_page(
     }
     let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
     let store = Store::open_read_only(state)?;
-    let page = list_page(&store, identity, after, limit, None).await;
+    let page = store.list_sessions(identity, after, limit, None).await;
     let closed = store.close().await;
-    let (page, _) = page?;
+    let (page, _) = page.map_err(list_error)?;
     closed?;
     Ok(page)
 }
@@ -192,43 +192,19 @@ pub async fn list_sessions(
 ) -> Result<Vec<SessionListItem>, EngineError> {
     let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
     let store = Store::open_read_only(state)?;
-    let mut items = Vec::new();
-    let mut after = None;
-    let mut watermark = None;
-    let listed = loop {
-        match list_page(&store, identity, after, 100, watermark).await {
-            Ok((page, sequence)) => {
-                watermark = Some(sequence);
-                after = page.items.last().map(|item| (item.id, item.last_sequence));
-                items.extend(page.items);
-                if !page.more {
-                    break Ok(());
-                }
-            }
-            Err(error) => break Err(error),
-        }
-    };
+    let listed = store.list_all_sessions(identity).await;
     let closed = store.close().await;
-    listed?;
+    let items = listed.map_err(list_error)?;
     closed?;
     Ok(items)
 }
 
-async fn list_page(
-    store: &Store,
-    identity: WorkspaceIdentity,
-    after: Option<(SessionId, u64)>,
-    limit: usize,
-    watermark: Option<u64>,
-) -> Result<(SessionPage, u64), EngineError> {
-    store
-        .list_sessions(identity, after, limit, watermark)
-        .await
-        .map_err(|error| match error {
-            StoreError::TooManySessions => EngineError::TooManySessions,
-            StoreError::StaleCursor => EngineError::InvalidRequest,
-            other => EngineError::Store(other),
-        })
+fn list_error(error: StoreError) -> EngineError {
+    match error {
+        StoreError::TooManySessions => EngineError::TooManySessions,
+        StoreError::StaleCursor => EngineError::InvalidRequest,
+        other => EngineError::Store(other),
+    }
 }
 
 pub async fn rename_session(

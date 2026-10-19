@@ -1,6 +1,6 @@
 use super::super::replay::{
     BEFORE_DECODE, HEAD_FIRST_SQL, HEAD_TAIL_SQL, LANE_SQL, LINEAGE_COUNT_SQL, NEXT_HEAD_SQL,
-    WATERMARK_SQL, list_page_in_snapshot, list_session_page,
+    WATERMARK_SQL, list_all_sessions, list_page_in_snapshot, list_session_page,
 };
 use super::*;
 use crate::session::WorkspaceIdentity;
@@ -668,6 +668,9 @@ fn listing_page_orders_and_reads_from_one_snapshot() {
 
 #[test]
 fn long_listings_never_block_concurrent_appends() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     let temp = tempfile::tempdir().expect("private test root");
     let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
     let mut connection = open_connection(&root, false).expect("file-backed store");
@@ -681,18 +684,26 @@ fn long_listings_never_block_concurrent_appends() {
     }
     let target = seed_session(&mut connection, &mut hot_session, mine, 0);
     let reader = open_connection(&root, true).expect("read-only store");
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopping = stop.clone();
+    let (started, ready) = std::sync::mpsc::sync_channel(0);
     let listing = std::thread::spawn(move || {
-        let started = std::time::Instant::now();
         let mut pages = 0;
-        while started.elapsed() < std::time::Duration::from_millis(600) {
+        while pages == 0 || !stopping.load(Ordering::SeqCst) {
             let (page, _) =
-                list_session_page(&reader, mine, None, 100, usize::MAX, None).expect("page");
+                list_page_in_snapshot(&reader, mine, None, 100, usize::MAX, None, || {
+                    if pages == 0 {
+                        started.send(()).expect("listing started");
+                    }
+                })
+                .expect("page");
             assert_eq!(page.items.len(), 41);
             pages += 1;
         }
         pages
     });
-    for index in 0..60 {
+    ready.recv().expect("listing started before appends");
+    let appended = (0..60).try_for_each(|index| {
         append(
             &mut connection,
             &mut hot_session,
@@ -701,10 +712,11 @@ fn long_listings_never_block_concurrent_appends() {
                 title: format!("t{index}"),
             },
         )
-        .expect("append commits durably without SQLITE_BUSY while listing runs");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+        .map(|_| ())
+    });
+    stop.store(true, Ordering::SeqCst);
     assert!(listing.join().expect("listing thread") >= 1);
+    appended.expect("append commits durably without SQLITE_BUSY while listing runs");
     let count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM events WHERE session_id = ?1",
@@ -857,18 +869,40 @@ fn full_listing_of_a_large_store_never_fails_a_concurrent_append() {
     let reader = open_connection(&root, true).expect("read-only store");
     let listing = std::thread::spawn(move || {
         let mut after = None;
-        let mut seen = 0;
+        let mut seen = std::collections::HashSet::new();
         let mut watermark = None;
         loop {
             let (page, sequence) =
                 list_session_page(&reader, mine, after, 100, usize::MAX, watermark).expect("page");
             watermark = Some(sequence);
-            seen += page.items.len();
+            for item in &page.items {
+                assert!(seen.insert(item.id), "duplicate Session across pages");
+            }
             after = page.items.last().map(|item| (item.id, item.last_sequence));
             if !page.more {
-                break seen;
+                break;
             }
         }
+        assert_eq!(seen.len(), 500);
+
+        let decodes = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = decodes.clone();
+        BEFORE_DECODE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || counter.set(counter.get() + 1)));
+        });
+        let items = list_all_sessions(&reader, mine).expect("full listing");
+        BEFORE_DECODE.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(
+            decodes.get(),
+            501,
+            "one head-discovery batch and one replay chunk per Session across five pages"
+        );
+        let mut full = std::collections::HashSet::new();
+        for item in items {
+            assert!(full.insert(item.id), "duplicate Session in full listing");
+        }
+        assert_eq!(full, seen);
+        full.len()
     });
     for index in 0..40 {
         append(
@@ -881,7 +915,7 @@ fn full_listing_of_a_large_store_never_fails_a_concurrent_append() {
         )
         .expect("append at the normal busy timeout never fails during a listing");
     }
-    assert!(listing.join().expect("listing thread") >= 499);
+    assert_eq!(listing.join().expect("listing thread"), 500);
 }
 
 #[test]
