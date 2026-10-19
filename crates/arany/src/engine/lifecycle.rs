@@ -176,9 +176,9 @@ pub async fn list_sessions_page(
 ) -> Result<SessionPage, EngineError> {
     let identity = WorkspaceInputs::admit_identity(&workspace, &state)?;
     let store = Store::open_read_only(state)?;
-    let page = list_page(&store, identity, after, limit).await;
+    let page = list_page(&store, identity, after, limit, None).await;
     let closed = store.close().await;
-    let page = page?;
+    let (page, _) = page?;
     closed?;
     Ok(page)
 }
@@ -191,9 +191,11 @@ pub async fn list_sessions(
     let store = Store::open_read_only(state)?;
     let mut items = Vec::new();
     let mut after = None;
+    let mut watermark = None;
     let listed = loop {
-        match list_page(&store, identity, after, 100).await {
-            Ok(page) => {
+        match list_page(&store, identity, after, 100, watermark).await {
+            Ok((page, sequence)) => {
+                watermark = Some(sequence);
                 after = page.items.last().map(|item| (item.id, item.last_sequence));
                 items.extend(page.items);
                 if !page.more {
@@ -214,9 +216,10 @@ async fn list_page(
     identity: WorkspaceIdentity,
     after: Option<(SessionId, u64)>,
     limit: usize,
-) -> Result<SessionPage, EngineError> {
+    watermark: Option<u64>,
+) -> Result<(SessionPage, u64), EngineError> {
     store
-        .list_sessions(identity, after, limit)
+        .list_sessions(identity, after, limit, watermark)
         .await
         .map_err(|error| match error {
             StoreError::TooManySessions => EngineError::TooManySessions,

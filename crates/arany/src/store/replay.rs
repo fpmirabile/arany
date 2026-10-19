@@ -113,8 +113,17 @@ pub(super) fn list_session_page(
     after: Option<(SessionId, u64)>,
     limit: usize,
     budget: usize,
-) -> Result<SessionPage, StoreError> {
-    list_page_in_snapshot(connection, workspace_identity, after, limit, budget, || {})
+    watermark: Option<u64>,
+) -> Result<(SessionPage, u64), StoreError> {
+    list_page_in_snapshot(
+        connection,
+        workspace_identity,
+        after,
+        limit,
+        budget,
+        watermark,
+        || {},
+    )
 }
 
 pub(super) fn list_page_in_snapshot(
@@ -123,9 +132,13 @@ pub(super) fn list_page_in_snapshot(
     after: Option<(SessionId, u64)>,
     limit: usize,
     mut budget: usize,
+    watermark: Option<u64>,
     after_ordering: impl FnOnce(),
-) -> Result<SessionPage, StoreError> {
-    let watermark: i64 = connection.query_row(WATERMARK_SQL, [], |row| row.get(0))?;
+) -> Result<(SessionPage, u64), StoreError> {
+    let watermark: i64 = match watermark {
+        Some(sequence) => i64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?,
+        None => connection.query_row(WATERMARK_SQL, [], |row| row.get(0))?,
+    };
     let mut tails = HashMap::<SessionId, u64>::new();
     let mut roots = HashMap::<SessionId, (Option<WorkspaceIdentity>, Option<SessionId>)>::new();
     let mut next_head = connection.prepare(NEXT_HEAD_SQL)?;
@@ -269,7 +282,10 @@ pub(super) fn list_page_in_snapshot(
             },
         });
     }
-    Ok(SessionPage { items, more })
+    Ok((
+        SessionPage { items, more },
+        u64::try_from(watermark).map_err(|_| StoreError::InvalidHistory)?,
+    ))
 }
 
 fn lineage_event_count(
@@ -280,7 +296,10 @@ fn lineage_event_count(
     for &(id, tail) in bounded {
         let count: i64 = connection.query_row(
             LINEAGE_COUNT_SQL,
-            rusqlite::params![id.to_string(), tail as i64],
+            rusqlite::params![
+                id.to_string(),
+                i64::try_from(tail).map_err(|_| StoreError::InvalidHistory)?
+            ],
             |row| row.get(0),
         )?;
         total =
@@ -732,9 +751,6 @@ fn scan_events(
         }
         return Ok(());
     }
-    // Rows at or below a captured bound never change. Each Session is a lane read by
-    // an index range seek; lanes merge here, so SQLite never sorts and no reader lock
-    // outlives a short range read of one lane chunk.
     struct Lane {
         id: String,
         bound: i64,

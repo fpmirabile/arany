@@ -229,7 +229,8 @@ enum Request {
         workspace_identity: WorkspaceIdentity,
         after: Option<(SessionId, u64)>,
         limit: usize,
-        reply: oneshot::Sender<Result<SessionPage, StoreError>>,
+        watermark: Option<u64>,
+        reply: oneshot::Sender<Result<(SessionPage, u64), StoreError>>,
     },
     Fork {
         source_session_id: SessionId,
@@ -413,6 +414,7 @@ impl Store {
                             workspace_identity,
                             after,
                             limit,
+                            watermark,
                             reply,
                         } => {
                             let _ = reply.send(list_session_page(
@@ -421,6 +423,7 @@ impl Store {
                                 after,
                                 limit,
                                 replay::MAX_LIST_SCAN_EVENTS,
+                                watermark,
                             ));
                         }
                         Request::Fork {
@@ -699,11 +702,13 @@ impl Store {
         workspace_identity: WorkspaceIdentity,
         after: Option<(SessionId, u64)>,
         limit: usize,
-    ) -> Result<SessionPage, StoreError> {
+        watermark: Option<u64>,
+    ) -> Result<(SessionPage, u64), StoreError> {
         self.call(|reply| Request::ListSessions {
             workspace_identity,
             after,
             limit,
+            watermark,
             reply,
         })
         .await

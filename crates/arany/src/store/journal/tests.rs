@@ -505,12 +505,13 @@ fn listing_is_filtered_by_workspace_before_decoding_history() {
     for _ in 0..20 {
         seed_session(&mut connection, &mut hot_session, other, 500);
     }
-    let page = list_session_page(&connection, empty, None, 50, 10).expect("empty Workspace");
+    let (page, _) =
+        list_session_page(&connection, empty, None, 50, 10, None).expect("empty Workspace");
     assert!(page.items.is_empty() && !page.more);
 }
 
 #[test]
-fn budget_limited_listing_pages_without_skips_or_duplicates() {
+fn budget_limited_listing_pages_pin_watermark_without_skips_or_duplicates() {
     let temp = tempfile::tempdir().expect("private test root");
     let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
     let mut connection = open_connection(&root, false).expect("file-backed store");
@@ -531,9 +532,15 @@ fn budget_limited_listing_pages_without_skips_or_duplicates() {
     expected.reverse();
     let mut listed = Vec::new();
     let mut after = None;
+    let reader = open_connection(&root, true).expect("read-only store");
     let mut pages = 0;
+    let mut watermark = None;
     loop {
-        let page = list_session_page(&connection, mine, after, 100, 40).expect("bounded page");
+        let (page, sequence) =
+            list_session_page(&reader, mine, after, 100, 40, watermark).expect("bounded page");
+        assert!(watermark.is_none_or(|pinned| pinned == sequence));
+        watermark = Some(sequence);
+        assert!(page.items.iter().all(|item| item.title == "x"));
         assert!(
             !page.items.is_empty() && page.items.len() < 7,
             "budget bounds each page"
@@ -541,6 +548,25 @@ fn budget_limited_listing_pages_without_skips_or_duplicates() {
         after = page.items.last().map(|item| (item.id, item.last_sequence));
         listed.extend(page.items.iter().map(|item| item.id));
         pages += 1;
+        if pages == 1 {
+            let anchor = after.expect("first page anchor").0;
+            for id in [anchor, *expected.last().expect("unlisted Session")] {
+                append(
+                    &mut connection,
+                    &mut hot_session,
+                    id,
+                    Event::SessionRenamed {
+                        title: "later".into(),
+                    },
+                )
+                .expect("writer advances anchor and unlisted Session between pages");
+            }
+            seed_session(&mut connection, &mut hot_session, mine, 0);
+            assert!(matches!(
+                list_session_page(&reader, mine, after, 100, 40, None),
+                Err(StoreError::StaleCursor)
+            ));
+        }
         if !page.more {
             break;
         }
@@ -548,10 +574,11 @@ fn budget_limited_listing_pages_without_skips_or_duplicates() {
     assert!(pages > 1);
     assert_eq!(listed, expected);
     assert!(matches!(
-        list_session_page(&connection, mine, Some((expected[0], 1)), 100, 40),
+        list_session_page(&connection, mine, Some((expected[0], 1)), 100, 40, None),
         Err(StoreError::StaleCursor)
     ));
-    let first = list_session_page(&connection, mine, None, 3, usize::MAX).expect("limit page");
+    let (first, _) =
+        list_session_page(&connection, mine, None, 3, usize::MAX, None).expect("limit page");
     assert_eq!(first.items.len(), 3);
     assert!(first.more);
 }
@@ -577,7 +604,7 @@ fn listing_page_orders_and_reads_from_one_snapshot() {
         .expect("tail");
     let reader = open_connection(&root, true).expect("read-only store");
     let mut writer_state = None;
-    let page = list_page_in_snapshot(&reader, mine, None, 10, usize::MAX, || {
+    let (page, _) = list_page_in_snapshot(&reader, mine, None, 10, usize::MAX, None, || {
         let mut writer = open_connection(&root, false).expect("concurrent writer");
         append(
             &mut writer,
@@ -595,7 +622,8 @@ fn listing_page_orders_and_reads_from_one_snapshot() {
         [newer, older]
     );
     assert_eq!(page.items[1].last_sequence, old_tail as u64);
-    let relisted = list_session_page(&reader, mine, None, 10, usize::MAX).expect("fresh page");
+    let (relisted, _) =
+        list_session_page(&reader, mine, None, 10, usize::MAX, None).expect("fresh page");
     assert_eq!(relisted.items[0].id, older);
 }
 
@@ -618,7 +646,8 @@ fn long_listings_never_block_concurrent_appends() {
         let started = std::time::Instant::now();
         let mut pages = 0;
         while started.elapsed() < std::time::Duration::from_millis(600) {
-            let page = list_session_page(&reader, mine, None, 100, usize::MAX).expect("page");
+            let (page, _) =
+                list_session_page(&reader, mine, None, 100, usize::MAX, None).expect("page");
             assert_eq!(page.items.len(), 41);
             pages += 1;
         }
@@ -687,7 +716,7 @@ fn listing_holds_no_reader_lock_while_decoding() {
             counter.fetch_add(1, Ordering::SeqCst);
         }));
     });
-    let page = list_session_page(&reader, mine, None, 100, usize::MAX).expect("page");
+    let (page, _) = list_session_page(&reader, mine, None, 100, usize::MAX, None).expect("page");
     BEFORE_DECODE.with(|hook| *hook.borrow_mut() = None);
     assert_eq!(page.items.len(), 3);
     assert!(appended.load(Ordering::SeqCst) > 3);
@@ -717,7 +746,7 @@ fn fork_resolution_ignores_events_committed_after_the_watermark() {
         .expect("tail");
     let reader = open_connection(&root, true).expect("read-only store");
     let writer_root = root.try_clone().expect("state clone");
-    let page = list_page_in_snapshot(&reader, mine, None, 10, usize::MAX, || {
+    let (page, _) = list_page_in_snapshot(&reader, mine, None, 10, usize::MAX, None, || {
         let mut writer = open_connection(&writer_root, false).expect("writer");
         append(
             &mut writer,
@@ -734,7 +763,8 @@ fn fork_resolution_ignores_events_committed_after_the_watermark() {
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].id, source);
     assert_eq!(page.items[0].last_sequence, tail as u64);
-    let later = list_session_page(&reader, mine, None, 10, usize::MAX).expect("later page");
+    let (later, _) =
+        list_session_page(&reader, mine, None, 10, usize::MAX, None).expect("later page");
     assert_eq!(later.items.len(), 2);
 }
 
@@ -789,8 +819,11 @@ fn full_listing_of_a_large_store_never_fails_a_concurrent_append() {
     let listing = std::thread::spawn(move || {
         let mut after = None;
         let mut seen = 0;
+        let mut watermark = None;
         loop {
-            let page = list_session_page(&reader, mine, after, 100, usize::MAX).expect("page");
+            let (page, sequence) =
+                list_session_page(&reader, mine, after, 100, usize::MAX, watermark).expect("page");
+            watermark = Some(sequence);
             seen += page.items.len();
             after = page.items.last().map(|item| (item.id, item.last_sequence));
             if !page.more {
