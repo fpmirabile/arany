@@ -17,6 +17,8 @@ pub const CAPABILITIES: &[&str] = &[
     "turn_steer_v1",
     "goal_pause_v1",
     "thread_settings_update_v1",
+    "thread_unsubscribe_v1",
+    "thread_list_v1",
 ];
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -172,6 +174,58 @@ pub struct ThreadSettingsUpdateParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadSettingsUpdateResult {
     pub permission_mode: PermissionMode,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadUnsubscribeParams {
+    #[schemars(with = "String")]
+    pub thread_id: SessionId,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadUnsubscribeResult {
+    pub status: ThreadUnsubscribeStatus,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadUnsubscribeStatus {
+    NotLoaded,
+    Unsubscribed,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 128))]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadListResult {
+    #[schemars(length(max = 100))]
+    pub data: Vec<ThreadListEntry>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadListEntry {
+    #[schemars(with = "String")]
+    pub id: SessionId,
+    pub title: String,
+    pub cwd: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]

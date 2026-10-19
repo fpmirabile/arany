@@ -1315,6 +1315,84 @@
       ],
       "type": "object"
     },
+    "ThreadListEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAt": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "cwd",
+        "createdAt",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "ThreadListParams": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "maxLength": 128,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint32",
+          "maximum": 100,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ThreadListResult": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "items": {
+            "$ref": "#/$defs/ThreadListEntry"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "type": "object"
+    },
     "ThreadResult": {
       "additionalProperties": false,
       "properties": {
@@ -1537,6 +1615,37 @@
         "model"
       ],
       "type": "object"
+    },
+    "ThreadUnsubscribeParams": {
+      "additionalProperties": false,
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadUnsubscribeResult": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/ThreadUnsubscribeStatus"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "ThreadUnsubscribeStatus": {
+      "enum": [
+        "notLoaded",
+        "unsubscribed"
+      ],
+      "type": "string"
     },
     "Turn": {
       "additionalProperties": false,
@@ -1820,6 +1929,14 @@
         "$ref": "#/$defs/ThreadResult"
       }
     },
+    "thread/list": {
+      "params": {
+        "$ref": "#/$defs/ThreadListParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ThreadListResult"
+      }
+    },
     "thread/resume": {
       "params": {
         "$ref": "#/$defs/ThreadResumeParams"
@@ -1842,6 +1959,14 @@
       },
       "result": {
         "$ref": "#/$defs/ThreadResult"
+      }
+    },
+    "thread/unsubscribe": {
+      "params": {
+        "$ref": "#/$defs/ThreadUnsubscribeParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ThreadUnsubscribeResult"
       }
     },
     "turn/interrupt": {

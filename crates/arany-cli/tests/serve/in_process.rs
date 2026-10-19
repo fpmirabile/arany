@@ -401,6 +401,7 @@ async fn reader_failure_notifies_the_server_of_eof() {
 async fn reader_failure_during_a_turn_cancels_and_closes_the_engine() {
     let _deadline = deadline();
     waiting_turn(TurnStop::ReaderFailure).await;
+    waiting_turn(TurnStop::Close).await;
 }
 
 #[tokio::test]
@@ -417,6 +418,7 @@ async fn full_inbound_queue_does_not_block_signal_or_writer_failure_cancellation
 #[derive(Clone, Copy)]
 enum TurnStop {
     Interrupt,
+    Close,
     Eof,
     ReaderFailure,
     FullInboundSignal,
@@ -491,6 +493,11 @@ async fn waiting_turn(stop: TurnStop) {
                 read_messages(FailingReader, input.clone(), reader_output).await,
                 Err("protocol input failed".into())
             );
+        } else if matches!(stop, TurnStop::Close) {
+            input
+                .send(request(5, "thread/unsubscribe", json!({"threadId":thread})))
+                .await
+                .unwrap();
         } else if matches!(stop, TurnStop::Eof) {
             input.send(ClientMessage::Eof).await.unwrap();
         } else {
@@ -526,7 +533,24 @@ async fn waiting_turn(stop: TurnStop) {
                 break;
             }
         }
-        if matches!(stop, TurnStop::Interrupt) {
+        if matches!(stop, TurnStop::Close) {
+            let closed = next(&mut output).await;
+            assert_eq!(closed["id"], 5);
+            assert_eq!(closed["result"], json!({"status":"unsubscribed"}));
+            input
+                .send(request(
+                    7,
+                    "turn/start",
+                    json!({"threadId":thread,"input":[{"type":"text","text":"Again"}]}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                next(&mut output).await["error"]["data"]["reason"],
+                "threadNotLoaded"
+            );
+        }
+        if matches!(stop, TurnStop::Interrupt | TurnStop::Close) {
             input.send(ClientMessage::Eof).await.unwrap();
         }
         serde_json::from_value(thread).unwrap()
@@ -1833,4 +1857,187 @@ async fn thread_settings_update_accepts_only_loaded_threads_and_closed_modes() {
     };
     let (result, ()) = tokio::join!(server, client);
     result.unwrap();
+}
+
+#[tokio::test]
+async fn session_lifecycle_releases_capacity_and_pages_only_workspace_metadata() {
+    let _deadline = deadline();
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let foreign = root.path().join("foreign");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&foreign).unwrap();
+    let state = root.path().join("state");
+    let engine = engine(&state);
+    let hidden = engine
+        .create_session(foreign.clone(), Some("Hidden".into()))
+        .await
+        .unwrap();
+    let provider = scripted();
+    let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+    let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+    let client = async {
+        input.send(initialize()).await.unwrap();
+        let initialized = next(&mut output).await;
+        for capability in ["thread_unsubscribe_v1", "thread_list_v1"] {
+            assert!(
+                initialized["result"]["capabilities"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(capability))
+            );
+        }
+        let mut ids = Vec::new();
+        for _ in 0..64 {
+            input.send(thread_start(&workspace)).await.unwrap();
+            ids.push(next(&mut output).await["result"]["thread"]["id"].clone());
+            next(&mut output).await;
+        }
+        input.send(thread_start(&workspace)).await.unwrap();
+        assert_eq!(
+            next(&mut output).await["error"]["data"]["reason"],
+            "threadLimit"
+        );
+        input
+            .send(request(
+                20,
+                "thread/unsubscribe",
+                json!({"threadId":ids[0]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(next(&mut output).await["result"]["status"], "unsubscribed");
+        input
+            .send(request(
+                20,
+                "thread/unsubscribe",
+                json!({"threadId":ids[0]}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(next(&mut output).await["result"]["status"], "notLoaded");
+        input.send(thread_start(&workspace)).await.unwrap();
+        let newest = next(&mut output).await["result"]["thread"]["id"].clone();
+        next(&mut output).await;
+        input
+            .send(request(
+                20,
+                "thread/list",
+                json!({"cwd":workspace,"limit":2}),
+            ))
+            .await
+            .unwrap();
+        let first = next(&mut output).await;
+        let page = &first["result"];
+        assert_eq!(page["data"].as_array().unwrap().len(), 2);
+        assert_eq!(page["data"][0]["id"], newest);
+        let cursor = page["nextCursor"].as_str().unwrap();
+        assert!(cursor.len() <= 128);
+        input
+            .send(request(
+                20,
+                "thread/list",
+                json!({"cwd":workspace,"cursor":cursor,"limit":100}),
+            ))
+            .await
+            .unwrap();
+        let second = next(&mut output).await;
+        assert_eq!(second["result"]["data"].as_array().unwrap().len(), 63);
+        assert!(second["result"]["nextCursor"].is_null());
+        let mut listed = std::collections::BTreeSet::new();
+        for entry in page["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second["result"]["data"].as_array().unwrap())
+        {
+            assert!(listed.insert(entry["id"].as_str().unwrap().to_owned()));
+            assert_eq!(entry["cwd"], json!(workspace));
+            assert!(entry["updatedAt"].as_str().unwrap().ends_with('Z'));
+            assert_eq!(entry.as_object().unwrap().len(), 5);
+        }
+        assert!(
+            listed.contains(ids[0].as_str().unwrap()),
+            "closing retains durable history"
+        );
+        for response in [&first, &second] {
+            let encoded = serde_json::to_string(response).unwrap();
+            assert!(!encoded.contains(foreign.to_str().unwrap()));
+            assert!(!encoded.contains(state.to_str().unwrap()));
+            assert!(!encoded.contains(&hidden.to_string()));
+            let schema = protocol_schema();
+            let part = json!({"$schema":schema["$schema"],"$defs":schema["$defs"],"$ref":schema["methods"]["thread/list"]["result"]["$ref"]});
+            assert!(
+                jsonschema::validator_for(&part)
+                    .unwrap()
+                    .is_valid(&response["result"])
+            );
+        }
+        for params in [
+            json!({"cwd":workspace,"limit":0}),
+            json!({"cwd":workspace,"limit":101}),
+            json!({"cwd":workspace,"cursor":"bad"}),
+            json!({"cwd":workspace,"cursor":"x".repeat(129)}),
+            json!({"cwd":foreign,"cursor":cursor}),
+            json!({"cwd":"relative"}),
+            json!({"cwd":root.path()}),
+            json!({"cwd":workspace,"sortKey":"created_at"}),
+        ] {
+            input
+                .send(request(20, "thread/list", params))
+                .await
+                .unwrap();
+            assert_eq!(next(&mut output).await["error"]["code"], -32602);
+        }
+        let anchor = serde_json::from_value(page["data"][1]["id"].clone()).unwrap();
+        arany::rename_session(
+            StateRoot::open_existing(&state).unwrap(),
+            workspace.clone(),
+            anchor,
+            "Changed".into(),
+        )
+        .await
+        .unwrap();
+        input
+            .send(request(
+                20,
+                "thread/list",
+                json!({"cwd":workspace,"cursor":cursor}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            next(&mut output).await["error"]["data"]["reason"],
+            "invalidParams",
+            "a changed anchor must not silently skip history"
+        );
+        input
+            .send(request(
+                20,
+                "thread/list",
+                json!({"cwd":foreign,"limit":100}),
+            ))
+            .await
+            .unwrap();
+        let other = next(&mut output).await;
+        assert_eq!(other["result"]["data"].as_array().unwrap().len(), 1);
+        assert_eq!(other["result"]["data"][0]["id"], json!(hidden));
+        input.send(ClientMessage::Eof).await.unwrap();
+        serde_json::from_value(ids[0].clone()).unwrap()
+    };
+    let (result, closed) = tokio::join!(
+        server::run_with_threads(
+            engine,
+            state.clone(),
+            inbound,
+            outbound,
+            threads::Threads::with_provider(provider.clone())
+        ),
+        client
+    );
+    result.unwrap();
+    assert!(provider.requests.lock().unwrap().is_empty());
+    let (events, view) = closed_view(&state, closed).await;
+    assert_eq!(events.len(), 1);
+    assert!(view.runs.is_empty());
 }

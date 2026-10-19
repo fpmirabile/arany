@@ -28,6 +28,8 @@ pub(super) struct State {
     permission: Option<Permission>,
     changed: Arc<Notify>,
     active: Option<Active>,
+    closing: BTreeSet<SessionId>,
+    next_generation: u64,
 }
 
 struct Session {
@@ -47,6 +49,7 @@ struct Permission {
 
 struct Active {
     id: RequestId,
+    generation: u64,
     session: SessionId,
     turn: Option<RunId>,
     cancelled: bool,
@@ -56,6 +59,8 @@ struct Active {
     projected: BTreeSet<(String, bool)>,
     uncertain: usize,
     incomplete: bool,
+    close: Option<RequestId>,
+    close_task: Option<tokio::task::AbortHandle>,
 }
 
 enum Pending {
@@ -72,6 +77,8 @@ enum Pending {
         session: SessionId,
         config: bool,
     },
+    Close(RequestId, SessionId),
+    List(RequestId),
     Start,
     Interrupt,
     Recover,
@@ -399,6 +406,89 @@ pub(super) async fn input(
             )
             .await
         }
+        "session/close" => {
+            let Ok(params) = parse::<wire::Cancel>(request.params) else {
+                return immediate(output, invalid());
+            };
+            let shared = state;
+            let cancel = {
+                let mut state = state.lock().expect("translator state");
+                if !state.sessions.contains_key(&params.session_id) {
+                    return immediate(
+                        output,
+                        wire::error(Some(id), -32002, "Session not found", "resource_not_found"),
+                    );
+                }
+                if !state.closing.insert(params.session_id) {
+                    return immediate(output, wire::error(Some(id), -32600, "Server busy", "busy"));
+                }
+                let cancel = match state
+                    .active
+                    .as_mut()
+                    .filter(|a| a.session == params.session_id)
+                {
+                    Some(active) => {
+                        active.close = Some(id.clone());
+                        active.close_task = Some(
+                            tokio::spawn(expire_close(
+                                shared.clone(),
+                                serve.clone(),
+                                output.clone(),
+                                active.generation,
+                            ))
+                            .abort_handle(),
+                        );
+                        let first = !active.cancelled;
+                        active.cancelled = true;
+                        Some(
+                            active
+                                .turn
+                                .filter(|_| first && active.completion.is_none())
+                                .map(|turn_id| TurnInterruptParams {
+                                    thread_id: active.session,
+                                    turn_id,
+                                }),
+                        )
+                    }
+                    None => None,
+                };
+                state.changed.notify_one();
+                cancel
+            };
+            match cancel {
+                Some(interrupt) => {
+                    if let Some(interrupt) = interrupt {
+                        send_request(
+                            state,
+                            serve,
+                            "turn/interrupt",
+                            interrupt,
+                            Pending::Interrupt,
+                        )
+                        .await?;
+                    }
+                    Ok(())
+                }
+                None => unload(state, serve, id, params.session_id).await,
+            }
+        }
+        "session/list" => {
+            let Ok(params) = parse::<wire::ListSessions>(request.params) else {
+                return immediate(output, invalid());
+            };
+            send_request(
+                state,
+                serve,
+                "thread/list",
+                ThreadListParams {
+                    cwd: params.cwd,
+                    cursor: params.cursor,
+                    limit: None,
+                },
+                Pending::List(id),
+            )
+            .await
+        }
         "session/prompt" => {
             let Ok(params) = parse::<wire::Prompt>(request.params) else {
                 return immediate(output, invalid());
@@ -418,11 +508,14 @@ pub(super) async fn input(
                         "Session not found",
                         "resource_not_found",
                     ))
-                } else if state.active.is_some() {
+                } else if state.active.is_some() || state.closing.contains(&session_id) {
                     Some(wire::error(Some(id.clone()), -32600, "Server busy", "busy"))
                 } else {
+                    state.next_generation += 1;
+                    let generation = state.next_generation;
                     state.active = Some(Active {
                         id: id.clone(),
+                        generation,
                         session: session_id,
                         turn: None,
                         cancelled: false,
@@ -432,6 +525,8 @@ pub(super) async fn input(
                         projected: BTreeSet::new(),
                         uncertain: 0,
                         incomplete: false,
+                        close: None,
+                        close_task: None,
                     });
                     None
                 }
@@ -607,6 +702,40 @@ pub(super) async fn output(
                         };
                         emit(&outbound, wire::response(id, result)).await?;
                     }
+                    Some(Pending::Close(id, session)) => {
+                        {
+                            let mut state = state.lock().expect("translator state");
+                            state.sessions.remove(&session);
+                            state.closing.remove(&session);
+                        }
+                        emit(&outbound, wire::response(id, json!({}))).await?;
+                    }
+                    Some(Pending::List(id)) => {
+                        let result: ThreadListResult = serde_json::from_value(reply.result)
+                            .map_err(|_| "invalid serve Session list")?;
+                        let sessions: Vec<_> = result
+                            .data
+                            .into_iter()
+                            .map(|item| {
+                                let mut session = json!({
+                                    "sessionId": item.id, "cwd": item.cwd,
+                                    "title": crate::presentation::escape_terminal(&item.title),
+                                });
+                                if item.updated_at != "Unknown" {
+                                    session["updatedAt"] = json!(item.updated_at);
+                                }
+                                session
+                            })
+                            .collect();
+                        emit(
+                            &outbound,
+                            wire::response(
+                                id,
+                                json!({"sessions": sessions, "nextCursor": result.next_cursor}),
+                            ),
+                        )
+                        .await?;
+                    }
                     Some(Pending::Start) => {
                         let result: TurnResult = serde_json::from_value(reply.result)
                             .map_err(|_| "invalid serve turn")?;
@@ -635,10 +764,13 @@ pub(super) async fn output(
                     Some(Pending::Recover) => {
                         let page: EventsSubscribeResult = serde_json::from_value(reply.result)
                             .map_err(|_| "invalid serve events")?;
-                        let (session, run) = {
+                        let Some((session, run, prompt)) = ({
                             let state = state.lock().expect("translator state");
-                            let active = state.active.as_ref().ok_or("no active ACP prompt")?;
-                            (active.session, active.turn.ok_or("no active Run")?)
+                            state.active.as_ref().and_then(|active| {
+                                Some((active.session, active.turn?, active.generation))
+                            })
+                        }) else {
+                            continue;
                         };
                         for event in &page.events {
                             if event.run_id.as_deref() != Some(run.to_string().as_str()) {
@@ -688,20 +820,21 @@ pub(super) async fn output(
                                 emit_answer(&outbound, update).await?;
                             }
                         }
-                        if let Some(last) = page.events.last() {
-                            state
+                        if let Some(last) = page.events.last()
+                            && let Some(loaded) = state
                                 .lock()
                                 .expect("translator state")
                                 .sessions
                                 .get_mut(&session)
-                                .expect("loaded Session")
-                                .sequence = last.sequence;
+                        {
+                            loaded.sequence = last.sequence;
                         }
                         if let Some(since) = page.next_since.filter(|_| !*stopping.borrow()) {
                             recover(
                                 &state,
                                 &serve,
                                 &outbound,
+                                prompt,
                                 EventsSubscribeParams {
                                     thread_id: session,
                                     since,
@@ -709,7 +842,8 @@ pub(super) async fn output(
                             )
                             .await?;
                         } else {
-                            finish(&state, &outbound, page.next_since.is_some()).await?;
+                            finish(&state, &serve, &outbound, prompt, page.next_since.is_some())
+                                .await?;
                         }
                     }
                     _ => (),
@@ -725,8 +859,17 @@ pub(super) async fn output(
                         Pending::Initialize(id)
                         | Pending::New(id, ..)
                         | Pending::Load { id, .. }
-                        | Pending::Mode { id, .. },
+                        | Pending::Mode { id, .. }
+                        | Pending::List(id),
                     ) => emit(&outbound, remap(id, reply.error)).await?,
+                    Some(Pending::Close(id, session)) => {
+                        state
+                            .lock()
+                            .expect("translator state")
+                            .closing
+                            .remove(&session);
+                        emit(&outbound, remap(id, reply.error)).await?
+                    }
                     Some(Pending::Start) => {
                         let active = state
                             .lock()
@@ -740,12 +883,23 @@ pub(super) async fn output(
                             remap(active.id, reply.error)
                         };
                         emit(&outbound, response).await?;
+                        if let Some(close) = active.close {
+                            unload(&state, &serve, close, active.session).await?;
+                        }
                     }
                     Some(Pending::Recover) => {
                         eprintln!(
                             "Arany could not reconcile all committed ACP updates; check Session history"
                         );
-                        finish(&state, &outbound, true).await?;
+                        let prompt = state
+                            .lock()
+                            .expect("translator state")
+                            .active
+                            .as_ref()
+                            .map(|a| a.generation);
+                        if let Some(prompt) = prompt {
+                            finish(&state, &serve, &outbound, prompt, true).await?;
+                        }
                     }
                     _ => (),
                 }
@@ -797,15 +951,22 @@ pub(super) async fn output(
                         let recover = active.resync
                             || (!active.answered && result.turn.status == TurnStatus::Completed);
                         active.completion = Some(result.turn);
-                        recover.then_some(
-                            state
-                                .sessions
-                                .get(&result.thread_id)
-                                .map_or(0, |s| s.sequence),
-                        )
+                        let prompt = active.generation;
+                        Some((
+                            prompt,
+                            recover.then_some(
+                                state
+                                    .sessions
+                                    .get(&result.thread_id)
+                                    .map_or(0, |s| s.sequence),
+                            ),
+                        ))
                     } else {
                         None
                     }
+                };
+                let Some((prompt, since)) = since else {
+                    continue;
                 };
                 if let Some(withdrawal) = withdraw_permission(&state, None, true) {
                     emit(&outbound, withdrawal).await?;
@@ -815,6 +976,7 @@ pub(super) async fn output(
                         &state,
                         &serve,
                         &outbound,
+                        prompt,
                         EventsSubscribeParams {
                             thread_id: result.thread_id,
                             since,
@@ -822,7 +984,7 @@ pub(super) async fn output(
                     )
                     .await?;
                 } else {
-                    finish(&state, &outbound, since.is_some()).await?;
+                    finish(&state, &serve, &outbound, prompt, since.is_some()).await?;
                 }
             }
             Message::Notification(note) if note.method == "events/resync" => {
@@ -849,9 +1011,10 @@ pub(super) async fn output(
         .expect("translator state")
         .active
         .as_ref()
-        .is_some_and(|active| active.completion.is_some());
-    if completed {
-        finish(&state, &outbound, true).await?;
+        .filter(|active| active.completion.is_some())
+        .map(|active| active.generation);
+    if let Some(prompt) = completed {
+        finish(&state, &serve, &outbound, prompt, true).await?;
     }
     Ok(())
 }
@@ -860,10 +1023,20 @@ async fn recover(
     state: &Shared,
     serve: &mpsc::Sender<ClientMessage>,
     outbound: &mpsc::Sender<Value>,
+    prompt: u64,
     params: EventsSubscribeParams,
 ) -> Result<(), String> {
+    if !state
+        .lock()
+        .expect("translator state")
+        .active
+        .as_ref()
+        .is_some_and(|a| a.generation == prompt)
+    {
+        return Ok(());
+    }
     match send_request(state, serve, "events/subscribe", params, Pending::Recover).await {
-        Err(_) if serve.is_closed() => finish(state, outbound, true).await,
+        Err(_) if serve.is_closed() => finish(state, serve, outbound, prompt, true).await,
         result => result,
     }
 }
@@ -887,17 +1060,94 @@ async fn emit_answer(outbound: &mpsc::Sender<Value>, mut answer: Value) -> Resul
     emit(outbound, answer).await
 }
 
-async fn finish(
+async fn expire_close(
+    state: Shared,
+    serve: mpsc::Sender<ClientMessage>,
+    output: mpsc::Sender<Value>,
+    prompt: u64,
+) {
+    tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE).await;
+    let active = {
+        let mut state = state.lock().expect("translator state");
+        if !state
+            .active
+            .as_ref()
+            .is_some_and(|a| a.generation == prompt && a.close.is_some())
+        {
+            return;
+        }
+        state
+            .pending
+            .retain(|_, pending| !matches!(pending, Pending::Start | Pending::Recover));
+        state
+            .active
+            .take()
+            .expect("expired close has an active prompt")
+    };
+    if let Some(id) = active.close {
+        let _ = unload(&state, &serve, id, active.session).await;
+    }
+    let response = if active.uncertain > 0 {
+        wire::error(Some(active.id), -32603, tools::UNKNOWN, "effectUncertain")
+    } else {
+        wire::response(
+            active.id,
+            json!({"stopReason":"cancelled","_meta":{"arany.incompleteUpdates":true}}),
+        )
+    };
+    let _ = emit(&output, response).await;
+}
+
+async fn unload(
     state: &Shared,
-    output: &mpsc::Sender<Value>,
-    incomplete: bool,
+    serve: &mpsc::Sender<ClientMessage>,
+    id: RequestId,
+    session: SessionId,
 ) -> Result<(), String> {
-    let active = state
+    state
         .lock()
         .expect("translator state")
-        .active
-        .take()
-        .ok_or("no active ACP prompt")?;
+        .closing
+        .insert(session);
+    send_request(
+        state,
+        serve,
+        "thread/unsubscribe",
+        ThreadUnsubscribeParams { thread_id: session },
+        Pending::Close(id, session),
+    )
+    .await
+}
+
+async fn finish(
+    state: &Shared,
+    serve: &mpsc::Sender<ClientMessage>,
+    output: &mpsc::Sender<Value>,
+    prompt: u64,
+    incomplete: bool,
+) -> Result<(), String> {
+    let active = {
+        let mut state = state.lock().expect("translator state");
+        if !state
+            .active
+            .as_ref()
+            .is_some_and(|a| a.generation == prompt)
+        {
+            return Ok(());
+        }
+        state.active.take().expect("matched active prompt")
+    };
+    let close = active.close.clone();
+    let session = active.session;
+    if let Some(id) = close {
+        match unload(state, serve, id, session).await {
+            Err(_) if serve.is_closed() => {}
+            result => result?,
+        }
+    }
+    if let Some(task) = &active.close_task {
+        task.abort();
+    }
     let turn = active.completion.ok_or("no committed turn completion")?;
     let incomplete = incomplete
         || active.incomplete

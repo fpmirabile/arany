@@ -144,6 +144,8 @@ fn every_conformance_message_validates_against_the_schema() {
         ("turn/start", json!({"threadId": thread_id, "input": [{"type": "text", "text": "Hello"}, {"type": "image", "mediaType": "image/png", "data": "aW1hZ2U="}], "goal": {"autonomous": false}}), json!({"turn": turn})),
         ("thread/settings/update", json!({"threadId":thread_id,"permissionMode":"acceptEdits"}), json!({"permissionMode":"acceptEdits"})),
         ("thread/fork", json!({"threadId": thread_id, "cwd": "/workspace", "title": "Fork"}), json!({"thread": thread})),
+        ("thread/unsubscribe", json!({"threadId":thread_id}), json!({"status":"unsubscribed"})),
+        ("thread/list", json!({"cwd":"/workspace","limit":100}), json!({"data":[{"id":thread_id,"title":"Example","cwd":"/workspace","createdAt":"2026-10-19T00:00:00Z","updatedAt":"2026-10-19T00:00:00Z"}],"nextCursor":null})),
         ("events/subscribe", json!({"threadId": thread_id, "since": 0}), json!({"events": [], "nextSince": null})),
         ("receipt/get", json!({"threadId": thread_id, "goalId": goal_id}), json!({"goal": {"id": goal_id, "status": "completed", "objective": "Hello", "budget": {"maxProviderCalls": 64, "maxTokens": null, "maxActiveMs": 1800000, "maxRuns": 16}, "usage": {"runs": 1, "providerCalls": 1, "activeMs": 1, "uncertainActiveMs": 0, "knownTokens": 0, "knownCachedTokens": 0, "tokenUsageUnknown": true}, "report": {"summary": "Done", "changes": [], "evidence": [], "unresolved": [], "cachedInputTokens": 0}}})),
         ("turn/interrupt", json!({"threadId": thread_id, "turnId": run_id}), json!({})),
@@ -167,6 +169,8 @@ fn every_conformance_message_validates_against_the_schema() {
             "goal/pause" => {serde_json::from_value::<GoalPauseParams>(params).unwrap();}
             "goal/resume" => {serde_json::from_value::<GoalResumeParams>(params).unwrap();}
             "thread/fork" => {serde_json::from_value::<ThreadForkParams>(params).unwrap();}
+            "thread/unsubscribe" => {serde_json::from_value::<ThreadUnsubscribeParams>(params).unwrap();}
+            "thread/list" => {serde_json::from_value::<ThreadListParams>(params).unwrap();}
             "events/subscribe" => {serde_json::from_value::<EventsSubscribeParams>(params).unwrap();}
             "receipt/get" => {serde_json::from_value::<ReceiptGetParams>(params).unwrap();}
             _ => unreachable!(),

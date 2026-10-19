@@ -2,8 +2,8 @@ use crate::provider::evidence::{
     EvidenceOp, EvidenceRecord, NativeEvidenceRecord, ProviderEvidenceRecord,
 };
 use crate::session::{
-    Event, EventEnvelope, ForkLineage, ReplayError, RunId, SessionId, SessionListItem, SessionView,
-    WorkspaceIdentity, payload_version,
+    Event, EventEnvelope, ForkLineage, ReplayError, RunId, SessionId, SessionListItem, SessionPage,
+    SessionView, WorkspaceIdentity, payload_version,
 };
 use std::io;
 use std::sync::mpsc::sync_channel;
@@ -16,7 +16,7 @@ mod replay;
 mod state;
 use journal::{HotSession, append, fork_session, open_connection};
 use replay::{
-    latest_session_id, list_session_items, load_session, resolve_open_view, resolve_view,
+    latest_session_id, list_session_page, load_session, resolve_open_view, resolve_view,
     session_for_run,
 };
 pub use state::HistoryReset;
@@ -96,6 +96,8 @@ pub enum StoreError {
     ReplayLimit,
     #[error("too many Sessions for discovery; resume an exact ID")]
     TooManySessions,
+    #[error("Session listing cursor no longer matches the journal")]
+    StaleCursor,
     #[error("corrupt or unsupported Event history")]
     InvalidHistory,
     #[error("invalid compaction snapshot")]
@@ -226,6 +228,13 @@ enum Request {
         reply: oneshot::Sender<Result<Option<SessionId>, StoreError>>,
     },
     ListSessions {
+        workspace_identity: WorkspaceIdentity,
+        after: Option<(SessionId, u64)>,
+        limit: usize,
+        watermark: Option<u64>,
+        reply: oneshot::Sender<Result<(SessionPage, u64), StoreError>>,
+    },
+    ListAllSessions {
         workspace_identity: WorkspaceIdentity,
         reply: oneshot::Sender<Result<Vec<SessionListItem>, StoreError>>,
     },
@@ -419,9 +428,22 @@ impl Store {
                         }
                         Request::ListSessions {
                             workspace_identity,
+                            after,
+                            limit,
+                            watermark,
                             reply,
                         } => {
-                            let _ = reply.send(list_session_items(&connection, workspace_identity));
+                            let _ = reply.send(list_session_page(
+                                &connection,
+                                workspace_identity,
+                                after,
+                                limit,
+                                replay::MAX_LIST_SCAN_EVENTS,
+                                watermark,
+                            ));
+                        }
+                        Request::ListAllSessions { workspace_identity, reply } => {
+                            let _ = reply.send(replay::list_all_sessions(&connection, workspace_identity));
                         }
                         Request::PrepareFork { source_session_id, source_sequence, reply } => {
                             let _ = reply.send(journal::prepare_fork(&mut connection, source_session_id, source_sequence));
@@ -704,12 +726,29 @@ impl Store {
         .await
     }
 
-    pub(crate) async fn list_sessions(
+    pub(crate) async fn list_all_sessions(
         &self,
         workspace_identity: WorkspaceIdentity,
     ) -> Result<Vec<SessionListItem>, StoreError> {
+        self.call(|reply| Request::ListAllSessions {
+            workspace_identity,
+            reply,
+        })
+        .await
+    }
+
+    pub(crate) async fn list_sessions(
+        &self,
+        workspace_identity: WorkspaceIdentity,
+        after: Option<(SessionId, u64)>,
+        limit: usize,
+        watermark: Option<u64>,
+    ) -> Result<(SessionPage, u64), StoreError> {
         self.call(|reply| Request::ListSessions {
             workspace_identity,
+            after,
+            limit,
+            watermark,
             reply,
         })
         .await

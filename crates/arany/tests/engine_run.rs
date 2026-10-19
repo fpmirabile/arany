@@ -5126,6 +5126,26 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
 }
 
 #[tokio::test]
+async fn list_sessions_page_rejects_zero_limit_before_workspace_or_store_access() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let state_path = temp.path().join("state");
+    let state = StateRoot::admit(&state_path).expect("private state");
+    let store_before = std::fs::metadata(state_path.join("events.sqlite3"))
+        .ok()
+        .map(|m| m.len());
+    assert!(matches!(
+        arany::list_sessions_page(state, temp.path().join("missing-workspace"), None, 0).await,
+        Err(EngineError::InvalidRequest)
+    ));
+    assert_eq!(
+        std::fs::metadata(state_path.join("events.sqlite3"))
+            .ok()
+            .map(|m| m.len()),
+        store_before
+    );
+}
+
+#[tokio::test]
 async fn create_session_on_open_engine_commits_session_started_and_submit_appends_to_it() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");

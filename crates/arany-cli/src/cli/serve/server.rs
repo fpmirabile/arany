@@ -98,6 +98,7 @@ struct ActiveTurn {
     steering: RunSteering,
     pending_start: Option<RequestId>,
     result_done: bool,
+    pending_close: Option<RequestId>,
     state: TurnState,
 }
 
@@ -248,6 +249,35 @@ pub(in crate::cli) async fn run_configured(
                                     .map_err(internal)?;
                                 Ok(None)
                             }
+                            "thread/list" => {
+                                let result = threads::list(&state, params(request.params)?).await?;
+                                let reply = response(id.clone(), result);
+                                encode_line(&reply)
+                                    .map_err(|_| Fault::engine(EngineError::ContextTooLarge))?;
+                                send(&outbound, reply).await.map_err(internal)?;
+                                Ok(None)
+                            }
+                            "thread/unsubscribe" => {
+                                let input: ThreadUnsubscribeParams = params(request.params)?;
+                                if let Some(turn) =
+                                    active.as_mut().filter(|t| t.thread_id == input.thread_id)
+                                {
+                                    if turn.pending_close.is_some() {
+                                        return Err(Fault::state(Reason::Busy));
+                                    }
+                                    turn.pending_close = Some(id.clone());
+                                    turn.approvals.close();
+                                    turn.cancel.cancel();
+                                    return Ok(None);
+                                }
+                                history.unsubscribe(input.thread_id);
+                                let status = if threads.map.remove(&input.thread_id).is_some() {
+                                    ThreadUnsubscribeStatus::Unsubscribed
+                                } else {
+                                    ThreadUnsubscribeStatus::NotLoaded
+                                };
+                                Ok(Some(json!(ThreadUnsubscribeResult { status })))
+                            }
                             "thread/settings/update" => {
                                 let input: ThreadSettingsUpdateParams = params(request.params)?;
                                 let loaded = threads
@@ -396,6 +426,7 @@ pub(in crate::cli) async fn run_configured(
                                     steering,
                                     pending_start: Some(id.clone()),
                                     result_done: false,
+                                    pending_close: None,
                                     state: TurnState {
                                         first_sequence: Some(first_sequence),
                                         ..Default::default()
@@ -497,6 +528,20 @@ pub(in crate::cli) async fn run_configured(
                         send(&outbound, Fault::engine(error).message(Some(id))).await?;
                     }
                     complete(turn, &state, &outbound, &opt_out, true, stopped).await?;
+                    if let Some(id) = turn.pending_close.take() {
+                        history.unsubscribe(turn.thread_id);
+                        threads.map.remove(&turn.thread_id);
+                        send(
+                            &outbound,
+                            response(
+                                id,
+                                ThreadUnsubscribeResult {
+                                    status: ThreadUnsubscribeStatus::Unsubscribed,
+                                },
+                            ),
+                        )
+                        .await?;
+                    }
                     active = None;
                     if let Some(failure) = failure {
                         return Err(format!(
@@ -817,6 +862,7 @@ mod tests {
             steering: RunSteering::new(),
             pending_start: Some(RequestId::Integer(3)),
             result_done: true,
+            pending_close: None,
             state: TurnState {
                 first_sequence: Some(first_sequence),
                 ..Default::default()

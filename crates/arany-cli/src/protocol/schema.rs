@@ -13,6 +13,8 @@ pub fn protocol_schema() -> Value {
         "thread/start": method::<ThreadStartParams, ThreadResult>(&mut generator),
         "thread/resume": method::<ThreadResumeParams, ThreadResumeResult>(&mut generator),
         "thread/settings/update": method::<ThreadSettingsUpdateParams, ThreadSettingsUpdateResult>(&mut generator),
+        "thread/unsubscribe": method::<ThreadUnsubscribeParams, ThreadUnsubscribeResult>(&mut generator),
+        "thread/list": method::<ThreadListParams, ThreadListResult>(&mut generator),
         "thread/fork": method::<ThreadForkParams, ThreadResult>(&mut generator),
         "events/subscribe": method::<EventsSubscribeParams, EventsSubscribeResult>(&mut generator),
         "receipt/get": method::<ReceiptGetParams, ReceiptGetResult>(&mut generator),
