@@ -503,7 +503,9 @@ fn validate_request(
                     || matches!(call.as_ref(), ToolCall::Command { program, .. } if !request.commands.contains(program))
             }
             GoalSuccessCriterion::WorkspaceFileContent { path, .. }
-            | GoalSuccessCriterion::WorkspaceFileDigest { path, .. } => !within(path, &plan.paths),
+            | GoalSuccessCriterion::WorkspaceFileDigest { path, .. } => {
+                !within(path, &plan.paths) || !within(path, &request.lease)
+            }
         }
     {
         return Err(ReplayError::InvalidTransition);
@@ -1039,7 +1041,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
-                if let Ok(result) = serde_json::from_str::<WorkerCommandResult>(&o.output) {
+                if let Some(result) = WorkerCommandResult::parse(&o.output) {
                     if let PrivateCapture::Sealed { data } = result.private_capture {
                         let w = worker(run, *agent_run_id)?;
                         let used: u64 = run
@@ -1809,7 +1811,7 @@ fn valid_discard(run: &RunView, w: &WorkerView, d: &WorkerSettlement) -> bool {
     }
 }
 
-fn private_failure(t: &ToolView) -> bool {
+pub(crate) fn private_failure(t: &ToolView) -> bool {
     let Some(o) = t.observation.as_ref() else {
         return false;
     };
@@ -1867,7 +1869,7 @@ pub(crate) fn private_criterion_evidence(
             let passed = match &w.pins.request.criterion {
                 GoalSuccessCriterion::ToolCallSucceeded { call } if o.intent.call == **call => {
                     if matches!(o.intent.call, ToolCall::Command { .. }) {
-                        serde_json::from_str::<WorkerCommandResult>(&o.output).is_ok_and(|r| {
+                        WorkerCommandResult::parse(&o.output).is_some_and(|r| {
                             r.exit_code == Some(0)
                                 && !matches!(r.private_capture, PrivateCapture::Rejected { .. })
                         })
@@ -1906,7 +1908,7 @@ fn private_file_digest(
     if matches!(&o.intent.call, ToolCall::PrepareWorker { preparation } if preparation.purpose == WorkerDataPurpose::Handover)
         || matches!(o.attestation, Some(Attestation::WorkerMutation { .. }))
         || matches!(o.attestation, Some(Attestation::WorkerCommand { .. }))
-            && serde_json::from_str::<WorkerCommandResult>(&o.output).is_ok_and(|r| {
+            && WorkerCommandResult::parse(&o.output).is_some_and(|r| {
                 r.exit_code == Some(0) && matches!(r.private_capture, PrivateCapture::Sealed { .. })
             })
     {

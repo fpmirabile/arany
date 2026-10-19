@@ -399,6 +399,8 @@ impl ForegroundWorkerProvider {
                     && !matches!(
                         self.case,
                         "command_denied"
+                            | "command_review_denied"
+                            | "command_hook_denied"
                             | "command_loss"
                             | "command_nonzero"
                             | "command_rejected"
@@ -609,6 +611,9 @@ impl crate::Provider for ForegroundWorkerProvider {
         }
         let mut release_child = None;
         let outcome = match (request.phase, step) {
+            (AgentPhase::ToolReview, _) if self.case == "command_review_denied" => {
+                finish_with("ask")
+            }
             (AgentPhase::ChildWork | AgentPhase::RootSynthesis, _)
                 if self.case.starts_with("command_") =>
             {

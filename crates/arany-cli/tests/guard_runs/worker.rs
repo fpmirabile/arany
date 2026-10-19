@@ -717,6 +717,17 @@ async fn foreground_worker_unknown_hook_outcome_stops_the_run_as_uncertain() {
     }
 }
 
+#[tokio::test]
+async fn worker_recovery_with_an_open_private_command_never_reruns_it() {
+    let observation = Box::pin(
+        arany::test_support::worker_teams::recover_open_worker_command(Path::new(env!(
+            "CARGO_BIN_EXE_arany"
+        ))),
+    )
+    .await;
+    assert!(!observation.events.is_empty());
+}
+
 // The case advances the paused clock by an hour; its own runtime keeps that offset from later cases.
 #[tokio::test]
 async fn foreground_worker_guard_journey_active_time_budget_closes_the_goal() {
@@ -860,43 +871,41 @@ async fn worker_primary_background_tool_active_time_exhaustion_settles_the_team(
     .await;
 }
 
+async fn runtime_command_case_agrees_with_closed_output(case: &'static str) {
+    let observation = Box::pin(arany::test_support::worker_teams::runtime_command_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        case,
+    ))
+    .await;
+    let bundle = closed_bundle(
+        &observation.directory.path().join("state"),
+        observation.session,
+        &observation.directory.path().join("workspace"),
+    )
+    .await;
+    assert_eq!(bundle.events, observation.events, "{case}");
+    assert_eq!(bundle.view, observation.view, "{case}");
+}
+
 #[tokio::test]
 async fn runtime_worker_command_captures_gate_hooks_and_receipt_loss_agree_with_closed_output() {
     for case in [
         "command_success",
         "command_cap",
         "command_denied",
+        "command_review_denied",
+        "command_hook_denied",
         "command_stale",
         "command_nonzero",
         "command_rejected",
         "command_loss",
         "command_unguarded",
     ] {
-        let observation = tokio::time::timeout(
-            Duration::from_secs(180),
-            Box::pin(arany::test_support::worker_teams::runtime_command_case(
-                Path::new(env!("CARGO_BIN_EXE_arany")),
-                case,
-            )),
-        )
-        .await
-        .expect(case);
-        let bundle = closed_bundle(
-            &observation.directory.path().join("state"),
-            observation.session,
-            &observation.directory.path().join("workspace"),
-        )
-        .await;
-        assert_eq!(bundle.events, observation.events, "{case}");
-        assert_eq!(bundle.view, observation.view, "{case}");
+        runtime_command_case_agrees_with_closed_output(case).await;
     }
 }
 
 #[tokio::test]
 async fn runtime_worker_command_time_exhaustion_settles_the_team() {
-    Box::pin(arany::test_support::worker_teams::runtime_command_case(
-        Path::new(env!("CARGO_BIN_EXE_arany")),
-        "command_time",
-    ))
-    .await;
+    runtime_command_case_agrees_with_closed_output("command_time").await;
 }

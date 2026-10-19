@@ -934,6 +934,10 @@ pub struct WorkerCommandResult {
 }
 
 impl WorkerCommandResult {
+    pub(crate) fn parse(output: &str) -> Option<Self> {
+        serde_json::from_str(output).ok()
+    }
+
     pub(crate) fn valid(&self) -> bool {
         serde_json::to_vec(self)
             .is_ok_and(|b| b.len() <= crate::tools::types::MAX_TOOL_RESULT_BYTES)

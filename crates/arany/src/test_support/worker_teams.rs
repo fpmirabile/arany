@@ -1197,13 +1197,25 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
     })).unwrap());
     std::fs::create_dir(state.join("agents")).unwrap();
     std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
-    private(&state.join("agents/editor.md"), b"---\nname: editor\ndescription: Build and test leased notes\ntools: Read, Write, Bash\npermissionMode: acceptEdits\nisolation: worktree\n---\nKeep commands private.\n");
+    let mode = if case == "command_review_denied" {
+        ""
+    } else {
+        "permissionMode: acceptEdits\n"
+    };
+    private(
+        &state.join("agents/editor.md"),
+        format!("---\nname: editor\ndescription: Build and test leased notes\ntools: Read, Write, Bash\n{mode}isolation: worktree\n---\nKeep commands private.\n").as_bytes(),
+    );
     let hooks = serde_json::json!({
         "PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"exit 0","timeout":5}]}],
         "PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo checked >&2; exit 2","timeout":5}]}]
     });
     let permissions = if case == "command_denied" {
         serde_json::json!({"permissions":{"deny":["Bash"]}})
+    } else if case == "command_review_denied" {
+        serde_json::json!({"permissions":{"defaultMode":"auto"},"hooks":hooks})
+    } else if case == "command_hook_denied" {
+        serde_json::json!({"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo blocked >&2; exit 2","timeout":5}]}]}})
     } else {
         serde_json::json!({"hooks":hooks})
     };
@@ -1230,7 +1242,11 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
         max_active_children: 3,
     };
     input.goal = GoalRequest::new(budget, GoalPhase::Implementation);
-    let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
+    let (approvals, mut inbox) = ToolApprovals::new(if case == "command_review_denied" {
+        ApprovalMode::Auto
+    } else {
+        ApprovalMode::Request
+    });
     let mut handle = engine
         .submit(
             AdmittedProviders::single(provider.clone()),
@@ -1253,7 +1269,7 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
                     crate::FaultPlan::lose_guard_receipt(approval.intent.id);
                     lost = true;
                 }
-                approval.decide(true);
+                approval.decide(case != "command_review_denied");
             }
         }
     };
@@ -1383,35 +1399,201 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
         } else {
             assert_eq!(
                 outcome.cause,
-                crate::worker::WorkerCause::CriterionUnverified,
+                if case == "command_review_denied" {
+                    crate::worker::WorkerCause::ToolFailed
+                } else {
+                    crate::worker::WorkerCause::CriterionUnverified
+                },
                 "{case}: {} child calls, {} commands, {} gate rejections",
                 child.provider_calls.len(),
                 commands.len(),
                 rejected.len()
             );
-            if matches!(case, "command_nonzero" | "command_rejected") {
+            if matches!(
+                case,
+                "command_nonzero"
+                    | "command_rejected"
+                    | "command_review_denied"
+                    | "command_hook_denied"
+            ) {
                 assert_eq!(commands.len(), 1);
             }
             if case == "command_cap" {
                 assert_eq!(rejected.len(), 4);
                 assert_eq!(worker.gate_continuations, 3);
+                let heads: Vec<_> = requests
+                    .iter()
+                    .filter(|r| r.phase == AgentPhase::ChildWork)
+                    .map(|r| r.input.workspace_guidance.clone())
+                    .collect();
+                assert_eq!(heads.len(), 4);
+                assert!(heads.windows(2).all(|w| w[0] == w[1]));
+                assert!(
+                    !heads[0]
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains("Finish refused")
+                );
+                let feedback: Vec<_> = requests
+                    .iter()
+                    .filter(|r| r.phase == AgentPhase::ChildWork)
+                    .map(|r| r.input.stop_hook_feedback.len())
+                    .collect();
+                assert_eq!(feedback, [0, 1, 2, 3]);
+            }
+            if matches!(case, "command_review_denied" | "command_hook_denied") {
+                let observation = commands[0].observation.as_ref().unwrap();
+                assert_eq!(observation.disposition, ToolDisposition::Denied);
+                assert!(commands[0].permission_verdict.is_some());
+                assert!(worker.verification.is_none());
+            }
+            if case == "command_review_denied" {
+                assert!(requests.iter().any(|r| r.phase == AgentPhase::ToolReview));
+                let verdict = commands[0].permission_verdict.as_ref().unwrap();
+                assert!(!verdict.approved);
+                assert_eq!(verdict.source, crate::permissions::PermissionSource::Human);
             }
             if case == "command_denied" {
                 assert_eq!(commands.len(), 16);
                 assert!(commands.iter().all(|t| t.permission_verdict.is_some()
                     && t.observation.as_ref().unwrap().disposition == ToolDisposition::Denied));
+                assert_eq!(rejected.len(), 1);
+                assert_eq!(worker.gate_continuations, 0);
             }
-            assert!(
-                run.supervisor
-                    .verdicts()
-                    .iter()
-                    .any(|(actor, _)| *actor == child.id)
-            );
+            if !matches!(case, "command_review_denied" | "command_hook_denied") {
+                assert!(
+                    run.supervisor
+                        .verdicts()
+                        .iter()
+                        .any(|(actor, _)| *actor == child.id)
+                );
+            }
         }
     }
     TeamObservation {
         directory,
         session,
+        events,
+        view,
+    }
+}
+
+pub async fn recover_open_worker_command(guard: &Path) -> TeamObservation {
+    use super::goals::ForegroundWorkerProvider;
+    use std::os::unix::fs::PermissionsExt;
+    let mut original = Box::pin(runtime_command_case(guard, "command_success")).await;
+    let prior = original.directory.path().join("state");
+    let state = original.directory.path().join("recovery-state");
+    let root = StateRoot::admit(&state).unwrap();
+    for file in ["tools.json", "permissions.json", "agents/editor.md"] {
+        if file.contains('/') {
+            std::fs::create_dir_all(state.join("agents")).unwrap();
+            std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        std::fs::copy(prior.join(file), state.join(file)).unwrap();
+    }
+    let open = original
+        .events
+        .iter()
+        .position(|e| {
+            matches!(&e.event, Event::ToolStarted { intent, .. }
+                if matches!(intent.call, ToolCall::Command { .. })
+                    && matches!(intent.target, crate::worker::EffectTarget::WorkerView { .. }))
+        })
+        .expect("worker command intent");
+    let intent = match &original.events[open].event {
+        Event::ToolStarted { intent, .. } => intent.id,
+        _ => unreachable!(),
+    };
+    let store = Store::open(root).unwrap();
+    for event in &original.events[..=open] {
+        store
+            .append(original.session, event.event.clone())
+            .await
+            .unwrap();
+    }
+    store.close().await.unwrap();
+    let (prefix, _) = replayed(&state, original.session).await;
+    let workspace = original.directory.path().join("workspace");
+    std::fs::write(workspace.join("notes/a"), b"original a").unwrap();
+    let engine = super::engine::open(
+        StateRoot::open_existing(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(guard.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let budget = original.view.goals[0].budget;
+    let provider = Arc::new(ForegroundWorkerProvider::new(
+        &workspace,
+        "command_success",
+        budget,
+    ));
+    let mut input = request(&workspace, "");
+    input.include_paths.clear();
+    input.title = None;
+    input.session_id = Some(original.session);
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 3,
+    };
+    input.goal = GoalRequest::resume(original.view.goals[0].id, false);
+    let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
+    let mut running = engine
+        .submit(
+            AdmittedProviders::single(provider.clone()),
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                approvals: Some(approvals),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .result;
+    let result = loop {
+        tokio::select! {
+            result = &mut running => break result,
+            Some(approval) = inbox.next() => { approval.decide(true); },
+        }
+    };
+    drop(running);
+    engine.close().await.unwrap();
+    let (events, view) = replayed(&state, original.session).await;
+    assert_eq!(
+        &events[..prefix.len()],
+        prefix.as_slice(),
+        "recovery rewrote history"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(&e.event, Event::ToolStarted { intent: i, .. } if i.id == intent))
+            .count(),
+        1,
+        "the open worker command was re-executed"
+    );
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+    assert!(
+        view.runs[0]
+            .agents
+            .iter()
+            .flat_map(|a| &a.tools)
+            .find(|t| t.intent.id == intent)
+            .is_some_and(|t| t.observation.is_none()),
+        "recovery neither re-executes nor invents an outcome for the open command"
+    );
+    assert_eq!(
+        std::fs::read(workspace.join(".git/config")).unwrap(),
+        b"hostile git canary"
+    );
+    original.events = events.clone();
+    original.view = view.clone();
+    TeamObservation {
+        directory: original.directory,
+        session: original.session,
         events,
         view,
     }

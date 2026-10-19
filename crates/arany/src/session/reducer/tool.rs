@@ -669,7 +669,7 @@ fn post_target<'a>(
         ) {
             return None;
         }
-        let result = serde_json::from_str::<crate::worker::WorkerCommandResult>(&o.output).ok()?;
+        let result = crate::worker::WorkerCommandResult::parse(&o.output)?;
         match result.private_capture {
             crate::worker::PrivateCapture::Sealed { data } => Some(data.seal_sequence),
             _ => None,

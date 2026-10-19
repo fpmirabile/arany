@@ -122,7 +122,7 @@ impl RunLoop<'_> {
                         }
                         | crate::session::GoalSuccessCriterion::WorkspaceFileDigest {
                             path, ..
-                        } => within(path, &plan.paths),
+                        } => within(path, &plan.paths) && within(path, &a.lease),
                     }
                     && self.editor_grant(a).is_ok_and(|g| g.valid())
             })
@@ -286,7 +286,14 @@ impl RunLoop<'_> {
         purpose: WorkerDataPurpose,
         bytes: &[u8],
     ) -> Result<WorkerDataRef, EngineError> {
-        let mut data = self.worker_data_ref(intent, purpose, bytes, self.sequence()? + 1)?;
+        let mut data = self.worker_data_ref(
+            intent,
+            purpose,
+            bytes,
+            self.sequence()?
+                .checked_add(1)
+                .ok_or(EngineError::InvalidHistory)?,
+        )?;
         data.assignment_id = assignment_id;
         for (ordinal, chunk) in bytes.chunks(WORKER_CHUNK_BYTES).enumerate() {
             self.append(Event::WorkerDataChunk {
@@ -329,7 +336,9 @@ impl RunLoop<'_> {
             assignment_id: intent.agent_run_id,
             purpose,
             first_sequence,
-            seal_sequence: first_sequence + u64::from(chunks),
+            seal_sequence: first_sequence
+                .checked_add(u64::from(chunks))
+                .ok_or(EngineError::InvalidHistory)?,
             chunks,
             bytes: u32::try_from(bytes.len()).map_err(|_| EngineError::InvalidHistory)?,
             sha256: crate::tools::types::digest(bytes),
@@ -505,8 +514,14 @@ impl RunLoop<'_> {
         let data = match data {
             Some(data) => data,
             None if command => {
-                let mut data =
-                    self.worker_data_ref(&intent, purpose, &candidate.data, self.sequence()? + 2)?;
+                let mut data = self.worker_data_ref(
+                    &intent,
+                    purpose,
+                    &candidate.data,
+                    self.sequence()?
+                        .checked_add(2)
+                        .ok_or(EngineError::InvalidHistory)?,
+                )?;
                 let observation = candidate.observation(&data)?;
                 let verdict = self.ledger().view(|v| {
                     crate::supervisor::SupervisorState::tool_verdict_follows(
@@ -516,8 +531,14 @@ impl RunLoop<'_> {
                     )
                 })?;
                 if verdict {
-                    data.first_sequence += 1;
-                    data.seal_sequence += 1;
+                    data.first_sequence = data
+                        .first_sequence
+                        .checked_add(1)
+                        .ok_or(EngineError::InvalidHistory)?;
+                    data.seal_sequence = data
+                        .seal_sequence
+                        .checked_add(1)
+                        .ok_or(EngineError::InvalidHistory)?;
                 }
                 data
             }

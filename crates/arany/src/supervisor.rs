@@ -764,6 +764,14 @@ fn subject(
             let object = projection.as_object_mut().expect("typed result");
             object.remove("call");
             object.remove("target");
+            if let Some(data) = object
+                .get_mut("output")
+                .and_then(|output| output.pointer_mut("/private_capture/data"))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                data.remove("first_sequence");
+                data.remove("seal_sequence");
+            }
             let command = matches!(
                 o.intent.call,
                 ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
@@ -774,7 +782,12 @@ fn subject(
                     .filter(CommandResult::valid)
             })
             .flatten();
-            let exit_class = command.as_ref().map(|c| match c.exit_code {
+            let exit_code = command.as_ref().map(|c| c.exit_code).or_else(|| {
+                crate::worker::WorkerCommandResult::parse(&o.output)
+                    .filter(crate::worker::WorkerCommandResult::valid)
+                    .map(|c| c.exit_code)
+            });
+            let exit_class = exit_code.map(|code| match code {
                 Some(0) => 0,
                 Some(_) => 1,
                 None => 2,

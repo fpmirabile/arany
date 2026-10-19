@@ -345,7 +345,10 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 .map_or(crate::tools::UnguardedGrant::Denied, |policy| {
                     policy.child_unguarded
                 });
-            if grant.is_some_and(|grant| !grant.unguarded().narrows(parent_unguarded)) {
+            if grant.is_some_and(|grant| {
+                !grant.unguarded().narrows(parent_unguarded)
+                    || matches!(grant, ChildGrant::EditOnly { unguarded } if unguarded != crate::tools::UnguardedGrant::Denied)
+            }) {
                 return Err(ReplayError::InvalidTransition);
             }
             let child_grant = if config.tool_policy.is_some() {

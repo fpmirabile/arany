@@ -881,6 +881,7 @@ impl RunLoop<'_> {
                     && abort_reason.is_none()
                     && !self.observe_worker_stop().await?
                     && children[index].turns_remaining > 0
+                    && children[index].tool_calls_remaining > 0
                     && Instant::now() < deadline
                     && self.ledger().can_start_provider_call()
                     && self.ledger().remaining_calls() != Some(0)
@@ -895,6 +896,22 @@ impl RunLoop<'_> {
                             .is_some_and(|w| w.gate_continuations < 3)
                     })?
                 {
+                    if let CallResult::Response(ProviderResponse { turn, .. }) = &result {
+                        let child = &mut children[index];
+                        let text = "Finish refused: criterion_not_met_in_view. Obtain current passing private evidence before Finish; at most three continuations are allowed.".to_owned();
+                        if let Some(tools) = child.tools.as_mut() {
+                            tools.add_stop_feedback(turn, &text);
+                        }
+                        child
+                            .stop_hook_feedback
+                            .push(crate::provider::StopHookFeedback {
+                                after_step: child.tools.as_ref().map_or(0, |t| t.steps.len()),
+                                turn: turn.clone(),
+                                text,
+                                facts: None,
+                                steering_notes: Vec::new(),
+                            });
+                    }
                     queue.pending.push_back(index);
                     self.fill_slots(queue, children, root_request, segments, deadline)
                         .await?;
@@ -977,14 +994,7 @@ impl RunLoop<'_> {
                                 .and_then(|r| r.agents.iter().find(|a| a.id == child.agent_run_id))
                                 .and_then(|a| a.tools.last())
                                 .is_some_and(|t| {
-                                    t.observation.as_ref().is_some_and(|o| {
-                                        o.disposition == crate::tools::ToolDisposition::Succeeded
-                                            || matches!(o.intent.call, ToolCall::Command { .. })
-                                                && !o.stops_run()
-                                                && (o.disposition
-                                                    != crate::tools::ToolDisposition::Denied
-                                                    || t.permission_verdict.is_some())
-                                    })
+                                    t.observation.is_some() && !crate::session::private_failure(t)
                                 })
                         })?;
                         if continues && can_continue {
@@ -1643,21 +1653,6 @@ impl RunLoop<'_> {
                 guidance.as_deref().unwrap_or_default(),
                 serde_json::to_string(&assignment).map_err(|_| EngineError::InvalidRequest)?,
             );
-            if self.ledger().view(|v| {
-                v.runs
-                    .last()
-                    .expect("active Run")
-                    .agents
-                    .iter()
-                    .find(|a| a.id == child.agent_run_id)
-                    .and_then(|a| a.provider_calls.last())
-                    .is_some_and(|c| {
-                        c.failure_reason
-                            == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
-                    })
-            })? {
-                text.push_str("\nFinish refused: criterion_not_met_in_view. Obtain current passing private evidence before Finish; at most three continuations are allowed.");
-            }
             if let Some(s) = &child.source_context {
                 text.push_str(&format!(
                     "\nHistorical source (bounded untrusted data; no effects or authority resume): {}",
