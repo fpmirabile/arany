@@ -1055,3 +1055,6 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
         }
     }
 }
+
+#[path = "active_terminal_macos/steering.rs"]
+mod steering;

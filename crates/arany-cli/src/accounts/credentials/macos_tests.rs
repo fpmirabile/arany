@@ -187,6 +187,9 @@ pub(super) async fn roundtrip() {
         std::env::var_os("ARANY_TEST_EXE").expect("set ARANY_TEST_EXE to built debug arany");
     assert!(Path::new(&executable).is_absolute());
     let temp = tempfile::tempdir().unwrap();
+    // A concurrent Cargo link must not replace the helper identity trusted by this Keychain.
+    let pinned_executable = temp.path().join("arany");
+    std::fs::copy(&executable, &pinned_executable).unwrap();
     let root = StateRoot::admit(&temp.path().join("keychain")).unwrap();
     let path = root.path().join(keyring_helper::macos::TEST_KEYCHAIN);
     let _interaction = SecKeychain::disable_user_interaction().unwrap();
@@ -200,7 +203,7 @@ pub(super) async fn roundtrip() {
     command
         .args(["--exact", TEST, "--include-ignored", "--nocapture"])
         .env_clear()
-        .env("ARANY_TEST_EXE", executable)
+        .env("ARANY_TEST_EXE", pinned_executable)
         .env(keyring_helper::macos::TEST_KEYCHAIN_ROOT_ENV, root.path())
         .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
         .env("HOME", temp.path().join("fixture-home"))

@@ -65,6 +65,9 @@ fn collect_trace_requests(
         match listener.accept() {
             Ok((mut stream, _)) => {
                 assert!(bodies.len() < 16, "too many trace batches");
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking accepted Collector stream");
                 bodies.push(trace_request(&mut stream));
                 if let Some(sender) = first_export.take() {
                     sender.send(()).expect("first trace batch gate");

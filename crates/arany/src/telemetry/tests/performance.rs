@@ -30,15 +30,37 @@ const WARMUPS: usize = 10;
 const SAMPLES: usize = 100;
 
 fn rss_kib() -> usize {
-    let rollup = std::fs::read_to_string("/proc/self/smaps_rollup").expect("test-process RSS");
-    rollup
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("Rss:")
-                .and_then(|value| value.split_whitespace().next())
-                .and_then(|value| value.parse::<usize>().ok())
-        })
-        .expect("test-process RSS field")
+    #[cfg(target_os = "linux")]
+    {
+        let rollup = std::fs::read_to_string("/proc/self/smaps_rollup").expect("test-process RSS");
+        rollup
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Rss:")
+                    .and_then(|value| value.split_whitespace().next())
+                    .and_then(|value| value.parse::<usize>().ok())
+            })
+            .expect("test-process RSS field")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use crate::test_support::process::BoundedOutput;
+
+        let pid = std::process::id().to_string();
+        let mut command = std::process::Command::new("/bin/ps");
+        let output = command
+            .env_clear()
+            .current_dir("/")
+            .args(["-o", "rss=", "-p", &pid])
+            .bounded_output_for(Duration::from_secs(2), 4096)
+            .expect("bounded test-process RSS query");
+        assert!(output.status.success(), "test-process RSS query succeeded");
+        String::from_utf8(output.stdout)
+            .expect("test-process RSS output")
+            .trim()
+            .parse()
+            .expect("test-process RSS field")
+    }
 }
 
 fn read_one_request(stream: &mut TcpStream) -> Vec<u8> {
@@ -99,6 +121,9 @@ fn healthy_collector(expected_spans: usize) -> (SocketAddr, thread::JoinHandle<u
                 }
                 Err(error) => panic!("Collector accept: {error}"),
             };
+            stream
+                .set_nonblocking(false)
+                .expect("blocking accepted Collector stream");
             let body = read_one_request(&mut stream);
             let export = ExportTraceServiceRequest::decode(body.as_slice())
                 .expect("bounded OTLP protobuf request");
@@ -379,6 +404,9 @@ fn saturated_collector_keeps_span_end_bounded() {
                 Err(error) => panic!("Collector accept: {error}"),
             }
         };
+        stream
+            .set_nonblocking(false)
+            .expect("blocking accepted Collector stream");
         drop(read_one_request(&mut stream));
         accepted_tx.send(()).expect("first export request ready");
         release_rx

@@ -28,6 +28,30 @@ fn account_path_uses_the_private_binary_fixture() {
     }
 }
 
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn prepare_test_file_account_at(account_root: &std::path::Path) -> uuid::Uuid {
+    let state = StateRoot::admit(account_root).expect("test account root");
+    let account_id = uuid::Uuid::now_v7();
+    let record = serde_json::json!({
+        "schema": 1,
+        "storage": "private_file",
+        "account": {
+            "schema": 2,
+            "id": account_id,
+            "provider": "openai",
+            "model": "gpt-5.4",
+            "effort": null,
+            "api_key": "synthetic-existing-key",
+            "anthropic_workspace_id": null
+        }
+    });
+    state
+        .record(arany::RecordKind::SavedAccount)
+        .replace(&serde_json::to_vec(&record).expect("test record"))
+        .expect("test file backend");
+    account_id
+}
+
 fn tool_outcome(
     call: arany::ToolCall,
     plan_contract: Option<Box<arany::GoalPlanContract>>,
@@ -203,7 +227,7 @@ mod session_picker;
 #[path = "session_run/auto_compaction.rs"]
 mod auto_compaction;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[path = "session_run/telemetry.rs"]
 mod telemetry;
 
