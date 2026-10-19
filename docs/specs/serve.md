@@ -4,7 +4,7 @@
 
 This contract owns `arany serve --stdio`: its JSON-RPC vocabulary, bounded
 transport, thread and turn projection, and JSON Schema export. The server runs
-`initialize` / `initialized`, `thread/start|resume|fork`, `turn/start|interrupt|steer`,
+`initialize` / `initialized`, `thread/start|resume|fork|unsubscribe|list`, `turn/start|interrupt|steer`,
 `thread/settings/update`, `goal/pause|resume`, `events/subscribe` and `receipt/get`.
 The server sends one-use human approval requests. The remaining work belongs to
 [NEXT_STEPS item 8](../../NEXT_STEPS.md#pursue-in-order).
@@ -83,6 +83,8 @@ entry with the same `$defs`. Output is deterministic for a fixed contract.
 | `initialize` | `{clientInfo:{name,title?,version},capabilities?:{optOutNotificationMethods?:[string]}}` → `{userAgent,platformOs,capabilities}` | First request; other requests before it return `notInitialized`; a second initialize returns `alreadyInitialized`. Returns no paths or credentials. `initialized {}` is the following client notification and has no response. |
 | `thread/start` | `{cwd,provider,model,effort?,title?,collaboration?,maxActiveChildren?,tools?,permissionMode?,includePaths?}` → `{thread}` | Selects the Provider and configured role chains as `exec` does. `Engine::create_session` commits `SessionStarted` before the result and subsequent `thread/started`. A thread is a durable Session, including when no turn follows. |
 | `thread/resume` | `{threadId,cwd,provider,model,effort?,collaboration?,maxActiveChildren?,tools?,permissionMode?,includePaths?}` → `{thread,turns}` | Admits the selected Workspace and execution configuration with the same settings and defaults as start, strictly replays history without executing it, and loads the thread. Turns contain historical user, Tool and answer items; an unfinished Run and Goal appear interrupted. |
+| `thread/unsubscribe` | `{threadId}` → `{status:"unsubscribed"\|"notLoaded"}` | Codex app-server shape. Removes the connection's loaded thread and raw subscription; durable Session history remains. An active submission has its approval denied and cancellation signalled, and its committed completion precedes the response and slot release. A second close while cancellation is pending returns `busy`. An unloaded ID returns `notLoaded` without inspecting State. |
+| `thread/list` | `{cwd?,cursor?,limit?}` → `{data:[{id,title,cwd,createdAt,updatedAt}],nextCursor}` | Read-only Session metadata for one admitted Workspace, including unloaded/closed Sessions. Absolute cwd defaults to the process launch directory. Newest committed activity first. Each page defaults to 50 entries, with limits 1–100; `nextCursor:null` ends the list. Invalid, oversized, noncanonical, stale-anchor or foreign-Workspace cursors fail `-32602 invalidParams`. No Provider selection, Run or Tool execution, and no loaded slot is consumed. |
 | `thread/settings/update` | `{threadId,permissionMode}` → `{permissionMode}` | Requires a loaded thread (`threadNotLoaded` otherwise). Replaces its live approval mode and updates the matching active submission's `ToolApprovals`, like terminal Shift+Tab. A pending immutable approval keeps its intent, deadline and decision channel; only subsequent approval decisions use the new mode. Other loaded threads are unaffected. No Provider selection, Tool grant, settings snapshot, Goal budget or child authority changes. |
 | `thread/fork` | `{threadId,cwd,title?}` → `{thread}` | Requires a loaded source and capacity for another thread. Calls `Engine::fork_session`: the Workspace identity must match, the source must be unlocked and end at a committed terminal Run boundary. Inherits the source's pinned execution configuration. The result precedes `thread/started` with `forkedFromId`; empty prefixes, an interrupted objective before `RunStarted` and an open Run fail `forkNotAtRunBoundary`, a busy source fails `sessionBusy`. A reply that cannot fit a line (client-sized request ID) fails `contextTooLarge` before any fork is persisted. |
 | `events/subscribe` | `{threadId,since:u64}` → `{events:[EventLine],nextSince:u64\|null}` | Requires a loaded thread. Strictly replays committed Events with `sequence > since`; `since` beyond that thread's head fails `invalidParams`. Follow each non-null `nextSince` to drain the backlog. The final page enables live forwarding after its result; repeating a subscription replaces its cursor. |
@@ -92,6 +94,29 @@ entry with the same `$defs`. Output is deterministic for a fixed contract.
 | `turn/steer` | `{threadId,turnId,input:[{type:"text",text}]}` → `{turnId}` | Offers one note to the matching active Run's `RunSteering`, the call the attached composer makes. Exactly one text of at most 64 KiB, no images. Unknown or finished turns return `turnNotActive`; between autonomous Runs the last Run's ID still matches and the note waits for the next Run's first primary call, as in the terminal; an `Empty`, `TooLarge` (over 8 KiB with its history label), `RunFull` (the Run's 8 KiB note budget) or `Unavailable` refusal is `-32602` with that reason. Success means the note waits for the Run's next primary reservation (merged with any waiting note); delivery is the committed `GoalSteeringNoteRecorded`, and a note still waiting when the Run ends is discarded. |
 | `goal/pause` | `{threadId,goalId}` → `{}` | Sets the sticky pause on the active Run's steering handle; the Engine stops at its next boundary as for the terminal's `/goal pause`, so the turn ends `interrupted` and the Goal stays resumable. Repeating it is idempotent, and it is accepted for the whole submission, including between autonomous Runs. No active turn on the thread is `turnNotActive`; a `goalId` other than the active turn's Goal is `-32000 goalUnavailable`. An in-flight Provider call is never aborted: its Finish still commits and the turn can complete. |
 | `goal/resume` | `{threadId,goalId,input?:[{type:"text",text}]}` → `{turn}` | Starts a submission like `turn/start` (same `busy`, `threadNotLoaded`, admission, approval and steering behavior) with `GoalRequest::resume(goalId, true)`, exactly as the terminal's `/goal resume` does. Only the thread's most recent resumable Interrupted Goal (paused or interrupted) resumes; any other Goal is `-32000 goalUnavailable` before a Run. Absent input runs the pinned objective. Text is a superset of the terminal (as in `exec --resume-goal ID PROMPT`): when the Goal has no accepted Run yet, text different from the pinned objective is `goalUnavailable`; otherwise it becomes the resumed Run's user message while the Goal objective stays pinned. No images. Budget, phase and resource settings stay pinned. An exhausted Interrupted Goal closes Failed and returns `-32000 goalBudgetExhausted` with no Run, `GoalResumed` or `turn/started`. |
+
+Lifecycle method names, unsubscribe status and list pagination envelopes follow
+[Codex app-server](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/v2/thread.rs).
+One connection owns all loaded threads, so `notSubscribed` cannot occur. Arany
+cancels and releases immediately after durable completion rather than keeping
+an idle thread alive on a peer grace timer. Discovery deliberately narrows the
+peer's global listing to one Workspace to avoid disclosing other Workspace or
+State paths. The list row is a metadata-only subset: timestamps are UTC ISO 8601
+strings (or `Unknown` when Store cannot represent the timestamp), rather than
+Codex's epoch seconds, to reuse the Session metadata owner without replaying
+full histories. No stored defaults, include paths, provider configuration,
+State paths or journal content are returned. Titles are untrusted plain text;
+JSON escaping does not make them instructions or trusted markup. Clients must
+render every metadata field inertly.
+
+Cursors are opaque, at most 128 UTF-8 bytes, and bind a Session ID and its last
+committed sequence to the selected Workspace. They confer no access authority.
+If the anchor changes, restart discovery without a cursor; new activity before
+the anchor is visible on a fresh first page. A page is not a retained snapshot.
+Store's existing 65,536-head discovery cap bounds the scan; exceeding it fails
+closed. A result that cannot fit the line cap fails `contextTooLarge` without
+partial output. Unsupported sorting, filtering and archival options refuse as
+unknown parameters.
 
 Providers are `openai`, `anthropic`, `chatgpt` or `custom:NAME`; credentials come
 from the existing selection path. Collaboration defaults to `auto` with three
@@ -220,7 +245,8 @@ admission still apply. Hook execution remains owned by the Tools contract.
 | Turn input | At least one input item, at most one text of 64 KiB; base64-encoded images follow the [terminal image contract](./terminal.md#paste-and-attachments), including its image count and aggregate decoded-byte limit; invalid params. Text or images must be nonempty. |
 | Pending inbound requests | 64; reader awaits capacity, applying pipe backpressure; reader buffer 64 KiB. |
 | Outbound queue | 256; follower waits and Journal lag is reported through `events/resync`. |
-| Loaded threads / active submissions / pending approval requests | 64 / 1 / 1; `threadLimit` / `busy` / deny excess approvals; loaded threads are never evicted. Reloading a known thread consumes no extra slot. |
+| Loaded threads / active submissions / pending approval requests | 64 / 1 / 1; `threadLimit` / `busy` / deny excess approvals; loaded threads are never evicted. Reloading a known thread consumes no extra slot; unsubscribe frees one after cancellation settles. |
+| Session list page / cursor | 1–100 entries (default 50) / 128 UTF-8 bytes; invalid limits/cursors refuse with invalidParams. The whole response must fit 1 MiB. |
 | Resume response | Must fit the outbound line bound; otherwise `-32000 contextTooLarge`, without partial history. |
 | Steering and resume input | One text of at most 64 KiB, bounded further by the 8 KiB per-Run note budget for `turn/steer`; invalid params otherwise. |
 | Event replay backlog / page | Strict Store replay is bounded by the [Session Event cap](./execution.md#persistence-bounds), including inherited history; exceeding that existing bound fails closed with `store`. Each response contains at most 1,000 Events and fits 1 MiB including envelope, request ID and newline; byte overflow shortens the page and count overflow continues via `nextSince`. An Event that cannot fit alone fails `contextTooLarge`. No partial oversized response is sent. |
@@ -248,7 +274,7 @@ The protocol uses capability strings for feature detection; schema artifact
 versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
 `items_v1`, `interrupt_receipt_v1`, `approvals_v1`, `events_subscribe_v1`,
 `receipt_get_v1`, `thread_fork_v1`, `turn_steer_v1`, `goal_pause_v1` (the latter also
-covers `goal/resume`), `thread_settings_update_v1`. Breaking wire changes require a new
+covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`. Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
 pre-beta; stored formats retain their existing no-migration contract.
 
@@ -264,6 +290,7 @@ pre-beta; stored formats retain their existing no-migration contract.
 | Protocol state, capacity and transport recovery | Initialization refusals, 64-thread refusal without eviction, 64/256 queue backpressure, oversized/malformed duplex input recovery, tap-gap sequence and missed count | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Cancellation and failure | Busy refusal, interrupt and EOF commit cancellation, three-second grace despite a stalled client, failed accepted turns carry compiled guidance rather than RPC errors | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Tool history and human approvals | Reopened dispositions and uncertain unfinished ToolStarted; approval payload equals committed intent and timestamp; accept dispatches once; decline, invalid result, timeout, EOF and cancel deny; late/duplicate/unknown replies change no decision and get no reply; oversized requests deny unsent; full outbound queue cannot prevent expiry or Journal completion | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
+| Session lifecycle | Close frees a slot after 64 loaded threads, retains durable history and cancels an active submission before releasing it; list pages include only admitted Workspace metadata, enforce page/line/cursor bounds, reject foreign and invalid cursors and never execute | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Live approval settings | Closed mode values and schema-valid result; unknown thread and unsupported/oversized modes refuse; ACP exercises active switches and immutable pending asks | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Steering, pause and resume | Pause and steer are accepted between autonomous Runs (unit test); an exhausted paused Goal's resume closes it Failed in a second server over the same State, proving the pause survived exit; a note is journaled once and refused when empty, over 8 KiB, over the Run budget or over 64 KiB; steer, pause and resume without an active turn or resumable Goal return closed reasons; pause ends the turn `interrupted` and `goal/resume` runs the pinned objective once with one `GoalResumed`; an oversized line is rejected by the line cap | [Serve corpus](../../crates/arany-cli/tests/serve/goal_controls.rs), [protocol bounds](../../crates/arany-cli/src/protocol/tests.rs) |
 | Replay, receipts and forks | Exclusive `since`, count/byte pagination, live Event order and JSONL identity; tap overflow recovery; unknown threads/Goals and future cursors refused; receipt equals committed GoalFinished and oversized receipt refuses without closing the connection; fork lineage and Workspace identity preserved, busy and nonterminal sources refused | [History protocol corpus](../../crates/arany-cli/tests/serve/history.rs) |

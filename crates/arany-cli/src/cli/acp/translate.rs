@@ -72,6 +72,8 @@ enum Pending {
         session: SessionId,
         config: bool,
     },
+    Close(RequestId, SessionId),
+    List(RequestId),
     Start,
     Interrupt,
     Recover,
@@ -399,6 +401,55 @@ pub(super) async fn input(
             )
             .await
         }
+        "session/close" => {
+            let Ok(params) = parse::<wire::Cancel>(request.params) else {
+                return immediate(output, invalid());
+            };
+            {
+                let mut state = state.lock().expect("translator state");
+                if !state.sessions.contains_key(&params.session_id) {
+                    return immediate(
+                        output,
+                        wire::error(Some(id), -32002, "Session not found", "resource_not_found"),
+                    );
+                }
+                if let Some(active) = state
+                    .active
+                    .as_mut()
+                    .filter(|a| a.session == params.session_id)
+                {
+                    active.cancelled = true;
+                }
+                state.changed.notify_one();
+            }
+            send_request(
+                state,
+                serve,
+                "thread/unsubscribe",
+                ThreadUnsubscribeParams {
+                    thread_id: params.session_id,
+                },
+                Pending::Close(id, params.session_id),
+            )
+            .await
+        }
+        "session/list" => {
+            let Ok(params) = parse::<wire::ListSessions>(request.params) else {
+                return immediate(output, invalid());
+            };
+            send_request(
+                state,
+                serve,
+                "thread/list",
+                ThreadListParams {
+                    cwd: params.cwd,
+                    cursor: params.cursor,
+                    limit: None,
+                },
+                Pending::List(id),
+            )
+            .await
+        }
         "session/prompt" => {
             let Ok(params) = parse::<wire::Prompt>(request.params) else {
                 return immediate(output, invalid());
@@ -607,6 +658,40 @@ pub(super) async fn output(
                         };
                         emit(&outbound, wire::response(id, result)).await?;
                     }
+                    Some(Pending::Close(id, session)) => {
+                        state
+                            .lock()
+                            .expect("translator state")
+                            .sessions
+                            .remove(&session);
+                        emit(&outbound, wire::response(id, json!({}))).await?;
+                    }
+                    Some(Pending::List(id)) => {
+                        let result: ThreadListResult = serde_json::from_value(reply.result)
+                            .map_err(|_| "invalid serve Session list")?;
+                        let sessions: Vec<_> = result
+                            .data
+                            .into_iter()
+                            .map(|item| {
+                                let mut session = json!({
+                                    "sessionId": item.id, "cwd": item.cwd,
+                                    "title": crate::presentation::escape_terminal(&item.title),
+                                });
+                                if item.updated_at != "Unknown" {
+                                    session["updatedAt"] = json!(item.updated_at);
+                                }
+                                session
+                            })
+                            .collect();
+                        emit(
+                            &outbound,
+                            wire::response(
+                                id,
+                                json!({"sessions": sessions, "nextCursor": result.next_cursor}),
+                            ),
+                        )
+                        .await?;
+                    }
                     Some(Pending::Start) => {
                         let result: TurnResult = serde_json::from_value(reply.result)
                             .map_err(|_| "invalid serve turn")?;
@@ -725,7 +810,9 @@ pub(super) async fn output(
                         Pending::Initialize(id)
                         | Pending::New(id, ..)
                         | Pending::Load { id, .. }
-                        | Pending::Mode { id, .. },
+                        | Pending::Mode { id, .. }
+                        | Pending::Close(id, _)
+                        | Pending::List(id),
                     ) => emit(&outbound, remap(id, reply.error)).await?,
                     Some(Pending::Start) => {
                         let active = state

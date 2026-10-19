@@ -30,6 +30,8 @@ fn validate(value: &Value) {
         "Error"
     } else if value["result"].get("protocolVersion").is_some() {
         "InitializeResponse"
+    } else if value["result"].get("sessions").is_some() {
+        "ListSessionsResponse"
     } else if value["result"].get("sessionId").is_some() {
         "NewSessionResponse"
     } else if value["result"].get("configOptions").is_some() {
@@ -216,7 +218,7 @@ async fn initialize(writer: &mut Writer, reader: &mut Reader) {
     );
     assert_eq!(
         initialized["result"]["agentCapabilities"]["sessionCapabilities"],
-        json!({"resume":{}})
+        json!({"resume":{},"close":{},"list":{}})
     );
 }
 
@@ -331,7 +333,7 @@ async fn committed_text_turn_matches_upstream_schema_and_golden() {
 #[tokio::test]
 async fn busy_cancel_and_eof_commit_interruption() {
     let _deadline = crate::cli::serve::tests::deadline();
-    for cancel in ["session/cancel", "$/cancel_request", "eof"] {
+    for cancel in ["session/cancel", "$/cancel_request", "session/close", "eof"] {
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -392,7 +394,30 @@ async fn busy_cancel_and_eof_commit_interruption() {
         other_writer.shutdown().await.unwrap();
         other_task.await.unwrap().unwrap();
         assert!(idle.requests.lock().unwrap().is_empty());
-        if cancel != "eof" {
+        if cancel == "session/close" {
+            send(
+                &mut writer,
+                json!(8),
+                "session/close",
+                json!({"sessionId":session}),
+            )
+            .await;
+            assert_eq!(next(&mut reader).await["result"]["stopReason"], "cancelled");
+            let closed = next(&mut reader).await;
+            assert_eq!(closed["id"], 8);
+            assert_eq!(closed["result"], json!({}));
+            send(
+                &mut writer,
+                json!(9),
+                "session/prompt",
+                json!({"sessionId":session,"prompt":[{"type":"text","text":"Again"}]}),
+            )
+            .await;
+            assert_eq!(
+                next(&mut reader).await["error"]["data"]["reason"],
+                "resource_not_found"
+            );
+        } else if cancel != "eof" {
             writer.write_all(&encode_line(&json!({"jsonrpc":"2.0","method":cancel,"params":if cancel == "session/cancel" {json!({"sessionId":session})} else {json!({"requestId":3})}})).unwrap()).await.unwrap();
             let completion = next(&mut reader).await;
             assert_eq!(completion["id"], 3);
@@ -2930,4 +2955,205 @@ fn acp_cli_modes_are_closed_and_do_not_enable_tools() {
             assert!(parsed.is_err(), "unsupported CLI mode: {mode}");
         }
     }
+}
+
+#[tokio::test]
+async fn session_lifecycle_closes_full_roster_and_lists_bounded_inert_metadata() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let foreign = root.path().join("foreign");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&foreign).unwrap();
+    let state = root.path().join("state");
+    let engine =
+        arany::Engine::open(StateRoot::admit(&state).unwrap(), EngineConfig::default()).unwrap();
+    let title = "Hostile\u{1b}[31m\u{202e}<img src=x>";
+    let saved = engine
+        .create_session(workspace.clone(), Some(title.into()))
+        .await
+        .unwrap();
+    let hidden = engine
+        .create_session(foreign.clone(), Some("Hidden".into()))
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let provider = scripted();
+    let (mut writer, mut reader, task) = start(&state, provider.clone());
+    initialize(&mut writer, &mut reader).await;
+    let mut ids = Vec::new();
+    for _ in 0..64 {
+        ids.push(session(&mut writer, &mut reader, &workspace).await);
+    }
+    send(
+        &mut writer,
+        json!(20),
+        "session/new",
+        json!({"cwd":workspace,"mcpServers":[]}),
+    )
+    .await;
+    assert_eq!(
+        next(&mut reader).await["error"]["data"]["reason"],
+        "threadLimit"
+    );
+    send(
+        &mut writer,
+        json!(20),
+        "session/close",
+        json!({"sessionId":ids[0]}),
+    )
+    .await;
+    assert_eq!(next(&mut reader).await["result"], json!({}));
+    ids.push(session(&mut writer, &mut reader, &workspace).await);
+    send(
+        &mut writer,
+        json!(20),
+        "session/close",
+        json!({"sessionId":ids[0]}),
+    )
+    .await;
+    assert_eq!(next(&mut reader).await["error"]["code"], -32002);
+    send(
+        &mut writer,
+        json!(20),
+        "session/list",
+        json!({"cwd":workspace,"_meta":{"untrusted":"ignored"}}),
+    )
+    .await;
+    let first = next(&mut reader).await;
+    assert_eq!(first["result"]["sessions"].as_array().unwrap().len(), 50);
+    let cursor = first["result"]["nextCursor"].as_str().unwrap();
+    send(
+        &mut writer,
+        json!(20),
+        "session/list",
+        json!({"cwd":workspace,"cursor":cursor}),
+    )
+    .await;
+    let second = next(&mut reader).await;
+    assert_eq!(second["result"]["sessions"].as_array().unwrap().len(), 16);
+    assert!(second["result"]["nextCursor"].is_null());
+    let mut listed = std::collections::BTreeSet::new();
+    for entry in first["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second["result"]["sessions"].as_array().unwrap())
+    {
+        assert!(listed.insert(entry["sessionId"].as_str().unwrap().to_owned()));
+        assert_eq!(entry["cwd"], json!(workspace));
+        assert_eq!(entry.as_object().unwrap().len(), 4);
+        if entry["sessionId"] == json!(saved) {
+            assert_eq!(entry["title"], crate::presentation::escape_terminal(title));
+            assert!(
+                !entry["title"]
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .any(char::is_control)
+            );
+        }
+    }
+    assert!(listed.contains(&saved.to_string()));
+    assert!(listed.contains(&ids[0].to_string()));
+    for response in [&first, &second] {
+        let encoded = response.to_string();
+        assert!(!encoded.contains(foreign.to_str().unwrap()));
+        assert!(!encoded.contains(state.to_str().unwrap()));
+        assert!(!encoded.contains(&hidden.to_string()));
+    }
+    for params in [
+        json!({"cwd":workspace,"cursor":"bad"}),
+        json!({"cwd":workspace,"cursor":"x".repeat(129)}),
+        json!({"cwd":foreign,"cursor":cursor}),
+        json!({"cwd":"relative"}),
+        json!({"cwd":root.path()}),
+    ] {
+        send(&mut writer, json!(20), "session/list", params).await;
+        assert_eq!(next(&mut reader).await["error"]["code"], -32602);
+    }
+    for method in ["session/delete", "session/fork", "session/set_model"] {
+        send(&mut writer, json!(20), method, json!({"sessionId":saved})).await;
+        assert_eq!(next(&mut reader).await["error"]["code"], -32601);
+    }
+    writer.shutdown().await.unwrap();
+    task.await.unwrap().unwrap();
+    assert!(provider.requests.lock().unwrap().is_empty());
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    assert_eq!(store.load_session(ids[0]).await.unwrap().len(), 1);
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn close_cancels_pending_permissions_and_preserves_unknown_effects_without_private_state() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter.prompt(json!([{"type":"text","text":"Edit"}])).await;
+    let intent = adapter.intent(arany::ToolCall::Write {
+        path: "file".into(),
+        content: "new".into(),
+        expected_digest: None,
+    });
+    adapter.item(&intent, None).await;
+    adapter.next().await;
+    adapter.permission(&intent, 1).await;
+    let permission = adapter.next().await;
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    assert_eq!(close.params.unwrap(), json!({"threadId":adapter.session}));
+    let observation = arany::ToolObservation {
+        intent: intent.clone(),
+        disposition: arany::ToolDisposition::Uncertain,
+        enforcement_cause: None,
+        output: "Outcome unknown".into(),
+        attestation: None,
+        cache_update: arany::CacheUpdate::NotApplicable,
+    };
+    adapter.item(&intent, Some(&observation)).await;
+    let withdrawal = adapter.next().await;
+    assert_eq!(withdrawal["method"], "$/cancel_request");
+    assert_eq!(withdrawal["params"]["requestId"], permission["id"]);
+    let item = adapter.next().await;
+    assert_eq!(
+        item["params"]["update"]["_meta"]["arany.status"],
+        "uncertain"
+    );
+    adapter.events.send(Message::Notification(Notification {
+        jsonrpc: Default::default(), method: "turn/completed".into(),
+        params: Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})),
+    })).await.unwrap();
+    let prompt = adapter.next().await;
+    assert_eq!(prompt["id"], "prompt");
+    assert_eq!(prompt["result"]["stopReason"], "cancelled");
+    assert_eq!(prompt["result"]["_meta"]["arany.uncertainEffects"], 1);
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    adapter
+        .call(
+            json!(31),
+            "session/prompt",
+            json!({"sessionId":adapter.session,"prompt":[{"type":"text","text":"Again"}]}),
+        )
+        .await;
+    assert_eq!(adapter.next().await["error"]["code"], -32002);
+    assert!(
+        adapter.input.try_recv().is_err(),
+        "closing never retries or continues the effect"
+    );
+    adapter.close().await;
 }
