@@ -88,6 +88,8 @@ pub enum StoreError {
     CheckpointUnavailable,
     #[error("checkpoint storage changed during recovery; retry before resetting")]
     CheckpointChanged,
+    #[error("history is busy with a committing write; retry the listing")]
+    ListingBusy,
     #[error("history is in use by another Arany process; close it and retry")]
     HistoryBusy,
     #[error("saved history changed during recovery; retry before resetting")]
