@@ -167,6 +167,14 @@ impl Action {
     }
 }
 
+pub(crate) const DRAIN_EVENTS_PER_EDITOR: usize = 4;
+
+pub(crate) fn drain_headroom(in_flight: u32) -> usize {
+    usize::try_from(in_flight)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(DRAIN_EVENTS_PER_EDITOR)
+}
+
 pub(super) fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
@@ -357,6 +365,11 @@ impl GoalLedger {
 
     pub(super) fn in_flight_children(&self) -> u32 {
         self.read(|_, in_flight| in_flight.children).unwrap_or(0)
+    }
+
+    // Admission holds nothing back, so a primary step reserves the Events that draining each in-flight editor appends.
+    pub(super) fn drain_headroom(&self) -> usize {
+        drain_headroom(self.in_flight_children())
     }
 
     pub(super) fn admits(&self, action: Action) -> bool {

@@ -335,7 +335,14 @@ impl CallRouter<'_> {
             .journal
             .admit(
                 session_id,
-                action.max_events_for_admitted(&self.providers) + self.ledger.verdicts(action) + 1,
+                action.max_events_for_admitted(&self.providers)
+                    + self.ledger.verdicts(action)
+                    + 1
+                    + if role == ProviderRole::Primary {
+                        self.ledger.drain_headroom()
+                    } else {
+                        0
+                    },
                 action.tool_observations(),
             )
             .await

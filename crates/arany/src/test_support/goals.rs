@@ -264,6 +264,7 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
         .map(|(index, ..)| *index)
         .chain(markers)
         .collect();
+    let mut reaches: Vec<(usize, usize)> = Vec::new();
     for (index, action, end) in &points {
         let end = end.unwrap_or_else(|| {
             boundaries
@@ -283,24 +284,7 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 )
             })
             .count();
-        // A drained worker settles calls admitted at its own reservations, so they never charge a Tool window.
-        let drained_worker_events = if matches!(action, Action::Tool) {
-            events[*index..end]
-                .iter()
-                .filter(|event| match &event.event {
-                    Event::ProviderCallRecorded { agent_run_id, .. }
-                    | Event::AgentFinished { agent_run_id, .. }
-                    | Event::WorkerHandoverDiscarded { agent_run_id, .. }
-                    | Event::WorkerLeaseReleased { agent_run_id, .. } => {
-                        workers.contains_key(agent_run_id)
-                    }
-                    _ => false,
-                })
-                .count()
-        } else {
-            0
-        };
-        let observed = end - index - hook_events - drained_worker_events;
+        let observed = end - index - hook_events;
         let config = events[..=*index]
             .iter()
             .rev()
@@ -332,13 +316,43 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 || action.max_events(),
                 |providers| action.max_events_for(&providers),
             );
+        // A primary step also reserves the Events that draining each in-flight editor appends.
+        let bound = bound
+            + if matches!(action, Action::Tool | Action::ProviderCall { .. }) {
+                crate::engine::drain_headroom(in_flight(*index))
+            } else {
+                0
+            };
         assert!(
             bound >= observed,
-            "{action:?} at {index} bounds {bound} Events but appends {observed}: {:?}",
-            events[*index..end]
-                .iter()
-                .map(|e| e.event.kind())
-                .collect::<Vec<_>>(),
+            "{action:?} at {index} bounds {bound} Events but appends {observed}",
+        );
+        reaches.push((*index, bound + hook_events));
+    }
+    // Admission checks headroom once and holds nothing back, so each Event needs an earlier admission whose slots reach it.
+    let first = reaches.iter().map(|(index, _)| *index).min().unwrap_or(0);
+    let mut reach = 0;
+    for (position, envelope) in events.iter().enumerate().skip(first) {
+        for (index, slots) in reaches.iter().filter(|(index, _)| *index == position) {
+            reach = reach.max(index + slots);
+        }
+        let admitted_elsewhere = matches!(
+            envelope.event,
+            Event::GoalStarted { .. }
+                | Event::GoalResumed { .. }
+                | Event::GoalRunLinked { .. }
+                | Event::SessionStarted { .. }
+                | Event::MessageAccepted { .. }
+                | Event::RunStarted { .. }
+                | Event::AgentSpawned {
+                    role: crate::AgentRole::Primary,
+                    ..
+                }
+        );
+        assert!(
+            admitted_elsewhere || position < reach,
+            "{:?} at {position} is past every earlier admission (reach {reach})",
+            envelope.event.kind(),
         );
     }
 }

@@ -828,6 +828,7 @@ impl RunLoop<'_> {
                     Action::Tool
                         .remaining(1, &self.routing.providers)
                         .saturating_add(self.ledger().verdicts(Action::Tool))
+                        .saturating_add(self.ledger().drain_headroom())
                         .saturating_add(2 * (hook_events + narrowing))
                         .saturating_add(if narrowing > 0 { 3 } else { 0 }),
                     Action::Tool
