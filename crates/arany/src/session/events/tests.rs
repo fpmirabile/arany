@@ -1268,6 +1268,29 @@ mod provider_call_tests {
                 );
             }
         }
+        record.disposition = ProviderCallDisposition::InvalidResponse;
+        record.failure_reason = Some(ProviderFailureReason::CriterionNotMetInView);
+        for phase in [
+            crate::provider::AgentPhase::RootPlan,
+            crate::provider::AgentPhase::RootSynthesis,
+            crate::provider::AgentPhase::ToolReview,
+            crate::provider::AgentPhase::ChildWork,
+        ] {
+            record.phase = phase;
+            let payload = serde_json::to_string(&record).expect("scoped failure payload");
+            assert_eq!(
+                Event::decode(
+                    "ProviderCallRecorded",
+                    current,
+                    &payload,
+                    run_id,
+                    agent_run_id,
+                )
+                .is_ok(),
+                phase == crate::provider::AgentPhase::ChildWork,
+                "criterion failure phase: {phase:?}"
+            );
+        }
     }
 }
 

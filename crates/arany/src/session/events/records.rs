@@ -542,6 +542,11 @@ impl ProviderCallRecord {
                 {
                     return true;
                 }
+                if reason == crate::provider::ProviderFailureReason::CriterionNotMetInView
+                    && self.phase != crate::provider::AgentPhase::ChildWork
+                {
+                    return true;
+                }
 
                 use crate::provider::ProviderFailureReason;
                 !matches!(
