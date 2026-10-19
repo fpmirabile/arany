@@ -3661,8 +3661,10 @@ mod lifecycle_hooks {
 
     #[tokio::test]
     async fn cancellation_during_subagent_stop_cancels_the_child_not_the_budget() {
-        let settings =
-            json!({"hooks":{"SubagentStop":[{"hooks":[shell_hook("sleep 30; exit 2")]}]}});
+        let marker = format!("29.{}", std::process::id());
+        let settings = json!({"hooks":{"SubagentStop":[{"hooks":[shell_hook(
+            &format!("sleep {marker}; exit 2")
+        )]}]}});
         let fixture = Fixture::new(Some(&settings), false);
         let cancellation = RunCancellation::new();
         let provider = Arc::new(ScriptedProvider::new(vec![
@@ -3675,23 +3677,27 @@ mod lifecycle_hooks {
         input.policy = CollaborationPolicy::Auto {
             max_active_children: 1,
         };
-        let mut events = fixture.engine.subscribe();
         let watcher = {
             let cancellation = cancellation.clone();
             tokio::spawn(async move {
-                let started = async {
-                    while let Some(tapped) = events.next().await {
-                        if matches!(
-                            tapped,
-                            arany::Tapped::Committed(ref envelope)
-                                if matches!(envelope.event, Event::HookStarted { .. })
-                        ) {
+                let running = async {
+                    loop {
+                        let listing = tokio::process::Command::new("ps")
+                            .args(["-A", "-o", "command="])
+                            .output()
+                            .await
+                            .expect("process listing");
+                        if String::from_utf8_lossy(&listing.stdout)
+                            .lines()
+                            .any(|line| line.trim() == format!("sleep {marker}"))
+                        {
                             cancellation.cancel();
                             return;
                         }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
                     }
                 };
-                let _ = tokio::time::timeout(Duration::from_secs(60), started).await;
+                let _ = tokio::time::timeout(Duration::from_secs(60), running).await;
             })
         };
         let outcome = run_with(
