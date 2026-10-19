@@ -2946,6 +2946,50 @@ async fn plan_with_fewer_runs_than_linked_is_refused_as_an_invalid_plan() {
 }
 
 #[tokio::test]
+async fn plan_exhausted_by_its_own_call_is_refused_and_the_goal_continues() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget.max_active_ms = Some(1);
+    let provider = ScriptedProvider::new(vec![
+        arany::test_support::scenario::plan_outcome(plan),
+        finish_with("done without a plan"),
+    ])
+    .with_before_call(0, || {
+        std::thread::sleep(std::time::Duration::from_millis(20))
+    });
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        autonomous_input(&workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("refused plan Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert!(
+        view.goal(outcome.goal_id)
+            .expect("Goal")
+            .plan_contract
+            .is_none()
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.event, Event::GoalPlanContractRecorded { .. }))
+    );
+}
+
+#[tokio::test]
 async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");

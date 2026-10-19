@@ -473,6 +473,7 @@ impl<'a> RunLoop<'a> {
                 }
                 Err(error) => return Err(error),
             };
+            self.settle_active_segment(active_segment)?;
             let (validation, budget_admits) = self.validate_primary_outcome(&first, planning)?;
             let refusal = validation
                 .err()
@@ -494,7 +495,6 @@ impl<'a> RunLoop<'a> {
                 ),
             })
             .await?;
-            self.settle_active_segment(active_segment)?;
             if self.controls.cancellation.is_cancelled() {
                 break Exit::Stopped;
             }
