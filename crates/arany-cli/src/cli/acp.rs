@@ -39,6 +39,12 @@ pub(crate) struct AcpArgs {
     pub max_active_children: Option<u8>,
     #[arg(long)]
     pub tools: bool,
+    #[arg(long, default_value = "default", value_parser = parse_permission_mode)]
+    pub permission_mode: PermissionMode,
+}
+
+fn parse_permission_mode(value: &str) -> Result<PermissionMode, &'static str> {
+    serde_json::from_value(Value::String(value.into())).map_err(|_| "unsupported permission mode")
 }
 
 pub(crate) fn admit(args: &AcpArgs) -> Result<(), &'static str> {
@@ -64,6 +70,7 @@ struct Config {
     max_active_children: Option<u8>,
     roster: Option<super::provider::roster::SelectedRoster>,
     tools: bool,
+    permission_mode: PermissionMode,
     #[cfg(test)]
     authenticated: Option<bool>,
 }
@@ -79,7 +86,7 @@ impl Config {
             collaboration: Some(self.collaboration.clone()),
             max_active_children: self.max_active_children,
             tools: Some(self.tools),
-            permission_mode: None,
+            permission_mode: Some(self.permission_mode.clone()),
             include_paths: None,
         }
     }
@@ -152,6 +159,7 @@ pub(crate) async fn run(
         max_active_children: args.max_active_children,
         roster: roster.clone(),
         tools: args.tools,
+        permission_mode: args.permission_mode,
         #[cfg(test)]
         authenticated: None,
     };

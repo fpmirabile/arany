@@ -151,6 +151,7 @@ mod tests {
             events: engine.subscribe(),
             cancel: arany::RunCancellation::new(),
             approvals: crate::cli::serve::approvals::Approvals::empty_for_test(),
+            approval_mode: arany::ToolApprovals::new(arany::ApprovalMode::Request).0,
             steering: arany::RunSteering::new(),
             pending_start: None,
             result_done: false,

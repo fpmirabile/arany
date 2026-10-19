@@ -1425,6 +1425,34 @@
       ],
       "type": "object"
     },
+    "ThreadSettingsUpdateParams": {
+      "additionalProperties": false,
+      "properties": {
+        "permissionMode": {
+          "$ref": "#/$defs/PermissionMode"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "permissionMode"
+      ],
+      "type": "object"
+    },
+    "ThreadSettingsUpdateResult": {
+      "additionalProperties": false,
+      "properties": {
+        "permissionMode": {
+          "$ref": "#/$defs/PermissionMode"
+        }
+      },
+      "required": [
+        "permissionMode"
+      ],
+      "type": "object"
+    },
     "ThreadStartParams": {
       "additionalProperties": false,
       "properties": {
@@ -1796,6 +1824,14 @@
       },
       "result": {
         "$ref": "#/$defs/ThreadResumeResult"
+      }
+    },
+    "thread/settings/update": {
+      "params": {
+        "$ref": "#/$defs/ThreadSettingsUpdateParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ThreadSettingsUpdateResult"
       }
     },
     "thread/start": {

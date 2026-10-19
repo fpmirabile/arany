@@ -32,6 +32,8 @@ fn validate(value: &Value) {
         "InitializeResponse"
     } else if value["result"].get("sessionId").is_some() {
         "NewSessionResponse"
+    } else if value["result"].get("configOptions").is_some() {
+        "SetSessionConfigOptionResponse"
     } else if value["result"].get("stopReason").is_some() {
         "PromptResponse"
     } else {
@@ -95,6 +97,7 @@ fn config(state: &std::path::Path) -> Config {
         max_active_children: None,
         roster: None,
         tools: false,
+        permission_mode: PermissionMode::Default,
         authenticated: Some(true),
     }
 }
@@ -218,6 +221,11 @@ async fn initialize(writer: &mut Writer, reader: &mut Reader) {
 }
 
 fn validate_session_result(value: &Value, method: &str) {
+    validate_session_result_schema(value, method);
+    assert_mode_state(&value["result"], "default");
+}
+
+fn validate_session_result_schema(value: &Value, method: &str) {
     let schema = schema();
     let definition = match method {
         "session/load" => "LoadSessionResponse",
@@ -230,7 +238,6 @@ fn validate_session_result(value: &Value, method: &str) {
             .unwrap()
             .is_valid(&value["result"])
     );
-    assert_eq!(value["result"], json!({}));
 }
 
 async fn session(
@@ -1586,10 +1593,9 @@ impl Adapter {
         assert_eq!(start.params.as_ref().unwrap()["tools"], true);
         adapter.events.send(Message::Response(Response { jsonrpc:Default::default(), id:start.id,
             result:json!({"thread":{"id":adapter.session,"workspace":"/private/var/workspace","title":"Test","createdAtMs":0}}) })).await.unwrap();
-        assert_eq!(
-            adapter.next().await["result"]["sessionId"],
-            adapter.session.to_string()
-        );
+        let created = adapter.next().await;
+        assert_eq!(created["result"]["sessionId"], adapter.session.to_string());
+        assert_mode_state(&created["result"], "default");
         adapter
     }
 
@@ -2343,6 +2349,7 @@ async fn permission_round_trip_dispatch_and_denial_survive_reopen() {
     for allow in [true, false] {
         permission_scenario(allow, None, PermissionCase::Read).await;
     }
+    permission_scenario(true, None, PermissionCase::ModeSwitch).await;
 }
 
 #[test]
@@ -2373,7 +2380,8 @@ fn guarded_acp_permissions_publish_once_and_refuse_hook_asks() {
         .unwrap()
         .block_on(async {
             permission_scenario(false, Some(guard.clone()), PermissionCase::HookAsk).await;
-            permission_scenario(true, Some(guard), PermissionCase::Write).await;
+            permission_scenario(true, Some(guard.clone()), PermissionCase::Write).await;
+            permission_scenario(true, Some(guard), PermissionCase::LiveEdits).await;
         });
 }
 
@@ -2382,6 +2390,8 @@ enum PermissionCase {
     Read,
     Write,
     HookAsk,
+    ModeSwitch,
+    LiveEdits,
 }
 
 async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: PermissionCase) {
@@ -2393,7 +2403,8 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
     std::fs::write(workspace.join("facts.txt"), "Fact").unwrap();
     let state = root.path().join("state");
     StateRoot::admit(&state).unwrap();
-    let write = case == PermissionCase::Write;
+    let live_edits = case == PermissionCase::LiveEdits;
+    let write = matches!(case, PermissionCase::Write | PermissionCase::LiveEdits);
     let hook_ask = case == PermissionCase::HookAsk;
     let commands = if hook_ask {
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
@@ -2410,6 +2421,8 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
             "type":"command",
             "command":"printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\"}}'"
         }]}]}})
+    } else if live_edits {
+        json!({"permissions":{"defaultMode":"acceptEdits"}})
     } else {
         json!({"permissions":{"ask":["Read","Edit"]}})
     };
@@ -2437,22 +2450,40 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
             limit: 32,
         }
     };
+    let second = arany::ToolCall::Write {
+        path: "next.txt".into(),
+        expected_digest: None,
+        content: "Next".into(),
+    };
     let plan = write.then(|| {
         Box::new(arany::GoalPlanContract {
             mission: "Write the selected note".into(),
-            paths: vec!["new.txt".into()],
+            paths: if live_edits {
+                vec!["new.txt".into(), "next.txt".into()]
+            } else {
+                vec!["new.txt".into()]
+            },
             commands: vec![],
             resource_class: arany::ToolResourceClass::Default,
             command_timeout_ms: None,
             skills: vec![],
             mcp_tools: vec![],
             success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
-                call: Box::new(call.clone()),
+                call: Box::new(if live_edits {
+                    second.clone()
+                } else {
+                    call.clone()
+                }),
             },
             budget: arany::GoalBudget::default(),
         })
     });
     let mut outcomes = vec![tool_outcome(call, plan)];
+    if case == PermissionCase::ModeSwitch {
+        outcomes.push(outcomes[0].clone());
+    } else if live_edits {
+        outcomes.push(tool_outcome(second, None));
+    }
     if allow {
         outcomes.push(arany::ProviderOutcome::Finish(arany::Finish {
             summary: "Answer".into(),
@@ -2482,6 +2513,29 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
         if value["method"] == "session/request_permission" {
             permissions += 1;
             intent = Some(value["params"]["toolCall"]["rawInput"].clone());
+            if matches!(case, PermissionCase::ModeSwitch | PermissionCase::LiveEdits)
+                && permissions == 1
+            {
+                send(&mut writer, json!(4), "session/set_mode", json!({"sessionId":session,"modeId":if live_edits {"acceptEdits"} else {"auto"}})).await;
+                let mut updates = 0;
+                loop {
+                    let switched = next(&mut reader).await;
+                    if switched["id"] == 4 {
+                        assert_eq!(switched["result"], json!({}));
+                        break;
+                    }
+                    assert_eq!(switched["method"], "session/update");
+                    match switched["params"]["update"]["sessionUpdate"].as_str() {
+                        Some("current_mode_update" | "config_option_update") => updates += 1,
+                        Some("tool_call") => {
+                            assert_eq!(switched["params"]["update"]["status"], "pending");
+                            projections += 1;
+                        }
+                        _ => panic!("mode switch must leave the pending approval unanswered"),
+                    }
+                }
+                assert_eq!(updates, 2);
+            }
             writer.write_all(&encode_line(&json!({"jsonrpc":"2.0","id":value["id"],"result":{"outcome":{"outcome":"selected","optionId":if allow {"allow_once"} else {"deny"}}}})).unwrap()).await.unwrap();
         } else if value["method"] == "session/update"
             && value["params"]["update"]["sessionUpdate"]
@@ -2495,15 +2549,39 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
             break;
         }
     }
-    assert_eq!(permissions, usize::from(!hook_ask), "{case:?}");
-    assert_eq!(projections, 2);
+    let calls = if matches!(case, PermissionCase::ModeSwitch | PermissionCase::LiveEdits) {
+        2
+    } else {
+        1
+    };
+    assert_eq!(
+        permissions,
+        if hook_ask {
+            0
+        } else if live_edits {
+            1
+        } else {
+            calls
+        },
+        "{case:?}"
+    );
+    assert_eq!(projections, calls * 2);
     writer.shutdown().await.unwrap();
     task.await.unwrap().unwrap();
     let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
     let events = store.load_session(session).await.unwrap();
     let view = store.load_view(session).await.unwrap().unwrap();
     store.close().await.unwrap();
-    let tool = &view.runs[0].tools[0];
+    assert_eq!(view.runs[0].tools.len(), calls);
+    if case == PermissionCase::ModeSwitch {
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        for tool in &view.runs[0].tools {
+            let verdict = tool.permission_verdict.as_ref().unwrap();
+            assert_eq!(verdict.source, arany::permissions::PermissionSource::Human);
+            assert!(verdict.approved);
+        }
+    }
+    let tool = view.runs[0].tools.last().unwrap();
     if hook_ask {
         assert!(intent.is_none());
         let verdict = tool.permission_verdict.as_ref().unwrap();
@@ -2529,13 +2607,24 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
         )));
         assert!(tool.observation.as_ref().unwrap().attestation.is_none());
     } else {
-        assert_eq!(Some(serde_json::to_value(&tool.intent).unwrap()), intent);
+        let asked = if live_edits {
+            &view.runs[0].tools[0]
+        } else {
+            tool
+        };
+        assert_eq!(Some(serde_json::to_value(&asked.intent).unwrap()), intent);
+        assert_eq!(
+            asked.permission_verdict.as_ref().unwrap().source,
+            arany::permissions::PermissionSource::Human
+        );
     }
     assert_eq!(tool.permission_verdict.as_ref().unwrap().approved, allow);
     assert_eq!(
         tool.permission_verdict.as_ref().unwrap().source,
         if hook_ask {
             arany::permissions::PermissionSource::UnavailableApproval
+        } else if live_edits {
+            arany::permissions::PermissionSource::Mode
         } else {
             arany::permissions::PermissionSource::Human
         }
@@ -2553,13 +2642,16 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
             .iter()
             .filter(|e| matches!(e.event, Event::ToolFinished { .. }))
             .count(),
-        1
+        calls
     );
     assert_eq!(
         provider.requests.lock().unwrap().len(),
-        if allow { 2 } else { 1 }
+        if allow { calls + 1 } else { 1 }
     );
     assert!(provider.responses.lock().unwrap().is_empty());
+    if live_edits {
+        assert_eq!(std::fs::read(workspace.join("next.txt")).unwrap(), b"Next");
+    }
     if write {
         assert_eq!(
             std::fs::read(workspace.join("new.txt")).unwrap(),
@@ -2569,5 +2661,253 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
             tool.observation.as_ref().unwrap().attestation,
             Some(arany::Attestation::Guard(_))
         ));
+    }
+}
+
+fn assert_mode_state(result: &Value, current: &str) {
+    assert_eq!(result["modes"]["currentModeId"], current);
+    let modes = result["modes"]["availableModes"].as_array().unwrap();
+    let config = &result["configOptions"][0];
+    assert_eq!(result["configOptions"].as_array().unwrap().len(), 1);
+    assert_eq!(config["id"], "mode");
+    assert_eq!(config["category"], "mode");
+    assert_eq!(config["type"], "select");
+    assert_eq!(config["currentValue"], current);
+    assert_eq!(
+        modes.iter().map(|m| &m["id"]).collect::<Vec<_>>(),
+        config["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| &m["value"])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        modes.iter().map(|m| &m["id"]).collect::<Vec<_>>(),
+        vec![&json!("default"), &json!("acceptEdits"), &json!("auto")]
+    );
+}
+
+#[tokio::test]
+async fn modes_and_config_options_stay_in_sync_and_refuse_invalid_values_without_private_state() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    for (method, mode) in [
+        ("session/set_mode", "acceptEdits"),
+        ("session/set_config_option", "auto"),
+        ("session/set_config_option", "default"),
+    ] {
+        let params = if method == "session/set_mode" {
+            json!({"sessionId":adapter.session,"modeId":mode,"_meta":{"tools":true}})
+        } else {
+            json!({"sessionId":adapter.session,"configId":"mode","value":mode})
+        };
+        adapter.call(json!(9), method, params).await;
+        let request = adapter.request().await;
+        assert_eq!(request.method, "thread/settings/update");
+        assert_eq!(
+            request.params.unwrap(),
+            json!({"threadId":adapter.session,"permissionMode":mode})
+        );
+        adapter
+            .call(
+                json!(10),
+                "session/resume",
+                json!({"sessionId":adapter.session,"cwd":"/var/workspace"}),
+            )
+            .await;
+        assert_eq!(adapter.next().await["error"]["data"]["reason"], "busy");
+        assert!(adapter.input.try_recv().is_err());
+        adapter
+            .events
+            .send(Message::Response(Response {
+                jsonrpc: Default::default(),
+                id: request.id,
+                result: json!({"permissionMode":mode}),
+            }))
+            .await
+            .unwrap();
+        let current = adapter.next().await;
+        assert_eq!(
+            current["params"]["update"],
+            json!({"sessionUpdate":"current_mode_update","currentModeId":mode})
+        );
+        let config = adapter.next().await;
+        assert_eq!(
+            config["params"]["update"]["configOptions"][0]["currentValue"],
+            mode
+        );
+        let response = adapter.next().await;
+        if method == "session/set_mode" {
+            assert_eq!(response["result"], json!({}));
+        } else {
+            assert_eq!(
+                response["result"]["configOptions"],
+                config["params"]["update"]["configOptions"]
+            );
+        }
+        for method in ["session/load", "session/resume"] {
+            adapter
+                .call(
+                    json!(11),
+                    method,
+                    json!({"sessionId":adapter.session,"cwd":"/var/workspace","mcpServers":[]}),
+                )
+                .await;
+            let request = adapter.request().await;
+            assert_eq!(request.method, "thread/resume");
+            assert_eq!(request.params.as_ref().unwrap()["permissionMode"], mode);
+            adapter.events.send(Message::Response(Response {jsonrpc:Default::default(), id:request.id,
+                result:json!({"thread":{"id":adapter.session,"workspace":"/private/var/workspace","title":"Test","createdAtMs":0},"turns":[]})})).await.unwrap();
+            let loaded = adapter.next().await;
+            validate_session_result_schema(&loaded, method);
+            assert_mode_state(&loaded["result"], mode);
+        }
+    }
+    for mode in [
+        json!("plan"),
+        json!("dontAsk"),
+        json!("bypassPermissions"),
+        json!("bypass"),
+        json!("Default"),
+        json!(""),
+        json!("x".repeat(65536)),
+        json!(true),
+    ] {
+        for (method, params) in [
+            (
+                "session/set_mode",
+                json!({"sessionId":adapter.session,"modeId":mode}),
+            ),
+            (
+                "session/set_config_option",
+                json!({"sessionId":adapter.session,"configId":"mode","value":mode}),
+            ),
+        ] {
+            adapter.call(json!(9), method, params).await;
+            assert_eq!(adapter.next().await["error"]["code"], -32602);
+            assert!(adapter.input.try_recv().is_err());
+        }
+    }
+    for params in [
+        json!({"sessionId":adapter.session,"configId":"model","value":"auto"}),
+        json!({"sessionId":adapter.session,"configId":"mode","value":true,"type":"boolean"}),
+        json!({"sessionId":adapter.session,"configId":"mode","value":"auto","type":"boolean"}),
+        json!({"sessionId":adapter.session,"configId":"x".repeat(65536),"value":"auto"}),
+    ] {
+        adapter
+            .call(json!(9), "session/set_config_option", params)
+            .await;
+        assert_eq!(adapter.next().await["error"]["code"], -32602);
+    }
+    adapter
+        .call(
+            json!(9),
+            "session/set_mode",
+            json!({"sessionId":SessionId::new(),"modeId":"default"}),
+        )
+        .await;
+    assert_eq!(adapter.next().await["error"]["code"], -32002);
+    assert!(adapter.input.try_recv().is_err());
+    adapter
+        .call(
+            json!(12),
+            "session/set_mode",
+            json!({"sessionId":adapter.session,"modeId":"auto"}),
+        )
+        .await;
+    let request = adapter.request().await;
+    adapter
+        .events
+        .send(Message::Error(ErrorResponse {
+            jsonrpc: Default::default(),
+            id: Some(request.id),
+            error: ErrorObject {
+                code: -32600,
+                message: "unavailable".into(),
+                data: Some(ErrorData {
+                    reason: Reason::ThreadNotLoaded,
+                }),
+            },
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["error"]["code"], -32002);
+    assert!(
+        adapter.output.try_recv().is_err(),
+        "failed update must not change either selector"
+    );
+    adapter
+        .call(
+            json!(13),
+            "session/resume",
+            json!({"sessionId":adapter.session,"cwd":"/var/workspace"}),
+        )
+        .await;
+    let request = adapter.request().await;
+    assert_eq!(request.params.unwrap()["permissionMode"], "default");
+    adapter.events.send(Message::Response(Response {jsonrpc:Default::default(), id:request.id,
+        result:json!({"thread":{"id":adapter.session,"workspace":"/private/var/workspace","title":"Test","createdAtMs":0},"turns":[]})})).await.unwrap();
+    assert_mode_state(&adapter.next().await["result"], "default");
+    for _ in 0..62 {
+        adapter
+            .call(
+                json!(14),
+                "session/set_config_option",
+                json!({"sessionId":adapter.session,"configId":"mode","type":"id","value":"auto"}),
+            )
+            .await;
+    }
+    adapter
+        .call(
+            json!(15),
+            "session/set_mode",
+            json!({"sessionId":adapter.session,"modeId":"default"}),
+        )
+        .await;
+    assert_eq!(adapter.next().await["error"]["data"]["reason"], "busy");
+    for _ in 0..62 {
+        let request = adapter.request().await;
+        assert_eq!(request.method, "thread/settings/update");
+        assert_eq!(
+            request.params.unwrap(),
+            json!({"threadId":adapter.session,"permissionMode":"auto"})
+        );
+    }
+    assert!(adapter.input.try_recv().is_err());
+    adapter.close().await;
+}
+
+#[test]
+fn acp_cli_modes_are_closed_and_do_not_enable_tools() {
+    use clap::Parser;
+    for mode in [
+        "default",
+        "acceptEdits",
+        "auto",
+        "plan",
+        "dontAsk",
+        "bypassPermissions",
+        "Auto",
+    ] {
+        let parsed = crate::Cli::try_parse_from([
+            "arany",
+            "acp",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.4",
+            "--permission-mode",
+            mode,
+        ]);
+        if matches!(mode, "default" | "acceptEdits" | "auto") {
+            let crate::Command::Acp(args) = parsed.unwrap().command.unwrap() else {
+                panic!("ACP args")
+            };
+            assert_eq!(serde_json::to_value(args.permission_mode).unwrap(), mode);
+            assert!(!args.tools);
+        } else {
+            assert!(parsed.is_err(), "unsupported CLI mode: {mode}");
+        }
     }
 }
