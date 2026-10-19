@@ -505,7 +505,8 @@ pub async fn exercise_private_guard_command(
                             } else {
                                 PrivateCaptureRejection::UnsupportedEntry
                             }
-                        }
+                        },
+                        "{case}: {result:?}"
                     );
                 }
             }
