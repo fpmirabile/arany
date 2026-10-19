@@ -667,6 +667,45 @@ fn listing_page_orders_and_reads_from_one_snapshot() {
 }
 
 #[test]
+fn listing_waits_past_the_old_bound_for_a_committing_writer_then_reports_busy() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let mut connection = open_connection(&root, false).expect("file-backed store");
+    let mut hot_session = None;
+    let mine = WorkspaceIdentity {
+        device: 1,
+        inode: 1,
+    };
+    seed_session(&mut connection, &mut hot_session, mine, 3);
+    let reader = open_connection(&root, true).expect("read-only store");
+    connection
+        .execute_batch("BEGIN EXCLUSIVE")
+        .expect("writer commit lock");
+    let listing = std::thread::spawn(move || {
+        let page = list_session_page(&reader, mine, None, 10, usize::MAX, None);
+        (page, reader)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    connection.execute_batch("COMMIT").expect("commit");
+    let (page, reader) = listing.join().expect("listing thread");
+    let (page, _) = page.expect("a committing writer is waited for beyond 250 ms");
+    assert_eq!(page.items.len(), 1);
+    reader
+        .busy_timeout(std::time::Duration::from_millis(20))
+        .expect("short bound");
+    connection
+        .execute_batch("BEGIN EXCLUSIVE")
+        .expect("writer commit lock");
+    let refused = list_session_page(&reader, mine, None, 10, usize::MAX, None);
+    connection.execute_batch("COMMIT").expect("commit");
+    assert!(matches!(
+        refused,
+        Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, _)))
+            if failure.code == rusqlite::ErrorCode::DatabaseBusy
+    ));
+}
+
+#[test]
 fn long_listings_never_block_concurrent_appends() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
