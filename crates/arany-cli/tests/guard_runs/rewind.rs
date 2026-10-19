@@ -2,7 +2,7 @@ use super::*;
 use arany::rewind::{CheckpointTarget, RewindOutcome};
 use arany::test_support::goals::{facts_workspace, finish_with, replayed};
 use arany::{CheckpointStatus, RewindIssue, RewindRequest};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 fn grant(state: &Path, write: bool) {
     let config = state.join("tools.json");
@@ -19,7 +19,36 @@ fn grant(state: &Path, write: bool) {
 
 async fn case(case: &str) {
     arany::test_support::isolate_account_root();
-    let temp = tempfile::tempdir().unwrap();
+    let temp = if case == "case_alias" {
+        tempfile::Builder::new()
+            .prefix("arany-rewind-apfs-")
+            .tempdir_in("/private/tmp")
+            .unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    };
+    if case == "case_alias" {
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            nix::sys::statfs::statfs(temp.path())
+                .unwrap()
+                .filesystem_type_name(),
+            "apfs",
+            "native rewind alias fixture requires APFS"
+        );
+        let lower = temp.path().join("a");
+        let upper = temp.path().join("A");
+        std::fs::write(&lower, b"synthetic APFS alias baseline").unwrap();
+        let metadata = std::fs::metadata(&lower).unwrap();
+        let alias = std::fs::metadata(&upper)
+            .expect("native rewind alias fixture requires case-insensitive APFS");
+        assert_eq!((metadata.dev(), metadata.ino()), (alias.dev(), alias.ino()));
+        assert_eq!(metadata.nlink(), 1, "case alias is not a hard link");
+        assert_eq!(
+            std::fs::read(&upper).unwrap(),
+            b"synthetic APFS alias baseline"
+        );
+    }
     let workspace = facts_workspace(temp.path(), "original");
     let state = temp.path().join("state");
     let engine = engine_support::open(
@@ -91,7 +120,7 @@ async fn case(case: &str) {
     .unwrap();
     assert_eq!(result.run.status, RunStatus::Finished);
     let session = result.session_id;
-    let (_, view) = replayed(&state, session).await;
+    let (before_events, view) = replayed(&state, session).await;
     let target = view.rewinds.checkpoints[0].clone();
     let request = |target, kept: Vec<String>, overwrite: Vec<String>| RewindRequest {
         session_id: session,
@@ -102,6 +131,30 @@ async fn case(case: &str) {
         overwrite,
     };
     let path = workspace.join("notes/facts.txt");
+    let alias_identity = if case == "case_alias" {
+        assert_eq!(
+            result.run.tools[0].checkpoint.as_ref().unwrap().status,
+            CheckpointStatus::Captured,
+            "valid publication captures its before bytes before alias drift"
+        );
+        let before = std::fs::metadata(&path).unwrap();
+        std::fs::rename(&path, workspace.join("notes/FACTS.txt")).unwrap();
+        let alias = std::fs::metadata(workspace.join("notes/FACTS.txt")).unwrap();
+        let lower = std::fs::metadata(&path).unwrap();
+        let identity = (before.dev(), before.ino());
+        assert_eq!(identity, (alias.dev(), alias.ino()));
+        assert_eq!(identity, (lower.dev(), lower.ino()));
+        assert_eq!(alias.nlink(), 1);
+        let mut names = std::fs::read_dir(workspace.join("notes"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["FACTS.txt", "new.txt"]);
+        Some(identity)
+    } else {
+        None
+    };
     if ["drift", "keep", "overwrite"].contains(&case) {
         std::fs::write(&path, "external").unwrap();
     }
@@ -143,7 +196,17 @@ async fn case(case: &str) {
         .rewind_preview(request(target.clone(), kept, overwrite))
         .await
         .unwrap();
-    if ["drift", "link", "special", "grant", "missing", "oversized"].contains(&case) {
+    if [
+        "drift",
+        "link",
+        "special",
+        "grant",
+        "missing",
+        "oversized",
+        "case_alias",
+    ]
+    .contains(&case)
+    {
         assert!(!preview.can_restore(), "{case}");
         let expected = match case {
             "drift" => RewindIssue::Drifted,
@@ -162,13 +225,31 @@ async fn case(case: &str) {
             "whole batch refused"
         );
         engine.close().await.unwrap();
-        let (events, after) = replayed(&state, session).await;
+        let (after_events, after) = replayed(&state, session).await;
         assert!(after.rewinds.operations.is_empty());
         assert!(
-            !events
+            !after_events
                 .iter()
                 .any(|e| matches!(e.event, Event::WorkspaceRewindStarted { .. }))
         );
+        if let Some(identity) = alias_identity {
+            assert_eq!(
+                after_events, before_events,
+                "alias refusal appends no Events"
+            );
+            assert_eq!(after, view, "closed replay preserves the Session");
+            for name in ["facts.txt", "FACTS.txt"] {
+                let alias = workspace.join("notes").join(name);
+                let metadata = std::fs::metadata(&alias).unwrap();
+                assert_eq!((metadata.dev(), metadata.ino()), identity);
+                assert_eq!(metadata.nlink(), 1);
+                assert_eq!(std::fs::read(alias).unwrap(), b"changed");
+            }
+            assert_eq!(
+                std::fs::read(workspace.join("notes/new.txt")).unwrap(),
+                b"new"
+            );
+        }
         return;
     }
     assert!(preview.can_restore());
@@ -366,6 +447,13 @@ async fn case(case: &str) {
         }
     }
     settle(engine, &state, session, &path, case).await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "native case-insensitive APFS rewind alias boundary; explicit opt-in"]
+async fn guarded_rewind_refuses_case_insensitive_apfs_alias_without_publication() {
+    case("case_alias").await;
 }
 
 async fn crash(

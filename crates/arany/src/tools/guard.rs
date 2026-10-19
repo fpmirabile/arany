@@ -43,7 +43,9 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub(super) use macos::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 #[cfg(target_os = "macos")]
-pub(super) use macos::{SystemPrograms, macos_enforcement_digest};
+pub(super) use macos::{
+    RUNTIME_COMPAT_BYTES, RUNTIME_COMPAT_FILE, SystemPrograms, macos_enforcement_digest,
+};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod admission;
@@ -1856,6 +1858,28 @@ pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, To
     Ok(paths.join(":"))
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn prefix_shell_runtime_compat(
+    args: &mut [std::ffi::OsString],
+    path: &str,
+) -> Result<(), ToolError> {
+    if !args.first().is_some_and(|arg| arg == "-c") {
+        return Ok(());
+    }
+    let script = args.get_mut(1).ok_or(ToolError::Configuration)?;
+    let text = script.to_str().ok_or(ToolError::Path)?;
+    // Shells parse options after -c; reject ambiguous script positions before changing argv.
+    if text.starts_with(['-', '+']) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    *script = format!(
+        "export DYLD_INSERT_LIBRARIES='{}'\n{text}",
+        path.replace('\'', "'\\''"),
+    )
+    .into();
+    Ok(())
+}
+
 pub(super) fn payload(
     program: &super::config::Program,
     args: &[String],
@@ -1886,9 +1910,9 @@ pub(super) fn payload(
         return Err(ToolError::ChangedInput);
     }
     let path = runtime_path(runtime_grants)?;
-    let mut command = Command::new(executable);
-    command
-        .args(args.iter().map(|arg| {
+    let payload_args: Vec<_> = args
+        .iter()
+        .map(|arg| {
             if cfg!(target_os = "macos") {
                 for (alias, target) in [
                     ("workspace", &workspace),
@@ -1904,7 +1928,10 @@ pub(super) fn payload(
                 }
             }
             std::ffi::OsString::from(arg)
-        }))
+        })
+        .collect();
+    let mut command = Command::new(executable);
+    command
         .current_dir(workspace.join(cwd))
         .env_clear()
         .env("PATH", path)
@@ -1922,12 +1949,77 @@ pub(super) fn payload(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(target_os = "macos")]
+    let payload_args = {
+        let mut args = payload_args;
+        macos::configure_runtime_compat(&mut command, program, &mut args, &resources)?;
+        args
+    };
+    command.args(payload_args);
+    // Cargo's libcurl otherwise initializes LibreSSL, which reads /private/etc/ssl and fails under Seatbelt.
+    if cfg!(target_os = "macos")
+        && runtime_grants
+            .iter()
+            .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
+    {
+        command.env("CURL_SSL_BACKEND", "Secure-Transport");
+    }
+    if cfg!(target_os = "macos")
+        && let Some(sdk) = runtime_grants
+            .iter()
+            .find(|grant| grant.kind == super::toolchains::RuntimeKind::AppleSdk)
+    {
+        command.env("SDKROOT", &sdk.path);
+    }
     Ok(command)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_runtime_compat_preserves_script_position_and_rejects_options() {
+        use std::ffi::OsString;
+
+        let path = "/private/runtime 'quoted'/compat.dylib";
+        let script = "printf '%s\\n' \"$0\" \"$1\"";
+        for tail in [vec![], vec!["arg0"], vec!["arg0", "-e"]] {
+            let mut args: Vec<OsString> = ["-c", script]
+                .into_iter()
+                .chain(tail.iter().copied())
+                .map(OsString::from)
+                .collect();
+            let original = args.clone();
+            prefix_shell_runtime_compat(&mut args, path).unwrap();
+            assert_eq!(args[0], original[0]);
+            assert_eq!(args[2..], original[2..]);
+            assert_eq!(
+                args[1],
+                OsString::from(format!(
+                    "export DYLD_INSERT_LIBRARIES='/private/runtime '\\''quoted'\\''/compat.dylib'\n{script}"
+                ))
+            );
+        }
+        for option in ["--", "-e", "+e", "-", "+"] {
+            let mut args = ["-c", option, script].map(OsString::from);
+            let original = args.clone();
+            assert!(matches!(
+                prefix_shell_runtime_compat(&mut args, path),
+                Err(ToolError::ProtectionUnavailable)
+            ));
+            assert_eq!(args, original);
+        }
+        let mut missing = [OsString::from("-c")];
+        assert!(matches!(
+            prefix_shell_runtime_compat(&mut missing, path),
+            Err(ToolError::Configuration)
+        ));
+        let mut file = [OsString::from("script.sh"), OsString::from("-c")];
+        let original = file.clone();
+        prefix_shell_runtime_compat(&mut file, path).unwrap();
+        assert_eq!(file, original);
+    }
 
     #[test]
     fn agent_definition_guard_task_binds_snapshot_digest_and_closed_payload() {

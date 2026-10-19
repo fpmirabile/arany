@@ -533,3 +533,69 @@ fn tool_observation_slots_fit_within_each_action_bound() {
     );
     assert_eq!(Action::Compaction.tool_observations(), 0);
 }
+
+#[test]
+fn drain_headroom_reserves_four_events_per_lease_holding_editor_and_a_verdict_slot_when_supervised()
+{
+    let fixture = crate::session::worker_protocol_fixture();
+    let events = fixture.envelopes();
+    let base = (1..=events.len())
+        .filter_map(|end| {
+            crate::session::SessionView::replay(fixture.session, &events[..end])
+                .ok()
+                .flatten()
+        })
+        .find(|view| {
+            view.runs.last().is_some_and(|run| {
+                run.agents.iter().any(|agent| {
+                    agent
+                        .assignment
+                        .as_ref()
+                        .is_some_and(|worker| worker.released.is_none())
+                })
+            })
+        })
+        .expect("a prefix with a lease-holding editor");
+    let editor = base
+        .runs
+        .last()
+        .and_then(|run| run.agents.iter().find(|agent| agent.assignment.is_some()))
+        .expect("editor")
+        .clone();
+    let researcher = {
+        let mut agent = editor.clone();
+        agent.assignment = None;
+        agent
+    };
+    for (name, run, held, released, researchers, supervised, expected) in [
+        ("no Run", false, 0, 0, 0, false, 0),
+        ("researchers only", true, 0, 0, 2, false, 0),
+        ("one held editor", true, 1, 0, 0, false, 4),
+        ("released editor", true, 0, 1, 0, false, 0),
+        ("three held, one released", true, 3, 1, 0, false, 12),
+        ("three held under a Supervisor", true, 3, 0, 0, true, 15),
+    ] {
+        let mut view = base.clone();
+        if run {
+            let last = view.runs.last_mut().expect("Run");
+            last.agents.retain(|agent| agent.assignment.is_none());
+            for _ in 0..held {
+                last.agents.push(editor.clone());
+            }
+            for _ in 0..released {
+                let mut agent = editor.clone();
+                agent.assignment.as_mut().expect("assignment").released = Some(1);
+                last.agents.push(agent);
+            }
+            for _ in 0..researchers {
+                last.agents.push(researcher.clone());
+            }
+            last.config.as_mut().expect("config").supervisor =
+                supervised.then(crate::supervisor::SupervisorPolicy::default);
+        } else {
+            view.runs.clear();
+        }
+        let ledger = GoalLedger::new(view, Some(fixture.goal));
+        assert_eq!(ledger.drain_headroom(), expected, "{name}");
+    }
+}

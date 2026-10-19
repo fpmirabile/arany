@@ -437,7 +437,9 @@ impl<'a> RunLoop<'a> {
         self.journal
             .admit(
                 self.session_id,
-                Action::Tool.remaining(0, &self.routing.providers),
+                Action::Tool
+                    .remaining(0, &self.routing.providers)
+                    .saturating_add(self.ledger().drain_headroom()),
                 Action::Tool.tool_observations(),
             )
             .await?;

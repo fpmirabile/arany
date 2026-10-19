@@ -738,7 +738,24 @@ impl RunLoop<'_> {
                 let valid = self.ledger().tokens_within_limit()
                     && abort_reason.is_none()
                     && !queue.budget_stopped
-                    && matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Tools(requests), .. }) if matches!(self.well_formed_tools(requests), Ok(Ok(()))) && requests.iter().all(|r| r.call.is_process() || matches!(self.primary_lease_allows(&r.call), Ok(Ok(())))));
+                    && match &result {
+                        CallResult::Response(ProviderResponse {
+                            outcome: ProviderOutcome::Tools(requests),
+                            ..
+                        }) if self.well_formed_tools(requests)?.is_ok() => {
+                            let mut allowed = true;
+                            for request in requests {
+                                if !request.call.is_process()
+                                    && self.primary_lease_allows(&request.call)?.is_err()
+                                {
+                                    allowed = false;
+                                    break;
+                                }
+                            }
+                            allowed
+                        }
+                        _ => false,
+                    };
                 let mut record = call_record(AgentPhase::RootSynthesis, &result, valid, None, None);
                 if !valid
                     && self.ledger().tokens_within_limit()
@@ -1071,7 +1088,12 @@ impl RunLoop<'_> {
                         deadline,
                         matches!(
                             abort_reason,
-                            Some(AbortReason::Failed | AbortReason::Cancelled)
+                            Some(
+                                AbortReason::Failed
+                                    | AbortReason::PlanAdmission
+                                    | AbortReason::ToolContextFull
+                                    | AbortReason::Cancelled
+                            )
                         ),
                         failure,
                     )

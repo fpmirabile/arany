@@ -2,9 +2,13 @@ use super::{ToolError, fs};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub(crate) const MAX_RUNTIME_GRANTS: usize = 9;
+pub(crate) const MAX_RUNTIME_GRANTS: usize = 11;
 const MAX_CANDIDATES: usize = 64;
 const MAX_DIRECTORY_ENTRIES: usize = 128;
+#[cfg(target_os = "macos")]
+const APPLE_CLT_USR: &str = "/Library/Developer/CommandLineTools/usr";
+#[cfg(target_os = "macos")]
+const APPLE_CLT_SDKS: &str = "/Library/Developer/CommandLineTools/SDKs";
 // pip follows the platform cache directory.
 #[cfg(target_os = "macos")]
 const PIP_HOST_HTTP_CACHE: &str = "Library/Caches/pip/http-v2";
@@ -32,6 +36,8 @@ pub(crate) enum RuntimeKind {
     NpmCache,
     PipHttpCache,
     PipWheelCache,
+    AppleCompiler,
+    AppleSdk,
 }
 
 impl RuntimeKind {
@@ -46,15 +52,28 @@ impl RuntimeKind {
             Self::NpmCache => "npm content cache",
             Self::PipHttpCache => "pip HTTP cache",
             Self::PipWheelCache => "pip wheel cache",
+            Self::AppleCompiler => "Command Line Tools compiler",
+            Self::AppleSdk => "macOS SDK",
         }
     }
 
     pub(crate) fn is_toolchain(self) -> bool {
-        matches!(self, Self::Rust | Self::Node | Self::Python)
+        matches!(
+            self,
+            Self::Rust | Self::Node | Self::Python | Self::AppleCompiler
+        )
     }
 
     pub(crate) fn is_cache(self) -> bool {
-        !self.is_toolchain()
+        matches!(
+            self,
+            Self::CargoCache
+                | Self::CargoSource
+                | Self::CargoIndex
+                | Self::NpmCache
+                | Self::PipHttpCache
+                | Self::PipWheelCache
+        )
     }
 
     fn token_prefix(self) -> &'static str {
@@ -68,6 +87,8 @@ impl RuntimeKind {
             Self::NpmCache => "npm-cache",
             Self::PipHttpCache => "pip-http-cache",
             Self::PipWheelCache => "pip-wheel-cache",
+            Self::AppleCompiler => "apple-compiler",
+            Self::AppleSdk => "apple-sdk",
         }
     }
 
@@ -102,6 +123,7 @@ pub(crate) enum RuntimeManager {
     Asdf,
     Pyenv,
     HostCache,
+    AppleCommandLineTools,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -129,7 +151,11 @@ impl RuntimeGrant {
         format!(
             "{} · {} · {}",
             self.kind.label(),
-            self.version.as_deref().unwrap_or("selected cache"),
+            self.version.as_deref().unwrap_or(match self.kind {
+                RuntimeKind::AppleCompiler => "selected CLT compiler",
+                RuntimeKind::AppleSdk => "selected physical SDK",
+                _ => "selected cache",
+            }),
             self.path.display()
         )
     }
@@ -166,6 +192,19 @@ impl RuntimeGrant {
         self.verify_at(&self.path)
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn apple_compiler_executables(&self) -> Result<[PathBuf; 3], ToolError> {
+        if self.kind != RuntimeKind::AppleCompiler {
+            return Err(ToolError::Configuration);
+        }
+        self.validate_shape()?;
+        Ok([
+            self.path.join("bin/cc"),
+            self.path.join("bin/clang"),
+            self.path.join("bin/ld"),
+        ])
+    }
+
     pub(crate) fn verify_at(&self, path: &Path) -> Result<(), ToolError> {
         let directory = fs::open_directory(path).map_err(|_| ToolError::ChangedInput)?;
         if fs::identity(&directory)? != (self.device, self.inode) {
@@ -192,6 +231,12 @@ impl RuntimeGrant {
     }
 
     fn matches_known_layout(&self) -> bool {
+        if matches!(
+            self.kind,
+            RuntimeKind::AppleCompiler | RuntimeKind::AppleSdk
+        ) {
+            return apple_layout_matches(self);
+        }
         if self.kind.is_cache() {
             return self.manager == RuntimeManager::HostCache
                 && self.version.is_none()
@@ -320,6 +365,8 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<Candidate>, ToolError> {
             push_candidate(&mut candidates, grant)?;
         }
     }
+    #[cfg(target_os = "macos")]
+    discover_apple_runtimes(&mut candidates)?;
     candidates.sort_by(|left, right| left.token.cmp(&right.token));
     Ok(candidates)
 }
@@ -378,6 +425,8 @@ fn has_executables(kind: RuntimeKind, path: &Path) -> bool {
         }
         RuntimeKind::Node => executable(&path.join("bin/node")),
         RuntimeKind::Python => has_python_executable(path),
+        RuntimeKind::AppleCompiler => apple_compiler_valid(path),
+        RuntimeKind::AppleSdk => apple_sdk_valid(path),
         RuntimeKind::CargoCache
         | RuntimeKind::CargoSource
         | RuntimeKind::CargoIndex
@@ -546,6 +595,216 @@ fn is_versioned_installation(kind: RuntimeKind, version: &str) -> bool {
         .iter()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
         && bytes.len() > position + 1
+}
+
+fn apple_layout_matches(grant: &RuntimeGrant) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        match grant.kind {
+            RuntimeKind::AppleCompiler => {
+                grant.manager == RuntimeManager::AppleCommandLineTools
+                    && grant.version.is_none()
+                    && grant.path == Path::new(APPLE_CLT_USR)
+            }
+            RuntimeKind::AppleSdk => {
+                grant.manager == RuntimeManager::AppleCommandLineTools
+                    && grant
+                        .version
+                        .as_deref()
+                        .is_some_and(valid_apple_sdk_version)
+                    && grant.path
+                        == Path::new(APPLE_CLT_SDKS).join(format!(
+                            "MacOSX{}.sdk",
+                            grant.version.as_deref().unwrap_or_default()
+                        ))
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = grant;
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn valid_apple_sdk_version(version: &str) -> bool {
+    if version.len() > 32 {
+        return false;
+    }
+    let parts = version.split('.').collect::<Vec<_>>();
+    (2..=3).contains(&parts.len())
+        && parts[0] != "0"
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 5
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && part
+                    .parse::<u16>()
+                    .is_ok_and(|number| number.to_string() == *part)
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn discover_apple_runtimes(candidates: &mut Vec<Candidate>) -> Result<(), ToolError> {
+    let manager = RuntimeManager::AppleCommandLineTools;
+    if let Some(grant) = admit_directory(
+        RuntimeKind::AppleCompiler,
+        manager,
+        None,
+        PathBuf::from(APPLE_CLT_USR),
+    )? && grant.verify_host().is_ok()
+    {
+        push_candidate(candidates, grant)?;
+    }
+
+    let Ok(sdks) = fs::open_directory(Path::new(APPLE_CLT_SDKS)) else {
+        return Ok(());
+    };
+    for (index, entry) in sdks.entries().map_err(|_| ToolError::Path)?.enumerate() {
+        if index >= MAX_DIRECTORY_ENTRIES {
+            return Err(ToolError::Limit);
+        }
+        let entry = entry.map_err(|_| ToolError::Path)?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(version) = name
+            .strip_prefix("MacOSX")
+            .and_then(|name| name.strip_suffix(".sdk"))
+            .filter(|version| valid_apple_sdk_version(version))
+        else {
+            continue;
+        };
+        if !sdks
+            .symlink_metadata(&name)
+            .is_ok_and(|metadata| metadata.is_dir())
+        {
+            continue;
+        }
+        let path = Path::new(APPLE_CLT_SDKS).join(&name);
+        let Some(grant) = admit_directory(
+            RuntimeKind::AppleSdk,
+            manager,
+            Some(version.to_owned()),
+            path,
+        )?
+        else {
+            continue;
+        };
+        if grant.verify_host().is_ok() {
+            push_candidate(candidates, grant)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apple_compiler_valid(root: &Path) -> bool {
+    use cap_std::fs::MetadataExt;
+
+    let directories = [
+        Path::new("/Library"),
+        Path::new("/Library/Developer"),
+        Path::new("/Library/Developer/CommandLineTools"),
+        root,
+        &root.join("bin"),
+    ];
+    if !directories.into_iter().all(system_directory) {
+        return false;
+    }
+    let Ok(bin) = fs::open_directory(&root.join("bin")) else {
+        return false;
+    };
+    if !bin
+        .read_link("cc")
+        .is_ok_and(|target| target.as_os_str() == "clang")
+    {
+        return false;
+    }
+    let Ok(link) = bin.symlink_metadata("cc") else {
+        return false;
+    };
+    if link.uid() != 0 {
+        return false;
+    }
+    let Ok(clang) = fs::open_file(&bin, "clang") else {
+        return false;
+    };
+    system_executable(clang) && fs::open_file(&bin, "ld").is_ok_and(system_executable)
+}
+
+#[cfg(target_os = "macos")]
+fn system_executable(file: std::fs::File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    file.metadata().is_ok_and(|metadata| {
+        fs::macos_system_file(
+            metadata.is_file(),
+            metadata.uid(),
+            metadata.nlink(),
+            metadata.mode(),
+        ) && metadata.mode() & 0o111 != 0
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn apple_sdk_valid(root: &Path) -> bool {
+    let sdk_root = Path::new(APPLE_CLT_SDKS);
+    let directories = [
+        Path::new("/Library"),
+        Path::new("/Library/Developer"),
+        Path::new("/Library/Developer/CommandLineTools"),
+        sdk_root,
+        root,
+        &root.join("usr"),
+        &root.join("usr/lib"),
+    ];
+    directories.into_iter().all(system_directory)
+        && system_file(root, "SDKSettings.plist")
+        && system_directory(&root.join("usr/include"))
+        && system_file(root, "usr/lib/libSystem.B.tbd")
+}
+
+#[cfg(target_os = "macos")]
+fn system_directory(path: &Path) -> bool {
+    use cap_std::fs::MetadataExt;
+
+    let Ok(directory) = crate::private_fs::macos_directory(
+        path,
+        rustix::fs::OFlags::from_bits_retain(nix::libc::O_SEARCH as _),
+    ) else {
+        return false;
+    };
+    directory.dir_metadata().is_ok_and(|metadata| {
+        metadata.is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn system_file(root: &Path, path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(directory) = fs::open_directory(root) else {
+        return false;
+    };
+    let Ok(file) = fs::open_file(&directory, path) else {
+        return false;
+    };
+    file.metadata().is_ok_and(|metadata| {
+        metadata.is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apple_compiler_valid(_root: &Path) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apple_sdk_valid(_root: &Path) -> bool {
+    false
 }
 
 fn push_candidate(candidates: &mut Vec<Candidate>, grant: RuntimeGrant) -> Result<(), ToolError> {

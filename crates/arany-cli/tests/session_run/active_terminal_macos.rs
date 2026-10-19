@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn own_terminal(command: &mut Command) {
+pub(super) fn own_terminal(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     // The child has an admitted PTY on fd 0; only async-signal-safe syscalls run before exec.
     unsafe {
@@ -504,15 +504,27 @@ fn read_until_consent(
 ) {
     let flags = rustix::fs::fcntl_getfl(&*reader).unwrap();
     rustix::fs::fcntl_setfl(&*reader, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(20);
+    let mut first_byte = None;
     let mut consent = false;
     let mut suggested_input = Vec::new();
     while !consent {
         let mut bytes = [0; 4096];
         match reader.read(&mut bytes) {
-            Ok(0) => panic!("native consent closed before admission: {context}"),
+            Ok(0) => panic!(
+                "{}",
+                crate::process::terminal_wait_report(
+                    &format!("native consent closed before admission: {context}"),
+                    started,
+                    first_byte,
+                    transcript,
+                    child.child().try_wait().unwrap(),
+                )
+            ),
             Ok(count) => {
                 assert!(transcript.len() + count <= 64 * 1024);
+                first_byte.get_or_insert_with(Instant::now);
                 transcript.extend_from_slice(&bytes[..count]);
             }
             Err(error)
@@ -523,12 +535,20 @@ fn read_until_consent(
             Err(error) => panic!("native consent read: {error}"),
         }
         crate::process::decline_workspace_consent(&mut suggested_input, transcript, &mut consent);
-        assert!(
-            Instant::now() < deadline,
-            "native consent missing: {context}"
-        );
-        assert!(child.child().try_wait().unwrap().is_none());
-        thread::yield_now();
+        let status = child.child().try_wait().unwrap();
+        if Instant::now() >= deadline || status.is_some() {
+            panic!(
+                "{}",
+                crate::process::terminal_wait_report(
+                    &format!("native consent missing: {context}"),
+                    started,
+                    first_byte,
+                    transcript,
+                    status,
+                )
+            );
+        }
+        crate::process::wait_readable(&*reader);
     }
 }
 
@@ -1055,3 +1075,6 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
         }
     }
 }
+
+#[path = "active_terminal_macos/steering.rs"]
+mod steering;

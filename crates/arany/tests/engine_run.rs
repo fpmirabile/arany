@@ -51,6 +51,144 @@ async fn next_committed(events: &mut arany::Subscription, what: &str) -> Arc<ara
 }
 use engine_support::{run_to_end, run_with};
 
+#[tokio::test]
+async fn failed_write_turn_stays_in_history_after_reopen() {
+    use arany::test_support::goals::{finish_with, replayed};
+    use std::os::unix::fs::PermissionsExt;
+
+    for known_reason in [false, true] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state_path = temp.path().join("state");
+        let engine = engine_support::open(
+            StateRoot::admit(&state_path).expect("state"),
+            EngineConfig {
+                guard_executable: Some(std::env::current_exe().expect("test executable")),
+                ..Default::default()
+            },
+        )
+        .expect("engine");
+        let config = state_path.join("tools.json");
+        std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#)
+            .expect("tool configuration");
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+            .expect("private configuration");
+        let refused_write = || {
+            tool_outcome(
+                arany::ToolCall::Write {
+                    path: "test.txt".into(),
+                    expected_digest: None,
+                    content: "hello".into(),
+                },
+                None,
+            )
+        };
+        let attempts = if known_reason { 1 } else { 3 };
+        let provider = ScriptedProvider::new(
+            (0..attempts)
+                .map(|_| refused_write())
+                .chain([finish_with(
+                    "The previous Run failed before a Tool was dispatched.",
+                )])
+                .collect(),
+        );
+        if known_reason {
+            *provider
+                .responses
+                .lock()
+                .expect("responses")
+                .front_mut()
+                .expect("first response") = Err(ProviderError::InvalidOutcomeContract);
+        }
+        let observed = provider.requests.clone();
+        let provider = Arc::new(provider);
+        let mut input = request(&workspace, "write test.txt");
+        input.include_paths.clear();
+        let first = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("failed Write Run");
+        assert_eq!(first.run.status, RunStatus::Failed);
+        assert!(first.run.tools.is_empty());
+        assert!(!workspace.join("test.txt").exists());
+        engine.close().await.expect("shutdown before follow-up");
+        let (events, view) = replayed(&state_path, first.session_id).await;
+        assert_eq!(view.runs[0], first.run);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, Event::ToolStarted { .. }))
+        );
+        let call = &view.runs[0].agents[0].provider_calls[0];
+        assert_eq!(call.disposition, ProviderCallDisposition::InvalidResponse);
+        assert_eq!(
+            call.failure_reason,
+            Some(if known_reason {
+                arany::ProviderFailureReason::OutcomeContract
+            } else {
+                arany::ProviderFailureReason::ProposalRefused
+            })
+        );
+
+        let engine = engine_support::open(
+            StateRoot::open_existing(&state_path).expect("state"),
+            EngineConfig::default(),
+        )
+        .expect("reopened Engine");
+        let mut follow_up = request(&workspace, "why couldn't you write it?");
+        follow_up.include_paths.clear();
+        follow_up.session_id = Some(first.session_id);
+        follow_up.title = None;
+        let second = run_to_end(&engine, &provider, follow_up)
+            .await
+            .expect("follow-up");
+        assert_eq!(second.run.status, RunStatus::Finished);
+        engine.close().await.expect("shutdown");
+        let (_, view) = replayed(&state_path, first.session_id).await;
+        assert_eq!(view.runs[1], second.run);
+        let requests = observed.lock().expect("requests");
+        assert_eq!(requests.len(), attempts + 1);
+        assert!(provider.responses.lock().expect("responses").is_empty());
+        let follow_up_request = &requests[attempts];
+        assert_eq!(
+            follow_up_request.input.objective,
+            "why couldn't you write it?"
+        );
+        let [history] = follow_up_request.input.history.as_slice() else {
+            panic!("one failed turn retained")
+        };
+        assert_eq!(history.user, "write test.txt");
+        let fact: serde_json::Value =
+            serde_json::from_str(&history.assistant).expect("typed history fact");
+        assert_eq!(
+            fact,
+            serde_json::json!({
+                "status": "failed",
+                "fact": "Run failed before any primary model Tool",
+                "failure": if known_reason { "provider_call" } else { "refusal_limit" },
+                "primary_model_tool_execution": "nothing dispatched",
+                "last_call": if known_reason {
+                    serde_json::json!({"disposition": "invalid_response", "failure_reason": "outcome_contract", "refusal": null})
+                } else {
+                    serde_json::json!({"disposition": "invalid_response", "failure_reason": "proposal_refused", "refusal": {"operation": "arany_write", "cause": "plan_missing"}})
+                },
+            })
+        );
+        assert_eq!(
+            second.run.config.as_ref().expect("config").history_run_ids,
+            [first.run.id]
+        );
+    }
+}
+
 #[test]
 fn account_path_uses_the_private_binary_fixture() {
     let root = arany::test_support::isolate_account_root();
@@ -1050,10 +1188,16 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
             .expect("accepted objective");
         store.close().await.expect("store shutdown");
 
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "finished".into(),
-            result: "Finished answer".into(),
-        })])
+        let provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Finish(Finish {
+                summary: "finished".into(),
+                result: "Finished answer".into(),
+            }),
+            ProviderOutcome::Finish(Finish {
+                summary: "follow-up".into(),
+                result: "Follow-up answer".into(),
+            }),
+        ])
         .with_compactions(vec![Ok(CompactionResponse {
             summary: "Unfinished then finished".into(),
             response_id: None,
@@ -1065,6 +1209,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
             wire_provenance: None,
         })]);
         let compact_requests = Arc::clone(&provider.compact_requests);
+        let observed = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
         let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("state readmission"),
@@ -1097,9 +1242,24 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
             ));
         }
         let fork_id = engine
-            .fork_session(session_id, workspace, None)
+            .fork_session(session_id, workspace.clone(), None)
             .await
             .expect("fork after interruption");
+        let mut follow_up = request(&workspace, "Question after compaction");
+        follow_up.session_id = Some(session_id);
+        follow_up.title = None;
+        run_to_end(&engine, &provider, follow_up)
+            .await
+            .expect("Run after compaction");
+        {
+            let requests = observed.lock().expect("request lock");
+            assert_eq!(requests.len(), 2);
+            assert_eq!(
+                requests[1].input.context_summary.as_deref(),
+                Some("Unfinished then finished")
+            );
+            assert!(requests[1].input.history.is_empty());
+        }
         engine.close().await.expect("engine shutdown");
         let store = Store::open(StateRoot::admit(&state_path).expect("state readmission"))
             .expect("reopened store");
