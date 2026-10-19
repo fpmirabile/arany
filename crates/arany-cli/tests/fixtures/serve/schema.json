@@ -2021,6 +2021,16 @@
         },
         "status": {
           "$ref": "#/$defs/TurnStatus"
+        },
+        "stopReason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnStopReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -2163,6 +2173,13 @@
         "turnId"
       ],
       "type": "object"
+    },
+    "TurnStopReason": {
+      "enum": [
+        "actionBudgetExhausted",
+        "tokenBudgetExhausted"
+      ],
+      "type": "string"
     },
     "UserInput": {
       "oneOf": [

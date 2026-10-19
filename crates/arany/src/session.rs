@@ -54,7 +54,7 @@ pub use reducer::{
 };
 pub(crate) use reducer::{
     ForkInheritance, coordination_ready, criterion_unmet_in_view, evidence_admitted,
-    private_criterion_evidence, verification_passed, wave_settled,
+    private_criterion_evidence, private_failure, verification_passed, wave_settled,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

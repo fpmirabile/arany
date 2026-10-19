@@ -759,6 +759,7 @@ async fn complete(
             goal.stopped = stopped.clone();
         }
         if !finalizing {
+            summary.stop_reason = None;
             summary.goal = Some(GoalSummary {
                 status: if matches!(
                     run.status,

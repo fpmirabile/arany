@@ -498,9 +498,22 @@ fn validate_request(
             .iter()
             .any(|op| policy.parent_grant.tools.contains(op) && definition.allows_worker_tool(*op))
         || match &request.criterion {
-            GoalSuccessCriterion::ToolCallSucceeded { call } => !plan.allows_call(call),
+            GoalSuccessCriterion::ToolCallSucceeded { call } => {
+                !plan.allows_call(call)
+                    || matches!(call.as_ref(), ToolCall::Mkdir { .. })
+                    || !policy
+                        .parent_grant
+                        .clone()
+                        .narrowed_for_editor(request, &plan.commands, |tool| {
+                            definition.allows_worker_tool(tool)
+                        })
+                        .allows(call)
+                    || matches!(call.as_ref(), ToolCall::Command { program, .. } if !request.commands.contains(program))
+            }
             GoalSuccessCriterion::WorkspaceFileContent { path, .. }
-            | GoalSuccessCriterion::WorkspaceFileDigest { path, .. } => !within(path, &plan.paths),
+            | GoalSuccessCriterion::WorkspaceFileDigest { path, .. } => {
+                !within(path, &plan.paths) || !within(path, &request.lease)
+            }
         }
     {
         return Err(ReplayError::InvalidTransition);
@@ -708,9 +721,9 @@ pub(super) fn child_tool_admissible(
         || !quiescent(run)
         || intent.policy_digest != w.pins.policy_digest
         || a.status != AgentStatus::Active
-        || a.tools.iter().any(|t| {
-            t.intent.id == intent.id || t.observation.as_ref().is_some_and(private_failure)
-        })
+        || a.tools
+            .iter()
+            .any(|t| t.intent.id == intent.id || private_failure(t))
     {
         return false;
     }
@@ -923,9 +936,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                     c.failure_reason
                         == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
                 })
-            || a.tools
-                .iter()
-                .any(|t| t.observation.as_ref().is_some_and(private_failure))
+            || a.tools.iter().any(private_failure)
             || !reviewing
                 && !matches!(event, Event::ProviderCallRecorded { .. })
                 && a.provider_calls
@@ -957,8 +968,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                 .max_tools;
             if record.failure_reason
                 == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
-                && (!criterion_gated(&w_criterion(run, *agent_run_id)?)
-                    || !private_criterion_evidence(run, *agent_run_id)?.is_empty())
+                && !private_criterion_evidence(run, *agent_run_id)?.is_empty()
             {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -1039,7 +1049,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                 {
                     return Err(ReplayError::InvalidTransition);
                 }
-                if let Ok(result) = serde_json::from_str::<WorkerCommandResult>(&o.output) {
+                if let Some(result) = WorkerCommandResult::parse(&o.output) {
                     if let PrivateCapture::Sealed { data } = result.private_capture {
                         let w = worker(run, *agent_run_id)?;
                         let used: u64 = run
@@ -1190,9 +1200,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                     o.disposition,
                     WorkerDisposition::Ready | WorkerDisposition::NoChange
                 ) {
-                    if criterion_gated(&w_criterion(run, *agent_run_id)?)
-                        && private_criterion_evidence(run, *agent_run_id)?.is_empty()
-                    {
+                    if private_criterion_evidence(run, *agent_run_id)?.is_empty() {
                         return Err(ReplayError::InvalidTransition);
                     }
                     let data = o.data.as_ref().ok_or(ReplayError::InvalidTransition)?;
@@ -1811,27 +1819,22 @@ fn valid_discard(run: &RunView, w: &WorkerView, d: &WorkerSettlement) -> bool {
     }
 }
 
-fn private_failure(o: &crate::tools::ToolObservation) -> bool {
+pub(crate) fn private_failure(t: &ToolView) -> bool {
+    let Some(o) = t.observation.as_ref() else {
+        return false;
+    };
     o.disposition != ToolDisposition::Succeeded
         && !(matches!(o.intent.call, ToolCall::Command { .. })
             && !matches!(
                 o.disposition,
                 ToolDisposition::Uncertain | ToolDisposition::Cancelled
             )
-            && o.cache_update != crate::tools::CacheUpdate::Uncertain)
-}
-
-// Command criteria are verified by the primary after integration until worker commands execute.
-pub(crate) fn criterion_gated(criterion: &GoalSuccessCriterion) -> bool {
-    !matches!(criterion, GoalSuccessCriterion::ToolCallSucceeded { call } if matches!(call.as_ref(), ToolCall::Command { .. }))
+            && o.cache_update != crate::tools::CacheUpdate::Uncertain
+            && (o.disposition != ToolDisposition::Denied || t.permission_verdict.is_some()))
 }
 
 pub(crate) fn criterion_unmet_in_view(run: &RunView, id: AgentRunId) -> Result<bool, ReplayError> {
-    Ok(criterion_gated(&w_criterion(run, id)?) && private_criterion_evidence(run, id)?.is_empty())
-}
-
-fn w_criterion(run: &RunView, id: AgentRunId) -> Result<GoalSuccessCriterion, ReplayError> {
-    Ok(worker(run, id)?.pins.request.criterion.clone())
+    Ok(private_criterion_evidence(run, id)?.is_empty())
 }
 
 pub(crate) fn private_criterion_evidence(
@@ -1874,7 +1877,7 @@ pub(crate) fn private_criterion_evidence(
             let passed = match &w.pins.request.criterion {
                 GoalSuccessCriterion::ToolCallSucceeded { call } if o.intent.call == **call => {
                     if matches!(o.intent.call, ToolCall::Command { .. }) {
-                        serde_json::from_str::<WorkerCommandResult>(&o.output).is_ok_and(|r| {
+                        WorkerCommandResult::parse(&o.output).is_some_and(|r| {
                             r.exit_code == Some(0)
                                 && !matches!(r.private_capture, PrivateCapture::Rejected { .. })
                         })
@@ -1911,6 +1914,11 @@ fn private_file_digest(
     path: &str,
 ) -> Option<String> {
     if matches!(&o.intent.call, ToolCall::PrepareWorker { preparation } if preparation.purpose == WorkerDataPurpose::Handover)
+        || matches!(o.attestation, Some(Attestation::WorkerMutation { .. }))
+        || matches!(o.attestation, Some(Attestation::WorkerCommand { .. }))
+            && WorkerCommandResult::parse(&o.output).is_some_and(|r| {
+                r.exit_code == Some(0) && matches!(r.private_capture, PrivateCapture::Sealed { .. })
+            })
     {
         let version = w
             .overlay

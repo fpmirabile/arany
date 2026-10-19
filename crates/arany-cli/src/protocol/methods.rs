@@ -549,11 +549,20 @@ pub struct Turn {
     #[schemars(with = "String")]
     pub goal_id: GoalId,
     pub status: TurnStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<TurnStopReason>,
     pub items: Vec<Item>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<TurnError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalSummary>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum TurnStopReason {
+    ActionBudgetExhausted,
+    TokenBudgetExhausted,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]

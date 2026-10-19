@@ -256,18 +256,12 @@ pub(crate) struct View {
     enforcement_digest: [u8; 32],
     process_enforcement_digest: [u8; 32],
     last_intent_digest: Option<[u8; 32]>,
+    last_enforcement_digest: Option<[u8; 32]>,
     sealed: Option<WorkerDataRef>,
     cache_lease: Option<crate::store::BuildCacheLease>,
     cache_generation: Option<[u8; 32]>,
 }
 
-#[cfg_attr(
-    not(any(test, feature = "test-support")),
-    expect(
-        dead_code,
-        reason = "Internal private-target entry points precede model editor admission"
-    )
-)]
 impl View {
     pub(crate) fn capture(
         runtime: &ToolRuntime,
@@ -332,6 +326,7 @@ impl View {
             enforcement_digest: runtime.enforcement_digest,
             process_enforcement_digest: runtime.process_enforcement_digest,
             last_intent_digest: None,
+            last_enforcement_digest: None,
             sealed: None,
             cache_lease: None,
             cache_generation: None,
@@ -352,6 +347,7 @@ impl View {
 
     pub(crate) fn note_intent(&mut self, intent: &EffectIntent) {
         self.last_intent_digest = Some(intent.digest());
+        self.last_enforcement_digest = Some(intent.enforcement_digest);
     }
 
     pub(crate) fn reusable_data(&self, bytes: &[u8]) -> Option<WorkerDataRef> {
@@ -365,10 +361,12 @@ impl View {
         serde_json::to_vec(&self.base.manifest()).map_err(|_| ToolError::Operation)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn run_id(&self) -> crate::session::RunId {
         self.run_id
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn assignment(&self) -> AgentRunId {
         self.assignment
     }
@@ -560,7 +558,7 @@ impl View {
         });
         let mut private = runtime.clone();
         private.worker = Some(action.clone());
-        self.last_intent_digest = Some(intent.digest());
+        self.note_intent(&intent);
         self.pending = Some(intent.id);
         let result = super::guard::execute(&private, &intent, cancellation).await;
         self.receive(intent, &action, result)
@@ -773,7 +771,9 @@ impl View {
             assignment_id: self.assignment,
             base_digest: self.base_digest,
             revision: self.revision,
-            enforcement_digest: self.enforcement_digest,
+            enforcement_digest: self
+                .last_enforcement_digest
+                .unwrap_or(self.enforcement_digest),
             last_intent_digest: self.last_intent_digest,
         })
     }
@@ -786,13 +786,6 @@ pub(crate) struct Candidate {
     target: EffectTarget,
 }
 
-#[cfg_attr(
-    not(any(test, feature = "test-support")),
-    expect(
-        dead_code,
-        reason = "Internal data producer precedes Engine editor admission"
-    )
-)]
 impl Candidate {
     pub(crate) fn observation(&self, data: &WorkerDataRef) -> Result<ToolObservation, ToolError> {
         if data.assignment_id != self.observation.intent.agent_run_id
@@ -853,6 +846,7 @@ impl Candidate {
         Ok(observation)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn chunks(&self) -> impl Iterator<Item = WorkerDataChunk> + '_ {
         use base64::Engine as _;
         self.data
@@ -1569,7 +1563,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_target_command_protocol_remains_explicitly_refused() {
+    async fn private_command_requires_an_admitted_image() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = runtime(temp.path());
         let mut intent = runtime.intent(
@@ -1590,7 +1584,7 @@ mod tests {
         let observation = runtime.execute(intent, Cancellation::new()).await;
         assert_eq!(observation.disposition, ToolDisposition::Denied);
         assert!(observation.attestation.is_none());
-        assert!(observation.output == crate::tools::WORKER_COMMANDS_REFUSED);
+        assert!(observation.output == crate::tools::PRIVATE_IMAGE_REQUIRED);
         assert!(observation.valid());
     }
 
@@ -2115,6 +2109,24 @@ mod tests {
                 .expect(case);
             assert_eq!(retried.disposition, ToolDisposition::Denied, "{case}");
         }
+    }
+
+    #[test]
+    fn cleanup_binds_the_enforcement_of_the_last_intent_class() {
+        let (_dir, runtime, mut view) = fixture();
+        view.process_enforcement_digest = [9; 32];
+        let command = ToolCall::Command {
+            program: "sh".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        };
+        let mut intent = intent(&runtime, &view, command);
+        intent.enforcement_digest = view.process_enforcement_digest;
+        assert_ne!(view.enforcement_digest, view.process_enforcement_digest);
+        view.note_intent(&intent);
+        let cleanup = view.dispose().unwrap();
+        assert_eq!(cleanup.enforcement_digest, intent.enforcement_digest);
+        assert_eq!(cleanup.last_intent_digest, Some(intent.digest()));
     }
 
     #[test]

@@ -779,13 +779,21 @@ impl ToolRuntime {
         self.config.skills.iter().map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect()
     }
 
+    fn command_rows(&self, names: Option<&[String]>) -> Vec<serde_json::Value> {
+        self.config.commands.iter()
+            .filter(|p| names.is_none_or(|names| names.contains(&p.name)))
+            .map(|program| serde_json::json!({"name":program.name,"interpreter":program.interpreter,
+                "inputs":program.inputs.iter().map(|input| format!("/inputs/{}/{}", program.name, input.destination)).collect::<Vec<_>>()}))
+            .collect()
+    }
+
     pub(crate) fn context(&self) -> Result<ToolContext, ToolError> {
         let catalog = serde_json::json!({
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": self.config.write,
             "file_tools": catalog::FILE_TOOLS,
-            "commands": self.config.commands.iter().map(|program| serde_json::json!({"name":program.name,"interpreter":program.interpreter,"inputs":program.inputs.iter().map(|input| format!("/inputs/{}/{}", program.name, input.destination)).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+            "commands": self.command_rows(None),
             "command_contract": catalog::COMMAND_CONTRACT,
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
@@ -865,15 +873,23 @@ impl ToolRuntime {
         catalog["skills"] = serde_json::json!([]);
         catalog["mcp_servers"] = serde_json::json!([]);
         catalog["file_tools"] = serde_json::json!(catalog::FILE_TOOLS);
+        catalog["commands"] = serde_json::json!(self.command_rows(Some(&grant.commands)));
+        if !grant.commands.is_empty() {
+            catalog["command_contract"] = serde_json::json!(catalog::WORKER_COMMAND_CONTRACT);
+        }
         catalog["operations"] = serde_json::json!(
             grant
                 .tools
                 .iter()
-                .filter(|tool| **tool != crate::worker::WorkerTool::Command)
+                .filter(|tool| **tool != crate::worker::WorkerTool::Command
+                    || !grant.commands.is_empty())
                 .map(|tool| tool.label())
                 .collect::<Vec<_>>()
         );
         context.catalog = catalog.to_string();
+        if context.catalog.len() > types::MAX_TOOL_CATALOG_BYTES {
+            return Err(ToolError::Limit);
+        }
         Ok(context)
     }
 
@@ -968,7 +984,7 @@ impl ToolRuntime {
                 enforcement_cause: None,
                 intent,
                 disposition: ToolDisposition::Denied,
-                output: crate::tools::WORKER_COMMANDS_REFUSED.into(),
+                output: crate::tools::PRIVATE_IMAGE_REQUIRED.into(),
                 attestation: None,
                 cache_update: CacheUpdate::NotApplicable,
             };
@@ -1157,8 +1173,8 @@ struct InProcessReads {
     slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
-pub(crate) const WORKER_COMMANDS_REFUSED: &str =
-    "Worker commands are not available yet; no operation was dispatched";
+pub(crate) const PRIVATE_IMAGE_REQUIRED: &str =
+    "Worker commands require an admitted private image; no operation was dispatched";
 const MAX_IN_PROCESS_READS: usize = 16;
 static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| {

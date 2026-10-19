@@ -61,6 +61,8 @@ struct Active {
     incomplete: bool,
     close: Option<RequestId>,
     close_task: Option<tokio::task::AbortHandle>,
+    watch_plan: bool,
+    plan: Option<(u64, Value)>,
 }
 
 enum Pending {
@@ -82,6 +84,10 @@ enum Pending {
     Start,
     Interrupt,
     Recover,
+    Watch {
+        session: SessionId,
+        run: RunId,
+    },
 }
 
 fn parse<T: DeserializeOwned>(value: Option<Value>) -> Result<T, ()> {
@@ -222,7 +228,7 @@ pub(super) async fn input(
                 "Initialize first",
                 "notInitialized",
             ))
-        } else if state.pending.len() >= 62 {
+        } else if state.pending.len() >= 61 {
             Some(wire::error(Some(id.clone()), -32600, "Server busy", "busy"))
         } else {
             None
@@ -245,9 +251,7 @@ pub(super) async fn input(
                 "initialize",
                 InitializeParams {
                     client_info: client,
-                    capabilities: Some(ClientCapabilities {
-                        opt_out_notification_methods: Some(vec!["events/committed".into()]),
-                    }),
+                    capabilities: None,
                 },
                 Pending::Initialize(id),
             )
@@ -527,6 +531,8 @@ pub(super) async fn input(
                         incomplete: false,
                         close: None,
                         close_task: None,
+                        watch_plan: config.tools,
+                        plan: None,
                     });
                     None
                 }
@@ -760,6 +766,60 @@ pub(super) async fn output(
                             )
                             .await?;
                         }
+                        let watch = {
+                            let state = state.lock().expect("translator state");
+                            state.active.as_ref().filter(|a| a.watch_plan).map(|a| {
+                                (
+                                    a.session,
+                                    result.turn.id,
+                                    state.sessions.get(&a.session).map_or(0, |s| s.sequence),
+                                )
+                            })
+                        };
+                        if let Some((session, run, since)) = watch.filter(|_| !*stopping.borrow()) {
+                            send_request(
+                                &state,
+                                &serve,
+                                "events/subscribe",
+                                EventsSubscribeParams {
+                                    thread_id: session,
+                                    since,
+                                },
+                                Pending::Watch { session, run },
+                            )
+                            .await?;
+                        }
+                    }
+                    Some(Pending::Watch { session, run }) => {
+                        if !state
+                            .lock()
+                            .expect("translator state")
+                            .active
+                            .as_ref()
+                            .is_some_and(|a| a.session == session && a.turn == Some(run))
+                        {
+                            continue;
+                        }
+                        let page: EventsSubscribeResult = serde_json::from_value(reply.result)
+                            .map_err(|_| "invalid serve events")?;
+                        for event in &page.events {
+                            if let Some(update) = project_plan(&state, session, event)? {
+                                emit(&outbound, update).await?;
+                            }
+                        }
+                        if let Some(since) = page.next_since.filter(|_| !*stopping.borrow()) {
+                            send_request(
+                                &state,
+                                &serve,
+                                "events/subscribe",
+                                EventsSubscribeParams {
+                                    thread_id: session,
+                                    since,
+                                },
+                                Pending::Watch { session, run },
+                            )
+                            .await?;
+                        }
                     }
                     Some(Pending::Recover) => {
                         let page: EventsSubscribeResult = serde_json::from_value(reply.result)
@@ -773,6 +833,9 @@ pub(super) async fn output(
                             continue;
                         };
                         for event in &page.events {
+                            if let Some(update) = project_plan(&state, session, event)? {
+                                emit(&outbound, update).await?;
+                            }
                             if event.run_id.as_deref() != Some(run.to_string().as_str()) {
                                 continue;
                             }
@@ -798,11 +861,13 @@ pub(super) async fn output(
                                     ))
                                 }
                                 "ToolFinished" => {
+                                    let mut payload = event.payload.clone();
+                                    if let Some(fields) = payload.as_object_mut() {
+                                        fields.remove("checkpoint");
+                                    }
                                     let observation: arany::ToolObservation =
-                                        serde_json::from_value(
-                                            event.payload["observation"].clone(),
-                                        )
-                                        .map_err(|_| "invalid committed Tool observation")?;
+                                        serde_json::from_value(payload)
+                                            .map_err(|_| "invalid committed Tool observation")?;
                                     Some((
                                         crate::cli::serve::items::tool_item(
                                             &observation.intent,
@@ -901,6 +966,14 @@ pub(super) async fn output(
                             finish(&state, &serve, &outbound, prompt, true).await?;
                         }
                     }
+                    Some(Pending::Watch { session, run }) => {
+                        if let Some(active) = &mut state.lock().expect("translator state").active
+                            && active.session == session
+                            && active.turn == Some(run)
+                        {
+                            active.resync = true;
+                        }
+                    }
                     _ => (),
                 }
             }
@@ -948,7 +1021,8 @@ pub(super) async fn output(
                         && active.session == result.thread_id
                         && active.turn == Some(result.turn.id)
                     {
-                        let recover = active.resync
+                        let recover = active.watch_plan
+                            || active.resync
                             || (!active.answered && result.turn.status == TurnStatus::Completed);
                         active.completion = Some(result.turn);
                         let prompt = active.generation;
@@ -990,6 +1064,14 @@ pub(super) async fn output(
             Message::Notification(note) if note.method == "events/resync" => {
                 if let Some(active) = &mut state.lock().expect("translator state").active {
                     active.resync = true;
+                }
+            }
+            Message::Notification(note) if note.method == "events/committed" => {
+                let params: EventsCommittedNotification =
+                    serde_json::from_value(note.params.unwrap_or(Value::Null))
+                        .map_err(|_| "invalid serve event")?;
+                if let Some(update) = project_plan(&state, params.thread_id, &params.event)? {
+                    emit(&outbound, update).await?;
                 }
             }
             Message::Notification(note) if note.method == "$/cancel_request" => {
@@ -1039,6 +1121,52 @@ async fn recover(
         Err(_) if serve.is_closed() => finish(state, serve, outbound, prompt, true).await,
         result => result,
     }
+}
+
+fn project_plan(
+    state: &Shared,
+    session: SessionId,
+    event: &arany_cli::protocol::EventLine,
+) -> Result<Option<Value>, String> {
+    if event.kind != "GoalPlanContractRecorded" {
+        return Ok(None);
+    }
+    let mut state = state.lock().expect("translator state");
+    let Some(active) = state.active.as_mut().filter(|a| {
+        a.session == session
+            && a.turn
+                .is_some_and(|run| event.run_id.as_deref() == Some(run.to_string().as_str()))
+            && a.plan
+                .as_ref()
+                .is_none_or(|(sequence, _)| event.sequence > *sequence)
+    }) else {
+        return Ok(None);
+    };
+    let contract: arany::GoalPlanContract =
+        serde_json::from_value(event.payload["contract"].clone())
+            .map_err(|_| "invalid committed Goal plan")?;
+    let criterion = match &contract.success_criterion {
+        arany::GoalSuccessCriterion::ToolCallSucceeded { call } => {
+            format!(
+                "Verify successful planned Tool: {}",
+                serde_json::to_string(call).expect("Tool call")
+            )
+        }
+        arany::GoalSuccessCriterion::WorkspaceFileDigest { path, sha256 } => {
+            format!("Verify file {path} has SHA-256 {sha256}")
+        }
+        arany::GoalSuccessCriterion::WorkspaceFileContent { path, .. } => {
+            format!("Verify file {path} has the exact planned content")
+        }
+    };
+    let plan = json!({"jsonrpc":"2.0","method":"session/update","params":{
+        "sessionId":session,"update":{"sessionUpdate":"plan","entries":[
+            {"content":tools::bounded(&contract.mission, 2048, session),"priority":"medium","status":"in_progress"},
+            {"content":tools::bounded(&criterion, 2048, session),"priority":"medium","status":"pending"}
+        ]}
+    }});
+    active.plan = Some((event.sequence, plan.clone()));
+    Ok(Some(plan))
 }
 
 async fn emit_answer(outbound: &mpsc::Sender<Value>, mut answer: Value) -> Result<(), String> {
@@ -1149,6 +1277,24 @@ async fn finish(
         task.abort();
     }
     let turn = active.completion.ok_or("no committed turn completion")?;
+    if let Some((_, mut plan)) = active.plan {
+        let status = if turn
+            .goal
+            .as_ref()
+            .is_some_and(|g| g.status == GoalStatus::Completed)
+        {
+            "completed"
+        } else {
+            "pending"
+        };
+        for entry in plan["params"]["update"]["entries"]
+            .as_array_mut()
+            .expect("plan entries")
+        {
+            entry["status"] = json!(status);
+        }
+        emit(output, plan).await?;
+    }
     let incomplete = incomplete
         || active.incomplete
         || (turn.status == TurnStatus::Completed && !active.answered);
@@ -1165,13 +1311,19 @@ async fn finish(
             .is_some_and(|g| g.status == GoalStatus::Completed && g.stopped.is_none())
     {
         wire::response(active.id, json!({"stopReason":"end_turn"}))
+    } else if active.uncertain == 0
+        && let Some(reason) = turn.stop_reason
+    {
+        wire::response(
+            active.id,
+            json!({"stopReason": match reason {
+                TurnStopReason::ActionBudgetExhausted => "max_turn_requests",
+                TurnStopReason::TokenBudgetExhausted => "max_tokens",
+            }}),
+        )
     } else {
         let reason = if active.uncertain > 0 {
             "effectUncertain"
-        } else if turn.goal.as_ref().and_then(|g| g.stopped.as_deref())
-            == Some(arany::EngineError::GoalBudgetExhausted.to_string().as_str())
-        {
-            "goalBudgetExhausted"
         } else if turn.status == TurnStatus::Interrupted {
             "stoppedByHook"
         } else {

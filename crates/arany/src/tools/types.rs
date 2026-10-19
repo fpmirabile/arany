@@ -896,7 +896,8 @@ pub(crate) fn qualifying_guard_failure<'a>(
         })
         .last()
         .filter(|observation| {
-            observation.disposition == ToolDisposition::Failed
+            observation.intent.target == crate::worker::EffectTarget::Workspace
+                && observation.disposition == ToolDisposition::Failed
                 && observation.enforcement_cause != Some(EnforcementCause::FilesystemDenied)
                 && matches!(&observation.attestation,
                     Some(attestation @ Attestation::Guard(_)) if attestation.valid_for(&observation.intent))
@@ -927,7 +928,8 @@ pub(crate) fn qualifying_hook_failure<'a>(
         matches!(&observation.intent.call, ToolCall::Command { program: p, args: a, cwd: c }
             if p == program && a == args && c == cwd)
     }).last().filter(|observation| {
-        observation.valid() && !observation.stops_run() && match observation.enforcement_cause {
+        observation.intent.target == crate::worker::EffectTarget::Workspace
+            && observation.valid() && !observation.stops_run() && match observation.enforcement_cause {
             Some(EnforcementCause::GuardBootstrap) => true,
             Some(_) => matches!(&observation.attestation,
                 Some(attestation @ Attestation::Guard(_)) if attestation.valid_for(&observation.intent)),
@@ -1554,6 +1556,25 @@ mod unguarded_vocabulary_tests {
             qualifying_guard_failure(call, observations.iter()).is_some()
         };
         assert!(qualifies(&call, std::slice::from_ref(&failed)));
+
+        let mut private = failed.clone();
+        private.intent.target = crate::worker::EffectTarget::WorkerView {
+            assignment_id: private.intent.agent_run_id,
+            base_digest: [1; 32],
+            revision: 0,
+            cache_generation: None,
+        };
+        private.attestation = Some(Attestation::WorkerCommand {
+            receipt: Attestation::for_site(&private.intent)
+                .guard()
+                .unwrap()
+                .clone(),
+        });
+        assert!(!qualifies(&call, std::slice::from_ref(&private)));
+        private.attestation = None;
+        private.enforcement_cause = Some(EnforcementCause::GuardBootstrap);
+        assert!(private.valid());
+        assert!(qualifying_hook_failure(&call, std::iter::once(&private)).is_none());
 
         let one_byte_off = guarded(
             command(&["-c", "exit 8"], ""),

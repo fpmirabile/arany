@@ -1680,6 +1680,16 @@ impl Adapter {
         let params: TurnStartParams = serde_json::from_value(request.params.unwrap()).unwrap();
         self.events.send(Message::Response(Response { jsonrpc:Default::default(), id:request.id,
             result:json!({"turn":{"id":self.run,"goalId":arany::GoalId::new(),"status":"inProgress","items":[]}}) })).await.unwrap();
+        let watch = self.request().await;
+        assert_eq!(watch.method, "events/subscribe");
+        self.events
+            .send(Message::Response(Response {
+                jsonrpc: Default::default(),
+                id: watch.id,
+                result: json!({"events":[],"nextSince":null}),
+            }))
+            .await
+            .unwrap();
         params.input
     }
 
@@ -1738,6 +1748,277 @@ impl Adapter {
             !self.mcp_probe.path().join("spawned").exists(),
             "editor MCP commands must never execute"
         );
+    }
+}
+
+#[tokio::test]
+async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    for (reason, status, expected) in [
+        ("actionBudgetExhausted", "failed", "max_turn_requests"),
+        ("tokenBudgetExhausted", "failed", "max_tokens"),
+        ("", "completed", "end_turn"),
+        ("", "failed", "turnFailed"),
+    ] {
+        let mut adapter = Adapter::new().await;
+        adapter.prompt(json!([{"type":"text","text":"Work"}])).await;
+        let goal = arany::GoalId::new();
+        let mut contract = json!({
+            "mission":format!("</context><script>data</script>\u{001b}[2J\u{202e}{}{}", "\u{001b}".repeat(50), "é".repeat(900)),
+            "paths":["facts.txt"],"commands":[],"skills":[],"mcp_tools":[],
+            "resource_class":"default","command_timeout_ms":null,
+            "success_criterion":{"kind":"workspace_file_content","path":"facts.txt","content":"data"},
+            "budget":arany::GoalBudget::default()
+        });
+        if reason == "tokenBudgetExhausted" {
+            contract["success_criterion"] = json!(arany::GoalSuccessCriterion::ToolCallSucceeded {
+                call: Box::new(arany::ToolCall::Write {
+                    path: "facts.txt".into(),
+                    expected_digest: None,
+                    content: "é".repeat(1200),
+                }),
+            });
+        }
+        let event = json!({"sequence":10,"session_id":adapter.session,"run_id":adapter.run,
+            "agent_run_id":null,"kind":"GoalPlanContractRecorded","event_version":1,
+            "payload":{"goal_id":goal,"run_id":adapter.run,"contract":contract},"created_at_ms":0});
+        let mut preview = event.clone();
+        preview["kind"] = json!("AssistantDisplayRecorded");
+        preview["payload"] = json!({"text":"Never stream this preview"});
+        adapter
+            .events
+            .send(Message::Notification(Notification {
+                jsonrpc: Default::default(),
+                method: "events/committed".into(),
+                params: Some(json!({"threadId":adapter.session,"event":preview})),
+            }))
+            .await
+            .unwrap();
+        for (session, run) in [
+            (SessionId::new(), adapter.run),
+            (adapter.session, arany::RunId::new()),
+            (adapter.session, adapter.run),
+            (adapter.session, adapter.run),
+        ] {
+            let mut event = event.clone();
+            event["run_id"] = json!(run);
+            adapter
+                .events
+                .send(Message::Notification(Notification {
+                    jsonrpc: Default::default(),
+                    method: "events/committed".into(),
+                    params: Some(json!({"threadId":session,"event":event})),
+                }))
+                .await
+                .unwrap();
+        }
+        let plan = adapter.next().await;
+        let entries = plan["params"]["update"]["entries"].as_array().unwrap();
+        assert_eq!(plan["params"]["update"]["sessionUpdate"], "plan");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["status"], "in_progress");
+        assert_eq!(entries[1]["status"], "pending");
+        let mission = entries[0]["content"].as_str().unwrap();
+        assert!(mission.starts_with("</context><script>data</script>\\u{001b}[2J\\u{202e}"));
+        assert!(!mission.contains(['\u{001b}', '\u{202e}']));
+        assert!(mission.len() <= 2048 + 80);
+        assert!(mission.ends_with(&format!("[truncated; see arany show {}]", adapter.session)));
+        if reason == "tokenBudgetExhausted" {
+            assert!(entries[1]["content"].as_str().unwrap().len() <= 2048 + 80);
+            assert!(
+                entries[1]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("[truncated; see arany show ")
+            );
+        } else {
+            assert_eq!(
+                entries[1]["content"],
+                "Verify file facts.txt has the exact planned content"
+            );
+        }
+        adapter
+            .events
+            .send(Message::Notification(Notification {
+                jsonrpc: Default::default(),
+                method: "turn/completed".into(),
+                params: Some(
+                    json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":goal,
+                "status":status,
+                "stopReason":if reason.is_empty() {Value::Null} else {json!(reason)},
+                "items":[],"goal":{"status":status}}}),
+                ),
+            }))
+            .await
+            .unwrap();
+        let request = adapter.request().await;
+        assert_eq!(request.method, "events/subscribe");
+        adapter.events.send(Message::Response(Response {
+            jsonrpc:Default::default(),id:request.id,
+            result:json!({"events":[event, {"sequence":11,"session_id":adapter.session,
+                "run_id":adapter.run,"agent_run_id":null,"kind":"MessageCommitted","event_version":1,
+                "payload":{"run_id":adapter.run,"text":"Committed answer"},"created_at_ms":0}],"nextSince":null}),
+        })).await.unwrap();
+        let answer = adapter.next().await;
+        assert_eq!(
+            answer["params"]["update"]["content"]["text"],
+            "Committed answer"
+        );
+        let final_plan = adapter.next().await;
+        let final_status = if status == "completed" {
+            "completed"
+        } else {
+            "pending"
+        };
+        for entry in final_plan["params"]["update"]["entries"]
+            .as_array()
+            .unwrap()
+        {
+            assert_eq!(entry["status"], final_status);
+        }
+        let result = adapter.next().await;
+        if expected == "turnFailed" {
+            assert_eq!(result["error"]["data"]["reason"], expected);
+        } else {
+            assert_eq!(result["result"]["stopReason"], expected);
+        }
+        assert!(
+            adapter.output.try_recv().is_err(),
+            "duplicates and foreign plans are suppressed"
+        );
+        for method in [
+            "goal/pause",
+            "goal/resume",
+            "session/pause",
+            "session/set_model",
+            "terminal/create",
+            "fs/write_text_file",
+        ] {
+            adapter
+                .call(json!(8), method, json!({"sessionId":adapter.session}))
+                .await;
+            assert_eq!(adapter.next().await["error"]["code"], -32601);
+            assert!(
+                adapter.input.try_recv().is_err(),
+                "unadvertised surfaces never reach serve"
+            );
+        }
+        adapter.close().await;
+    }
+}
+
+#[tokio::test]
+async fn budget_stop_reasons_match_reopened_goal_receipts() {
+    use arany::test_support::scenario::tool_outcome;
+    use std::os::unix::fs::PermissionsExt;
+    let _deadline = crate::cli::serve::tests::deadline();
+    for mode in ["actions", "tokens", "finish"] {
+        let tokens = mode == "tokens";
+        let finish = mode == "finish";
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("facts.txt"), "Fact").unwrap();
+        let state = root.path().join("state");
+        let budget = arany::GoalBudget {
+            max_provider_calls: Some(1),
+            max_tokens: tokens.then_some(1),
+            ..Default::default()
+        };
+        StateRoot::admit(&state)
+            .unwrap()
+            .record(arany::RecordKind::UiPreferences)
+            .replace(
+                &serde_json::to_vec(&json!({"version":3,"preferences":{
+                    "completion":"tabs","view":"classic","goal_budget":budget,
+                    "resources":arany::ToolResourceSettings::default()
+                }}))
+                .unwrap(),
+            )
+            .unwrap();
+        let tools = state.join("tools.json");
+        std::fs::write(
+            &tools,
+            serde_json::to_vec(&json!({"version":1,
+                "workspace_paths":["facts.txt"],"write":false,"commands":[],"skills":[],"mcp":[]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![if finish {
+                arany::ProviderOutcome::Finish(arany::Finish {
+                    summary: "Done".into(),
+                    result: "Answer".into(),
+                })
+            } else {
+                tool_outcome(
+                    arany::ToolCall::Read {
+                        path: "facts.txt".into(),
+                        offset: 0,
+                        limit: 32,
+                    },
+                    None,
+                )
+            }])
+            .with_profile("openai", "gpt-5.4")
+            .with_reported_usage(arany::Usage {
+                input_tokens: Some(0),
+                output_tokens: Some(1),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            }),
+        );
+        let (mut writer, mut reader, task) = start_configured(&state, provider.clone(), true);
+        initialize(&mut writer, &mut reader).await;
+        let session = session(&mut writer, &mut reader, &workspace).await;
+        send(
+            &mut writer,
+            json!(3),
+            "session/prompt",
+            json!({"sessionId":session,
+            "prompt":[{"type":"text","text":"Read facts"}]}),
+        )
+        .await;
+        loop {
+            let value = next(&mut reader).await;
+            if value["id"] == 3 {
+                assert_eq!(
+                    value["result"]["stopReason"],
+                    if finish {
+                        "end_turn"
+                    } else if tokens {
+                        "max_tokens"
+                    } else {
+                        "max_turn_requests"
+                    }
+                );
+                break;
+            }
+        }
+        writer.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let events = store.load_session(session).await.unwrap();
+        let view = arany::SessionView::replay(session, &events)
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.goals[0].budget_closed, !finish);
+        assert_eq!(view.goals[0].provider_calls, 1);
+        assert_eq!(view.runs.len(), 1);
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            events.iter().any(|e| matches!(
+                e.event,
+                Event::GoalFinished {
+                    exhausted: true,
+                    ..
+                }
+            )),
+            !finish
+        );
+        store.close().await.unwrap();
     }
 }
 
@@ -2081,7 +2362,7 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
         .await
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
-    let events:Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",json!({"observation":observation}))].into_iter().enumerate().map(|(index,(kind,payload))| json!({
+    let events:Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
         "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":1,"payload":payload,"created_at_ms":0
     })).collect();
     adapter
@@ -2895,7 +3176,7 @@ async fn modes_and_config_options_stay_in_sync_and_refuse_invalid_values_without
     adapter.events.send(Message::Response(Response {jsonrpc:Default::default(), id:request.id,
         result:json!({"thread":{"id":adapter.session,"workspace":"/private/var/workspace","title":"Test","createdAtMs":0},"turns":[]})})).await.unwrap();
     assert_mode_state(&adapter.next().await["result"], "default");
-    for _ in 0..62 {
+    for _ in 0..61 {
         adapter
             .call(
                 json!(14),
@@ -2912,7 +3193,7 @@ async fn modes_and_config_options_stay_in_sync_and_refuse_invalid_values_without
         )
         .await;
     assert_eq!(adapter.next().await["error"]["data"]["reason"], "busy");
-    for _ in 0..62 {
+    for _ in 0..61 {
         let request = adapter.request().await;
         assert_eq!(request.method, "thread/settings/update");
         assert_eq!(
@@ -3129,6 +3410,7 @@ async fn close_cancels_pending_permissions_and_preserves_unknown_effects_without
         jsonrpc: Default::default(), method: "turn/completed".into(),
         params: Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})),
     })).await.unwrap();
+    adapter.respond(json!({"events":[],"nextSince":null})).await;
     let prompt = adapter.next().await;
     assert_eq!(prompt["id"], "prompt");
     assert_eq!(prompt["result"]["stopReason"], "cancelled");
@@ -3205,7 +3487,7 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         .await
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
-    let events: Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",json!({"observation":observation}))].into_iter().enumerate().map(|(index,(kind,payload))| json!({
+    let events: Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
         "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":1,"payload":payload,"created_at_ms":0
     })).collect();
     let recover = adapter.request().await;
@@ -3395,6 +3677,7 @@ async fn completion_before_expiry_queues_unsubscribe_even_with_a_blocked_writer(
         filler += 1;
     }
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"interrupted","items":[],"goal":{"status":"interrupted"}}})) })).await.unwrap();
+    adapter.respond(json!({"events":[],"nextSince":null})).await;
     let close = adapter.request().await;
     assert_eq!(close.method, "thread/unsubscribe");
     for _ in 0..filler {
@@ -3550,6 +3833,9 @@ async fn reused_client_prompt_id_is_not_consumed_by_expired_blocked_work() {
     adapter.events.send(Message::Response(Response { jsonrpc:Default::default(), id:turn_start.id,
         result:json!({"turn":{"id":run,"goalId":arany::GoalId::new(),"status":"inProgress","items":[]}}) })).await.unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":other,"turn":{"id":run,"goalId":arany::GoalId::new(),"status":"interrupted","items":[],"goal":{"status":"interrupted"}}})) })).await.unwrap();
+    for _ in 0..2 {
+        adapter.respond(json!({"events":[],"nextSince":null})).await;
+    }
     let reused = adapter.next().await;
     assert_eq!(
         reused["id"], "prompt",
