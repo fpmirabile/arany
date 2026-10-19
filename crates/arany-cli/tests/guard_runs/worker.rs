@@ -617,8 +617,8 @@ pub(super) async fn worker_case(case: &'static str) {
     }
 }
 
-#[tokio::test]
-async fn foreground_worker_deadline_and_stop_refusals_keep_their_causes() {
+#[test]
+fn foreground_worker_deadline_and_stop_refusals_keep_their_causes() {
     for case in [
         "tool_deadline",
         "hook_stop_last_turn",
@@ -627,7 +627,12 @@ async fn foreground_worker_deadline_and_stop_refusals_keep_their_causes() {
         "hook_stop_deadline",
         "hook_stop_deadline_last_turn",
     ] {
-        worker_case(case).await;
+        // Each case advances paused time; a fresh runtime keeps that offset from leaking into the next case.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(worker_case(case));
     }
 }
 
