@@ -423,17 +423,10 @@ fn evict(
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let gone = !incoming.contains(&victim.digest)
-                    && scalar(
-                        connection,
-                        "SELECT EXISTS(SELECT 1 FROM refs WHERE digest=?1)",
+                    && connection.execute(
+                        "DELETE FROM blobs WHERE digest=?1 AND NOT EXISTS(SELECT 1 FROM refs WHERE digest=?1)",
                         [victim.digest.as_slice()],
-                    )? == 0;
-                if gone {
-                    connection.execute(
-                        "DELETE FROM blobs WHERE digest=?1",
-                        [victim.digest.as_slice()],
-                    )?;
-                }
+                    )? > 0;
                 entry.insert(gone)
             }
         };

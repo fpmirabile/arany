@@ -101,3 +101,6 @@ tempfile = "3.27.0"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(arany_ci)'] }
+
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2
