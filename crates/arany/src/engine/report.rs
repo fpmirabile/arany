@@ -85,6 +85,20 @@ pub(super) fn goal_report(
     push_cache_facts(&mut report, view, goal, &mut omitted_facts);
     push_unguarded_facts(&mut report, view, goal, &mut omitted_facts);
     push_checkpoint_facts(&mut report, view, goal, &mut omitted_facts);
+    if let Some(facts) = crate::session::rewind::history_facts(view, 0, view.last_sequence) {
+        let mut lines = facts.lines();
+        lines.next();
+        let mut lines = lines.rev().peekable();
+        let omission = lines.next_if(|line| line.starts_with("Older "));
+        for fact in lines.chain(omission) {
+            push_goal_report_item(
+                &mut report,
+                GoalReportSection::Unresolved,
+                fact,
+                &mut omitted_facts,
+            );
+        }
+    }
     for (index, (_, fallback)) in view
         .runs
         .iter()

@@ -1413,39 +1413,54 @@ fn replace(
     bytes: &[u8],
 ) -> Result<String, ToolError> {
     let (parent, leaf) = parent(root, path)?;
-    let verify = || match open_file(&parent, &leaf) {
+    let inspect = || match open_file(&parent, &leaf) {
         Ok(file) => {
-            if expected.is_some_and(|hash| {
-                read_regular(file, MAX_FILE_BYTES).is_ok_and(|current| hex_digest(&current) == hash)
-            }) {
-                Ok(())
-            } else {
-                Err(ToolError::Conflict)
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::MetadataExt;
+                file.metadata().map_err(|_| ToolError::Operation)?.mode() & 0o777
+            };
+            #[cfg(not(unix))]
+            let mode = 0o600;
+            let current = read_regular(file, MAX_FILE_BYTES)?;
+            let sha256 = hex_digest(&current);
+            if expected != Some(sha256.as_str()) {
+                return Err(ToolError::Conflict);
             }
+            Ok((
+                Some(crate::session::rewind::FileState {
+                    sha256,
+                    bytes: current.len() as u32,
+                    executable: mode & 0o111 != 0,
+                }),
+                mode,
+            ))
         }
         Err(_)
             if expected.is_none()
                 && parent
                     .symlink_metadata(&leaf)
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
         {
-            Ok(())
+            Ok((None, 0o600))
         }
         Err(_) => Err(ToolError::Conflict),
     };
-    verify()?;
-    #[cfg(unix)]
-    let mode = match parent.symlink_metadata(&leaf) {
-        Ok(metadata) => {
-            use cap_std::fs::MetadataExt;
-            metadata.mode() & 0o777
+    let (before, mode) = inspect()?;
+    replace_file(&parent, &leaf, expected.is_none(), bytes, mode, || {
+        if inspect()? == (before.clone(), mode) {
+            Ok(())
+        } else {
+            Err(ToolError::Conflict)
         }
-        Err(_) => 0o600,
-    };
-    #[cfg(not(unix))]
-    let mode = 0o600;
-    replace_file(&parent, &leaf, expected.is_none(), bytes, mode, verify)?;
-    Ok(json!({"sha256":hex_digest(bytes),"bytes":bytes.len()}).to_string())
+    })?;
+    serde_json::to_string(&crate::session::rewind::FilePublicationResult {
+        sha256: hex_digest(bytes),
+        bytes: bytes.len() as u32,
+        executable: mode & 0o111 != 0,
+        before,
+    })
+    .map_err(|_| ToolError::Operation)
 }
 
 fn replace_file(

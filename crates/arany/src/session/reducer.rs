@@ -14,6 +14,9 @@ pub(crate) use worker::{
     verification_passed, wave_settled,
 };
 mod goal;
+mod rewind;
+#[cfg(test)]
+pub(crate) mod rewind_tests;
 mod run;
 mod session;
 mod tool;
@@ -157,7 +160,7 @@ impl GoalView {
     }
 
     pub(crate) fn can_resume(&self, view: &SessionView) -> bool {
-        if self.active_run.is_some() {
+        if self.active_run.is_some() || super::rewind::goal_blocked(view, self) {
             return false;
         }
         let completed_run_ids = if self
@@ -664,6 +667,8 @@ impl RunView {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ForkInheritance {
+    pub(crate) workspace_identity: Option<WorkspaceIdentity>,
+    pub(crate) rewinds: super::rewind::RewindState,
     pub(crate) runs: Vec<RunView>,
     pub(crate) compactions: Vec<CompactionView>,
 }
@@ -763,6 +768,7 @@ impl RunView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionView {
+    pub rewinds: super::rewind::RewindState,
     pub id: SessionId,
     pub title: String,
     pub title_is_explicit: bool,
@@ -853,6 +859,7 @@ impl SessionView {
                     workspace_identity,
                 } if view.is_none() => {
                     view = Some(Self {
+                        rewinds: Default::default(),
                         id,
                         title: title.clone(),
                         title_is_explicit: !crate::session::placeholder_title(title),
@@ -866,6 +873,11 @@ impl SessionView {
                         compactions: Vec::new(),
                         goals: Vec::new(),
                     });
+                    view.as_mut()
+                        .expect("created Session")
+                        .rewinds
+                        .prefix
+                        .update(envelope)?;
                     continue;
                 }
                 Event::SessionForked {
@@ -880,7 +892,7 @@ impl SessionView {
                         title: title.clone(),
                         title_is_explicit: !crate::session::placeholder_title(title),
                         inherited_title: None,
-                        workspace_identity: None,
+                        workspace_identity: inherited.and_then(|i| i.workspace_identity),
                         defaults: SessionDefaults::default(),
                         created_sequence: prior,
                         last_sequence: prior,
@@ -890,11 +902,21 @@ impl SessionView {
                             source_sequence: *source_sequence,
                             prefix_digest: *prefix_digest,
                         }),
+                        rewinds: inherited.map_or_else(Default::default, |i| {
+                            let mut r = i.rewinds.clone();
+                            r.prefix = Default::default();
+                            r
+                        }),
                         runs: inherited.map_or_else(Vec::new, |inherited| inherited.runs.clone()),
                         compactions: inherited
                             .map_or_else(Vec::new, |inherited| inherited.compactions.clone()),
                         goals: Vec::new(),
                     });
+                    view.as_mut()
+                        .expect("created Session")
+                        .rewinds
+                        .prefix
+                        .update(envelope)?;
                     continue;
                 }
                 _ => {}
@@ -916,6 +938,9 @@ impl SessionView {
                 goal.active_run = None;
             }
         }
+        if close_history && let Some(current) = &mut view {
+            rewind::seal(current);
+        }
         super::compaction::validate_compactions(events)?;
         super::compaction::validate_goal_context_compactions(events)?;
         Ok(view)
@@ -930,11 +955,13 @@ impl SessionView {
             return Err(ReplayError::InvalidTransition);
         }
         if crate::supervisor::SupervisorState::before(self, envelope)? {
+            self.rewinds.prefix.update(envelope)?;
             self.last_sequence = envelope.sequence;
             return Ok(());
         }
         let prior = envelope.sequence;
         let current = self;
+        rewind::before_event(current, &envelope.event);
         if current
             .runs
             .last()
@@ -981,7 +1008,12 @@ impl SessionView {
                 &envelope.event,
                 Event::GoalResumed { goal_id } if *goal_id == awaiting
             )
-            && !matches!(&envelope.event, Event::GoalStarted { .. })
+            && !matches!(
+                &envelope.event,
+                Event::GoalStarted { .. }
+                    | Event::WorkspaceRewindStarted { .. }
+                    | Event::WorkspaceRewindFinished { .. }
+            )
             && !closes_run_without_plan(&envelope.event)
         {
             return Err(ReplayError::InvalidTransition);
@@ -997,6 +1029,8 @@ impl SessionView {
         worker::before_event(current, &envelope.event)?;
         match &envelope.event {
             Event::SupervisorVerdictRecorded { .. } => return Err(ReplayError::InvalidTransition),
+            Event::WorkspaceRewindStarted { record } => rewind::start(current, record, prior)?,
+            Event::WorkspaceRewindFinished { record } => rewind::finish(current, record, prior)?,
             Event::SessionStarted { .. } | Event::SessionForked { .. } => {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -1055,6 +1089,16 @@ impl SessionView {
         }
         worker::after_event(current, &envelope.event, prior)?;
         crate::supervisor::SupervisorState::after(current, envelope);
+        if let Event::RunStarted { run_id, .. } = envelope.event {
+            current
+                .rewinds
+                .checkpoints
+                .push(super::rewind::CheckpointTarget::Run {
+                    run_id,
+                    sequence: prior,
+                });
+        }
+        current.rewinds.prefix.update(envelope)?;
         current.last_sequence = prior;
         Ok(())
     }
@@ -1096,6 +1140,9 @@ impl SessionView {
                     .iter()
                     .any(|other| other.continues == Some(goal.id))
         })?;
+        if super::rewind::goal_blocked(self, latest) {
+            return None;
+        }
         latest
             .run_ids
             .iter()

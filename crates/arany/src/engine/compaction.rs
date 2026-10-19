@@ -524,6 +524,9 @@ fn covered_sequence(
         .iter()
         .rev()
         .find_map(|envelope| match &envelope.event {
+            Event::WorkspaceRewindStarted { .. } | Event::WorkspaceRewindFinished { .. } => {
+                Some(envelope.sequence)
+            }
             Event::RunFinished { run_id, .. } if *run_id == covered_run_id => {
                 Some(envelope.sequence)
             }

@@ -45,6 +45,7 @@ fn goal_view(goal_id: GoalId, budget: GoalBudget) -> GoalView {
 fn ledger(budget: GoalBudget) -> GoalLedger {
     let goal_id = GoalId::new();
     let view = SessionView {
+        rewinds: Default::default(),
         id: SessionId::new(),
         title: String::new(),
         title_is_explicit: false,

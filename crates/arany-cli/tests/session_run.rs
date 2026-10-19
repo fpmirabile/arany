@@ -252,6 +252,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     .draw_setup(4, "Synthetic setup", "Returning to chat", 0, None)
                     .unwrap();
                 let mut view = SessionView {
+                    rewinds: Default::default(),
                     id: SessionId::new(),
                     title: "New Session".into(),
                     title_is_explicit: false,

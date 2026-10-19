@@ -927,6 +927,8 @@ pub(super) fn before_lifecycle_event(
                 | Event::GoalResumed { .. }
                 | Event::GoalFinished { .. }
                 | Event::SessionRenamed { .. }
+                | Event::WorkspaceRewindStarted { .. }
+                | Event::WorkspaceRewindFinished { .. }
                 | Event::SessionDefaultChanged { .. }
         )
         && !opens_other_run(run, event)

@@ -197,6 +197,9 @@ pub(crate) fn validate_finished(
         .iter()
         .find(|r| r.id == observation.intent.run_id)
         .ok_or(ReplayError::InvalidTransition)?;
+    if observation.disposition == ToolDisposition::Succeeded {
+        super::rewind::publication_files(run, observation)?;
+    }
     let published = matches!(
         observation.disposition,
         ToolDisposition::Succeeded | ToolDisposition::Uncertain

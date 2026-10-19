@@ -382,3 +382,83 @@ fn worker_process_death_preserves_exact_recovery_prefixes() {
         }
     }
 }
+
+#[test]
+#[ignore = "native Linux Store rewind transaction crash release gate"]
+fn rewind_process_death_preserves_exact_recovery_prefixes() {
+    for finish in [false, true] {
+        for stage in ["before", "after"] {
+            let f = crate::session::worker_protocol_fixture();
+            let temp = tempfile::tempdir().unwrap();
+            let state = temp.path().join("state");
+            let event_path = temp.path().join("event.json");
+            let marker = temp.path().join("stage");
+            let store = Store::open(StateRoot::admit(&state).unwrap()).unwrap();
+            let (event, prefix) = runtime().block_on(async {
+                for event in &f.events {
+                    store.append(f.session, event.clone()).await.unwrap();
+                }
+                let view = store.load_view(f.session).await.unwrap().unwrap();
+                let begin = crate::session::rewind_started_fixture(
+                    &view,
+                    view.rewinds.checkpoints[0].clone(),
+                );
+                let event = if finish {
+                    store.append(f.session, begin).await.unwrap();
+                    let view = store.load_view(f.session).await.unwrap().unwrap();
+                    crate::session::rewind_finished_fixture(
+                        &view,
+                        crate::session::rewind::RewindOutcome::Restored,
+                    )
+                } else {
+                    begin
+                };
+                let prefix = store.load_session(f.session).await.unwrap();
+                store.close().await.unwrap();
+                (event, prefix)
+            });
+            let (run, actor) = event.scope();
+            std::fs::write(
+                &event_path,
+                serde_json::to_vec(&(
+                    event.kind(),
+                    event.version(),
+                    event.payload().unwrap(),
+                    run,
+                    actor,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+            kill_at_append(&state, f.session, f.run, &marker, stage, Some(&event_path));
+            let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
+            runtime().block_on(async {
+                let events = store.load_session(f.session).await.unwrap();
+                assert_eq!(&events[..prefix.len()], prefix.as_slice());
+                assert_eq!(events.len(), prefix.len() + usize::from(stage == "after"));
+                if stage == "after" {
+                    assert_eq!(events.last().unwrap().event, event);
+                }
+                let view = store.load_view(f.session).await.unwrap().unwrap();
+                assert_eq!(
+                    view,
+                    SessionView::replay(f.session, &events).unwrap().unwrap()
+                );
+                if finish || stage == "after" {
+                    let rewind = view.rewinds.operations.last().unwrap();
+                    let restored = finish && stage == "after";
+                    assert_eq!(
+                        rewind.outcome() == crate::session::rewind::RewindOutcome::Restored,
+                        restored
+                    );
+                    assert_eq!(rewind.finished.is_some(), restored);
+                    let resume = store
+                        .append(f.session, Event::GoalResumed { goal_id: f.goal })
+                        .await;
+                    assert_eq!(resume.is_ok(), restored);
+                }
+                store.close().await.unwrap();
+            });
+        }
+    }
+}
