@@ -47,6 +47,9 @@ seccompiler.workspace = true
 core-foundation.workspace = true
 security-framework.workspace = true
 
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cc = "=1.5.1"
+
 [dev-dependencies]
 arany = { path = ".", features = ["test-support"] }
 opentelemetry-proto.workspace = true

@@ -38,6 +38,42 @@ pub(crate) mod fixture;
 mod storage;
 mod unit;
 
+pub(in crate::tools) const RUNTIME_COMPAT_FILE: &str = "arany-runtime-compat.dylib";
+pub(in crate::tools) const RUNTIME_COMPAT_BYTES: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/arany-runtime-compat.dylib"));
+const RUNTIME_COMPAT_BYTES_CAP: usize = 128 * 1024;
+
+pub(super) fn configure_runtime_compat(
+    command: &mut tokio::process::Command,
+    program: &crate::tools::config::Program,
+    args: &mut [std::ffi::OsString],
+    resources: &Path,
+) -> Result<(), ToolError> {
+    let library = resources.join(RUNTIME_COMPAT_FILE);
+    let path = library.to_str().ok_or(ToolError::Path)?;
+    if path.contains(':') {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let staged = crate::tools::fs::read_regular(
+        crate::tools::fs::open_absolute(path)?,
+        RUNTIME_COMPAT_BYTES_CAP,
+    )?;
+    if staged != RUNTIME_COMPAT_BYTES {
+        return Err(ToolError::ChangedInput);
+    }
+    command.env("DYLD_INSERT_LIBRARIES", path);
+    if program.executable == "/bin/sh" && args.first().is_some_and(|arg| arg == "-c") {
+        let text = args.get_mut(1).ok_or(ToolError::Configuration)?;
+        *text = format!(
+            "export DYLD_INSERT_LIBRARIES='{}'\n{}",
+            path.replace('\'', "'\\''"),
+            text.to_str().ok_or(ToolError::Path)?,
+        )
+        .into();
+    }
+    Ok(())
+}
+
 pub(super) fn unit_main() -> std::process::ExitCode {
     unit::helper_main()
 }
@@ -141,7 +177,6 @@ const COMMAND_DENIED_SYSCALLS: &[i32] = &[
     SYS_SETRLIMIT,
     SYS_SYSCTL,
     SYS_SYSCTLBYNAME,
-    SYS___PTHREAD_SIGMASK,
     SYS___SIGWAIT,
     SYS___DISABLE_THREADSIGNAL,
     SYS___MAC_EXECVE,
@@ -217,6 +252,13 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-workspace-grant");
+    bytes.extend_from_slice(b";runtime-compat-v1:public-vm-page-size-sysconf-getpagesize;non-page-sysconf-forward;fixed-cleared-dyld-env;known-pinned-sh-c-fixed-quoted-export;no-sysctl-policy-exception;read-only-nofollow-exact-bytes;128KiB-runtime-budget");
+    bytes.extend_from_slice(RUNTIME_COMPAT_BYTES);
+    bytes.extend_from_slice(include_bytes!("macos/runtime_compat.c"));
+    bytes.extend_from_slice(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/build.rs"
+    )));
     for kind in [ProfileKind::File, ProfileKind::Command, ProfileKind::Git] {
         bytes.extend_from_slice(SeatbeltProfile::new(kind).text.as_bytes());
     }
@@ -540,12 +582,23 @@ fn install_command(task: &Task, stage: &mut super::BootstrapStage) -> Result<Pat
     }
     for grant in &task.config.runtime_grants {
         grant.verify_host()?;
-        let operations = if grant.kind.is_toolchain() {
-            "allow file-read* file-map-executable process-exec"
+        if grant.kind == crate::tools::toolchains::RuntimeKind::AppleCompiler {
+            profile.grant(
+                "allow file-read* file-map-executable",
+                "subpath",
+                &grant.path,
+            )?;
+            for executable in grant.apple_compiler_executables()? {
+                profile.grant("allow process-exec", "literal", &executable)?;
+            }
         } else {
-            "allow file-read*"
-        };
-        profile.grant(operations, "subpath", &grant.path)?;
+            let operations = if grant.kind.is_toolchain() {
+                "allow file-read* file-map-executable process-exec"
+            } else {
+                "allow file-read*"
+            };
+            profile.grant(operations, "subpath", &grant.path)?;
+        }
     }
     let resources = root.join("runtime");
     let metadata = std::fs::symlink_metadata(&resources).map_err(|_| ToolError::Path)?;
@@ -609,6 +662,14 @@ pub(super) fn verify_runtime_mounts(
         .iter()
         .map(|grant| {
             grant.verify_host()?;
+            if grant.kind == crate::tools::toolchains::RuntimeKind::AppleCompiler {
+                let [_, clang, ld] = grant.apple_compiler_executables()?;
+                for executable in [clang, ld] {
+                    if ffi::unentitled_code(&executable)? != Some(true) {
+                        return Err(ToolError::ProtectionUnavailable);
+                    }
+                }
+            }
             std::fs::canonicalize(&grant.path).map_err(|_| ToolError::ProtectionUnavailable)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1613,9 +1674,16 @@ mod tests {
         std::fs::remove_dir_all(&view).unwrap();
         std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
             .expect("unsandboxed network baseline");
+        let mach = ffi::MachLookupProbe::new();
+        assert_eq!(mach.lookup(), 0, "unsandboxed logger lookup baseline");
         configure_resources().unwrap();
         let mut stage = super::BootstrapStage::Workspace;
         assert_eq!(install(&task, &mut stage).unwrap(), root);
+        assert_eq!(
+            mach.lookup(),
+            1100,
+            "Seatbelt must deny the same service lookup through the retained bootstrap right"
+        );
         for path in [&outside, &workspace_file] {
             assert_eq!(
                 std::fs::write(path, b"forbidden").unwrap_err().kind(),

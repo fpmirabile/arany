@@ -43,7 +43,9 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub(super) use macos::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 #[cfg(target_os = "macos")]
-pub(super) use macos::{SystemPrograms, macos_enforcement_digest};
+pub(super) use macos::{
+    RUNTIME_COMPAT_BYTES, RUNTIME_COMPAT_FILE, SystemPrograms, macos_enforcement_digest,
+};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod admission;
@@ -1886,9 +1888,9 @@ pub(super) fn payload(
         return Err(ToolError::ChangedInput);
     }
     let path = runtime_path(runtime_grants)?;
-    let mut command = Command::new(executable);
-    command
-        .args(args.iter().map(|arg| {
+    let payload_args: Vec<_> = args
+        .iter()
+        .map(|arg| {
             if cfg!(target_os = "macos") {
                 for (alias, target) in [
                     ("workspace", &workspace),
@@ -1904,7 +1906,10 @@ pub(super) fn payload(
                 }
             }
             std::ffi::OsString::from(arg)
-        }))
+        })
+        .collect();
+    let mut command = Command::new(executable);
+    command
         .current_dir(workspace.join(cwd))
         .env_clear()
         .env("PATH", path)
@@ -1922,6 +1927,22 @@ pub(super) fn payload(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(target_os = "macos")]
+    let payload_args = {
+        let mut args = payload_args;
+        macos::configure_runtime_compat(&mut command, program, &mut args, &resources)?;
+        args
+    };
+    command.args(payload_args);
+    if cfg!(target_os = "macos") {
+        command.env("CURL_SSL_BACKEND", "Secure-Transport");
+        if let Some(sdk) = runtime_grants
+            .iter()
+            .find(|grant| grant.kind == super::toolchains::RuntimeKind::AppleSdk)
+        {
+            command.env("SDKROOT", &sdk.path);
+        }
+    }
     Ok(command)
 }
 

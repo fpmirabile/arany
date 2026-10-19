@@ -134,6 +134,7 @@ dependencies = [
  "base64 0.23.1",
  "cap-fs-ext",
  "cap-std",
+ "cc",
  "core-foundation",
  "directories",
  "jsonschema",

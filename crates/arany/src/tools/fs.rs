@@ -519,6 +519,16 @@ pub(super) fn snapshot_into(
         }
     }
     let mut runtime_bytes = 0usize;
+    #[cfg(target_os = "macos")]
+    {
+        charge_runtime(&mut runtime_bytes, super::guard::RUNTIME_COMPAT_BYTES.len())?;
+        put(
+            resources,
+            super::guard::RUNTIME_COMPAT_FILE,
+            super::guard::RUNTIME_COMPAT_BYTES,
+            false,
+        )?;
+    }
     for program in config
         .commands
         .iter()
