@@ -1802,7 +1802,10 @@ async fn thread_settings_update_accepts_only_loaded_threads_and_closed_modes() {
             json!("dontAsk"),
             json!("bypassPermissions"),
             json!("x".repeat(65536)),
+            json!({"auto":null}),
+            json!(42),
             json!(null),
+            json!("unknown"),
         ] {
             input
                 .send(request(

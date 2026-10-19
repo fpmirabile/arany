@@ -1,6 +1,6 @@
 use arany::SessionId;
 use arany_cli::protocol::{
-    methods::{ClientInfo, PermissionMode},
+    methods::{ClientInfo, PermissionMode, deserialize_permission_mode},
     rpc::*,
 };
 use serde::Deserialize;
@@ -326,6 +326,7 @@ fn context_body(text: &str) -> String {
 #[serde(rename_all = "camelCase")]
 pub(super) struct SetMode {
     pub session_id: SessionId,
+    #[serde(deserialize_with = "deserialize_permission_mode")]
     pub mode_id: PermissionMode,
 }
 
@@ -334,6 +335,7 @@ pub(super) struct SetMode {
 pub(super) struct SetConfigOption {
     pub session_id: SessionId,
     pub config_id: String,
+    #[serde(deserialize_with = "deserialize_permission_mode")]
     pub value: PermissionMode,
     #[serde(rename = "type")]
     pub value_type: Option<String>,

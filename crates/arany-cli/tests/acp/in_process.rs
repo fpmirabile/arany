@@ -2773,6 +2773,10 @@ async fn modes_and_config_options_stay_in_sync_and_refuse_invalid_values_without
         json!(""),
         json!("x".repeat(65536)),
         json!(true),
+        json!({"auto":null}),
+        json!(42),
+        json!(null),
+        json!("unknown"),
     ] {
         for (method, params) in [
             (
@@ -2787,6 +2791,22 @@ async fn modes_and_config_options_stay_in_sync_and_refuse_invalid_values_without
             adapter.call(json!(9), method, params).await;
             assert_eq!(adapter.next().await["error"]["code"], -32602);
             assert!(adapter.input.try_recv().is_err());
+            assert!(adapter.output.try_recv().is_err());
+            adapter
+                .call(
+                    json!(11),
+                    "session/resume",
+                    json!({"sessionId":adapter.session,"cwd":"/var/workspace"}),
+                )
+                .await;
+            let request = adapter.request().await;
+            assert_eq!(
+                request.params.as_ref().unwrap()["permissionMode"],
+                "default"
+            );
+            adapter.events.send(Message::Response(Response {jsonrpc:Default::default(), id:request.id,
+                result:json!({"thread":{"id":adapter.session,"workspace":"/private/var/workspace","title":"Test","createdAtMs":0},"turns":[]})})).await.unwrap();
+            assert_mode_state(&adapter.next().await["result"], "default");
         }
     }
     for params in [
