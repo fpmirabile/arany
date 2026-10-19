@@ -85,9 +85,7 @@ pub(super) fn goal_report(
     push_cache_facts(&mut report, view, goal, &mut omitted_facts);
     push_unguarded_facts(&mut report, view, goal, &mut omitted_facts);
     push_checkpoint_facts(&mut report, view, goal, &mut omitted_facts);
-    if let Some(facts) =
-        crate::session::rewind::history_facts(view, goal.started_sequence, view.last_sequence)
-    {
+    if let Some(facts) = crate::session::rewind::history_facts(view, 0, view.last_sequence) {
         let mut lines = facts.lines();
         lines.next();
         let mut lines = lines.rev().peekable();

@@ -987,6 +987,16 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
     assert!(report.unresolved[8].starts_with("Older Workspace rewind facts omitted"));
     report.validate().unwrap();
 
+    let mut later_goal = view.goal(f.goal).unwrap().clone();
+    later_goal.id = GoalId::new();
+    later_goal.started_sequence = view.last_sequence + 1;
+    later_goal.run_ids.clear();
+    let mut later_view = view.clone();
+    later_view.last_sequence = later_goal.started_sequence;
+    let later_report = goal_report(&later_view, &view.runs[0], &later_goal);
+    assert_eq!(later_report.unresolved, report.unresolved[..9]);
+    later_report.validate().unwrap();
+
     let run = &mut view.runs[0];
     let template = run
         .agents
