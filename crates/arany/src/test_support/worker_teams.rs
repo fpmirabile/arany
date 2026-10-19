@@ -838,6 +838,32 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             b"host edit"
         );
     }
+    if case == "order_hooks" {
+        for worker in run.agents.iter().skip(1) {
+            let writes: Vec<_> = worker
+                .tools
+                .iter()
+                .filter(|tool| matches!(tool.intent.call, ToolCall::Write { .. }))
+                .collect();
+            assert_eq!(writes.len(), 1, "each worker performs one Write");
+            let tool = writes[0];
+            assert_eq!(tool.hooks.len(), 2, "worker Write runs both hooks");
+            assert_eq!(
+                tool.hooks[0].invocation.event,
+                crate::permissions::HookEvent::PreToolUse
+            );
+            assert_eq!(
+                tool.hooks[1].invocation.event,
+                crate::permissions::HookEvent::PostToolUse
+            );
+            assert!(tool.hooks.iter().all(|hook| {
+                matches!(
+                    hook.outcome.as_ref().map(|outcome| &outcome.result),
+                    Some(crate::tools::permissions::HookResult::Passed)
+                )
+            }));
+        }
+    }
     if matches!(
         case,
         "order" | "order_hooks" | "conflict" | "mixed" | "fallback" | "command_refused"
