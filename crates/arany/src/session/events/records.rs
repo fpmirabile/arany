@@ -339,6 +339,9 @@ pub enum RunDisposition {
 pub enum RunFailure {
     ProviderCall,
     ProposalRefused,
+    BudgetExhausted,
+    ToolStopped,
+    DefinitionInvalid,
     PlanAdmission,
     ToolContextFull,
     WorkersUnverified,
@@ -596,6 +599,15 @@ impl ProviderCallRecord {
                         | crate::provider::ProviderFailureReason::WorkerDelegateRefused
                         | crate::provider::ProviderFailureReason::WorkerToolRefused
                 ) && self.phase != crate::provider::AgentPhase::RootSynthesis
+                {
+                    return true;
+                }
+                if reason == crate::provider::ProviderFailureReason::ProposalRefused
+                    && !matches!(
+                        self.phase,
+                        crate::provider::AgentPhase::RootPlan
+                            | crate::provider::AgentPhase::RootSynthesis
+                    )
                 {
                     return true;
                 }

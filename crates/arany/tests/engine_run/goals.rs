@@ -1105,6 +1105,7 @@ async fn single_run_goal_with_an_unmet_plan_criterion_is_not_a_budget_close() {
     .await
     .expect("failed Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert_eq!(outcome.run.failure, Some(arany::RunFailure::CriterionUnmet));
     engine.close().await.expect("engine shutdown");
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
@@ -2948,6 +2949,7 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
     .await
     .expect("an unnarrowable plan is a Failed Run, not a Store error");
     assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert_eq!(outcome.run.failure, Some(arany::RunFailure::PlanAdmission));
     engine.close().await.expect("engine shutdown");
 
     let (events, view) = replayed(&state_path, outcome.session_id).await;
@@ -2970,6 +2972,45 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
         [ProviderCallDisposition::ToolRequested],
         "the plan-bearing call is refused at the plan contract, after its Tool was requested"
     );
+}
+
+#[tokio::test]
+async fn active_time_left_below_one_second_stops_the_tool_step_without_a_context_cause() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_active_ms: Some(6_000),
+        ..arany::GoalBudget::default()
+    };
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget = budget;
+    let provider = ScriptedProvider::new(vec![crate::tool_outcome(
+        facts_read(),
+        Some(Box::new(plan)),
+    )]);
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, AUTONOMOUS_OBJECTIVE);
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("budget-stopped Run");
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(run.failure, Some(arany::RunFailure::ToolStopped));
+    assert_eq!(provider.requests.lock().expect("requests").len(), 1);
 }
 
 #[tokio::test]

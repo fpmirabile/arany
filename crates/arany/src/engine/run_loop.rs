@@ -285,7 +285,7 @@ impl<'a> RunLoop<'a> {
     // Journals `exhausted` only when settlement agrees the Goal admits no next Run.
     async fn fail_for_budget(&self) -> Result<(), EngineError> {
         self.ledger().mark_budget_stopped();
-        self.fail_primary(RunFailure::ProviderCall).await
+        self.fail_primary(RunFailure::BudgetExhausted).await
     }
 
     fn reserve_active_segment(&self, action_bound: Duration) -> Result<ActiveSegment, EngineError> {
@@ -517,7 +517,7 @@ impl<'a> RunLoop<'a> {
                     outcome: ProviderOutcome::Tools(requests),
                     ..
                 }) => (
-                    self.well_formed_primary_tools(requests),
+                    self.well_formed_primary_tools(requests)?,
                     self.ledger().admits(Action::Tool),
                 ),
                 _ => (Ok(()), true),
@@ -526,6 +526,7 @@ impl<'a> RunLoop<'a> {
                 .err()
                 .and_then(|cause| proposal_refusal(&first, cause));
             let well_formed = validation.is_ok();
+            let refused = refusal.is_some();
             let tokens_ok = self.ledger().tokens_within_limit();
             let valid_response = tokens_ok && well_formed && budget_admits;
             let budget_refused = well_formed && !(tokens_ok && budget_admits);
@@ -537,7 +538,7 @@ impl<'a> RunLoop<'a> {
                     &first,
                     valid_response,
                     self.default_child_profile(),
-                    refusal.clone(),
+                    refusal,
                 ),
             })
             .await?;
@@ -551,7 +552,7 @@ impl<'a> RunLoop<'a> {
             if self.ledger().active_time_exhausted() {
                 break Exit::Stopped;
             }
-            if refusal.is_some() {
+            if refused {
                 if self.primary_refusal()?.1 {
                     break Exit::Failed(RunFailure::RefusalLimit);
                 }
@@ -662,7 +663,7 @@ impl<'a> RunLoop<'a> {
             }
             Ok(false) => {
                 return self
-                    .fail_primary(RunFailure::ProviderCall)
+                    .fail_primary(RunFailure::ToolStopped)
                     .await
                     .map(|()| false);
             }
@@ -965,29 +966,41 @@ impl<'a> RunLoop<'a> {
     fn well_formed_primary_tools(
         &self,
         requests: &[crate::tools::ToolRequest],
-    ) -> Result<(), ProposalRefusalCause> {
-        self.well_formed_tools(requests)?;
-        requests
-            .iter()
-            .try_for_each(|request| self.primary_lease_allows(&request.call))
+    ) -> Result<Result<(), ProposalRefusalCause>, EngineError> {
+        if let Err(cause) = self.well_formed_tools(requests)? {
+            return Ok(Err(cause));
+        }
+        for request in requests {
+            if let Err(cause) = self.primary_lease_allows(&request.call)? {
+                return Ok(Err(cause));
+            }
+        }
+        Ok(Ok(()))
     }
 
     fn well_formed_tools(
         &self,
         requests: &[crate::tools::ToolRequest],
-    ) -> Result<(), ProposalRefusalCause> {
+    ) -> Result<Result<(), ProposalRefusalCause>, EngineError> {
         let [request] = requests else {
-            return Err(ProposalRefusalCause::InvalidArguments);
+            return Ok(Err(ProposalRefusalCause::InvalidArguments));
         };
-        self.well_formed_tool(&request.call, &request.plan_contract)
+        let existing = self.ledger().plan_contract()?;
+        let budget = self.ledger().effective_budget()?;
+        Ok(self.check_tool(&request.call, &request.plan_contract, existing, &budget))
     }
 
-    fn well_formed_tool(
+    fn check_tool(
         &self,
         call: &crate::tools::ToolCall,
         plan_contract: &Option<Box<crate::session::GoalPlanContract>>,
+        existing: Option<crate::session::GoalPlanContract>,
+        budget: &crate::session::GoalBudget,
     ) -> Result<(), ProposalRefusalCause> {
-        use ProposalRefusalCause::*;
+        use ProposalRefusalCause::{
+            ArgumentBytes, InvalidArguments, NotOffered, Phase, PlanBudgetOutsideGoal,
+            PlanBudgetSpent, PlanInvalid, PlanMissing, PlanOutsideGrant, PlanScopeExcludesCall,
+        };
         if self.controls.tools.is_none()
             || matches!(
                 call,
@@ -1009,8 +1022,6 @@ impl<'a> RunLoop<'a> {
         if self.controls.goal_phase != GoalPhase::Implementation && !call.is_goal_plan_prelude() {
             return Err(Phase);
         }
-        let existing = self.ledger().plan_contract().map_err(|_| PlanInvalid)?;
-        let budget = self.ledger().effective_budget().map_err(|_| PlanInvalid)?;
         // Restating the recorded contract is a no-op; only a different one is a widening attempt.
         let plan_contract = if existing.as_ref() == plan_contract.as_deref() {
             &None
@@ -1029,7 +1040,7 @@ impl<'a> RunLoop<'a> {
         let contract = existing.as_ref().or(plan_contract.as_deref());
         if let Some(contract) = contract {
             if existing.is_none() {
-                if !contract.budget.is_within(&budget) {
+                if !contract.budget.is_within(budget) {
                     return Err(PlanBudgetOutsideGoal);
                 }
                 if contract.validate().is_err() {
@@ -1141,7 +1152,7 @@ impl<'a> RunLoop<'a> {
         match definition_stop(stopped, !self.ledger().can_start_provider_call()) {
             DefinitionStop::Settle => self.settle_stopped_primary().await,
             DefinitionStop::Budget => self.fail_for_budget().await,
-            DefinitionStop::Fail => self.fail_primary(RunFailure::ProviderCall).await,
+            DefinitionStop::Fail => self.fail_primary(RunFailure::DefinitionInvalid).await,
         }
     }
 
@@ -1373,8 +1384,9 @@ fn call_record(
         ),
         CallResult::Failed(_) | CallResult::Cancelled => (None, Usage::default(), None),
     };
+    let refused = refusal.is_some();
     ProviderCallRecord {
-        refusal: refusal.clone(),
+        refusal,
         delegation: if disposition == ProviderCallDisposition::Delegated {
             match result {
                 CallResult::Response(ProviderResponse {
@@ -1422,7 +1434,7 @@ fn call_record(
         cache_read_input_tokens: usage.cache_read_input_tokens,
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         wire_provenance,
-        failure_reason: if refusal.is_some() {
+        failure_reason: if refused {
             Some(ProviderFailureReason::ProposalRefused)
         } else {
             match result {

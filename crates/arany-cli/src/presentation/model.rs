@@ -998,6 +998,14 @@ mod tests {
                 arany::RunFailure::RefusalLimit,
                 "The same proposed operation was refused three times.",
             ),
+            (
+                arany::RunFailure::BudgetExhausted,
+                "The Goal budget refused the next action.",
+            ),
+            (
+                arany::RunFailure::DefinitionInvalid,
+                "An agent definition could not be loaded.",
+            ),
         ] {
             view.runs[0].failure = Some(cause);
             assert_eq!(
@@ -1008,6 +1016,22 @@ mod tests {
             );
         }
         view.runs[0].failure = None;
+        for reason in [
+            arany::ProviderFailureReason::WorkerFinishDeferred,
+            arany::ProviderFailureReason::WorkerDelegateRefused,
+            arany::ProviderFailureReason::WorkerToolRefused,
+            arany::ProviderFailureReason::CriterionNotMetInView,
+        ] {
+            let mut call = record(ProviderCallDisposition::InvalidResponse);
+            call.failure_reason = Some(reason);
+            view.runs[0].agents[0].provider_calls = vec![call];
+            let copy = run_feedback(&view.runs[0]).expect("worker refusal feedback");
+            assert!(
+                copy.contains("Arany refused the proposed worker coordination outcome."),
+                "{reason:?}: {copy}"
+            );
+            assert!(!copy.contains("Provider"));
+        }
         use arany::ProviderFailureReason;
         for (reason, disposition, message) in [
             (

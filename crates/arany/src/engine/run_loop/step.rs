@@ -75,7 +75,8 @@ impl Grant<'_> {
 
 enum SizingRefusal {
     DelegationDeadline,
-    Unavailable,
+    ActiveTime,
+    ContextFull,
 }
 
 enum Verdict {
@@ -256,7 +257,8 @@ impl RunLoop<'_> {
                             .await?;
                         return Ok(false);
                     }
-                    Err(SizingRefusal::Unavailable) => {
+                    Err(SizingRefusal::ActiveTime) => return Ok(false),
+                    Err(SizingRefusal::ContextFull) => {
                         return if matches!(grant, Grant::Primary { .. }) {
                             Err(EngineError::ContextTooLarge)
                         } else {
@@ -415,7 +417,7 @@ impl RunLoop<'_> {
             }
         };
         let Some(mut intent) = intent else {
-            return Ok(Err(SizingRefusal::Unavailable));
+            return Ok(Err(SizingRefusal::ActiveTime));
         };
         // The PreToolUse hooks run before dispatch, so the authorization outlives them.
         intent.expires_at_ms = intent
@@ -437,7 +439,7 @@ impl RunLoop<'_> {
             0
         } + self.feedback_reserve(runtime, post_call);
         let Some(capacity) = runtime.result_capacity(overhead, integration_capacity) else {
-            return Ok(Err(SizingRefusal::Unavailable));
+            return Ok(Err(SizingRefusal::ContextFull));
         };
         intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
             128
@@ -862,7 +864,7 @@ impl RunLoop<'_> {
     }
 
     fn plan_allows(&self, call: &ToolCall) -> bool {
-        self.primary_lease_allows(call).is_ok()
+        matches!(self.primary_lease_allows(call), Ok(Ok(())))
             && (matches!(
                 call,
                 ToolCall::ApplyChangeset {
@@ -874,37 +876,34 @@ impl RunLoop<'_> {
     pub(super) fn primary_lease_allows(
         &self,
         call: &ToolCall,
-    ) -> Result<(), super::ProposalRefusalCause> {
-        let allowed = self
-            .ledger()
-            .view(|v| {
-                v.runs.last().is_some_and(|r| {
-                    let leases = r
-                        .agents
-                        .iter()
-                        .filter_map(|a| a.assignment.as_ref())
-                        .filter(|w| w.released.is_none())
-                        .flat_map(|w| &w.pins.request.lease)
-                        .collect::<Vec<_>>();
-                    match call {
-                        ToolCall::ApplyChangeset {
-                            source: crate::worker::ChangesetSource::WorkerHandover { .. },
-                        } => true,
-                        ToolCall::Write { path, .. }
-                        | ToolCall::Edit { path, .. }
-                        | ToolCall::Mkdir { path } => {
-                            !leases.iter().any(|l| crate::worker::overlaps(l, path))
-                        }
-                        _ => !call.is_process() || leases.is_empty(),
+    ) -> Result<Result<(), super::ProposalRefusalCause>, EngineError> {
+        let allowed = self.ledger().view(|v| {
+            v.runs.last().is_some_and(|r| {
+                let leases = r
+                    .agents
+                    .iter()
+                    .filter_map(|a| a.assignment.as_ref())
+                    .filter(|w| w.released.is_none())
+                    .flat_map(|w| &w.pins.request.lease)
+                    .collect::<Vec<_>>();
+                match call {
+                    ToolCall::ApplyChangeset {
+                        source: crate::worker::ChangesetSource::WorkerHandover { .. },
+                    } => true,
+                    ToolCall::Write { path, .. }
+                    | ToolCall::Edit { path, .. }
+                    | ToolCall::Mkdir { path } => {
+                        !leases.iter().any(|l| crate::worker::overlaps(l, path))
                     }
-                })
+                    _ => !call.is_process() || leases.is_empty(),
+                }
             })
-            .unwrap_or(false);
-        if allowed {
+        })?;
+        Ok(if allowed {
             Ok(())
         } else {
             Err(super::ProposalRefusalCause::LeaseOverlap)
-        }
+        })
     }
 
     fn review_will_run(
