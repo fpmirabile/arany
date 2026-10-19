@@ -24,7 +24,7 @@ fn fenced(text: &str) -> Value {
     json!([{"type":"content", "content":{"type":"text", "text":format!("{fence}\n{text}\n{fence}")}}])
 }
 
-fn bounded(text: &str, limit: usize, session: SessionId) -> String {
+pub(super) fn bounded(text: &str, limit: usize, session: SessionId) -> String {
     let mut safe = String::new();
     for line in text.split_inclusive('\n') {
         let (line, newline) = line.strip_suffix('\n').map_or((line, false), |s| (s, true));

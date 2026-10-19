@@ -137,6 +137,28 @@ fn every_conformance_message_validates_against_the_schema() {
     let thread =
         json!({"id": thread_id, "title": "Example", "workspace": "/workspace", "createdAtMs": 1});
     let turn = json!({"id": run_id, "goalId": goal_id, "status": "inProgress", "items": []});
+    for reason in [
+        "actionBudgetExhausted",
+        "tokenBudgetExhausted",
+        "futureBudget",
+    ] {
+        let mut completed = turn.clone();
+        completed["status"] = json!("failed");
+        completed["stopReason"] = json!(reason);
+        let valid = reason != "futureBudget";
+        assert_eq!(
+            serde_json::from_value::<Turn>(completed.clone()).is_ok(),
+            valid
+        );
+        let mut part = schema.clone();
+        part["$ref"] = json!("#/$defs/Turn");
+        assert_eq!(
+            jsonschema::validator_for(&part)
+                .unwrap()
+                .is_valid(&completed),
+            valid
+        );
+    }
     for (index, (name, params, result)) in [
         ("initialize", json!({"clientInfo": {"name": "fixture", "version": "1"}, "capabilities": {"futureFlag": true}}), json!({"userAgent": "arany/0.1.0", "platformOs": "linux", "capabilities": CAPABILITIES})),
         ("thread/start", json!({"cwd": "/workspace", "provider": "openai", "model": "model", "effort": "high", "permissionMode": "acceptEdits", "includePaths": ["/workspace/file"]}), json!({"thread": thread})),

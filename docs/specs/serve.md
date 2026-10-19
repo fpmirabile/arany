@@ -155,9 +155,19 @@ honored.
 | `turn/started` | `MessageAccepted`; `{threadId,turn:{id,goalId,status:"inProgress",items:[]}}`. Each subsequent Run of an autonomous Goal has a new turn ID and the same Goal ID. |
 | `item/started` | `MessageAccepted` or `ToolStarted`; `{threadId,turnId,item,startedAtMs}`. |
 | `item/completed` | `MessageAccepted`, `MessageCommitted` or `ToolFinished`; `{threadId,turnId,item,completedAtMs}`. User items start and complete together; final answer items complete without a started notification. |
-| `turn/completed` | `RunFinished` plus reduced Goal state; `{threadId,turn:{id,goalId,status,items:[],error?,goal:{status,stopped?}}}`. Status is `completed`, `interrupted` or `failed`. An autonomous submission can complete several turns before its final receipt. |
+| `turn/completed` | `RunFinished` plus reduced Goal state; `{threadId,turn:{id,goalId,status,stopReason?,items:[],error?,goal:{status,stopped?}}}`. Status is `completed`, `interrupted` or `failed`. An autonomous submission can complete several turns before its final receipt. |
 | `events/committed` | After a thread's final subscription page, `{threadId,event:EventLine}` for each later tapped Event in commit order. Events at or before the page head are suppressed. |
 | `events/resync` | A tap `Resync {missed}`; `{threadId,missed,lastSequence}`. Raw subscriptions receive one notice per subscribed thread with its last delivered sequence and are then disabled until `events/subscribe` is called again, so a later notice never reports a cursor beyond the first gap. The turn projection also emits `events/resync` for its active thread with its own `lastSequence`, so a subscriber can see two notices; `missed` counts the process-wide tap loss and may include other threads. Recover by paging `events/subscribe` from `lastSequence`, or reconstruct items with `thread/resume`. Live delivery is best effort: a lost append acknowledgment or a fork committed inside Store can leave a gap without Resync; paging supplies completeness. |
+
+`turn.stopReason` is a closed optional value, present only for the last Run of
+a Goal whose committed `GoalFinished.exhausted` is true. `tokenBudgetExhausted`
+means the effective finite token ceiling is reached or token usage is unknown;
+otherwise `actionBudgetExhausted` covers Provider/action, Run and active-time
+budget exhaustion. Token exhaustion takes precedence when dimensions coincide.
+A failure merely occurring on the last permitted call is not budget exhaustion.
+In-progress and intermediate autonomous turns omit the reason; historical turns
+use the same reduced facts. `goal.stopped` remains diagnostic text and must not
+be parsed to classify a budget stop.
 
 Raw Event delivery and turn/item projection use separate subscriptions, so
 `events/committed` may precede or follow the matching `item/*` notification.
