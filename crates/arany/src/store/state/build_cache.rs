@@ -477,13 +477,7 @@ impl StateRoot {
         if requested == 0 {
             return Ok((0, 0));
         }
-        let workspace = crate::private_fs::open_workspace_directory(Path::new(&identity.path))
-            .map_err(StoreError::from)?;
-        self.ensure_outside_workspace(&workspace)?;
-        let metadata = workspace.dir_metadata()?;
-        if metadata.dev() != identity.device || metadata.ino() != identity.inode {
-            return Err(StoreError::InvalidStateDirectory);
-        }
+        self.admit_identity(identity)?;
         let dir = cache_directory(self, true)?;
         let _aggregate = lock_file(&dir, AGGREGATE_LOCK, true)?;
         remove_stale_candidates(&dir)?;
@@ -599,16 +593,7 @@ impl StateRoot {
     }
 
     pub(crate) fn clear_build_cache(&self, identity: BuildCacheIdentity) -> Result<(), StoreError> {
-        if !valid_identity_path(Path::new(&identity.path)) || identity.inode == 0 {
-            return Err(StoreError::InvalidStateDirectory);
-        }
-        let workspace = crate::private_fs::open_workspace_directory(Path::new(&identity.path))
-            .map_err(StoreError::from)?;
-        self.ensure_outside_workspace(&workspace)?;
-        let metadata = workspace.dir_metadata()?;
-        if metadata.dev() != identity.device || metadata.ino() != identity.inode {
-            return Err(StoreError::InvalidStateDirectory);
-        }
+        self.admit_identity(&identity)?;
         let dir = match cache_directory(self, false) {
             Ok(dir) => dir,
             Err(error) if io_kind(&error) == Some(io::ErrorKind::NotFound) => return Ok(()),
