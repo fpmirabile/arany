@@ -289,5 +289,31 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
     block.to_string()
 }
 
+pub(crate) fn history_unanswered_block(run: &RunView) -> String {
+    use crate::session::{AgentRole, RunStatus};
+
+    let (status, fact) = match run.status {
+        RunStatus::Failed => ("failed", "Run failed before any primary model Tool"),
+        RunStatus::Cancelled => ("cancelled", "Run cancelled"),
+        RunStatus::StoppedByHook => ("stopped_by_hook", "Run stopped by hook"),
+        _ => ("interrupted", "Run interrupted"),
+    };
+    let call = run
+        .agents
+        .iter()
+        .find(|agent| agent.role == AgentRole::Primary)
+        .and_then(|agent| agent.provider_calls.last());
+    json!({
+        "status": status,
+        "fact": fact,
+        "primary_model_tool_execution": "nothing dispatched",
+        "last_call": call.map(|call| json!({
+            "disposition": call.disposition,
+            "failure_reason": call.failure_reason,
+        })),
+    })
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests;
