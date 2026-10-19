@@ -1934,6 +1934,14 @@ pub(super) fn payload(
         args
     };
     command.args(payload_args);
+    // Cargo's libcurl otherwise initializes LibreSSL, which reads /private/etc/ssl and fails under Seatbelt.
+    if cfg!(target_os = "macos")
+        && runtime_grants
+            .iter()
+            .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
+    {
+        command.env("CURL_SSL_BACKEND", "Secure-Transport");
+    }
     if cfg!(target_os = "macos")
         && let Some(sdk) = runtime_grants
             .iter()
