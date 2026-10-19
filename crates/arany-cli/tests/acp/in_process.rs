@@ -3105,9 +3105,8 @@ async fn close_cancels_pending_permissions_and_preserves_unknown_effects_without
             json!({"sessionId":adapter.session}),
         )
         .await;
-    let close = adapter.request().await;
-    assert_eq!(close.method, "thread/unsubscribe");
-    assert_eq!(close.params.unwrap(), json!({"threadId":adapter.session}));
+    let interrupt = adapter.request().await;
+    assert_eq!(interrupt.method, "turn/interrupt");
     let observation = arany::ToolObservation {
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Uncertain,
@@ -3133,6 +3132,9 @@ async fn close_cancels_pending_permissions_and_preserves_unknown_effects_without
     assert_eq!(prompt["id"], "prompt");
     assert_eq!(prompt["result"]["stopReason"], "cancelled");
     assert_eq!(prompt["result"]["_meta"]["arany.uncertainEffects"], 1);
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    assert_eq!(close.params.unwrap(), json!({"threadId":adapter.session}));
     adapter
         .events
         .send(Message::Response(Response {
@@ -3154,6 +3156,106 @@ async fn close_cancels_pending_permissions_and_preserves_unknown_effects_without
     assert!(
         adapter.input.try_recv().is_err(),
         "closing never retries or continues the effect"
+    );
+    adapter.close().await;
+}
+
+#[tokio::test]
+async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertain_effect() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter.prompt(json!([{"type":"text","text":"Edit"}])).await;
+    let intent = adapter.intent(arany::ToolCall::Write {
+        path: "file".into(),
+        content: "new".into(),
+        expected_digest: None,
+    });
+    adapter
+        .call(
+            json!(30),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.request().await.method, "turn/interrupt");
+    adapter
+        .call(
+            json!(31),
+            "session/close",
+            json!({"sessionId":adapter.session}),
+        )
+        .await;
+    assert_eq!(adapter.next().await["error"]["data"]["reason"], "busy");
+    let observation = arany::ToolObservation {
+        intent: intent.clone(),
+        disposition: arany::ToolDisposition::Uncertain,
+        enforcement_cause: None,
+        output: "Outcome unknown".into(),
+        attestation: None,
+        cache_update: arany::CacheUpdate::NotApplicable,
+    };
+    adapter
+        .events
+        .send(Message::Notification(Notification {
+            jsonrpc: Default::default(),
+            method: "events/resync".into(),
+            params: Some(json!({"threadId":adapter.session,"missed":2,"lastSequence":0})),
+        }))
+        .await
+        .unwrap();
+    adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
+    let events: Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",json!({"observation":observation}))].into_iter().enumerate().map(|(index,(kind,payload))| json!({
+        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":1,"payload":payload,"created_at_ms":0
+    })).collect();
+    let recover = adapter.request().await;
+    assert_eq!(
+        recover.method, "events/subscribe",
+        "the thread stays loaded for reconciliation before unload"
+    );
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: recover.id,
+            result: json!({"events":events,"nextSince":null}),
+        }))
+        .await
+        .unwrap();
+    let mut recovered = false;
+    let prompt = loop {
+        let message = adapter.next().await;
+        if message["id"] == "prompt" {
+            break message;
+        }
+        recovered |= message["params"]["update"]["_meta"]["arany.status"] == "uncertain";
+    };
+    assert!(recovered, "the missed Uncertain observation is recovered");
+    assert_eq!(prompt["result"]["stopReason"], "cancelled");
+    assert_eq!(prompt["result"]["_meta"]["arany.uncertainEffects"], 1);
+    assert!(prompt["result"]["_meta"]["arany.incompleteUpdates"].is_null());
+    let close = adapter.request().await;
+    assert_eq!(close.method, "thread/unsubscribe");
+    adapter
+        .events
+        .send(Message::Response(Response {
+            jsonrpc: Default::default(),
+            id: close.id,
+            result: json!({"status":"unsubscribed"}),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(adapter.next().await["id"], 30);
+    adapter
+        .call(
+            json!(32),
+            "session/prompt",
+            json!({"sessionId":adapter.session,"prompt":[{"type":"text","text":"Again"}]}),
+        )
+        .await;
+    assert_eq!(adapter.next().await["error"]["code"], -32002);
+    assert!(
+        adapter.input.try_recv().is_err(),
+        "the Uncertain effect is never retried and the slot is freed"
     );
     adapter.close().await;
 }

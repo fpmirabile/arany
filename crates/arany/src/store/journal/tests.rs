@@ -443,3 +443,61 @@ fn forged_rewind_workspace_identity_is_rejected_on_append_and_replay() {
     let cold = open_connection(&root, true).unwrap();
     assert!(resolve_view(&cold, child, 0, &mut 0).is_err());
 }
+
+#[test]
+fn session_listing_stops_at_its_scan_budget() {
+    use super::super::replay::list_session_items;
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let mut connection = open_connection(&root, false).expect("file-backed store");
+    let mut hot_session = None;
+    let identity = WorkspaceIdentity {
+        device: 1,
+        inode: 1,
+    };
+    let session_id = SessionId::new();
+    append(
+        &mut connection,
+        &mut hot_session,
+        session_id,
+        Event::SessionStarted {
+            title: "Session".into(),
+            workspace_identity: identity,
+        },
+    )
+    .expect("first Event");
+    let rename = Event::SessionRenamed { title: "x".into() };
+    let payload = rename.payload().expect("bounded Event payload");
+    let transaction = connection.transaction().expect("seed transaction");
+    {
+        let mut insert = transaction
+            .prepare(
+                "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            )
+            .expect("seed statement");
+        for sequence in 2..=100_i64 {
+            insert
+                .execute(params![
+                    sequence,
+                    session_id.to_string(),
+                    rename.kind(),
+                    rename.version(),
+                    payload,
+                ])
+                .expect("valid Event row");
+        }
+    }
+    transaction.commit().expect("seeded history");
+
+    assert_eq!(
+        list_session_items(&connection, identity, 100)
+            .expect("within budget")
+            .len(),
+        1
+    );
+    assert!(matches!(
+        list_session_items(&connection, identity, 99),
+        Err(StoreError::TooManySessions)
+    ));
+}

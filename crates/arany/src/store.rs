@@ -90,7 +90,7 @@ pub enum StoreError {
     HistoryChanged,
     #[error("Session history exceeds the replay limit")]
     ReplayLimit,
-    #[error("too many Sessions for discovery; resume an exact ID")]
+    #[error("too many Sessions or Events for discovery; resume an exact ID")]
     TooManySessions,
     #[error("corrupt or unsupported Event history")]
     InvalidHistory,
@@ -403,7 +403,11 @@ impl Store {
                             workspace_identity,
                             reply,
                         } => {
-                            let _ = reply.send(list_session_items(&connection, workspace_identity));
+                            let _ = reply.send(list_session_items(
+                                &connection,
+                                workspace_identity,
+                                replay::MAX_LIST_SCAN_EVENTS,
+                            ));
                         }
                         Request::Fork {
                             source_session_id,

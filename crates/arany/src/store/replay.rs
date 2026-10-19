@@ -12,6 +12,7 @@ use std::str::FromStr;
 pub(super) const MAX_SESSION_EVENTS: usize = 10_000;
 const MAX_FORK_DEPTH: usize = 8;
 const MAX_DISCOVERED_SESSIONS: usize = 65_536;
+pub(super) const MAX_LIST_SCAN_EVENTS: usize = 262_144;
 
 struct SessionHead {
     title: String,
@@ -42,7 +43,7 @@ pub(super) fn session_for_run(
     run_id: RunId,
 ) -> Result<Option<SessionId>, StoreError> {
     let mut selected = None;
-    scan_all_events(connection, |envelope| {
+    scan_all_events(connection, &mut { usize::MAX }, |envelope| {
         if envelope.run_id == Some(run_id) {
             if selected.is_some_and(|id| id != envelope.session_id) {
                 return Err(StoreError::InvalidHistory);
@@ -58,7 +59,7 @@ pub(super) fn latest_session_id(
     connection: &Connection,
     workspace_identity: WorkspaceIdentity,
 ) -> Result<Option<SessionId>, StoreError> {
-    let heads = scan_session_heads(connection)?;
+    let heads = scan_session_heads(connection, &mut { usize::MAX })?;
     let mut latest = None::<(SessionId, u64)>;
     for (&id, head) in &heads {
         if discovered_identity(id, &heads, 0)? == Some(workspace_identity)
@@ -82,9 +83,10 @@ pub(super) fn latest_session_id(
 pub(super) fn list_session_items(
     connection: &Connection,
     workspace_identity: WorkspaceIdentity,
+    mut budget: usize,
 ) -> Result<Vec<SessionListItem>, StoreError> {
-    let mut heads = scan_session_heads(connection)?;
-    inherit_fork_metadata(connection, &mut heads)?;
+    let mut heads = scan_session_heads(connection, &mut budget)?;
+    inherit_fork_metadata(connection, &mut budget, &mut heads)?;
     let mut items = Vec::new();
     let mut timestamp =
         connection.prepare("SELECT strftime('%Y-%m-%d %H:%M:%S', ?1 / 1000, 'unixepoch')")?;
@@ -123,9 +125,10 @@ pub(super) fn list_session_items(
 
 fn scan_session_heads(
     connection: &Connection,
+    budget: &mut usize,
 ) -> Result<HashMap<SessionId, SessionHead>, StoreError> {
     let mut heads = HashMap::<SessionId, SessionHead>::new();
-    scan_all_events(connection, |envelope| {
+    scan_all_events(connection, budget, |envelope| {
         let id = envelope.session_id;
         if let Some(head) = heads.get_mut(&id) {
             if matches!(
@@ -257,6 +260,7 @@ fn selection_from_run(config: &RunConfig) -> SessionDefaults {
 
 fn inherit_fork_metadata(
     connection: &Connection,
+    budget: &mut usize,
     heads: &mut HashMap<SessionId, SessionHead>,
 ) -> Result<(), StoreError> {
     let mut boundaries = heads
@@ -270,7 +274,7 @@ fn inherit_fork_metadata(
     let mut next = 0;
     let mut selections = HashMap::<SessionId, SessionDefaults>::new();
     let mut inherited = HashMap::<SessionId, (SessionDefaults, Option<(u64, String)>)>::new();
-    scan_all_events(connection, |envelope| {
+    scan_all_events(connection, budget, |envelope| {
         match &envelope.event {
             Event::RunStarted { config, .. } => {
                 selections.insert(envelope.session_id, selection_from_run(config));
@@ -518,7 +522,7 @@ fn load_session_events(
     session_id: SessionId,
 ) -> Result<Vec<EventEnvelope>, StoreError> {
     let mut selected = Vec::new();
-    scan_all_events(connection, |envelope| {
+    scan_all_events(connection, &mut { usize::MAX }, |envelope| {
         if envelope.session_id == session_id {
             if selected.len() == MAX_SESSION_EVENTS {
                 return Err(StoreError::ReplayLimit);
@@ -532,6 +536,7 @@ fn load_session_events(
 
 fn scan_all_events(
     connection: &Connection,
+    budget: &mut usize,
     mut on_event: impl FnMut(EventEnvelope) -> Result<(), StoreError>,
 ) -> Result<(), StoreError> {
     let mut statement = connection.prepare(
@@ -545,6 +550,7 @@ fn scan_all_events(
     let mut rows = statement.query([])?;
     let mut expected = 1_i64;
     while let Some(row) = rows.next()? {
+        *budget = budget.checked_sub(1).ok_or(StoreError::TooManySessions)?;
         let sequence: i64 = row.get(0)?;
         if sequence != expected {
             return Err(StoreError::InvalidHistory);

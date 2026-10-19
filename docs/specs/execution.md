@@ -222,7 +222,7 @@ Finished records its own rewind ID, closed `restored`, `conflict`, `denied`, `fa
 | Steering note per Run | 8 KiB, including history labels | offer refused; the caller keeps its text |
 | Requested Tools per model step | 0, or 1 to 4 for a `ToolRequested` disposition | replay refused |
 | Evidence caches | 32 custom Provider rows and 256 native rows; native rows expire after 24 hours | expired rows are removed first; a new row beyond the bound is refused as storage full |
-| Session discovery | 65,536 heads | exact-ID resume fallback |
+| Session discovery | 65,536 heads; listing scans at most 262,144 Events across both passes | exact-ID resume fallback |
 | Events per Session lineage | 10,000, including inherited history | append refused; strict replay fails closed with a Store error |
 | `provider-profiles.json` and `tools.json` | 64 KiB each, read only through the admitted handle | rejected; never parsed as trusted configuration |
 

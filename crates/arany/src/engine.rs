@@ -78,7 +78,7 @@ pub enum EngineError {
     MissingSession,
     #[error("no Session for this Workspace")]
     NoSessionForWorkspace,
-    #[error("too many Sessions for discovery; use --resume ID")]
+    #[error("too many Sessions or Events for discovery; use --resume ID")]
     TooManySessions,
     #[error("Session has an active operation")]
     SessionBusy,
