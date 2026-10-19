@@ -282,33 +282,37 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
             })
             .count();
         let observed = end - index - hook_events;
-        let providers = events[..=*index]
+        let config = events[..=*index]
             .iter()
             .rev()
             .find_map(|event| match &event.event {
                 Event::RunStarted { config, .. } => Some(config),
                 _ => None,
-            })
-            .map(|config| {
-                let mut routes = config
-                    .providers
-                    .clone()
-                    .unwrap_or_else(|| crate::Providers::all(vec![config.identity().unwrap()]));
-                if let Some(roster) = &config.roster
-                    && let Some(chain) = roster
-                        .child_profiles
-                        .iter()
-                        .filter_map(|name| roster.chain(name))
-                        .max_by_key(|chain| chain.len())
-                {
-                    routes.child = chain.to_vec();
-                }
-                routes
             });
-        let bound = providers.map_or_else(
-            || action.max_events(),
-            |providers| action.max_events_for(&providers),
-        );
+        let providers = config.map(|config| {
+            let mut routes = config
+                .providers
+                .clone()
+                .unwrap_or_else(|| crate::Providers::all(vec![config.identity().unwrap()]));
+            if let Some(roster) = &config.roster
+                && let Some(chain) = roster
+                    .child_profiles
+                    .iter()
+                    .filter_map(|name| roster.chain(name))
+                    .max_by_key(|chain| chain.len())
+            {
+                routes.child = chain.to_vec();
+            }
+            routes
+        });
+        let verdicts = config
+            .filter(|config| config.supervisor.is_some())
+            .map_or(0, |_| action.verdict_slots());
+        let bound = verdicts
+            + providers.map_or_else(
+                || action.max_events(),
+                |providers| action.max_events_for(&providers),
+            );
         assert!(
             bound >= observed,
             "{action:?} at {index} bounds {bound} Events but appends {observed}",

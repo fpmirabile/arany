@@ -506,7 +506,8 @@ fn evaluate(
     if let Some(f) = footprint {
         let notice = f.files >= policy.floors.files
             || f.files_per_root >= policy.floors.files_per_root
-                && f.delete_permille >= policy.floors.delete_permille;
+                && f.delete_permille >= policy.floors.delete_permille
+                && f.deleted_files >= policy.floors.deleted_files;
         let t = &policy.candidates;
         let narrow = f.files >= t.files && f.files_per_root >= t.files_per_root
             || f.deleted_files >= t.deleted_files && f.delete_permille >= t.delete_permille

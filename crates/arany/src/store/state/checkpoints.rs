@@ -376,6 +376,8 @@ fn evict(
     must_satisfy: bool,
     mut enough: impl FnMut(i64, i64) -> bool,
 ) -> Result<(), StoreError> {
+    #[cfg(test)]
+    tests::EVICTION_PASSES.with(|passes| passes.set(passes.get() + 1));
     let mut victims = Vec::new();
     let (mut bytes, mut groups) = (0i64, 0i64);
     let mut group = None::<String>;
@@ -703,7 +705,9 @@ fn capture_inner(
         if HEADROOM as i64 + needed > available {
             return Err(StoreError::StorageFull);
         }
-        evict_total(&tx, &incoming, &mut pruned, |freed, _| freed >= short)?;
+        evict_total(&tx, &incoming, &mut pruned, |freed, _| {
+            freed >= short.saturating_mul(2)
+        })?;
         in_time(deadline)?;
         if shortfall(&tx)? > 0 {
             return Err(StoreError::StorageFull);

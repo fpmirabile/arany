@@ -1,5 +1,9 @@
 use super::*;
 
+thread_local! {
+    pub(super) static EVICTION_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn fixture() -> (tempfile::TempDir, StateRoot) {
     let temp = tempfile::tempdir().unwrap();
     let root = StateRoot::admit(&temp.path().join("state")).unwrap();
@@ -142,10 +146,16 @@ fn checkpoints_every_logical_quota_accepts_boundary_and_evicts_first_overflow() 
                 };
                 oldest = Some(run);
             }
+            EVICTION_PASSES.set(0);
             assert_eq!(
                 capture_inner(&root, &captured, sequence as i64, limits).unwrap(),
                 if sequence == 3 { oldest } else { None },
                 "{dimension}: notice names the pruned checkpoint"
+            );
+            assert_eq!(
+                EVICTION_PASSES.get(),
+                if sequence == 3 { 2 } else { 1 },
+                "{dimension}: expiry plus at most one quota pass"
             );
             assert_eq!(
                 count(&root, "SELECT COUNT(*) FROM refs"),
@@ -359,8 +369,8 @@ fn checkpoints_pin_the_owner_accepted_bounds() {
     assert_eq!(BUSY, Duration::from_millis(2000));
 }
 
-#[tokio::test(start_paused = true)]
-async fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_session() {
+#[test]
+fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_session() {
     let (_temp, root) = fixture();
     let (foreign, session, goal) = (SessionId::new(), SessionId::new(), GoalId::new());
     let foreign_run = RunId::new();
@@ -415,6 +425,7 @@ async fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_
     let mut limits = LIMITS;
     limits.refs = 30_000;
     limits.session_checkpoints = 100;
+    EVICTION_PASSES.set(0);
     let pruned = super::capture_inner(
         &root,
         &batch(session, goal, RunId::new(), 30_000, b"new").capture,
@@ -424,12 +435,70 @@ async fn checkpoints_evict_a_large_store_in_one_bounded_pass_and_name_only_this_
         &mut None,
     )
     .unwrap();
+    assert_eq!(
+        EVICTION_PASSES.get(),
+        2,
+        "one expiry and one Session quota pass"
+    );
     assert_eq!(count(&root, "SELECT COUNT(DISTINCT run_id) FROM refs"), 100);
     assert_eq!(pruned.get(&session), Some(&runs[19_900]));
     assert_eq!(
         pruned.get(&foreign),
         Some(&foreign_run),
         "foreign expiry is kept per Session, never attributed to this one"
+    );
+}
+
+#[test]
+fn checkpoints_physical_quota_evicts_twice_the_shortfall_in_one_pass() {
+    let (_temp, root) = fixture();
+    let (session, goal, run) = (SessionId::new(), GoalId::new(), RunId::new());
+    let connection = open(&root, true, LIMITS).unwrap();
+    connection.execute_batch("BEGIN").unwrap();
+    for index in 0..4096i64 {
+        let mut bytes = [0; 128];
+        bytes[..8].copy_from_slice(&index.to_le_bytes());
+        let digest = Sha256::digest(bytes);
+        connection
+            .execute(
+                "INSERT INTO blobs(digest,bytes,len) VALUES(?1,?2,128)",
+                params![digest.as_slice(), bytes.as_slice()],
+            )
+            .unwrap();
+        connection.execute("INSERT INTO refs(session_id,goal_id,run_id,rewind_id,tool_sequence,path,digest,len,captured_at_ms) VALUES(?1,?2,?3,NULL,?4,?5,?6,128,100)", params![session.to_string(), goal.to_string(), run.to_string(), index + 1, format!("p{index}"), digest.as_slice()]).unwrap();
+    }
+    connection.execute_batch("COMMIT").unwrap();
+    let limits = Limits {
+        bytes: scalar(&connection, "PRAGMA page_count", []).unwrap() * 4096,
+        ..LIMITS
+    };
+    assert_eq!(scalar(&connection, "PRAGMA freelist_count", []).unwrap(), 0);
+    drop(connection);
+    EVICTION_PASSES.set(0);
+    capture_inner(
+        &root,
+        &batch(session, goal, RunId::new(), 5000, b"new"),
+        100,
+        limits,
+    )
+    .unwrap();
+    assert_eq!(
+        EVICTION_PASSES.get(),
+        2,
+        "one expiry and one physical quota pass"
+    );
+    let shortfall = 3i64 + 16 * 4096;
+    let removed = (2 * shortfall + 127) / 128;
+    assert_eq!(
+        count(&root, "SELECT COUNT(*) FROM refs"),
+        4096 - removed + 1
+    );
+    assert!(count(&root, "PRAGMA page_count") * 4096 <= limits.bytes);
+    assert_eq!(
+        load(&root, Sha256::digest(b"new").into())
+            .unwrap()
+            .as_deref(),
+        Some(b"new".as_slice())
     );
 }
 

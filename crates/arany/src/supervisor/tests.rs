@@ -159,6 +159,31 @@ fn supervisor_disproportion_boundaries_saturation_and_privacy() {
             "files {files} deleted {deleted} changed {changed}"
         );
     }
+    let mut pinned = SupervisorPolicy::all_off();
+    pinned.floors.files_per_root = 4;
+    pinned.floors.delete_permille = 250;
+    pinned.floors.deleted_files = 2;
+    pinned.digest = pinned.computed_digest();
+    assert!(pinned.valid());
+    for (deleted_files, expected) in [(1, false), (2, true)] {
+        let signals = evaluate(
+            &window,
+            Some(DisproportionFeatures {
+                files: 4,
+                files_per_root: 4,
+                deleted_files,
+                delete_permille: deleted_files * 250,
+                ..Default::default()
+            }),
+            &pinned,
+        );
+        assert_eq!(
+            signals
+                .iter()
+                .any(|s| matches!(s.features, Features::Disproportion(_))),
+            expected
+        );
+    }
     assert_eq!(count(usize::MAX), u16::MAX);
     assert_eq!(ratio(u64::MAX, 0), u16::MAX);
     let window = (1..=32)
