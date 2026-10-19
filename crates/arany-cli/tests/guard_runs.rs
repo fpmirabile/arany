@@ -1666,6 +1666,23 @@ async fn primary_tool_step_events_match_the_snapshot() {
             PRIMARY_DENIED_WRITE,
         ),
         (
+            "repaired mutation",
+            vec![
+                tool_outcome(
+                    arany::ToolCall::Write {
+                        path: "notes/new.txt".into(),
+                        expected_digest: None,
+                        content: "New".into(),
+                    },
+                    None,
+                ),
+                write(),
+                finish("answer"),
+            ],
+            granted(None),
+            PRIMARY_REPAIRED_WRITE,
+        ),
+        (
             "guard mutation",
             vec![write(), finish("answer")],
             granted(None),
@@ -1861,6 +1878,27 @@ GoalRunLinked
 MessageAccepted
 RunStarted
 AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+GoalPlanContractRecorded
+ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolFinished Succeeded
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
+AgentFinished
+MessageCommitted
+RunFinished
+GoalFinished";
+
+const PRIMARY_REPAIRED_WRITE: &str = "\
+SessionStarted
+GoalStarted
+GoalRunLinked
+MessageAccepted
+RunStarted
+AgentSpawned
+GoalProviderCallReserved
+ProviderCallRecorded RootPlan
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
 GoalPlanContractRecorded

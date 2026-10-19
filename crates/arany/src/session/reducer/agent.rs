@@ -490,15 +490,26 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                         == Some(crate::provider::ProviderFailureReason::CriterionNotMetInView)
                 })
                 && record.phase == AgentPhase::ChildWork;
-            let valid = gate_continuation
+            let refusal_continuation = agent.role == AgentRole::Primary
+                && !agent.refusal_limit_reached()
+                && agent
+                    .provider_calls
+                    .last()
+                    .is_some_and(|call| call.refusal.is_some() && call.phase == record.phase)
+                && run.hooks_settled()
+                && run.tools.iter().all(ToolView::settled_without_stop);
+            let valid = refusal_continuation
+                || gate_continuation
                 || stop_continuation
                 || tool_continuation
                 || tool_review
                 || delegated
                 || match (agent.role, agent.provider_calls.as_slice(), record.phase) {
                     (AgentRole::Primary, [], AgentPhase::RootPlan) => true,
-                    (AgentRole::Primary, [first], AgentPhase::RootSynthesis)
-                        if first.disposition == ProviderCallDisposition::Delegated =>
+                    (AgentRole::Primary, calls, AgentPhase::RootSynthesis)
+                        if calls.last().is_some_and(|call| {
+                            call.disposition == ProviderCallDisposition::Delegated
+                        }) =>
                     {
                         all_children_finished(run)
                             || record.disposition == ProviderCallDisposition::ToolRequested

@@ -239,6 +239,12 @@ impl SessionView {
             .iter()
             .any(|agent| agent.id == *agent_run_id && agent.status == AgentStatus::Active);
         let run = current_run(self, *run_id)?;
+        if run
+            .primary()
+            .is_some_and(|agent| agent.id == *agent_run_id && agent.refusal_limit_reached())
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
         if let Some(agent) = run.agents.iter().find(|agent| agent.id == *agent_run_id)
             && let Some(name) = &agent.definition
         {

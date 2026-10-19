@@ -1802,10 +1802,13 @@ fn team_policy_rejects_a_direct_primary_finish() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "summary".into(),
-            result: "unearned result".into(),
-        })]);
+        let provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Finish(Finish {
+                summary: "summary".into(),
+                result: "unearned result".into(),
+            });
+            3
+        ]);
         let requests = provider.requests.clone();
         let state_path = temp.path().join("state");
         let provider = Arc::new(provider);
@@ -1823,12 +1826,13 @@ fn team_policy_rejects_a_direct_primary_finish() {
             .expect("durable failed Run");
         assert_eq!(outcome.run.status, RunStatus::Failed);
         assert!(outcome.run.assistant_message.is_none());
+        assert_eq!(outcome.run.failure, Some(arany::RunFailure::RefusalLimit));
         {
             let requests = requests.lock().unwrap();
             assert_eq!(
                 requests.len(),
-                1,
-                "invalid outcome must not trigger a second call or fake exhaustion"
+                3,
+                "three identical phase refusals must stop the Run"
             );
             assert_test_call(
                 &requests[0],
@@ -1846,7 +1850,7 @@ fn team_policy_rejects_a_direct_primary_finish() {
                 }
             );
         }
-        assert_eq!(outcome.run.agents[0].provider_calls.len(), 1);
+        assert_eq!(outcome.run.agents[0].provider_calls.len(), 3);
         assert_eq!(
             outcome.run.agents[0].provider_calls[0].disposition,
             ProviderCallDisposition::InvalidResponse
@@ -1864,6 +1868,72 @@ fn team_policy_rejects_a_direct_primary_finish() {
         );
         store.close().await.unwrap();
     });
+}
+
+#[tokio::test]
+async fn team_planning_refusal_can_be_repaired_with_delegate() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state = temp.path().join("state");
+    let finish = ProviderOutcome::Finish(Finish {
+        summary: "done".into(),
+        result: "answer".into(),
+    });
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        finish.clone(),
+        ProviderOutcome::Delegate(Delegate {
+            agent: None,
+            children: vec![arany::ChildAssignment {
+                objective: "Inspect".into(),
+                profile: None,
+                editor: None,
+            }],
+        }),
+        finish.clone(),
+        finish,
+    ]));
+    let engine = engine_support::open(
+        StateRoot::admit(&state).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
+    let mut input = request(&workspace, "Question");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Team {
+        max_active_children: 1,
+    };
+    let result = run_to_end(&engine, &provider, input)
+        .await
+        .expect("team repaired");
+    engine.close().await.expect("close engine");
+    {
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests[1].input.last_answer_refused,
+            Some(arany::ProposalRefusal {
+                operation: "finish".into(),
+                cause: arany::ProposalRefusalCause::Phase
+            })
+        );
+        assert!(
+            requests[2..]
+                .iter()
+                .all(|request| request.input.last_answer_refused.is_none())
+        );
+    }
+    assert!(provider.responses.lock().expect("script").is_empty());
+    let store =
+        Store::open_read_only(StateRoot::open_existing(&state).expect("state")).expect("store");
+    let view = store
+        .load_view(result.session_id)
+        .await
+        .expect("reopen")
+        .expect("Session");
+    assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert!(view.runs[0].tools.is_empty());
+    store.close().await.expect("store close");
 }
 
 #[test]
@@ -5223,15 +5293,34 @@ async fn create_session_on_open_engine_commits_session_started_and_submit_append
 }
 
 #[tokio::test]
-async fn write_proposal_refusals_record_missing_and_spent_plan_causes_without_dispatch() {
+async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
     use arany::{
         GoalBudget, GoalPlanContract, GoalSuccessCriterion, ProposalRefusalCause, RunFailure,
     };
     use std::os::unix::fs::PermissionsExt;
 
-    for (plan_calls, cause) in [
-        (None, ProposalRefusalCause::PlanMissing),
-        (Some(1), ProposalRefusalCause::PlanBudgetSpent),
+    for (plan_calls, cause, goal_calls, expected_calls, failure) in [
+        (
+            None,
+            ProposalRefusalCause::PlanMissing,
+            8,
+            3,
+            Some(RunFailure::RefusalLimit),
+        ),
+        (
+            Some(1),
+            ProposalRefusalCause::PlanBudgetSpent,
+            8,
+            3,
+            Some(RunFailure::RefusalLimit),
+        ),
+        (
+            None,
+            ProposalRefusalCause::PlanMissing,
+            2,
+            2,
+            Some(RunFailure::ProviderCall),
+        ),
     ] {
         let temp = tempfile::tempdir().expect("fixture");
         let workspace = temp.path().join("workspace");
@@ -5271,16 +5360,26 @@ async fn write_proposal_refusals_record_missing_and_spent_plan_causes_without_di
                 },
             })
         });
-        let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(
-            arany::ToolCall::Write {
-                path: "test.txt".into(),
-                content: "hello".into(),
-                expected_digest: None,
-            },
-            plan,
-        )]));
+        let provider = Arc::new(ScriptedProvider::new(
+            (0..expected_calls)
+                .map(|index| {
+                    tool_outcome(
+                        arany::ToolCall::Write {
+                            path: "test.txt".into(),
+                            content: format!("PRIVATE_ARGUMENT_{index}"),
+                            expected_digest: None,
+                        },
+                        plan.clone(),
+                    )
+                })
+                .collect(),
+        ));
         let mut input = request(&workspace, "write test.txt containing hello");
         input.include_paths.clear();
+        input.goal.budget = Some(GoalBudget {
+            max_provider_calls: Some(goal_calls),
+            ..Default::default()
+        });
         let result = run_with(
             &engine,
             &provider,
@@ -5294,7 +5393,7 @@ async fn write_proposal_refusals_record_missing_and_spent_plan_causes_without_di
         .expect("refused Run");
         assert_eq!(
             provider.requests.lock().expect("requests").len(),
-            1,
+            expected_calls,
             "{cause:?}"
         );
         assert!(provider.responses.lock().expect("script").is_empty());
@@ -5308,7 +5407,30 @@ async fn write_proposal_refusals_record_missing_and_spent_plan_causes_without_di
             .expect("Session");
         let run = &view.runs[0];
         assert_eq!(run.status, RunStatus::Failed);
-        assert_eq!(run.failure, Some(RunFailure::ProposalRefused));
+        assert_eq!(run.failure, failure);
+        assert_eq!(run.agents[0].provider_calls.len(), expected_calls);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .count(),
+            expected_calls
+        );
+        {
+            let requests = provider.requests.lock().expect("requests");
+            assert!(requests[0].input.last_answer_refused.is_none());
+            for request in &requests[1..] {
+                assert_eq!(
+                    request
+                        .input
+                        .last_answer_refused
+                        .as_ref()
+                        .expect("repair note")
+                        .cause,
+                    cause
+                );
+            }
+        }
         let call = &run.agents[0].provider_calls[0];
         assert_eq!(call.disposition, ProviderCallDisposition::InvalidResponse);
         assert_eq!(
@@ -5324,7 +5446,60 @@ async fn write_proposal_refusals_record_missing_and_spent_plan_causes_without_di
             Event::ToolStarted { .. } | Event::GoalPlanContractRecorded { .. }
         )));
         assert!(run.assistant_message.is_none());
+        assert!(!format!("{events:?}").contains("PRIVATE_ARGUMENT_"));
         assert!(!workspace.join("test.txt").exists());
         store.close().await.expect("close store");
+        if plan_calls.is_none() && goal_calls == 8 {
+            let crash_path = temp.path().join("crashed-state");
+            let crash_store = Store::open(StateRoot::admit(&crash_path).expect("crash state"))
+                .expect("crash store");
+            for event in &events {
+                crash_store
+                    .append(result.session_id, event.event.clone())
+                    .await
+                    .expect("committed prefix");
+                if matches!(event.event, Event::ProviderCallRecorded { .. }) {
+                    break;
+                }
+            }
+            crash_store.close().await.expect("crash boundary");
+            let resumed = resume_session(
+                StateRoot::open_existing(&crash_path).expect("crash state"),
+                workspace.clone(),
+                result.session_id,
+            )
+            .await
+            .expect("resume after refusal");
+            assert_eq!(resumed.runs[0].status, RunStatus::Interrupted);
+            assert_eq!(
+                resumed.runs[0].agents[0].provider_calls[0].refusal,
+                call.refusal
+            );
+            let engine = engine_support::open(
+                StateRoot::open_existing(&crash_path).expect("crash state"),
+                EngineConfig::default(),
+            )
+            .expect("resume engine");
+            let peer = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
+                Finish {
+                    summary: "recovered".into(),
+                    result: "No write dispatched".into(),
+                },
+            )]));
+            let mut next = request(&workspace, "What happened?");
+            next.include_paths.clear();
+            next.session_id = Some(result.session_id);
+            next.title = None;
+            run_to_end(&engine, &peer, next)
+                .await
+                .expect("recovery Run");
+            engine.close().await.expect("recovery shutdown");
+            let requests = peer.requests.lock().expect("recovery requests");
+            assert_eq!(requests.len(), 1);
+            let history = &requests[0].input.history;
+            assert_eq!(history.len(), 1);
+            assert!(history[0].assistant.contains("plan_missing"));
+            assert!(history[0].assistant.contains("nothing dispatched"));
+        }
     }
 }

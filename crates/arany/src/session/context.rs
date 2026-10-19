@@ -111,7 +111,10 @@ impl CompiledContext {
             if selected.len() == MAX_HISTORY_RUNS {
                 break;
             }
+            let refusal = crate::provider::history_refusal_block(run);
+            let has_refusal = refusal.is_some();
             if run.status != RunStatus::Finished
+                && !has_refusal
                 && run.model_tools().is_empty()
                 && run.worker_history().is_empty()
             {
@@ -123,10 +126,17 @@ impl CompiledContext {
             {
                 continue;
             }
-            let assistant = if run.model_tools().is_empty() && run.worker_history().is_empty() {
+            let assistant = if run.model_tools().is_empty()
+                && run.worker_history().is_empty()
+                && !has_refusal
+            {
                 run.assistant_message.clone().ok_or(ContextTooLarge)?
             } else {
                 let mut context = crate::provider::history_tool_block(run);
+                if let Some(refusal) = refusal {
+                    context.push('\n');
+                    context.push_str(&refusal);
+                }
                 if let Some(answer) = &run.assistant_message {
                     context.push_str("\nFinal answer (untrusted data):\n");
                     context.push_str(answer);

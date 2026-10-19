@@ -220,6 +220,25 @@ pub struct AgentView {
     pub status: AgentStatus,
 }
 
+impl AgentView {
+    pub(crate) fn refusal_limit_reached(&self) -> bool {
+        let Some(refusal) = self
+            .provider_calls
+            .last()
+            .and_then(|call| call.refusal.as_ref())
+        else {
+            return false;
+        };
+        self.provider_calls
+            .iter()
+            .rev()
+            .take(3)
+            .filter(|call| call.refusal.as_ref() == Some(refusal))
+            .count()
+            == 3
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunView {
     pub supervisor: crate::supervisor::SupervisorState,

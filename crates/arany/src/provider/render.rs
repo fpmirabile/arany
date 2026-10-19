@@ -19,7 +19,7 @@ const HISTORY_LABEL: &str =
 pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, ProviderError> {
     request.validate_scope()?;
     let input = &request.input;
-    let catalog = input.tools.as_ref().map(|tools| {
+    let mut catalog = input.tools.as_ref().map(|tools| {
         crate::tools::parse_json(tools.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES)
             .unwrap_or_else(|_| json!(tools.catalog))
     });
@@ -29,6 +29,16 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
         .tools
         .as_ref()
         .is_some_and(|tools| tools.steps.iter().any(|step| step.requests.is_empty()));
+    if let Some(refusal) = &input.last_answer_refused {
+        let catalog = catalog.get_or_insert_with(|| json!({}));
+        catalog
+            .as_object_mut()
+            .ok_or(ProviderError::Rejected)?
+            .insert("last_answer_refused".into(), refusal_note(refusal));
+        if catalog.to_string().len() > MAX_TOOL_CATALOG_BYTES {
+            return Err(ProviderError::Rejected);
+        }
+    }
     messages.push(current_message(request, catalog.as_ref(), delegate_step));
     append_stop_feedback(&mut messages, request, 0);
     if let Some(tools) = &input.tools {
@@ -260,6 +270,46 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
         blocks.push(data_block("tool_calls_remaining", json!(remaining)));
     }
     Ok(blocks)
+}
+
+fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
+    use crate::session::ProposalRefusalCause::*;
+    let remediation = match refusal.cause {
+        InvalidArguments => "Send one call with valid arguments matching its schema.",
+        Phase => "Choose an outcome allowed in this phase; team planning requires Delegate.",
+        PlanMissing => "Supply a valid plan_contract before a non-prelude Tool call.",
+        PlanInvalid => "Supply a valid plan_contract; do not replace a recorded contract.",
+        PlanBudgetOutsideGoal => "The plan budget must not exceed the Goal budget.",
+        PlanBudgetSpent => "The plan budget must cover usage already spent and the next action.",
+        PlanScopeExcludesCall => "Choose a call within the plan scope.",
+        PlanOutsideGrant => "Choose a plan within the admitted Tool grant.",
+        ArgumentBytes => "Reduce the call and plan_contract to the argument byte limit.",
+        LeaseOverlap => "Wait for worker settlement or choose paths outside active leases.",
+        NotOffered => "Choose an offered operation.",
+        FinishInvalid => "Send a Finish with nonempty summary and result within their byte limits.",
+        DelegateInvalid => {
+            "Send a valid bounded Delegate using the offered assignments and profiles."
+        }
+    };
+    json!({"operation": refusal.operation, "cause": refusal.cause, "remediation": remediation})
+}
+
+pub(crate) fn history_refusal_block(run: &RunView) -> Option<String> {
+    let refusal = run
+        .agents
+        .first()?
+        .provider_calls
+        .iter()
+        .rev()
+        .find_map(|call| call.refusal.as_ref())?;
+    Some(
+        json!({
+            "scope": "historical refused proposal; nothing dispatched",
+            "run_status": format!("{:?}", run.status),
+            "last_answer_refused": refusal_note(refusal),
+        })
+        .to_string(),
+    )
 }
 
 pub(crate) fn history_tool_block(run: &RunView) -> String {

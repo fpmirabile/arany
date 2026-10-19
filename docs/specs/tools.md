@@ -582,6 +582,7 @@ Each observation carries an `attestation`: `in_process` with the policy digest a
 
 | Resource | Current ceiling / behavior |
 |---|---|
+| Primary proposal refusals | [Execution](./execution.md#accepted-outcomes) owns the identical-pair refusal cap and Goal-budgeted continuation |
 | Private configuration | 64 KiB; 32 selected roots, 8 commands, 64 Skills, 4 MCP servers |
 | Project snapshot | 32 MiB; 2,048 file/empty-directory entries; 8,192 scanned directory entries; depth 16 |
 | File operation | 1 MiB input file; reads page at most 65,536 UTF-8 bytes, fitted to the result budget; writes and edit strings at most 8 KiB |
