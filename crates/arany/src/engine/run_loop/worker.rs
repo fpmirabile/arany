@@ -115,6 +115,7 @@ impl RunLoop<'_> {
                             !matches!(call.as_ref(), ToolCall::Mkdir { .. })
                                 && plan.allows_call(call)
                                 && runtime.allows(call)
+                                && self.editor_grant(a).is_ok_and(|g| g.allows(call))
                         }
                         crate::session::GoalSuccessCriterion::WorkspaceFileContent {
                             path, ..
@@ -223,8 +224,27 @@ impl RunLoop<'_> {
         id: AgentRunId,
     ) -> Result<(), EngineError> {
         intent.target = self.worker_target(id)?;
-        intent.limits.cache_requested_bytes = 0;
-        intent.limits.cache_bytes = 0;
+        intent.limits.project_bytes = crate::tools::types::SCRATCH_BYTES;
+        if matches!(intent.call, ToolCall::Command { .. }) {
+            let (class, requested, settings) = self.ledger().requested_command_resources()?;
+            intent.limits.resource_class = class;
+            intent.limits.runtime_ms = requested.min(settings.max_command_timeout_ms);
+            if class == crate::tools::ToolResourceClass::Build {
+                intent.limits.memory_bytes = settings.build_memory_bytes;
+                intent.limits.max_processes = settings.build_processes;
+                intent.limits.cache_requested_bytes = settings.build_cache_bytes;
+            }
+            intent.limits.cache_bytes = self
+                .controls
+                .tools
+                .ok_or(EngineError::InvalidRequest)?
+                .effective_cache_bytes(intent.limits.cache_requested_bytes)?
+                .0;
+        } else {
+            intent.limits.cache_requested_bytes = 0;
+            intent.limits.cache_bytes = 0;
+            intent.limits.cache_transfer_ms = 0;
+        }
         intent.limits.cache_candidate_bytes = 0;
         Ok(())
     }
@@ -236,7 +256,10 @@ impl RunLoop<'_> {
     ) -> Result<usize, EngineError> {
         Ok(match call {
             ToolCall::PrepareWorker { preparation } => usize::from(preparation.max_chunks),
-            ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::Mkdir { .. } => {
+            ToolCall::Write { .. }
+            | ToolCall::Edit { .. }
+            | ToolCall::Mkdir { .. }
+            | ToolCall::Command { .. } => {
                 (self.worker_allowance(id)? as usize).div_ceil(WORKER_CHUNK_BYTES)
             }
             _ => 0,
@@ -263,12 +286,8 @@ impl RunLoop<'_> {
         purpose: WorkerDataPurpose,
         bytes: &[u8],
     ) -> Result<WorkerDataRef, EngineError> {
-        let first_sequence = self
-            .sequence()?
-            .checked_add(1)
-            .ok_or(EngineError::InvalidHistory)?;
-        let chunks = u16::try_from(bytes.len().div_ceil(WORKER_CHUNK_BYTES))
-            .map_err(|_| EngineError::InvalidHistory)?;
+        let mut data = self.worker_data_ref(intent, purpose, bytes, self.sequence()? + 1)?;
+        data.assignment_id = assignment_id;
         for (ordinal, chunk) in bytes.chunks(WORKER_CHUNK_BYTES).enumerate() {
             self.append(Event::WorkerDataChunk {
                 run_id: self.run_id,
@@ -285,18 +304,6 @@ impl RunLoop<'_> {
             })
             .await?;
         }
-        let data = WorkerDataRef {
-            assignment_id,
-            purpose,
-            first_sequence,
-            seal_sequence: self
-                .sequence()?
-                .checked_add(1)
-                .ok_or(EngineError::InvalidHistory)?,
-            chunks,
-            bytes: u32::try_from(bytes.len()).map_err(|_| EngineError::InvalidHistory)?,
-            sha256: crate::tools::types::digest(bytes),
-        };
         self.append(Event::WorkerDataSealed {
             run_id: self.run_id,
             agent_run_id: intent.agent_run_id,
@@ -307,6 +314,46 @@ impl RunLoop<'_> {
         })
         .await?;
         Ok(data)
+    }
+
+    fn worker_data_ref(
+        &self,
+        intent: &EffectIntent,
+        purpose: WorkerDataPurpose,
+        bytes: &[u8],
+        first_sequence: u64,
+    ) -> Result<WorkerDataRef, EngineError> {
+        let chunks = u16::try_from(bytes.len().div_ceil(WORKER_CHUNK_BYTES))
+            .map_err(|_| EngineError::InvalidHistory)?;
+        Ok(WorkerDataRef {
+            assignment_id: intent.agent_run_id,
+            purpose,
+            first_sequence,
+            seal_sequence: first_sequence + u64::from(chunks),
+            chunks,
+            bytes: u32::try_from(bytes.len()).map_err(|_| EngineError::InvalidHistory)?,
+            sha256: crate::tools::types::digest(bytes),
+        })
+    }
+
+    pub(super) async fn seal_worker_command(
+        &self,
+        intent: &EffectIntent,
+        candidate: &crate::tools::worker::Candidate,
+        expected: &WorkerDataRef,
+    ) -> Result<(), EngineError> {
+        let actual = self
+            .seal_worker_data(
+                intent,
+                intent.agent_run_id,
+                WorkerDataPurpose::Mutation,
+                &candidate.data,
+            )
+            .await?;
+        if &actual != expected {
+            return Err(EngineError::InvalidHistory);
+        }
+        Ok(())
     }
 
     pub(super) async fn capture_worker_base(
@@ -344,7 +391,16 @@ impl RunLoop<'_> {
                     .map(WorkerPolicy::retained_bytes)
             })?
             .ok_or(EngineError::InvalidHistory)?;
+        let (class, _, settings) = self.ledger().requested_command_resources()?;
+        let cache_bytes = if a.commands.is_empty() {
+            0
+        } else if class == crate::tools::ToolResourceClass::Build {
+            settings.build_cache_bytes
+        } else {
+            crate::store::BUILD_CACHE_ARCHIVE_BYTES
+        };
         let view = match view.and_then(|mut view| {
+            view.pin_command_cache(runtime, cache_bytes)?;
             view.restrict_retained(retained_limit)?;
             Ok(view)
         }) {
@@ -409,19 +465,6 @@ impl RunLoop<'_> {
         ),
         EngineError,
     > {
-        if matches!(intent.call, ToolCall::Command { .. }) {
-            return Ok((
-                ToolObservation {
-                    enforcement_cause: None,
-                    intent,
-                    disposition: ToolDisposition::Denied,
-                    output: crate::tools::WORKER_COMMANDS_REFUSED.into(),
-                    attestation: None,
-                    cache_update: CacheUpdate::NotApplicable,
-                },
-                None,
-            ));
-        }
         let mut slot = self.worker.lock().await;
         let view = slot
             .get_mut(&intent.agent_run_id)
@@ -434,8 +477,13 @@ impl RunLoop<'_> {
             return Ok((view.read(intent), None));
         }
         let runtime = runtime.with_queue_accounting();
-        let result = view.edit(&runtime, intent.clone(), cancellation).await;
-        if self.ledger().in_flight_children() == 0 {
+        let command = matches!(intent.call, ToolCall::Command { .. });
+        let result = if command {
+            view.command(&runtime, intent.clone(), cancellation).await
+        } else {
+            view.edit(&runtime, intent.clone(), cancellation).await
+        };
+        if self.ledger().providers_idle()? {
             self.ledger()
                 .exclude_idle_approval(runtime.queued_duration()?)?;
         }
@@ -456,6 +504,23 @@ impl RunLoop<'_> {
         drop(slot);
         let data = match data {
             Some(data) => data,
+            None if command => {
+                let mut data =
+                    self.worker_data_ref(&intent, purpose, &candidate.data, self.sequence()? + 2)?;
+                let observation = candidate.observation(&data)?;
+                let verdict = self.ledger().view(|v| {
+                    crate::supervisor::SupervisorState::tool_verdict_follows(
+                        v,
+                        v.last_sequence + 1,
+                        &observation,
+                    )
+                })?;
+                if verdict {
+                    data.first_sequence += 1;
+                    data.seal_sequence += 1;
+                }
+                data
+            }
             None => {
                 self.seal_worker_data(&intent, intent.agent_run_id, purpose, &candidate.data)
                     .await?
@@ -559,15 +624,15 @@ impl RunLoop<'_> {
             definition: Some(assignment.definition.clone()),
             profile: None,
             grant: Some(ChildGrant::EditOnly {
-                unguarded: self
-                    .controls
-                    .tools
-                    .ok_or(EngineError::InvalidRequest)?
-                    .receipt()
-                    .child_unguarded,
+                unguarded: crate::tools::UnguardedGrant::Denied,
             }),
             assignment: Some(WorkerAssignment {
-                cache_generation: None,
+                cache_generation: match self.worker_target(id)? {
+                    EffectTarget::WorkerView {
+                        cache_generation, ..
+                    } => cache_generation,
+                    EffectTarget::Workspace => return Err(EngineError::CoordinatorFailed),
+                },
                 request: *assignment.clone(),
                 grant: grant.clone(),
                 policy_digest: observation.intent.policy_digest,
@@ -677,7 +742,7 @@ impl RunLoop<'_> {
         Box::pin(self.complete_worker_inner(child, finish, deadline, cancelled, failure))
     }
 
-    fn criterion_unmet(&self, id: AgentRunId) -> Result<bool, EngineError> {
+    pub(super) fn criterion_unmet(&self, id: AgentRunId) -> Result<bool, EngineError> {
         self.ledger()
             .view(|v| {
                 crate::session::criterion_unmet_in_view(v.runs.last().expect("active Run"), id)

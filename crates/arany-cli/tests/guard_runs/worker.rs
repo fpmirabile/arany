@@ -197,7 +197,11 @@ pub(super) async fn worker_case(case: &'static str) {
     };
     let budget = arany::GoalBudget {
         max_provider_calls: Some(if case == "calls" { 4 } else { 32 }),
-        max_tokens: matches!(case, "tokens" | "hook_stop_tokens").then_some(12),
+        max_tokens: if case == "hook_stop_tokens" {
+            Some(16)
+        } else {
+            (case == "tokens").then_some(12)
+        },
         ..Default::default()
     };
     let provider = Arc::new(ForegroundWorkerProvider::new(
@@ -282,7 +286,11 @@ pub(super) async fn worker_case(case: &'static str) {
             | "hook_stop_deadline_last_turn"
     ) {
         result.expect(case);
-        assert_eq!(child_calls, 1, "{case}: no reprompt");
+        assert_eq!(
+            child_calls,
+            if case == "tool_deadline" { 1 } else { 2 },
+            "{case}: no reprompt"
+        );
         let outcome = &worker.outcome.as_ref().unwrap().1;
         assert_eq!(outcome.disposition, WorkerDisposition::Failed, "{case}");
         assert_eq!(
@@ -577,7 +585,7 @@ pub(super) async fn worker_case(case: &'static str) {
                     "{case}"
                 );
                 if case == "hook_requested_stop_last_turn" {
-                    assert_eq!(child_calls, 1, "{case}: no reprompt");
+                    assert_eq!(child_calls, 2, "{case}: no reprompt");
                 }
             }
             if case == "hook_handover_deny" {
@@ -759,7 +767,7 @@ async fn worker_team_scenarios_complete_fail_cap_lease_wave_and_cancel() {
         "defer_finish",
         "budget_calls",
         "command",
-        "command_refused",
+        "worker_command",
         "waves",
         "reassign",
         "cancel_foreground",
@@ -849,5 +857,46 @@ async fn worker_primary_background_tool_active_time_exhaustion_settles_the_team(
         Path::new(env!("CARGO_BIN_EXE_arany")),
         "primary_time",
     )
+    .await;
+}
+
+#[tokio::test]
+async fn runtime_worker_command_captures_gate_hooks_and_receipt_loss_agree_with_closed_output() {
+    for case in [
+        "command_success",
+        "command_cap",
+        "command_denied",
+        "command_stale",
+        "command_nonzero",
+        "command_rejected",
+        "command_loss",
+        "command_unguarded",
+    ] {
+        let observation = tokio::time::timeout(
+            Duration::from_secs(180),
+            Box::pin(arany::test_support::worker_teams::runtime_command_case(
+                Path::new(env!("CARGO_BIN_EXE_arany")),
+                case,
+            )),
+        )
+        .await
+        .expect(case);
+        let bundle = closed_bundle(
+            &observation.directory.path().join("state"),
+            observation.session,
+            &observation.directory.path().join("workspace"),
+        )
+        .await;
+        assert_eq!(bundle.events, observation.events, "{case}");
+        assert_eq!(bundle.view, observation.view, "{case}");
+    }
+}
+
+#[tokio::test]
+async fn runtime_worker_command_time_exhaustion_settles_the_team() {
+    Box::pin(arany::test_support::worker_teams::runtime_command_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "command_time",
+    ))
     .await;
 }

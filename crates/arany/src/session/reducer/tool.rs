@@ -29,18 +29,7 @@ pub(super) fn apply(
         let definition_mode = super::definition_mode(run, *agent_run_id)?;
         let restrictions = super::mode_restrictions(run, *agent_run_id)?;
         let unguarded = observation.intent.call.is_unguarded();
-        let refused_command = matches!(
-            observation.intent.target,
-            crate::session::worker::EffectTarget::WorkerView { .. }
-        ) && matches!(
-            observation.intent.call,
-            crate::tools::ToolCall::Command { .. }
-        ) && observation.disposition == crate::tools::ToolDisposition::Denied
-            && observation.attestation.is_none()
-            && pending_tool(run, *agent_run_id)?
-                .permission_verdict
-                .is_none();
-        if (configured || definition_mode.is_some() || unguarded) && !refused_command {
+        if configured || definition_mode.is_some() || unguarded {
             let tool = pending_tool(run, *agent_run_id)?;
             let verdict = tool
                 .permission_verdict
@@ -673,9 +662,23 @@ fn post_target<'a>(
             .as_ref()
             .and_then(super::observed_command_changeset)
             .is_some_and(|changeset| !changeset.files.is_empty());
+    let capture_sequence = integration.observation.as_ref().and_then(|o| {
+        if !matches!(
+            o.attestation,
+            Some(crate::tools::Attestation::WorkerCommand { .. })
+        ) {
+            return None;
+        }
+        let result = serde_json::from_str::<crate::worker::WorkerCommandResult>(&o.output).ok()?;
+        match result.private_capture {
+            crate::worker::PrivateCapture::Sealed { data } => Some(data.seal_sequence),
+            _ => None,
+        }
+    });
     let tail = integration
         .finished_sequence
-        .max(tools[index].hook_sequence);
+        .max(tools[index].hook_sequence)
+        .max(capture_sequence);
     let adjacent = !awaiting_integration && tail == Some(previous);
     Ok((&mut tools[index], adjacent))
 }

@@ -3992,8 +3992,44 @@ fn worker_protocol_command_authority_revision_generation_and_capture_order() {
 }
 
 #[test]
-fn worker_protocol_command_criterion_editor_hands_over_without_private_evidence() {
-    let mut f = fixture();
+fn worker_protocol_command_criterion_requires_private_evidence() {
+    let mut f = command_fixture();
+    set_command_criterion(&mut f);
+    f.mutation();
+    f.finish_worker();
+    assert!(SessionView::replay(f.session, &f.envelopes()).is_err());
+}
+
+#[test]
+fn worker_protocol_denied_command_without_a_required_verdict_cannot_continue() {
+    let mut f = command_fixture();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let intent = f.intent(
+        f.child,
+        ToolCall::Command {
+            program: "check".into(),
+            args: Vec::new(),
+            cwd: ".".into(),
+        },
+        f.target(0),
+    );
+    f.started(&intent);
+    f.observed(&intent, ToolDisposition::Denied, None, "refused");
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::Finished,
+        None,
+    );
+    assert!(SessionView::replay(f.session, &f.envelopes()).is_err());
+}
+
+fn set_command_criterion(f: &mut Fixture) {
     let criterion = GoalSuccessCriterion::ToolCallSucceeded {
         call: Box::new(ToolCall::Command {
             program: "check".into(),
@@ -4014,57 +4050,9 @@ fn worker_protocol_command_criterion_editor_hands_over_without_private_evidence(
                 assignment: Some(p),
                 ..
             } => p.request.criterion = criterion.clone(),
-            Event::GoalPlanContractRecorded { contract, .. } => {
-                contract.commands = vec!["check".into()]
-            }
             _ => (),
         }
     }
-    f.mutation();
-    let data = f.finish_worker();
-    assert!(
-        private_criterion_evidence(&f.view().runs[0], f.child)
-            .unwrap()
-            .is_empty()
-    );
-    let handover = f.handover(data.clone());
-    let integrated = f.integrate(handover, data, ToolDisposition::Succeeded);
-    f.release(Some(handover), integrated);
-    SessionView::replay(f.session, &f.envelopes()).expect("command criterion hands over");
-}
-
-#[test]
-fn worker_protocol_refused_private_command_is_a_denied_non_failure() {
-    let mut f = command_fixture();
-    f.call(
-        f.child,
-        AgentPhase::ChildWork,
-        ProviderCallDisposition::ToolRequested,
-        None,
-    );
-    let intent = f.intent(
-        f.child,
-        ToolCall::Command {
-            program: "check".into(),
-            args: Vec::new(),
-            cwd: ".".into(),
-        },
-        f.target(0),
-    );
-    f.started(&intent);
-    f.observed(
-        &intent,
-        ToolDisposition::Denied,
-        None,
-        crate::tools::WORKER_COMMANDS_REFUSED,
-    );
-    f.call(
-        f.child,
-        AgentPhase::ChildWork,
-        ProviderCallDisposition::Finished,
-        None,
-    );
-    SessionView::replay(f.session, &f.envelopes()).expect("refusal is valid history");
 }
 
 #[test]
@@ -4112,29 +4100,7 @@ fn worker_protocol_handover_requires_current_private_evidence_and_gate_is_bounde
     }
     for case in ["fresh", "stale revision", "nonzero", "rejected"] {
         let mut f = command_fixture();
-        let criterion = GoalSuccessCriterion::ToolCallSucceeded {
-            call: Box::new(ToolCall::Command {
-                program: "check".into(),
-                args: Vec::new(),
-                cwd: ".".into(),
-            }),
-        };
-        for e in &mut f.events {
-            match e {
-                Event::ProviderCallRecorded { record, .. } => {
-                    if let Some(d) = &mut record.delegation
-                        && let ChildAssignment::Editor { assignment } = &mut d[0]
-                    {
-                        assignment.criterion = criterion.clone();
-                    }
-                }
-                Event::AgentSpawned {
-                    assignment: Some(p),
-                    ..
-                } => p.request.criterion = criterion.clone(),
-                _ => (),
-            }
-        }
+        set_command_criterion(&mut f);
         f.command(if case == "rejected" {
             PrivateCapture::Rejected {
                 cause: PrivateCaptureRejection::OutOfLease,
@@ -4156,11 +4122,11 @@ fn worker_protocol_handover_requires_current_private_evidence_and_gate_is_bounde
         } else {
             f.changes.files.clear();
         }
-        f.finish_worker();
         let evidence = private_criterion_evidence(&f.view().runs[0], f.child).unwrap();
         assert_eq!(evidence.is_empty(), case != "fresh", "{case}");
+        f.finish_worker();
         let replay = SessionView::replay(f.session, &f.envelopes());
-        assert!(replay.is_ok(), "command criteria are exempt: {case}");
+        assert_eq!(replay.is_ok(), case == "fresh", "{case}");
     }
     let mut f = fixture();
     for attempt in 0..=3 {

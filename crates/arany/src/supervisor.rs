@@ -390,33 +390,81 @@ impl SupervisorState {
         let Some(policy) = run.config.as_ref().and_then(|c| c.supervisor.clone()) else {
             return;
         };
-        let state = &mut run.supervisor;
-        let index = match state.windows.iter().position(|(id, _)| *id == actor) {
+        run.supervisor.observe(
+            run.id,
+            actor,
+            envelope.sequence,
+            (site, step, footprint),
+            &policy,
+        );
+    }
+
+    pub(crate) fn tool_verdict_follows(
+        view: &SessionView,
+        sequence: u64,
+        observation: &crate::tools::ToolObservation,
+    ) -> bool {
+        let run = view.runs.last().expect("active Run");
+        let Some(policy) = run.config.as_ref().and_then(|c| c.supervisor.as_ref()) else {
+            return false;
+        };
+        let actor = observation.intent.agent_run_id;
+        let envelope = EventEnvelope {
+            session_id: view.id,
+            run_id: Some(run.id),
+            agent_run_id: Some(actor),
+            sequence,
+            created_at_ms: 0,
+            event: Event::ToolFinished {
+                run_id: run.id,
+                agent_run_id: actor,
+                observation: observation.clone(),
+                checkpoint: None,
+            },
+        };
+        let Some((site, step, footprint)) = subject(run, actor, &envelope) else {
+            return false;
+        };
+        let mut state = run.supervisor.clone();
+        state.observe(run.id, actor, sequence, (site, step, footprint), policy);
+        state.pending.is_some()
+    }
+
+    fn observe(
+        &mut self,
+        run_id: crate::session::RunId,
+        actor: AgentRunId,
+        sequence: u64,
+        subject: (Site, Step, Option<DisproportionFeatures>),
+        policy: &SupervisorPolicy,
+    ) {
+        let (site, step, footprint) = subject;
+        let index = match self.windows.iter().position(|(id, _)| *id == actor) {
             Some(index) => index,
             None => {
-                assert!(state.windows.len() < 9, "bounded Run actors");
-                state.windows.push((actor, VecDeque::with_capacity(WINDOW)));
-                state.windows.len() - 1
+                assert!(self.windows.len() < 9, "bounded Run actors");
+                self.windows.push((actor, VecDeque::with_capacity(WINDOW)));
+                self.windows.len() - 1
             }
         };
-        let window = &mut state.windows[index].1;
+        let window = &mut self.windows[index].1;
         if window.len() == WINDOW {
             window.pop_front();
         }
         window.push_back(step);
-        let signals = evaluate(window, footprint, &policy);
-        let signals = new_facts(signals, site, envelope.sequence);
-        if !signals.is_empty() && state.verdicts < MAX_VERDICTS {
-            state.pending = Some((
-                run.id,
+        let signals = evaluate(window, footprint, policy);
+        let signals = new_facts(signals, site, sequence);
+        if !signals.is_empty() && self.verdicts < MAX_VERDICTS {
+            self.pending = Some((
+                run_id,
                 actor,
                 SupervisorVerdict {
-                    subject_sequence: envelope.sequence,
+                    subject_sequence: sequence,
                     site,
                     evaluator: 1,
                     mode: Mode::Shadow,
                     signals,
-                    capped: state.verdicts == MAX_VERDICTS - 1,
+                    capped: self.verdicts == MAX_VERDICTS - 1,
                 },
             ));
         }

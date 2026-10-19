@@ -261,13 +261,6 @@ pub(crate) struct View {
     cache_generation: Option<[u8; 32]>,
 }
 
-#[cfg_attr(
-    not(any(test, feature = "test-support")),
-    expect(
-        dead_code,
-        reason = "Internal private-target entry points precede model editor admission"
-    )
-)]
 impl View {
     pub(crate) fn capture(
         runtime: &ToolRuntime,
@@ -365,10 +358,12 @@ impl View {
         serde_json::to_vec(&self.base.manifest()).map_err(|_| ToolError::Operation)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn run_id(&self) -> crate::session::RunId {
         self.run_id
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn assignment(&self) -> AgentRunId {
         self.assignment
     }
@@ -786,13 +781,6 @@ pub(crate) struct Candidate {
     target: EffectTarget,
 }
 
-#[cfg_attr(
-    not(any(test, feature = "test-support")),
-    expect(
-        dead_code,
-        reason = "Internal data producer precedes Engine editor admission"
-    )
-)]
 impl Candidate {
     pub(crate) fn observation(&self, data: &WorkerDataRef) -> Result<ToolObservation, ToolError> {
         if data.assignment_id != self.observation.intent.agent_run_id
@@ -853,6 +841,7 @@ impl Candidate {
         Ok(observation)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn chunks(&self) -> impl Iterator<Item = WorkerDataChunk> + '_ {
         use base64::Engine as _;
         self.data
@@ -1538,7 +1527,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_target_command_protocol_remains_explicitly_refused() {
+    async fn private_command_requires_an_admitted_image() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = runtime(temp.path());
         let mut intent = runtime.intent(
@@ -1559,7 +1548,7 @@ mod tests {
         let observation = runtime.execute(intent, Cancellation::new()).await;
         assert_eq!(observation.disposition, ToolDisposition::Denied);
         assert!(observation.attestation.is_none());
-        assert!(observation.output == crate::tools::WORKER_COMMANDS_REFUSED);
+        assert!(observation.output == crate::tools::PRIVATE_IMAGE_REQUIRED);
         assert!(observation.valid());
     }
 

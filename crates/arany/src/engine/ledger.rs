@@ -621,6 +621,12 @@ impl GoalLedger {
         })
     }
 
+    pub(super) fn providers_idle(&self) -> Result<bool, EngineError> {
+        self.read(|goal, _| {
+            goal.unobserved_provider_calls.is_empty() && goal.compaction_call_reserved.is_none()
+        })
+    }
+
     pub(super) fn active_remaining_ms(&self) -> Option<u64> {
         self.read(|goal, in_flight| {
             goal.effective_budget()
