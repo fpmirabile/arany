@@ -123,7 +123,11 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
         assert_eq!(call.disposition, ProviderCallDisposition::InvalidResponse);
         assert_eq!(
             call.failure_reason,
-            known_reason.then_some(arany::ProviderFailureReason::OutcomeContract)
+            Some(if known_reason {
+                arany::ProviderFailureReason::OutcomeContract
+            } else {
+                arany::ProviderFailureReason::ProposalRefused
+            })
         );
 
         let engine = engine_support::open(
@@ -157,8 +161,13 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
             serde_json::json!({
                 "status": "failed",
                 "fact": "Run failed before any primary model Tool",
+                "failure": if known_reason { "provider_call" } else { "proposal_refused" },
                 "primary_model_tool_execution": "nothing dispatched",
-                "last_call": {"disposition": "invalid_response", "failure_reason": if known_reason { serde_json::json!("outcome_contract") } else { serde_json::Value::Null }},
+                "last_call": if known_reason {
+                    serde_json::json!({"disposition": "invalid_response", "failure_reason": "outcome_contract", "refusal": null})
+                } else {
+                    serde_json::json!({"disposition": "invalid_response", "failure_reason": "proposal_refused", "refusal": {"operation": "arany_write", "cause": "plan_missing"}})
+                },
             })
         );
         assert_eq!(

@@ -308,10 +308,12 @@ pub(crate) fn history_unanswered_block(run: &RunView) -> String {
     json!({
         "status": status,
         "fact": fact,
+        "failure": run.failure,
         "primary_model_tool_execution": "nothing dispatched",
         "last_call": call.map(|call| json!({
             "disposition": call.disposition,
             "failure_reason": call.failure_reason,
+            "refusal": call.refusal,
         })),
     })
     .to_string()

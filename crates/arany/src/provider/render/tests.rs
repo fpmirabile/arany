@@ -190,6 +190,7 @@ fn unanswered_turns_render_as_historical_untrusted_facts() {
         let expected = json!({
             "status": label,
             "fact": fact,
+            "failure": (status == RunStatus::Failed).then_some("proposal_refused"),
             "primary_model_tool_execution": "nothing dispatched",
             "last_call": null,
         })
