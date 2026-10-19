@@ -286,6 +286,11 @@ pub(super) fn command_changeset(
     Ok(changeset)
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn macos_system_file(is_file: bool, uid: u32, nlink: u64, mode: u32) -> bool {
+    is_file && uid == 0 && nlink == 1 && mode & 0o6022 == 0
+}
+
 pub(crate) fn open_directory(path: &Path) -> Result<Dir, ToolError> {
     crate::private_fs::open_workspace_directory(path).map_err(|_| ToolError::Path)
 }
@@ -519,6 +524,16 @@ pub(super) fn snapshot_into(
         }
     }
     let mut runtime_bytes = 0usize;
+    #[cfg(target_os = "macos")]
+    {
+        charge_runtime(&mut runtime_bytes, super::guard::RUNTIME_COMPAT_BYTES.len())?;
+        put(
+            resources,
+            super::guard::RUNTIME_COMPAT_FILE,
+            super::guard::RUNTIME_COMPAT_BYTES,
+            false,
+        )?;
+    }
     for program in config
         .commands
         .iter()

@@ -36,29 +36,7 @@ const RELEASE_ACCOUNT_SHELL: &str = r#"before=$(stty -g); printf 'TTY_BEFORE:%s\
 
 #[cfg(debug_assertions)]
 fn prepare_test_file_account(root: &Path) -> Uuid {
-    prepare_test_file_account_at(&root.join("account-root"))
-}
-
-pub(super) fn prepare_test_file_account_at(account_root: &Path) -> Uuid {
-    let state = StateRoot::admit(account_root).expect("test account root");
-    let account_id = Uuid::now_v7();
-    let record = serde_json::json!({
-        "schema": 1,
-        "storage": "private_file",
-        "account": {
-            "schema": 2,
-            "id": account_id,
-            "provider": "openai",
-            "model": "gpt-5.4",
-            "effort": null,
-            "api_key": "synthetic-existing-key", "anthropic_workspace_id": null
-        }
-    });
-    state
-        .record(RecordKind::SavedAccount)
-        .replace(&serde_json::to_vec(&record).expect("test record"))
-        .expect("test file backend");
-    account_id
+    super::prepare_test_file_account_at(&root.join("account-root"))
 }
 
 #[cfg(debug_assertions)]
@@ -1340,7 +1318,7 @@ fn release_saved_file_account_is_shared_across_session_roots() {
     let temp = tempfile::tempdir().expect("private test root");
     let private_home = temp.path().join("home");
     std::fs::create_dir_all(private_home.join("workspace")).expect("private Workspace");
-    prepare_test_file_account_at(&private_home.join(".local/state/arany"));
+    super::prepare_test_file_account_at(&private_home.join(".local/state/arany"));
     let passwd_home = release_passwd_home();
     for name in ["state-one", "state-two"] {
         let view = release_bare_session(
@@ -1385,7 +1363,7 @@ fn release_mixed_access_prompts_each_start_without_reading_the_other_record() {
     let private_home = temp.path().join("home");
     std::fs::create_dir_all(private_home.join("workspace")).expect("private Workspace");
     let account_path = private_home.join(".local/state/arany");
-    prepare_test_file_account_at(&account_path);
+    super::prepare_test_file_account_at(&account_path);
     prepare_selected_chatgpt_account_at(&account_path);
     let account = StateRoot::open_existing(&account_path).expect("private account root");
     account
@@ -1639,7 +1617,7 @@ fn release_saved_account_is_private_across_os_users() {
     std::fs::create_dir_all(owner_home.join("workspace")).expect("owner Workspace");
     std::fs::set_permissions(&owner_home, std::fs::Permissions::from_mode(0o700))
         .expect("owner-only home");
-    let account_id = prepare_test_file_account_at(&owner_home.join(".local/state/arany"));
+    let account_id = super::prepare_test_file_account_at(&owner_home.join(".local/state/arany"));
     let passwd = temp.path().join("passwd");
     std::fs::write(
         &passwd,
