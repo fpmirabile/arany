@@ -190,7 +190,7 @@ async fn finite_token_plan_reduces_parallelism_and_rejects_more_calls_at_the_cap
     assert_eq!(ledger.provider_concurrency(4), 1);
     assert!(
         ledger.tokens_within_limit(),
-        "an exact-cap Finish is still valid"
+        "an exact-cap Answer is still valid"
     );
     assert!(!ledger.can_start_provider_call());
     assert!(!ledger.admits(Action::ProviderCall {

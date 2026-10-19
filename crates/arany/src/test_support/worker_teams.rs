@@ -729,7 +729,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     }
     if matches!(case, "leased_edit" | "defer_finish") {
         let reason = if case == "defer_finish" {
-            ProviderFailureReason::WorkerFinishDeferred
+            ProviderFailureReason::WorkerAnswerDeferred
         } else {
             ProviderFailureReason::WorkerToolRefused
         };
@@ -1433,7 +1433,7 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
                     !heads[0]
                         .as_deref()
                         .unwrap_or_default()
-                        .contains("Finish refused")
+                        .contains("Answer refused")
                 );
                 let feedback: Vec<_> = requests
                     .iter()

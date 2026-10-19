@@ -329,7 +329,7 @@ mod tests {
             .collect();
         let turn = json!([
             {"type":"reasoning","summary":summaries},
-            {"type":"function_call","name":"Finish","arguments":"{}","call_id":"call_1"}
+            {"type":"function_call","name":"Answer","arguments":"{}","call_id":"call_1"}
         ])
         .to_string();
         assert!(ProviderTurn::new("openai", &turn, SECRET, 4096).is_ok());

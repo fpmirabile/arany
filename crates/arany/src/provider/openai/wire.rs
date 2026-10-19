@@ -1,5 +1,5 @@
 use crate::provider::conversation::{Block, Conversation, Role};
-use crate::provider::decode::{function_outcome, structured_outcome, tool_function};
+use crate::provider::decode::{function_outcome, review_outcome, tool_function};
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, outcome_specs};
 use crate::provider::{
@@ -27,7 +27,8 @@ pub(crate) struct RunScope<'a> {
     pub(crate) model: &'a str,
     pub(crate) output_cap: u32,
     pub(crate) secret: &'a str,
-    functions: Option<Vec<String>>,
+    functions: Vec<String>,
+    review: bool,
 }
 
 impl<'a> RunScope<'a> {
@@ -40,10 +41,12 @@ impl<'a> RunScope<'a> {
             model: &request.model,
             output_cap: request.max_output_tokens,
             secret,
-            functions: conversation
-                .tools
-                .as_ref()
-                .map(|tools| allowed_functions(request, tools, &conversation.outcome)),
+            functions: allowed_functions(
+                request,
+                conversation.tools.as_deref().unwrap_or_default(),
+                &conversation.outcome,
+            ),
+            review: request.input.role == crate::provider::PromptRole::ToolReview,
         }
     }
 }
@@ -57,12 +60,17 @@ pub(super) fn allowed_functions(
         .input
         .tools
         .as_ref()
-        .is_some_and(ToolContext::finish_only);
+        .is_some_and(ToolContext::answer_only);
     tools
         .iter()
         .filter(|_| !exhausted)
         .map(|spec| spec.name.clone())
-        .chain(outcome_specs(outcome).into_iter().map(|spec| spec.name))
+        .chain(
+            outcome_specs(outcome)
+                .into_iter()
+                .filter(|_| !exhausted)
+                .map(|spec| spec.name),
+        )
         .collect()
 }
 
@@ -73,13 +81,7 @@ pub(crate) fn decode_run(
     let response: WireResponse =
         serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
     let raw: Value = serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-    decode(response, &raw["output"], scope).map_err(|error| {
-        if scope.functions.is_some() {
-            error.provider_error()
-        } else {
-            ProviderError::InvalidOutcome
-        }
-    })
+    decode(response, &raw["output"], scope).map_err(ResponseError::provider_error)
 }
 
 pub(crate) fn decode_streamed_run(
@@ -108,16 +110,24 @@ fn decode(
     output: &Value,
     scope: &RunScope,
 ) -> Result<ProviderResponse, ResponseError> {
-    let (response_id, usage, outcome) = match &scope.functions {
-        Some(offered) => {
-            let (id, usage, call) = response.completed_function(scope.model)?;
-            (id, usage, call.outcome(offered)?)
+    let (response_id, usage, outcome) = if response
+        .output
+        .iter()
+        .any(|item| item.kind == "function_call")
+    {
+        if scope.review {
+            return Err(ResponseError::Outcome);
         }
-        None => {
-            let (id, usage, text) = response.completed_text(scope.model)?;
-            let outcome = structured_outcome(&text).map_err(|_| ResponseError::Outcome)?;
-            (id, usage, outcome)
-        }
+        let (id, usage, call) = response.completed_function(scope.model)?;
+        (id, usage, call.outcome(&scope.functions)?)
+    } else {
+        let (id, usage, text) = response.completed_text(scope.model)?;
+        let outcome = if scope.review {
+            review_outcome(&text).map_err(|_| ResponseError::Outcome)?
+        } else {
+            ProviderOutcome::Answer(crate::provider::Answer { text })
+        };
+        (id, usage, outcome)
     };
     let turn = ProviderTurn::new(ADAPTER, &output.to_string(), scope.secret, scope.output_cap)
         .map_err(|_| ResponseError::Outcome)?;
@@ -155,7 +165,7 @@ pub(crate) fn outcome_failure_diagnostic(
                 item.name
                     .as_deref()
                     .and_then(|name| name.strip_prefix(NAME_PREFIX)),
-                Some("finish" | "delegate")
+                Some("delegate")
             )
             && item.arguments.as_ref().is_some_and(|arguments| {
                 arguments.len() > crate::tools::types::MAX_TOOL_ARGUMENT_BYTES
@@ -180,7 +190,7 @@ pub(crate) fn outcome_failure_diagnostic(
         if operation == "plan" {
             return (Stage::OutcomeFields, None);
         }
-        if matches!(operation, "finish" | "delegate") {
+        if matches!(operation, "delegate") {
             return match function_outcome(operation, fields) {
                 Err(_) => (Stage::OutcomeFields, None),
                 Ok(_) => (Stage::OutcomeContract, None),
@@ -208,7 +218,7 @@ pub(crate) fn outcome_failure_diagnostic(
     };
     match serde_json::from_str::<Value>(&text) {
         Err(_) => (Stage::OutcomeEncoding, None),
-        Ok(_) if structured_outcome(&text).is_err() => (Stage::OutcomeFields, None),
+        Ok(_) if review_outcome(&text).is_err() => (Stage::OutcomeFields, None),
         Ok(_) => (Stage::OutcomeContract, None),
     }
 }
@@ -336,8 +346,9 @@ fn run_body_inner(
         conversation.outcome.clone(),
     );
     body["prompt_cache_key"] = json!(request.session_id.to_string());
-    if let Some(tools) = &conversation.tools {
+    if request.input.role != crate::provider::PromptRole::ToolReview {
         body.as_object_mut().expect("request object").remove("text");
+        let tools = conversation.tools.as_deref().unwrap_or_default();
         body["tools"] = tools
             .iter()
             .cloned()
@@ -345,11 +356,14 @@ fn run_body_inner(
             .map(function_json)
             .collect();
         let allowed = allowed_functions(request, tools, &conversation.outcome);
-        body["tool_choice"] = json!({
-            "type": "allowed_tools",
-            "mode": "required",
-            "tools": allowed.into_iter().map(|name| json!({"type": "function", "name": name})).collect::<Vec<_>>(),
-        });
+        body["tool_choice"] = if allowed.is_empty() {
+            json!("none")
+        } else {
+            json!({
+                "type": "allowed_tools", "mode": "auto",
+                "tools": allowed.into_iter().map(|name| json!({"type":"function", "name":name})).collect::<Vec<_>>()
+            })
+        };
         body["parallel_tool_calls"] = json!(false);
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
@@ -607,7 +621,7 @@ impl FunctionCall {
     }
 
     fn fields(&self) -> Result<Map<String, Value>, ResponseError> {
-        let limit = if matches!(self.operation()?, "finish" | "delegate") {
+        let limit = if matches!(self.operation()?, "delegate") {
             crate::store::MAX_EVENT_BYTES
         } else {
             crate::tools::types::MAX_TOOL_ARGUMENT_BYTES
@@ -629,7 +643,7 @@ impl FunctionCall {
         }
         let fields = self.fields()?;
         match operation {
-            "finish" | "delegate" => function_outcome(operation, fields),
+            "delegate" => function_outcome(operation, fields),
             _ => ToolUseId::new(self.call_id.clone())
                 .and_then(|id| tool_function(id, operation, Value::Object(fields))),
         }
@@ -667,6 +681,26 @@ impl WireResponse {
                         arguments: item.arguments.clone().ok_or(ResponseError::Outcome)?,
                         call_id: item.call_id.clone().unwrap_or_default(),
                     });
+                }
+                "message" if call.is_none() => {
+                    if item.role.as_deref() != Some("assistant")
+                        || item
+                            .status
+                            .as_deref()
+                            .is_some_and(|status| status != "completed")
+                        || !matches!(
+                            item.phase.as_deref(),
+                            None | Some("commentary" | "final_answer")
+                        )
+                        || !item.content.as_ref().is_some_and(|parts| {
+                            !parts.is_empty()
+                                && parts
+                                    .iter()
+                                    .all(|part| part.kind == "output_text" && part.text.is_some())
+                        })
+                    {
+                        return Err(ResponseError::Message);
+                    }
                 }
                 _ => return Err(ResponseError::Message),
             }
@@ -753,7 +787,7 @@ struct SummaryEnvelope {
 }
 
 pub(super) fn is_structured_text(text: &str) -> bool {
-    structured_outcome(text).is_ok() || serde_json::from_str::<SummaryEnvelope>(text).is_ok()
+    serde_json::from_str::<SummaryEnvelope>(text).is_ok()
 }
 
 #[cfg(test)]

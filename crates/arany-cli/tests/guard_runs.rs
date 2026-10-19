@@ -1,8 +1,8 @@
 use arany::{
-    AdmittedProviders, AgentPhase, AgentRunId, AgentStatus, CollaborationPolicy, CompactionFailure,
-    CompactionItem, CompactionRequest, CompactionResponse, CompactionStatus, ContextUsage,
-    Delegate, Effort, Engine, EngineConfig, EngineError, Event, Finish, ImageOrigin, PromptRole,
-    Provider, ProviderCallDisposition, ProviderError, ProviderImage, ProviderOutcome,
+    AdmittedProviders, AgentPhase, AgentRunId, AgentStatus, Answer, CollaborationPolicy,
+    CompactionFailure, CompactionItem, CompactionRequest, CompactionResponse, CompactionStatus,
+    ContextUsage, Delegate, Effort, Engine, EngineConfig, EngineError, Event, ImageOrigin,
+    PromptRole, Provider, ProviderCallDisposition, ProviderError, ProviderImage, ProviderOutcome,
     ProviderRequest, ProviderResponse, RunCancellation, RunControls, RunId, RunInput, RunStatus,
     RunSteering, SessionId, SessionView, StateRoot, Store, ToolGrant, continue_session,
     fork_session, list_sessions, rename_session, resume_session,
@@ -193,14 +193,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let state_path = temp.path().join("state");
         let account_id = Uuid::now_v7();
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Finish(Finish {
-                summary: "First summary".into(),
-                result: "First result".into(),
-            }),
-            ProviderOutcome::Finish(Finish {
-                summary: "Second summary".into(),
-                result: "Second result".into(),
-            }),
+            ProviderOutcome::Answer(Answer { text: "First result".into() }),
+            ProviderOutcome::Answer(Answer { text: "Second result".into() }),
         ])
         .with_profile("openai", "gpt-5.4")
         .with_saved_api_account(account_id)
@@ -284,7 +278,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert!(call.input.objective == objective, "exact objective");
                 assert!(call.input.context_summary.is_none(), "no derived summary");
                 assert!(call.input.child_results.is_empty(), "no child context");
-                assert_eq!(call.input.goal_budget, Some(arany::GoalBudget::default()));
+                assert_eq!(call.input.goal_budget, None);
                 assert_eq!(call.input.goal_plan_contract, None);
                 assert_eq!(call.max_output_tokens, 4096);
                 assert_eq!(call.run_id, run.id);
@@ -365,7 +359,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         );
         let listed = list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace.clone()).await.unwrap();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].title, "First summary", "second summary must not rename the conversation");
+        assert_eq!(listed[0].title, "First question", "later answers must not rename the conversation");
         assert!(arany_cli::presentation::render_session(&view, &events, arany_cli::presentation::Output::Text).starts_with(&format!("Session: {}\nTitle: {}\n", view.id, listed[0].title)));
         assert_eq!(listed[0].defaults.provider.as_deref(), Some("openai"));
         assert_eq!(listed[0].defaults.model.as_deref(), Some("gpt-5.4"));
@@ -378,11 +372,11 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
 
         let provider = ScriptedProvider::new(vec![
             ProviderOutcome::Delegate(Delegate { agent: None, children: vec![arany::ChildAssignment { editor: None, objective: "Inspect current image".into(), profile: None }] }),
-            ProviderOutcome::Finish(Finish { summary: "inspected".into(), result: "Child answer".into() }),
-            ProviderOutcome::Finish(Finish { summary: "combined".into(), result: "Team answer".into() }),
-            ProviderOutcome::Finish(Finish { summary: "large".into(), result: "Large image answer".into() }),
-            ProviderOutcome::Finish(Finish { summary: "after summary".into(), result: "Summary answer".into() }),
-            ProviderOutcome::Finish(Finish { summary: "fork".into(), result: "Fork answer".into() }),
+            ProviderOutcome::Answer(Answer { text: "Child answer".into() }),
+            ProviderOutcome::Answer(Answer { text: "Team answer".into() }),
+            ProviderOutcome::Answer(Answer { text: "Large image answer".into() }),
+            ProviderOutcome::Answer(Answer { text: "Summary answer".into() }),
+            ProviderOutcome::Answer(Answer { text: "Fork answer".into() }),
         ]).with_compactions(vec![Ok(CompactionResponse {
             summary: "Image conversation summary".into(), response_id: None,
             usage: arany::Usage {
@@ -441,7 +435,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 (0, AgentPhase::RootPlan, "", history.clone(), all_images.clone(), Vec::new()),
                 (1, AgentPhase::ChildWork, "Inspect current image", Vec::new(), vec![current], Vec::new()),
                 (2, AgentPhase::RootSynthesis, "", history.clone(), all_images, vec![arany::ChildResult {
-                    objective: "Inspect current image".into(), summary: "inspected".into(), result: "Child answer".into(),
+                    objective: "Inspect current image".into(), summary: "Child answer".into(), result: "Child answer".into(),
                 }]),
                 (3, AgentPhase::RootPlan, &realistic_objective[..64 * 1024], Vec::new(), vec![ProviderImage { origin: ImageOrigin::Objective, image: large_image.clone() }], Vec::new()),
                 (4, AgentPhase::RootPlan, maximal_objective.as_str(), Vec::new(), Vec::new(), Vec::new()),
@@ -449,7 +443,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             ] {
                 let mut actual = calls[index].clone();
                 let facts = actual.input.goal_context_facts.take();
-                assert_eq!(actual, ProviderRequest { session_id: if index == 5 { fork_id } else { first.session_id }, run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id, phase, collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single }, model: "test-model".into(), max_output_tokens: 4096, input: RunInput { images: expected_images, goal_budget: Some(arany::GoalBudget::default()), workspace_guidance: Some("Changed instruction".into()), includes: vec![include_data("notes/facts.txt", "Fact two")], history: expected_history, context_summary: (index == 4).then(|| "Image conversation summary".into()), child_results, ..RunInput::new(PromptRole::ReadOnly, objective.into()) } }, "image request {index}");
+                assert_eq!(actual, ProviderRequest { session_id: if index == 5 { fork_id } else { first.session_id }, run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id, phase, collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single }, model: "test-model".into(), max_output_tokens: 4096, input: RunInput { images: expected_images, goal_budget: None, workspace_guidance: Some("Changed instruction".into()), includes: vec![include_data("notes/facts.txt", "Fact two")], history: expected_history, context_summary: (index == 4).then(|| "Image conversation summary".into()), child_results, ..RunInput::new(PromptRole::ReadOnly, objective.into()) } }, "image request {index}");
                 if phase == AgentPhase::ChildWork {
                     assert!(facts.is_none(), "child calls do not receive primary Goal state");
                 } else {
@@ -646,13 +640,11 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Finish(Finish {
-                summary: "one".into(),
-                result: "Answer one".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Answer one".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "two".into(),
-                result: "Answer two".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Answer two".into(),
             }),
         ])
         .with_compactions(vec![Ok(CompactionResponse {
@@ -859,13 +851,11 @@ fn compaction_is_derived_durable_context_and_failure_keeps_the_prior_summary() {
         store.close().await.expect("store shutdown");
 
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Finish(Finish {
-                summary: "three".into(),
-                result: "Answer three".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Answer three".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "four".into(),
-                result: "Answer four".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Answer four".into(),
             }),
         ])
         .with_profile("changed-provider", "changed-model")
@@ -998,9 +988,8 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
     if let Some(root) = std::env::var_os(SEED_ROOT) {
         let root = std::path::PathBuf::from(root);
         runtime.block_on(async {
-            let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-                summary: "seed".into(),
-                result: "Seed answer".into(),
+            let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+                text: "Seed answer".into(),
             })])
             .with_compactions(vec![Ok(CompactionResponse {
                 summary: "Derived summary".into(),
@@ -1234,7 +1223,7 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
             assert_test_call(
                 &requests[4], AgentPhase::RootSynthesis, "Question", &["Fact"], &[], Some("Derived summary"),
                 &["A", "B", "C"].map(|objective| arany::ChildResult {
-                    objective: objective.into(), summary: "done".into(), result: format!("result:{objective}"),
+                    objective: objective.into(), summary: format!("result:{objective}"), result: format!("result:{objective}"),
                 }),
             );
             assert!(requests.iter().all(|call| call.run_id == outcome.run.id));
@@ -1290,8 +1279,8 @@ fn team_children_finish_in_reverse_order_but_synthesis_receives_assignment_order
         .await
         .expect("fork team boundary");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Finish(Finish { summary: "parent".into(), result: "Later parent answer".into() }),
-            ProviderOutcome::Finish(Finish { summary: "branch".into(), result: "Branch answer".into() }),
+            ProviderOutcome::Answer(Answer { text: "Later parent answer".into() }),
+            ProviderOutcome::Answer(Answer { text: "Branch answer".into() }),
         ])
         .with_profile("gated", "test-model")
         .with_compactions(vec![Err(ProviderError::RemoteHttp(403))]);
@@ -1629,9 +1618,8 @@ fn write_plan() -> arany::GoalPlanContract {
 #[tokio::test]
 async fn primary_tool_step_events_match_the_snapshot() {
     let finish = |result: &str| {
-        ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: result.into(),
+        ProviderOutcome::Answer(Answer {
+            text: result.into(),
         })
     };
     let read = arany::ToolCall::Read {
@@ -1724,9 +1712,8 @@ async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit(
         limit: 32,
     };
     let finish = || {
-        ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: "answer".into(),
+        ProviderOutcome::Answer(Answer {
+            text: "answer".into(),
         })
     };
     let result_bytes = |events: &[String]| {
@@ -1770,9 +1757,8 @@ async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit(
 #[tokio::test]
 async fn researcher_tool_step_events_match_the_snapshot() {
     let finish = || {
-        ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: "answer".into(),
+        ProviderOutcome::Answer(Answer {
+            text: "answer".into(),
         })
     };
     for (case, call, expected) in [
@@ -2035,9 +2021,8 @@ mod goals {
                     2,
                 ),
                 AgentPhase::ToolReview => (
-                    ProviderOutcome::Finish(Finish {
-                        summary: "Approve the note".into(),
-                        result: "approve".into(),
+                    ProviderOutcome::Answer(Answer {
+                        text: "approve".into(),
                     }),
                     3,
                     2,
@@ -2353,10 +2338,7 @@ mod goals {
                 expected_digest: None,
                 content: "changed".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "Ask the user".into(),
-                result: "ask".into(),
-            }),
+            ProviderOutcome::Answer(Answer { text: "ask".into() }),
             finish_with("never reached"),
         ])
         // Zero-based call 2 is the Tool review that follows the proposed Tool.
@@ -3192,9 +3174,8 @@ async fn attached_shape_write_without_a_plan_dispatches_after_ask_approval() {
             expected_digest: None,
             content: "hello".into(),
         }),
-        ProviderOutcome::Finish(Finish {
-            summary: "Written".into(),
-            result: "Wrote test.txt".into(),
+        ProviderOutcome::Answer(Answer {
+            text: "Wrote test.txt".into(),
         }),
     ]));
     let mut input = request(&workspace, "write test.txt containing hello");

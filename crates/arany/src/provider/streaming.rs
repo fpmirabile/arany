@@ -69,200 +69,22 @@ pub(super) fn visible_prefix<'a>(text: &'a str, secret: &str) -> Result<&'a str,
     Ok(&text[..end])
 }
 
-#[derive(Clone, Copy)]
-enum Scope {
-    Root,
-    Outcome,
-    Other,
+#[derive(Default)]
+pub(super) struct TextDecoder {
+    text: String,
 }
 
-struct Object {
-    scope: Scope,
-    key: Option<String>,
-    expecting_key: bool,
-}
-
-struct StringToken {
-    raw: Vec<u8>,
-    escaped: bool,
-    key: bool,
-    result: bool,
-    decoded: usize,
-}
-
-pub(super) struct ResultDecoder {
-    objects: Vec<Object>,
-    string: Option<StringToken>,
-    function: bool,
-    result_started: bool,
-    result: String,
-    total: usize,
-}
-
-impl ResultDecoder {
-    pub(super) fn new(function: bool) -> Self {
-        Self {
-            objects: Vec::new(),
-            string: None,
-            function,
-            result_started: false,
-            result: String::new(),
-            total: 0,
-        }
+impl TextDecoder {
+    pub(super) fn new() -> Self {
+        Self::default()
     }
-
     pub(super) fn feed(&mut self, fragment: &str, secret: &str) -> Result<&str, ProviderError> {
-        self.total = self
-            .total
-            .checked_add(fragment.len())
-            .filter(|total| *total <= MAX_RESPONSE_BYTES)
-            .ok_or(ProviderError::InvalidStream)?;
-        for byte in fragment.bytes() {
-            if let Some(token) = &mut self.string {
-                if byte == b'"' && !token.escaped {
-                    let mut quoted = Vec::with_capacity(token.raw.len() + 2);
-                    quoted.push(b'"');
-                    quoted.extend_from_slice(&token.raw);
-                    quoted.push(b'"');
-                    let value: String = serde_json::from_slice(&quoted)
-                        .map_err(|_| ProviderError::InvalidOutcome)?;
-                    if !secret.is_empty() && value.contains(secret) {
-                        return Err(ProviderError::InvalidOutcome);
-                    }
-                    if token.key {
-                        let object = self
-                            .objects
-                            .last_mut()
-                            .ok_or(ProviderError::InvalidOutcome)?;
-                        object.key = Some(value);
-                        object.expecting_key = false;
-                    }
-                    self.string = None;
-                    continue;
-                }
-                token.raw.push(byte);
-                if token.result {
-                    decode_string_prefix(&token.raw, &mut token.decoded, &mut self.result)?;
-                    if self.result.len() > MAX_DISPLAY_TEXT_BYTES {
-                        return Err(ProviderError::InvalidOutcome);
-                    }
-                }
-                token.escaped = byte == b'\\' && !token.escaped;
-                continue;
-            }
-            match byte {
-                b'{' | b'[' => {
-                    if self.objects.len() >= 64 {
-                        return Err(ProviderError::InvalidStream);
-                    }
-                    let scope = if self.objects.is_empty() && byte == b'{' {
-                        Scope::Root
-                    } else if byte == b'{'
-                        && self.objects.last().is_some_and(|object| {
-                            matches!(object.scope, Scope::Root)
-                                && object.key.as_deref() == Some("outcome")
-                        })
-                    {
-                        Scope::Outcome
-                    } else {
-                        Scope::Other
-                    };
-                    self.objects.push(Object {
-                        scope,
-                        key: None,
-                        expecting_key: byte == b'{',
-                    });
-                }
-                b'}' | b']' => {
-                    self.objects.pop().ok_or(ProviderError::InvalidOutcome)?;
-                }
-                b',' => {
-                    if let Some(object) = self.objects.last_mut() {
-                        object.key = None;
-                        object.expecting_key = !matches!(object.scope, Scope::Other);
-                    }
-                }
-                b'"' => {
-                    let object = self.objects.last().ok_or(ProviderError::InvalidOutcome)?;
-                    let result = !object.expecting_key
-                        && object.key.as_deref() == Some("result")
-                        && (matches!(object.scope, Scope::Outcome)
-                            || self.function && matches!(object.scope, Scope::Root));
-                    if result && self.result_started {
-                        return Err(ProviderError::InvalidOutcome);
-                    }
-                    self.result_started |= result;
-                    self.string = Some(StringToken {
-                        raw: Vec::new(),
-                        escaped: false,
-                        key: object.expecting_key,
-                        result,
-                        decoded: 0,
-                    });
-                }
-                _ => {}
-            }
+        if self.text.len().saturating_add(fragment.len()) > MAX_DISPLAY_TEXT_BYTES {
+            return Err(ProviderError::InvalidOutcome);
         }
-        visible_prefix(&self.result, secret)
+        self.text.push_str(fragment);
+        visible_prefix(&self.text, secret)
     }
-}
-
-fn decode_string_prefix(
-    raw: &[u8],
-    offset: &mut usize,
-    text: &mut String,
-) -> Result<(), ProviderError> {
-    while *offset < raw.len() {
-        let remaining = &raw[*offset..];
-        let length = match remaining[0] {
-            b'\\' => {
-                if remaining.len() < 2 {
-                    break;
-                }
-                if remaining[1] == b'u' {
-                    if remaining.len() < 6 {
-                        break;
-                    }
-                    let digits = std::str::from_utf8(&remaining[2..6])
-                        .map_err(|_| ProviderError::InvalidOutcome)?;
-                    let value = u16::from_str_radix(digits, 16)
-                        .map_err(|_| ProviderError::InvalidOutcome)?;
-                    if (0xd800..=0xdbff).contains(&value) {
-                        12
-                    } else {
-                        6
-                    }
-                } else {
-                    2
-                }
-            }
-            0..=31 | b'"' => return Err(ProviderError::InvalidOutcome),
-            32..=127 => 1,
-            0xc2..=0xdf => 2,
-            0xe0..=0xef => 3,
-            0xf0..=0xf4 => 4,
-            _ => return Err(ProviderError::InvalidOutcome),
-        };
-        if remaining.len() < length {
-            break;
-        }
-        if remaining[0] == b'\\' {
-            let mut quoted = Vec::with_capacity(length + 2);
-            quoted.push(b'"');
-            quoted.extend_from_slice(&remaining[..length]);
-            quoted.push(b'"');
-            let decoded: String =
-                serde_json::from_slice(&quoted).map_err(|_| ProviderError::InvalidOutcome)?;
-            text.push_str(&decoded);
-        } else {
-            text.push_str(
-                std::str::from_utf8(&remaining[..length])
-                    .map_err(|_| ProviderError::InvalidOutcome)?,
-            );
-        }
-        *offset += length;
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -411,28 +233,12 @@ fn is_event_type(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-enum ResponseItem {
-    Result {
-        decoder: ResultDecoder,
-        function: bool,
-    },
-    Commentary,
-    Other,
-}
-
-struct StreamItem {
-    output_index: usize,
-    kind: ResponseItem,
-    closed: bool,
-}
-
 pub(super) struct ResponsesPreview<'a> {
     secret: &'a str,
     model: &'a str,
     publisher: ResponsePreview,
-    items: std::collections::HashMap<String, StreamItem>,
-    text: PreviewText,
-    result_item: Option<String>,
+    done: std::collections::BTreeMap<usize, Value>,
+    started: std::collections::HashMap<String, (usize, String, bool)>,
 }
 
 impl<'a> ResponsesPreview<'a> {
@@ -441,14 +247,13 @@ impl<'a> ResponsesPreview<'a> {
             secret,
             model,
             publisher,
-            items: std::collections::HashMap::new(),
-            text: PreviewText::default(),
-            result_item: None,
+            done: Default::default(),
+            started: Default::default(),
         }
     }
 
     pub(super) fn event(&mut self, value: &Value) -> Result<(), ProviderError> {
-        match value.get("type").and_then(Value::as_str) {
+        match value["type"].as_str() {
             Some("response.created")
                 if value
                     .pointer("/response/model")
@@ -458,145 +263,115 @@ impl<'a> ResponsesPreview<'a> {
                 return Err(ProviderError::InvalidResponseContract);
             }
             Some("response.output_item.added") => {
-                let item = value.get("item").ok_or(ProviderError::InvalidStream)?;
-                let id = item
-                    .get("id")
-                    .and_then(Value::as_str)
+                let item = &value["item"];
+                let id = item["id"]
+                    .as_str()
                     .filter(|id| {
                         !id.is_empty()
                             && id.len() <= 128
                             && id.bytes().all(|byte| byte.is_ascii_graphic())
                     })
                     .ok_or(ProviderError::InvalidStream)?;
-                if self.items.len() >= 8192 || self.items.contains_key(id) {
-                    return Err(ProviderError::InvalidStream);
-                }
-                let index = value
-                    .get("output_index")
-                    .and_then(Value::as_u64)
+                let index = value["output_index"]
+                    .as_u64()
                     .filter(|index| *index < 8192)
-                    .and_then(|index| usize::try_from(index).ok())
-                    .ok_or(ProviderError::InvalidStream)?;
-                if self.items.values().any(|item| item.output_index == index) {
-                    return Err(ProviderError::InvalidStream);
+                    .ok_or(ProviderError::InvalidStream)? as usize;
+                let kind = item["type"].as_str().ok_or(ProviderError::InvalidStream)?;
+                if self.started.len() >= 8192
+                    || self.started.contains_key(id)
+                    || self.started.values().any(|(prior, _, _)| *prior == index)
+                    || kind == "message"
+                        && (!matches!(
+                            item["phase"].as_str(),
+                            None | Some("commentary" | "final_answer")
+                        ) || item["role"] != "assistant")
+                {
+                    return Err(ProviderError::InvalidResponseContract);
                 }
-                let capture = match item.get("type").and_then(Value::as_str) {
-                    Some("function_call")
-                        if item.get("name").and_then(Value::as_str) == Some("arany_finish") =>
-                    {
-                        ResponseItem::Result {
-                            decoder: ResultDecoder::new(true),
-                            function: true,
-                        }
-                    }
-                    Some("message")
-                        if item.get("role").and_then(Value::as_str) == Some("assistant") =>
-                    {
-                        match item.get("phase").and_then(Value::as_str) {
-                            Some("commentary") => ResponseItem::Commentary,
-                            Some("final_answer") | None => ResponseItem::Result {
-                                decoder: ResultDecoder::new(false),
-                                function: false,
-                            },
-                            _ => return Err(ProviderError::InvalidResponseContract),
-                        }
-                    }
-                    _ => ResponseItem::Other,
-                };
-                if matches!(capture, ResponseItem::Result { .. }) {
-                    if self.result_item.is_some() {
-                        return Err(ProviderError::InvalidResponseContract);
-                    }
-                    self.result_item = Some(id.to_owned());
-                }
-                self.items.insert(
-                    id.to_owned(),
-                    StreamItem {
-                        output_index: index,
-                        kind: capture,
-                        closed: false,
-                    },
-                );
+                self.started
+                    .insert(id.to_owned(), (index, kind.to_owned(), false));
             }
             Some("response.output_text.delta" | "response.function_call_arguments.delta") => {
-                let id = value
-                    .get("item_id")
-                    .and_then(Value::as_str)
+                let id = value["item_id"]
+                    .as_str()
                     .ok_or(ProviderError::InvalidStream)?;
-                let delta = value
-                    .get("delta")
-                    .and_then(Value::as_str)
-                    .ok_or(ProviderError::InvalidStream)?;
-                let item = self.items.get_mut(id).ok_or(ProviderError::InvalidStream)?;
-                if item.closed
-                    || value.get("output_index").and_then(Value::as_u64)
-                        != Some(item.output_index as u64)
+                let (index, kind, closed) =
+                    self.started.get(id).ok_or(ProviderError::InvalidStream)?;
+                let function = value["type"] == "response.function_call_arguments.delta";
+                if *closed
+                    || value["output_index"].as_u64() != Some(*index as u64)
+                    || (function && kind != "function_call")
+                    || (!function
+                        && (kind != "message" || value["content_index"].as_u64() != Some(0)))
+                    || !value["delta"].is_string()
                 {
                     return Err(ProviderError::InvalidStream);
-                }
-                if let ResponseItem::Result { decoder, function } = &mut item.kind {
-                    if *function != (value["type"] == "response.function_call_arguments.delta")
-                        || !*function
-                            && value.get("content_index").and_then(Value::as_u64) != Some(0)
-                    {
-                        return Err(ProviderError::InvalidStream);
-                    }
-                    self.text.answer = decoder.feed(delta, self.secret)?.to_owned();
-                    self.publisher.publish(self.text.clone())?;
                 }
             }
             Some("response.output_item.done") => {
-                let item = value.get("item").ok_or(ProviderError::InvalidStream)?;
-                let id = item
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or(ProviderError::InvalidStream)?;
-                let stream_item = self.items.get_mut(id).ok_or(ProviderError::InvalidStream)?;
-                if stream_item.closed
-                    || value.get("output_index").and_then(Value::as_u64)
-                        != Some(stream_item.output_index as u64)
-                    || matches!(stream_item.kind, ResponseItem::Commentary)
-                        != (item["phase"] == "commentary")
+                let index = value["output_index"]
+                    .as_u64()
+                    .filter(|index| *index < 8192)
+                    .ok_or(ProviderError::InvalidStream)? as usize;
+                if let Some(id) = value["item"]["id"].as_str()
+                    && let Some((started_index, kind, closed)) = self.started.get_mut(id)
                 {
+                    if *closed || *started_index != index || value["item"]["type"] != *kind {
+                        return Err(ProviderError::InvalidStream);
+                    }
+                    *closed = true;
+                }
+                if self.done.insert(index, value["item"].clone()).is_some() {
                     return Err(ProviderError::InvalidStream);
                 }
-                stream_item.closed = true;
-                if item.get("type").and_then(Value::as_str) == Some("message")
-                    && item.get("role").and_then(Value::as_str) == Some("assistant")
-                    && item.get("status").and_then(Value::as_str) == Some("completed")
-                    && item.get("phase").and_then(Value::as_str) == Some("commentary")
-                {
-                    let parts = item
-                        .get("content")
-                        .and_then(Value::as_array)
-                        .ok_or(ProviderError::InvalidStream)?;
+            }
+            Some("response.completed") => {
+                if self.started.values().any(|(_, _, closed)| !closed) {
+                    return Err(ProviderError::InvalidStream);
+                }
+                let output = value
+                    .pointer("/response/output")
+                    .and_then(Value::as_array)
+                    .ok_or(ProviderError::InvalidStream)?;
+                let items: Vec<_> = if output.is_empty() {
+                    self.done.values().collect()
+                } else {
+                    output.iter().collect()
+                };
+                let has_call = items.iter().any(|item| item["type"] == "function_call");
+                let mut preview = PreviewText::default();
+                for item in items {
+                    if item["type"] != "message" || item["role"] != "assistant" {
+                        continue;
+                    }
+                    let Some(parts) = item["content"].as_array() else {
+                        return Err(ProviderError::InvalidResponseContract);
+                    };
                     let mut text = String::new();
                     for part in parts {
-                        if part.get("type").and_then(Value::as_str) != Some("output_text") {
+                        if part["type"] != "output_text" {
                             return Err(ProviderError::InvalidResponseContract);
                         }
-                        text.push_str(
-                            part.get("text")
-                                .and_then(Value::as_str)
-                                .ok_or(ProviderError::InvalidStream)?,
-                        );
+                        text.push_str(part["text"].as_str().ok_or(ProviderError::InvalidStream)?);
                     }
                     if !self.secret.is_empty() && text.contains(self.secret) {
                         return Err(ProviderError::InvalidOutcome);
                     }
-                    if self.text.commentary.len() == MAX_DISPLAY_COMMENTARY_ITEMS
-                        || self.text.commentary.iter().map(String::len).sum::<usize>() + text.len()
-                            > MAX_DISPLAY_TEXT_BYTES
-                    {
-                        self.text.commentary_limited = true;
-                    } else if !text.is_empty() {
-                        self.text.commentary.push(text);
+                    if has_call || item["phase"] == "commentary" {
+                        if preview.commentary.len() < MAX_DISPLAY_COMMENTARY_ITEMS
+                            && preview.commentary.iter().map(String::len).sum::<usize>()
+                                + text.len()
+                                <= MAX_DISPLAY_TEXT_BYTES
+                        {
+                            preview.commentary.push(text);
+                        } else {
+                            preview.commentary_limited = true;
+                        }
+                    } else {
+                        preview.answer = text;
                     }
-                    self.publisher.publish(self.text.clone())?;
                 }
-            }
-            Some("response.completed") if self.items.values().any(|item| !item.closed) => {
-                return Err(ProviderError::InvalidStream);
+                self.publisher.publish(preview)?;
             }
             _ => {}
         }
@@ -657,51 +432,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn result_fragments_decode_unicode_and_hold_selected_credential_prefixes() {
-        let cases = [
-            (
-                false,
-                r#"{"outcome":{"result":"a\n\uD83D\uDE80é","summary":"ok","type":"finish"}}"#,
-                "a\n🚀é",
-            ),
-            (true, r#"{"summary":"ok","result":"a\"b\\c"}"#, "a\"b\\c"),
-            (
-                false,
-                r#"{"other":{"result":"hidden"},"outcome":{"type":"finish","result":"safe"}}"#,
-                "safe",
-            ),
-        ];
-        for (function, wire, expected) in cases {
-            let mut decoder = ResultDecoder::new(function);
-            let mut observed = String::new();
-            for character in wire.chars() {
-                let next = decoder
-                    .feed(&character.to_string(), "synthetic-key")
-                    .unwrap();
-                assert!(next.starts_with(&observed));
-                observed = next.to_owned();
-            }
-            assert_eq!(observed, expected);
-        }
-        let mut decoder = ResultDecoder::new(false);
+    fn text_fragments_hold_selected_credential_prefixes() {
+        let mut decoder = TextDecoder::new();
         assert_eq!(
-            decoder
-                .feed(r#"{"outcome":{"result":"safe syn"#, "synthetic-key")
-                .unwrap(),
-            "safe "
+            decoder.feed("Hola 🚀 safe syn", "synthetic-key").unwrap(),
+            "Hola 🚀 safe "
         );
-        assert_eq!(decoder.feed("thetic-", "synthetic-key").unwrap(), "safe ");
+        assert_eq!(
+            decoder.feed("thetic-", "synthetic-key").unwrap(),
+            "Hola 🚀 safe "
+        );
         assert!(decoder.feed("key", "synthetic-key").is_err());
-        for wire in [
-            r#"{"outcome":{"result":"\uDC00"}}"#,
-            r#"{"outcome":{"result":"a","result":"b"}}"#,
-            r#"{"outcome":{"result":"\x"}}"#,
-        ] {
-            assert!(
-                ResultDecoder::new(false).feed(wire, "key").is_err(),
-                "{wire}"
-            );
-        }
+        assert!(
+            TextDecoder::new()
+                .feed(&"x".repeat(MAX_DISPLAY_TEXT_BYTES + 1), "key")
+                .is_err()
+        );
     }
 
     #[test]

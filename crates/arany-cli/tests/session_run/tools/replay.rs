@@ -1065,7 +1065,7 @@ pub(super) async fn native_command_changeset_corpus(
     program: &str,
 ) {
     use arany::{
-        ApprovalMode, Finish, Provider, ProviderError, ProviderOutcome, ProviderRequest,
+        Answer, ApprovalMode, Provider, ProviderError, ProviderOutcome, ProviderRequest,
         ProviderResponse, RunCancellation, RunHints, RunRequest, StateRoot, Store, ToolApprovals,
     };
     use serde_json::json;
@@ -1124,16 +1124,14 @@ pub(super) async fn native_command_changeset_corpus(
                 return Err(ProviderError::InvalidOutcome);
             }
             let outcome = if review {
-                ProviderOutcome::Finish(Finish {
-                    summary: "Approved exact action".into(),
-                    result: "approve".into(),
+                ProviderOutcome::Answer(Answer {
+                    text: "approve".into(),
                 })
             } else {
                 self.calls.get(step).cloned().map_or_else(
                     || {
-                        ProviderOutcome::Finish(Finish {
-                            summary: "Observed changeset".into(),
-                            result: "Observed both effect stages.".into(),
+                        ProviderOutcome::Answer(Answer {
+                            text: "Observed both effect stages.".into(),
                         })
                     },
                     |call| {

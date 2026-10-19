@@ -1961,7 +1961,7 @@ fn root_request(
         input: RunInput {
             assignment_profiles: input.assignment_profiles,
             images: input.images,
-            goal_budget: Some(budget),
+            goal_budget: (goal.autonomous || goal.plan_contract.is_some()).then_some(budget),
             goal_plan_contract: goal.plan_contract.clone(),
             workspace_guidance: input
                 .inputs

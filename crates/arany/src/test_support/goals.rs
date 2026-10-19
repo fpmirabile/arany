@@ -1,11 +1,8 @@
-use crate::{AgentPhase, Event, Finish, ProviderOutcome, SessionView, StateRoot, Store};
+use crate::{AgentPhase, Answer, Event, ProviderOutcome, SessionView, StateRoot, Store};
 use std::path::Path;
 
 pub fn finish_with(text: &str) -> ProviderOutcome {
-    ProviderOutcome::Finish(Finish {
-        summary: text.into(),
-        result: text.into(),
-    })
+    ProviderOutcome::Answer(Answer { text: text.into() })
 }
 
 pub fn facts_workspace(root: &Path, text: &str) -> std::path::PathBuf {
@@ -791,9 +788,8 @@ impl crate::Provider for ForegroundWorkerProvider {
             (AgentPhase::RootSynthesis, 0 | 1) => finish_with("Primary verified published notes"),
             _ => {
                 self.check(false, "unexpected Provider call");
-                ProviderOutcome::Finish(crate::Finish {
-                    summary: "unexpected".into(),
-                    result: "unexpected".into(),
+                ProviderOutcome::Answer(crate::Answer {
+                    text: "unexpected".into(),
                 })
             }
         };

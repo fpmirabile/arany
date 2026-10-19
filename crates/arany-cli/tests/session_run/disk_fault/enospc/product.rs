@@ -138,7 +138,7 @@ fn tmpfs_enospc_exec_child() {
                     .is_none_or(serde_json::Value::is_null)
             );
             let response = match index {
-                0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                0 => serde_json::json!("ok"),
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }

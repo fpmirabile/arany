@@ -274,9 +274,8 @@ fn plan(call: &arany::ToolCall) -> arany::GoalPlanContract {
 }
 
 fn finish(result: &str) -> ProviderOutcome {
-    ProviderOutcome::Finish(Finish {
-        summary: "done".into(),
-        result: result.into(),
+    ProviderOutcome::Answer(Answer {
+        text: result.into(),
     })
 }
 

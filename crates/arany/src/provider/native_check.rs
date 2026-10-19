@@ -11,7 +11,7 @@ use aws_lc_rs::hmac;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v20";
+const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v21";
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -206,7 +206,7 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         .invoke_with_preview(direct.clone(), preview)
         .await
         .map_err(|_| NativeCheckError::ConformanceFailed)?;
-    if !matches!(&response.outcome, ProviderOutcome::Finish(value) if !observed.borrow().answer.is_empty() && value.result.starts_with(&observed.borrow().answer) && !value.summary.trim().is_empty() && !value.result.trim().is_empty() && value.summary.len() <= 8 * 1024 && value.result.len() <= 8 * 1024)
+    if !matches!(&response.outcome, ProviderOutcome::Answer(value) if !observed.borrow().answer.is_empty() && value.text.starts_with(&observed.borrow().answer) && !value.text.trim().is_empty() && value.text.len() <= 8 * 1024)
         || !valid_usage(response.usage.input_tokens, response.usage.output_tokens)
     {
         return Err(NativeCheckError::ConformanceFailed);
@@ -347,7 +347,7 @@ fn fingerprint_credentials(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{CompactionResponse, Delegate, Finish, ProviderError, ProviderResponse};
+    use crate::provider::{Answer, CompactionResponse, Delegate, ProviderError, ProviderResponse};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
@@ -513,7 +513,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum ProbeCase {
         Valid,
-        EmptyFinish,
+        EmptyAnswer,
         MissingUsage,
         WrongDelegation,
         DuplicateId,
@@ -554,9 +554,8 @@ mod tests {
             );
             let step = self.calls.fetch_add(1, Ordering::SeqCst);
             let outcome = if step == 0 || matches!(self.case, ProbeCase::WrongDelegation) {
-                ProviderOutcome::Finish(Finish {
-                    summary: "safe".into(),
-                    result: if matches!(self.case, ProbeCase::EmptyFinish) {
+                ProviderOutcome::Answer(Answer {
+                    text: if matches!(self.case, ProbeCase::EmptyAnswer) {
                         String::new()
                     } else {
                         "two".into()
@@ -602,9 +601,9 @@ mod tests {
             preview: super::super::ResponsePreview,
         ) -> Result<ProviderResponse, ProviderError> {
             let response = self.invoke(request).await?;
-            if let ProviderOutcome::Finish(finish) = &response.outcome {
+            if let ProviderOutcome::Answer(finish) = &response.outcome {
                 preview.publish(super::super::PreviewText {
-                    answer: finish.result.clone(),
+                    answer: finish.text.clone(),
                     ..Default::default()
                 })?;
             }
@@ -641,7 +640,7 @@ mod tests {
     async fn synthetic_probe_accepts_only_three_distinct_bounded_strict_outcomes() {
         for (case, expected, calls) in [
             (ProbeCase::Valid, true, 3),
-            (ProbeCase::EmptyFinish, false, 1),
+            (ProbeCase::EmptyAnswer, false, 1),
             (ProbeCase::MissingUsage, false, 1),
             (ProbeCase::WrongDelegation, false, 2),
             (ProbeCase::DuplicateId, false, 2),

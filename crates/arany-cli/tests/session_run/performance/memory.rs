@@ -147,7 +147,7 @@ fn resident_memory_two_includes_on_named_host() {
             assert_eq!(wire["model"], "model-1");
             let input: serde_json::Value = crate::semantic::input(&wire);
             let text = match index {
-                0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                0 => serde_json::json!("ok"),
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
@@ -166,12 +166,12 @@ fn resident_memory_two_includes_on_named_host() {
                     released
                         .recv_timeout(Duration::from_secs(10))
                         .expect("release synthetic response");
-                    let text = serde_json::json!({"outcome":{"type":"finish","summary":"done","result":"memory answer"}});
+                    let text = serde_json::json!("memory answer");
                     let mut response = serde_json::json!({
                         "id": format!("resp_{}", index + 1),
                         "status": "completed",
                         "model": "model-1",
-                        "output": [{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":text.to_string()}]}],
+                        "output": arany::semantic::responses_output(&text),
                         "usage": {"input_tokens":20,"output_tokens":10},
                         "padding": ""
                     });

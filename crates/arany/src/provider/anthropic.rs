@@ -247,7 +247,14 @@ impl AnthropicProvider {
                 model: &self.identity.model,
                 output_cap: request.max_output_tokens,
                 secret: &self.key,
-                offered: conversation.tools.as_deref().unwrap_or_default(),
+                offered: &conversation
+                    .tools
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .chain(super::tool_specs::outcome_specs(&conversation.outcome))
+                    .collect::<Vec<_>>(),
+                review: request.input.role == super::PromptRole::ToolReview,
             },
         )?;
         if response.reflects_secret(&self.key) {
@@ -502,12 +509,12 @@ mod tests {
         let request = crate::provider::test_support::primary_request("claude-sonnet-5");
         let conversation = render::conversation(&request).unwrap();
         let decode = |bytes: &[u8]| provider.decode_run(bytes, &request, &conversation);
-        let good_run =
-            synthetic_reply(r#"{"outcome":{"type":"finish","summary":"safe","result":"answer"}}"#);
+        let good_run = synthetic_reply(r#"answer"#);
         assert!(decode(&good_run).is_ok());
-        let reflected_run = synthetic_reply(
-            r#"{"outcome":{"type":"finish","summary":"\u0073ynthetic-native-secret","result":"answer"}}"#,
-        );
+        let reflected_run = String::from_utf8(synthetic_reply(secret))
+            .unwrap()
+            .replace("synthetic-native-secret", "\\u0073ynthetic-native-secret")
+            .into_bytes();
         assert!(!raw_reflects_secret(&reflected_run, secret));
         assert!(matches!(
             decode(&reflected_run),

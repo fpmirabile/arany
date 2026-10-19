@@ -1,10 +1,10 @@
 use super::{
-    Action, ActiveSegment, CallFailure, CallResult, Grant, RunLoop, call_record, valid_finish,
+    Action, ActiveSegment, CallFailure, CallResult, Grant, RunLoop, call_record, valid_answer,
 };
 use crate::engine::routing::CallScope;
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
 use crate::provider::{
-    AgentPhase, ChildAssignment, ChildResult, Finish, PromptRole, ProviderOutcome, ProviderRequest,
+    AgentPhase, Answer, ChildAssignment, ChildResult, PromptRole, ProviderOutcome, ProviderRequest,
     ProviderResponse, ProviderTurn, RunInput,
 };
 use crate::session::{
@@ -747,8 +747,8 @@ impl RunLoop<'_> {
                     && let CallResult::Response(response) = &result
                 {
                     record.failure_reason = Some(match &response.outcome {
-                        ProviderOutcome::Finish(_) => {
-                            crate::provider::ProviderFailureReason::WorkerFinishDeferred
+                        ProviderOutcome::Answer(_) => {
+                            crate::provider::ProviderFailureReason::WorkerAnswerDeferred
                         }
                         ProviderOutcome::Delegate(_) => {
                             crate::provider::ProviderFailureReason::WorkerDelegateRefused
@@ -849,8 +849,8 @@ impl RunLoop<'_> {
                             && !self.controls.cancellation.is_cancelled() =>
                     {
                         queue.refusal = Some(match outcome {
-                            ProviderOutcome::Finish(_) => {
-                                "Finish deferred: workers are still active; answer again after they settle."
+                            ProviderOutcome::Answer(_) => {
+                                "Answer deferred: workers are still active; answer again after they settle."
                             }
                             ProviderOutcome::Delegate(_) => {
                                 "Delegate refused: workers are still active."
@@ -883,9 +883,9 @@ impl RunLoop<'_> {
             let valid_response = self.ledger().tokens_within_limit()
                 && match &result {
                     CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Finish(finish),
+                        outcome: ProviderOutcome::Answer(finish),
                         ..
-                    }) => valid_finish(finish, MAX_CHILD_RESULT_BYTES),
+                    }) => valid_answer(finish, MAX_CHILD_RESULT_BYTES),
                     CallResult::Response(ProviderResponse {
                         outcome: ProviderOutcome::Tools(requests),
                         ..
@@ -897,7 +897,7 @@ impl RunLoop<'_> {
                     && matches!(
                         &result,
                         CallResult::Response(ProviderResponse {
-                            outcome: ProviderOutcome::Finish(_),
+                            outcome: ProviderOutcome::Answer(_),
                             ..
                         })
                     )
@@ -952,7 +952,7 @@ impl RunLoop<'_> {
                 {
                     if let CallResult::Response(ProviderResponse { turn, .. }) = &result {
                         let child = &mut children[index];
-                        let text = "Finish refused: criterion_not_met_in_view. Obtain current passing private evidence before Finish; at most three continuations are allowed.".to_owned();
+                        let text = "Answer refused: criterion_not_met_in_view. Obtain current passing private evidence before answering; at most three continuations are allowed.".to_owned();
                         if let Some(tools) = child.tools.as_mut() {
                             tools.add_stop_feedback(turn, &text);
                         }
@@ -989,7 +989,7 @@ impl RunLoop<'_> {
                 };
                 let finish = match result {
                     CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Finish(f),
+                        outcome: ProviderOutcome::Answer(f),
                         turn,
                         ..
                     }) if valid_response && !gate_failed && abort_reason.is_none() => {
@@ -1175,7 +1175,7 @@ impl RunLoop<'_> {
         }
         let disposition = match result {
             CallResult::Response(ProviderResponse {
-                outcome: ProviderOutcome::Finish(finish),
+                outcome: ProviderOutcome::Answer(finish),
                 turn,
                 ..
             }) if valid_response => {
@@ -1266,7 +1266,7 @@ impl RunLoop<'_> {
     fn subagent_stop<'a>(
         &'a self,
         child: &'a mut ChildWork,
-        finish: &'a Finish,
+        finish: &'a Answer,
         turn: ProviderTurn,
         abort_reason: &'a mut Option<AbortReason>,
         deadline: Instant,
@@ -1277,14 +1277,14 @@ impl RunLoop<'_> {
     async fn subagent_stop_inner(
         &self,
         child: &mut ChildWork,
-        finish: &Finish,
+        finish: &Answer,
         turn: ProviderTurn,
         abort_reason: &mut Option<AbortReason>,
         deadline: Instant,
     ) -> Result<ChildStop, EngineError> {
         let agent_run_id = child.agent_run_id;
         let stop = self
-            .run_subagent_stop(child, &finish.result, turn, deadline)
+            .run_subagent_stop(child, &finish.text, turn, deadline)
             .await;
         match stop {
             Ok(Some(())) => {}
@@ -1533,7 +1533,7 @@ impl RunLoop<'_> {
             }
             catalog["pending_workers"] = serde_json::json!(pending);
             catalog["worker_coordination"] = serde_json::json!(
-                "While workers are pending, inspect or edit only paths outside their leases. Commands wait for lease quiescence. Finish or propose the next wave only after settlement and fresh primary verification."
+                "While workers are pending, inspect or edit only paths outside their leases. Commands wait for lease quiescence. Answer or propose the next wave only after settlement and fresh primary verification."
             );
             let proposals = self.ledger().view(|view| {
                 view.runs
@@ -1776,7 +1776,13 @@ impl RunLoop<'_> {
                     .filter(|value| value.origin == crate::provider::ImageOrigin::Objective)
                     .cloned()
                     .collect(),
-                goal_budget: Some(self.ledger().effective_budget()?),
+                goal_budget: if self.ledger().autonomous()
+                    || self.ledger().plan_contract()?.is_some()
+                {
+                    Some(self.ledger().effective_budget()?)
+                } else {
+                    None
+                },
                 goal_plan_contract: if researcher {
                     self.ledger().plan_contract()?
                 } else {
@@ -1907,7 +1913,7 @@ impl RunLoop<'_> {
         &self,
         agent_run_id: AgentRunId,
         disposition: AgentDisposition,
-        finish: Option<&Finish>,
+        finish: Option<&Answer>,
         call_reserved: bool,
     ) -> Result<(), EngineError> {
         self.append(Event::AgentFinished {
@@ -1915,8 +1921,8 @@ impl RunLoop<'_> {
             run_id: self.run_id,
             agent_run_id,
             disposition,
-            summary: finish.map(|value| value.summary.clone()),
-            result: finish.map(|value| value.result.clone()),
+            summary: finish.map(|value| super::answer_summary(&value.text)),
+            result: finish.map(|value| value.text.clone()),
         })
         .await?;
         if call_reserved {

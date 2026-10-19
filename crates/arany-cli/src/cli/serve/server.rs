@@ -899,9 +899,8 @@ mod tests {
             arany::EngineConfig::default(),
         )
         .unwrap();
-        let finish = arany::ProviderOutcome::Finish(arany::Finish {
-            summary: "Answer".into(),
-            result: "Hello".into(),
+        let finish = arany::ProviderOutcome::Answer(arany::Answer {
+            text: "Hello".into(),
         });
         let providers = arany::AdmittedProviders::single(Arc::new(ScriptedProvider::new(vec![
             finish.clone(),

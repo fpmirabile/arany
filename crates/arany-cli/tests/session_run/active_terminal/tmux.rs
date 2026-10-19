@@ -1019,7 +1019,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             };
             let body = read_request(&mut stream);
             let text = match index {
-                0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                0 => serde_json::json!("ok"),
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child","profile":null}]}})
                 }
@@ -1033,7 +1033,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
                     response_ready
                         .recv_timeout(Duration::from_secs(20))
                         .expect("release Provider response");
-                    serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"done"}})
+                    serde_json::json!("done")
                 }
                 _ => {
                     let wire: serde_json::Value =
@@ -2399,12 +2399,7 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
             let (mut stream, input) =
                 accept_provider_request(&listener, "synthetic Provider request missing");
             match index {
-                0 => send_response_for(
-                    &mut stream,
-                    index,
-                    serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
-                    true,
-                ),
+                0 => send_response_for(&mut stream, index, serde_json::json!("ok"), true),
                 1 => send_response_for(
                     &mut stream,
                     index,
@@ -2431,21 +2426,11 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
                     release_child
                         .recv_timeout(Duration::from_secs(10))
                         .expect("release held child");
-                    send_response_for(
-                        &mut stream,
-                        index,
-                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"child result"}}),
-                        false,
-                    );
+                    send_response_for(&mut stream, index, serde_json::json!("child result"), false);
                 }
                 5 => {
                     assert_eq!(input["steering_notes"], serde_json::json!([NOTE]));
-                    send_response_for(
-                        &mut stream,
-                        index,
-                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"synthesized"}}),
-                        true,
-                    );
+                    send_response_for(&mut stream, index, serde_json::json!("synthesized"), true);
                 }
                 _ => {
                     assert_eq!(input["objective"], "pause");

@@ -871,7 +871,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
         && matches!(
             record.failure_reason,
             Some(
-                crate::provider::ProviderFailureReason::WorkerFinishDeferred
+                crate::provider::ProviderFailureReason::WorkerAnswerDeferred
                     | crate::provider::ProviderFailureReason::WorkerDelegateRefused
                     | crate::provider::ProviderFailureReason::WorkerToolRefused
             )

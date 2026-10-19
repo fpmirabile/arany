@@ -1,5 +1,5 @@
 use crate::{
-    AdmittedProviders, Engine, EngineConfig, Event, Finish, Provider, ProviderOutcome, Providers,
+    AdmittedProviders, Answer, Engine, EngineConfig, Event, Provider, ProviderOutcome, Providers,
     RunControls, RunRequest, SessionId, SessionView, StateRoot, Store, ToolGrant,
 };
 use std::path::Path;
@@ -8,10 +8,7 @@ use std::sync::Arc;
 use super::scenario::*;
 
 pub fn finish(text: &str) -> ProviderOutcome {
-    ProviderOutcome::Finish(Finish {
-        summary: text.into(),
-        result: text.into(),
-    })
+    ProviderOutcome::Answer(Answer { text: text.into() })
 }
 
 pub async fn reopen(state: &Path, session: SessionId) -> (Vec<crate::EventEnvelope>, SessionView) {

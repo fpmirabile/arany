@@ -85,7 +85,10 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
             body["output_config"]["effort"],
             if index < 4 { "low" } else { "high" }
         );
-        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(
+            body["output_config"].get("format").is_some(),
+            matches!(index, 3 | 8)
+        );
         let content = crate::semantic::input(&body);
         match index {
             2 | 4 => assert_eq!(content["objective"], OBJECTIVE),
@@ -120,15 +123,15 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
                 json!({"outcome": {"type": "delegate", "children":[{"objective":"Explain two","profile":null}]}})
             }
             _ => {
-                json!({"outcome": {"type": "finish", "summary": "scoped summary", "result": "scoped answer"}})
+                json!("scoped answer")
             }
         };
         chatgpt::send_json(
             input,
             &serde_json::to_vec(&json!({
                 "id": format!("msg_scoped_{index}"), "type": "message", "role": "assistant",
-                "model": model, "stop_reason": "end_turn", "stop_details": null,
-                "stop_sequence": null, "content": [{"type": "text", "text": outcome.to_string()}],
+                "model": model, "stop_reason": if index == 7 { "tool_use" } else { "end_turn" }, "stop_details": null,
+                "stop_sequence": null, "content": arany::semantic::messages_content(&outcome),
                 "usage": {"input_tokens": 12, "output_tokens": 8}
             }))
             .expect("synthetic Messages reply"),

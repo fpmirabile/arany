@@ -3,7 +3,7 @@ use super::ledger::{Action, GoalLedger, duration_ms};
 use super::{EngineError, RunCancellation, RunSteering, STORE_ACTION_OVERHEAD};
 use crate::journal::Journal;
 use crate::provider::{
-    AgentPhase, Finish, MAX_REPORTED_INPUT_TOKENS, PreviewText, Provider, ProviderFailureClass,
+    AgentPhase, Answer, MAX_REPORTED_INPUT_TOKENS, PreviewText, Provider, ProviderFailureClass,
     ProviderFailureReason, ProviderOutcome, ProviderRequest, ProviderResponse, ResponsePreview,
     Usage,
 };
@@ -454,7 +454,7 @@ impl<'a> RunLoop<'a> {
         enum Exit {
             Stopped,
             Cancelled,
-            Finished(Finish),
+            Finished(Answer),
             Failed(RunFailure),
             Budget,
             Settled,
@@ -525,7 +525,7 @@ impl<'a> RunLoop<'a> {
                     }
                 }
                 CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Finish(finish),
+                    outcome: ProviderOutcome::Answer(finish),
                     turn,
                     ..
                 }) if valid_response => {
@@ -595,9 +595,9 @@ impl<'a> RunLoop<'a> {
     ) -> Result<(Result<(), ProposalRefusalCause>, bool), EngineError> {
         Ok(match first {
             CallResult::Response(ProviderResponse {
-                outcome: ProviderOutcome::Finish(finish),
+                outcome: ProviderOutcome::Answer(finish),
                 ..
-            }) => (self.well_formed_finish(finish, planning), true),
+            }) => (self.well_formed_answer(finish, planning), true),
             CallResult::Response(ProviderResponse {
                 outcome: ProviderOutcome::Delegate(delegation),
                 ..
@@ -686,7 +686,7 @@ impl<'a> RunLoop<'a> {
     async fn stop_primary(
         &self,
         root: &mut ProviderRequest,
-        finish: &Finish,
+        finish: &Answer,
         turn: crate::provider::ProviderTurn,
     ) -> Result<bool, EngineError> {
         let fits = self
@@ -701,7 +701,7 @@ impl<'a> RunLoop<'a> {
                 self.primary_id,
                 crate::tools::permissions::HookEvent::Stop,
                 "",
-                &finish.result,
+                &finish.text,
                 None,
                 fits,
             )
@@ -848,7 +848,7 @@ impl<'a> RunLoop<'a> {
             CallResult::Response(response)
                 if !text.answer.is_empty()
                     && !matches!(&response.outcome,
-                ProviderOutcome::Finish(finish) if finish.result.starts_with(&text.answer)) =>
+                ProviderOutcome::Answer(finish) if finish.text.starts_with(&text.answer)) =>
             {
                 CallResult::Failed(CallFailure::InvalidResponse(Some(
                     ProviderFailureReason::ResponseContract,
@@ -950,15 +950,15 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
-    fn well_formed_finish(
+    fn well_formed_answer(
         &self,
-        finish: &Finish,
+        finish: &Answer,
         planning: bool,
     ) -> Result<(), ProposalRefusalCause> {
         if planning && matches!(self.controls.policy, CollaborationPolicy::Team { .. }) {
             Err(ProposalRefusalCause::Phase)
-        } else if !valid_finish(finish, MAX_PRIMARY_RESULT_BYTES) {
-            Err(ProposalRefusalCause::FinishInvalid)
+        } else if !valid_answer(finish, MAX_PRIMARY_RESULT_BYTES) {
+            Err(ProposalRefusalCause::AnswerInvalid)
         } else {
             Ok(())
         }
@@ -1111,7 +1111,7 @@ impl<'a> RunLoop<'a> {
         Ok(<[_; 1]>::try_from(requests).ok().map(|[request]| request))
     }
 
-    async fn finish_primary(&self, finish: Finish) -> Result<(), EngineError> {
+    async fn finish_primary(&self, finish: Answer) -> Result<(), EngineError> {
         if self.controls.cancellation.is_cancelled() {
             return self.cancel_primary().await;
         }
@@ -1141,13 +1141,13 @@ impl<'a> RunLoop<'a> {
             run_id: self.run_id,
             agent_run_id: self.primary_id,
             disposition: AgentDisposition::Finished,
-            summary: Some(finish.summary),
-            result: Some(finish.result.clone()),
+            summary: Some(answer_summary(&finish.text)),
+            result: Some(finish.text.clone()),
         })
         .await?;
         self.append(Event::MessageCommitted {
             run_id: self.run_id,
-            text: finish.result,
+            text: finish.text,
         })
         .await?;
         self.append(Event::RunFinished {
@@ -1388,7 +1388,7 @@ fn proposal_refusal(result: &CallResult, cause: ProposalRefusalCause) -> Option<
     };
     let operation = match &response.outcome {
         ProviderOutcome::Plan(_) => "arany_plan".to_owned(),
-        ProviderOutcome::Finish(_) => "finish".to_owned(),
+        ProviderOutcome::Answer(_) => "answer".to_owned(),
         ProviderOutcome::Delegate(_) => "delegate".to_owned(),
         ProviderOutcome::Tools(requests) => format!("arany_{}", requests.first()?.call.label()),
     };
@@ -1404,7 +1404,7 @@ fn call_record(
 ) -> ProviderCallRecord {
     let disposition = match result {
         CallResult::Response(ProviderResponse {
-            outcome: ProviderOutcome::Finish(_),
+            outcome: ProviderOutcome::Answer(_),
             ..
         }) if valid_response => ProviderCallDisposition::Finished,
         CallResult::Response(ProviderResponse {
@@ -1514,12 +1514,22 @@ fn continuation_feedback(
         .filter(|feedback| feedback.after_step == steps)
 }
 
-fn valid_finish(finish: &Finish, result_limit: usize) -> bool {
-    !finish.summary.is_empty()
-        && finish.summary.len() <= MAX_FINISH_SUMMARY_BYTES
-        && !finish.result.is_empty()
-        && finish.result.len() <= result_limit
-        && Event::finished_payload_size(&finish.summary, &finish.result)
+fn answer_summary(text: &str) -> String {
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    let mut end = line.len().min(MAX_FINISH_SUMMARY_BYTES);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line[..end].to_owned()
+}
+
+fn valid_answer(answer: &Answer, result_limit: usize) -> bool {
+    !answer.text.trim().is_empty()
+        && answer.text.len() <= result_limit
+        && Event::finished_payload_size(&answer_summary(&answer.text), &answer.text)
             .is_ok_and(|bytes| bytes <= crate::store::MAX_EVENT_BYTES)
 }
 

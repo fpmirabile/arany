@@ -389,7 +389,7 @@ mod journey {
                 served.fetch_add(1, Ordering::SeqCst);
                 let input = crate::semantic::input(&body);
                 let text = match index {
-                    0 => json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                    0 => json!("ok"),
                     1 => {
                         json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                     }
@@ -411,11 +411,11 @@ mod journey {
                     }
                     6 => {
                         assert_eq!(input["phase"], "child_work");
-                        json!({"outcome":{"type":"finish","summary":"child summary","result":"child result"}})
+                        json!("child result")
                     }
                     _ => {
                         assert_eq!(input["phase"], "root_synthesis");
-                        json!({"outcome":{"type":"finish","summary":"team summary","result":"resumed answer"}})
+                        json!("resumed answer")
                     }
                 };
                 super::super::loopback::send_response_for(

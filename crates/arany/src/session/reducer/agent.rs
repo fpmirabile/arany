@@ -647,7 +647,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             result,
             worker: _,
         } => {
-            // Unknown usage blocks Tool and Delegate outcomes and Provider calls, not a Finish.
+            // Unknown usage blocks Tool and Delegate outcomes and Provider calls, not a Answer.
             let over_token_cap = match active_run_goal(current, *run_id) {
                 Some(goal) => goal
                     .effective_budget()

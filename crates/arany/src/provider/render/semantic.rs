@@ -122,6 +122,29 @@ pub fn tool_results(wire: &Value) -> Vec<Value> {
         .collect()
 }
 
+pub fn responses_output(value: &Value) -> Value {
+    if value["outcome"]["type"] == "delegate" {
+        let mut arguments = value["outcome"].clone();
+        arguments
+            .as_object_mut()
+            .expect("delegation")
+            .remove("type");
+        json!([{"type":"function_call", "id":"fc_delegate", "call_id":"call_delegate", "status":"completed", "name":"arany_delegate", "arguments":arguments.to_string()}])
+    } else {
+        json!([{"type":"message", "role":"assistant", "status":"completed", "content":[{"type":"output_text", "text":value.as_str().map_or_else(|| value.to_string(), str::to_owned)}]}])
+    }
+}
+
+pub fn messages_content(value: &Value) -> Value {
+    if value["outcome"]["type"] == "delegate" {
+        let mut input = value["outcome"].clone();
+        input.as_object_mut().expect("delegation").remove("type");
+        json!([{"type":"tool_use", "id":"toolu_delegate", "name":"arany_delegate", "input":input}])
+    } else {
+        json!([{"type":"text", "text":value.as_str().map_or_else(|| value.to_string(), str::to_owned)}])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

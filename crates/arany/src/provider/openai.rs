@@ -410,8 +410,7 @@ mod tests {
             request.max_output_tokens = cap;
             provider.decode_run(bytes, &request, &read_only_conversation)
         };
-        let good_run =
-            synthetic_reply(r#"{"outcome":{"type":"finish","summary":"safe","result":"answer"}}"#);
+        let good_run = synthetic_reply(r#"answer"#);
         let good_compaction = synthetic_reply(r#"{"summary":"safe"}"#);
         for (case, cap, usage, accepted) in [
             ("reported output at requested cap", 8, Some((12, 8)), true),
@@ -449,13 +448,14 @@ mod tests {
                 assert_eq!(actual, accepted, "{operation}: {case}");
             }
         }
-        let reflected_run = synthetic_reply(
-            r#"{"outcome":{"type":"finish","summary":"\u0073ynthetic-native-secret","result":"answer"}}"#,
-        );
+        let reflected_run = String::from_utf8(synthetic_reply(secret))
+            .unwrap()
+            .replace("synthetic-native-secret", "\\u0073ynthetic-native-secret")
+            .into_bytes();
         assert!(!raw_reflects_secret(&reflected_run, secret));
         assert!(matches!(
             decode_run(&reflected_run, 4096),
-            Err(ProviderError::InvalidOutcome)
+            Err(ProviderError::InvalidOutcome | ProviderError::InvalidOutcomeContract)
         ));
 
         let tool_request = crate::provider::test_support::primary_request("gpt-5.4");

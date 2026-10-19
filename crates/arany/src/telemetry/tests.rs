@@ -2,7 +2,7 @@ use super::config::{parse_endpoint, resolve_endpoint};
 use super::*;
 use crate::engine::{Engine, EngineConfig, RunControls, RunRequest};
 use crate::provider::{
-    Delegate, Finish, Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome,
+    Answer, Delegate, Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome,
     ProviderRequest, ProviderResponse,
 };
 use crate::session::{AgentStatus, CollaborationPolicy, RunStatus, WorkspaceIdentity};
@@ -158,9 +158,8 @@ impl Provider for GatedFailureProvider {
                         ChildFailureCase::OutputLimit => {
                             return Ok(ProviderResponse {
                                 turn: crate::provider::ProviderTurn::scripted(),
-                                outcome: ProviderOutcome::Finish(Finish {
-                                    summary: "done".into(),
-                                    result: "done".into(),
+                                outcome: ProviderOutcome::Answer(Answer {
+                                    text: "done".into(),
                                 }),
                                 response_id: None,
                                 usage: crate::provider::Usage {
@@ -174,9 +173,8 @@ impl Provider for GatedFailureProvider {
                         ChildFailureCase::InputUsageOverflow => {
                             return Ok(ProviderResponse {
                                 turn: crate::provider::ProviderTurn::scripted(),
-                                outcome: ProviderOutcome::Finish(Finish {
-                                    summary: "done".into(),
-                                    result: "done".into(),
+                                outcome: ProviderOutcome::Answer(Answer {
+                                    text: "done".into(),
                                 }),
                                 response_id: None,
                                 usage: crate::provider::Usage {
@@ -189,9 +187,8 @@ impl Provider for GatedFailureProvider {
                         }
                     }
                 }
-                ProviderOutcome::Finish(Finish {
-                    summary: "done".into(),
-                    result: "done".into(),
+                ProviderOutcome::Answer(Answer {
+                    text: "done".into(),
                 })
             }
             AgentPhase::RootSynthesis | AgentPhase::ToolReview => {
@@ -1687,9 +1684,8 @@ impl Provider for CompactionRouteProvider {
         self.calls.lock().expect("calls").push(request.model);
         Ok(ProviderResponse {
             turn: crate::provider::ProviderTurn::scripted(),
-            outcome: ProviderOutcome::Finish(Finish {
-                summary: "done".into(),
-                result: "done".into(),
+            outcome: ProviderOutcome::Answer(Answer {
+                text: "done".into(),
             }),
             response_id: None,
             usage: crate::provider::Usage::default(),

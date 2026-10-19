@@ -196,7 +196,7 @@ fn team_two_process_latency_on_named_host() {
             let text = if index < 3 {
                 match index {
                     0 => {
-                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
+                        serde_json::json!("ok")
                     }
                     1 => {
                         serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
@@ -218,13 +218,13 @@ fn team_two_process_latency_on_named_host() {
                     }
                     1 | 2 => {
                         assert_eq!(input["objective"], if phase == 1 { "A" } else { "B" });
-                        serde_json::json!({"outcome":{"type":"finish","summary":"child","result":"done"}})
+                        serde_json::json!("done")
                     }
                     _ => {
                         assert_eq!(input["objective"], "Synthetic team question");
                         assert_eq!(input["child_results"][0]["objective"], "A");
                         assert_eq!(input["child_results"][1]["objective"], "B");
-                        serde_json::json!({"outcome":{"type":"finish","summary":"synthesized","result":"team answer"}})
+                        serde_json::json!("team answer")
                     }
                 }
             };

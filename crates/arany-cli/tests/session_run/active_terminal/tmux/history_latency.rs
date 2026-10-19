@@ -424,7 +424,7 @@ async fn run_history_fixture() {
                 read_request(&mut stream);
                 let text = match index {
                     0 => {
-                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
+                        serde_json::json!("ok")
                     }
                     1 => {
                         serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child","profile":null}]}})

@@ -7,29 +7,6 @@
           {
             "additionalProperties": false,
             "properties": {
-              "result": {
-                "type": "string"
-              },
-              "summary": {
-                "type": "string"
-              },
-              "type": {
-                "enum": [
-                  "finish"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "summary",
-              "result"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
               "agent": {
                 "description": "Admitted agent definition name, or null. An editor assignment selects its own exact admitted definition.",
                 "type": [
@@ -901,28 +878,6 @@
       },
       "strict": true,
       "type": "function"
-    },
-    {
-      "description": "Complete the current task and report its observed result. A requested edit must first have an applied mutation result, or an actual blocking failure.",
-      "name": "arany_finish",
-      "parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "result": {
-            "type": "string"
-          },
-          "summary": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "summary",
-          "result"
-        ],
-        "type": "object"
-      },
-      "strict": true,
-      "type": "function"
     }
   ],
   "primary_read_only": [
@@ -1182,28 +1137,6 @@
       },
       "strict": true,
       "type": "function"
-    },
-    {
-      "description": "Complete the current task and report its observed result. A requested edit must first have an applied mutation result, or an actual blocking failure.",
-      "name": "arany_finish",
-      "parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "result": {
-            "type": "string"
-          },
-          "summary": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "summary",
-          "result"
-        ],
-        "type": "object"
-      },
-      "strict": true,
-      "type": "function"
     }
   ],
   "researcher": [
@@ -1318,28 +1251,6 @@
         },
         "required": [
           "server"
-        ],
-        "type": "object"
-      },
-      "strict": true,
-      "type": "function"
-    },
-    {
-      "description": "Complete the current task and report its observed result. A requested edit must first have an applied mutation result, or an actual blocking failure.",
-      "name": "arany_finish",
-      "parameters": {
-        "additionalProperties": false,
-        "properties": {
-          "result": {
-            "type": "string"
-          },
-          "summary": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "summary",
-          "result"
         ],
         "type": "object"
       },

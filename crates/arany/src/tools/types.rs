@@ -1113,8 +1113,8 @@ impl ToolContext {
         }
     }
 
-    /// A researcher with no Tool calls left may only Finish.
-    pub fn finish_only(&self) -> bool {
+    /// A researcher with no Tool calls left may only Answer.
+    pub fn answer_only(&self) -> bool {
         self.calls_remaining() == Some(0)
     }
 
@@ -1130,7 +1130,7 @@ impl ToolContext {
         self.steps.iter().map(|step| step.observations.len()).sum()
     }
 
-    // Each Stop continuation re-renders the Finish turn beside its feedback.
+    // Each Stop continuation re-renders the Answer turn beside its feedback.
     pub(crate) fn has_stop_room(&self, turn: &crate::provider::ProviderTurn, limit: usize) -> bool {
         self.rendered_len()
             + turn.len()

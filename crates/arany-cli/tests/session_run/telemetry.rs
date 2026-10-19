@@ -202,7 +202,7 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
                     .any(|part| part == b"OMITTED_SECRET_CANARY")
             );
             let text = match index {
-                0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                0 => serde_json::json!("ok"),
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
@@ -211,7 +211,7 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child one","profile":null},{"objective":"child two","profile":null}]}})
                 }
                 _ => {
-                    serde_json::json!({"outcome":{"type":"finish","summary":"SUMMARY_SECRET_CANARY","result":"RESULT_SECRET_CANARY"}})
+                    serde_json::json!("RESULT_SECRET_CANARY")
                 }
             };
             send_response(&mut stream, index, text);

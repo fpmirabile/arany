@@ -235,10 +235,7 @@ fn script(
 }
 
 fn finish(text: &str) -> ProviderOutcome {
-    ProviderOutcome::Finish(Finish {
-        summary: "done".into(),
-        result: text.into(),
-    })
+    ProviderOutcome::Answer(Answer { text: text.into() })
 }
 
 fn denied(seen: &Seen, needle: &str) {

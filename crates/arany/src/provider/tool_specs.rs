@@ -40,7 +40,8 @@ pub(crate) fn specs(catalog: &Value, role: PromptRole) -> Vec<ToolSpec> {
 pub(crate) fn outcome_specs(outcome: &Value) -> Vec<ToolSpec> {
     outcome["properties"]["outcome"]["anyOf"]
         .as_array()
-        .expect("compiled outcome branches")
+        .map(Vec::as_slice)
+        .unwrap_or_default()
         .iter()
         .map(|branch| spec(branch.clone(), "type"))
         .collect()
@@ -60,9 +61,6 @@ fn spec(mut parameters: Value, discriminator: &str) -> ToolSpec {
         .expect("required")
         .retain(|field| field != discriminator);
     let description = match operation.as_str() {
-        "finish" => {
-            "Complete the current task and report its observed result. A requested edit must first have an applied mutation result, or an actual blocking failure."
-        }
         "delegate" => {
             "Delegate a bounded team of researchers and offered editor assignments in the next settled wave. The primary integrates private edits and verifies the criterion before completing."
         }
@@ -199,11 +197,13 @@ mod tests {
 
     #[test]
     fn outcome_functions_follow_the_restricted_schema() {
-        let schema = json!({"properties": {"outcome": {"anyOf": [
-            {"properties": {"type": {"enum": ["finish"]}, "summary": {"type": "string"}, "result": {"type": "string"}}, "required": ["type", "summary", "result"]},
-        ]}}});
+        let mut request = super::super::test_support::primary_request("model");
+        request.collaboration = crate::session::CollaborationPolicy::Auto {
+            max_active_children: 3,
+        };
+        let schema = super::super::run_outcome_schema(&request);
         let outcomes = outcome_specs(&schema);
-        assert_eq!(names(&outcomes), ["arany_finish"]);
+        assert_eq!(names(&outcomes), ["arany_delegate"]);
         assert!(outcomes[0].parameters["properties"].get("type").is_none());
     }
 }

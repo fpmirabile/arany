@@ -362,7 +362,7 @@ pub enum ProposalRefusalCause {
     ArgumentBytes,
     LeaseOverlap,
     NotOffered,
-    FinishInvalid,
+    AnswerInvalid,
     DelegateInvalid,
 }
 
@@ -377,7 +377,7 @@ impl ProposalRefusal {
     fn valid(&self) -> bool {
         matches!(
             self.operation.as_str(),
-            "finish" | "delegate" | "arany_plan"
+            "answer" | "delegate" | "arany_plan"
         ) || self.operation.strip_prefix("arany_").is_some_and(|name| {
             crate::tools::catalog::ALL
                 .iter()
@@ -603,7 +603,7 @@ impl ProviderCallRecord {
             || self.failure_reason.is_some_and(|reason| {
                 if matches!(
                     reason,
-                    crate::provider::ProviderFailureReason::WorkerFinishDeferred
+                    crate::provider::ProviderFailureReason::WorkerAnswerDeferred
                         | crate::provider::ProviderFailureReason::WorkerDelegateRefused
                         | crate::provider::ProviderFailureReason::WorkerToolRefused
                 ) && self.phase != crate::provider::AgentPhase::RootSynthesis
@@ -641,7 +641,7 @@ impl ProviderCallRecord {
                             | ProviderFailureReason::ResponseContract
                             | ProviderFailureReason::OutcomeContract
                             | ProviderFailureReason::LocalOutputLimit
-                            | ProviderFailureReason::WorkerFinishDeferred
+                            | ProviderFailureReason::WorkerAnswerDeferred
                             | ProviderFailureReason::WorkerDelegateRefused
                             | ProviderFailureReason::WorkerToolRefused
                             | ProviderFailureReason::CriterionNotMetInView

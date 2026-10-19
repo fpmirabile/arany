@@ -752,7 +752,7 @@ impl RunLoop<'_> {
     pub(super) fn complete_worker<'a>(
         &'a self,
         child: &'a mut ChildWork,
-        finish: Option<crate::provider::Finish>,
+        finish: Option<crate::provider::Answer>,
         deadline: tokio::time::Instant,
         cancelled: bool,
         failure: WorkerCause,
@@ -779,7 +779,7 @@ impl RunLoop<'_> {
     async fn complete_worker_inner(
         &self,
         child: &mut ChildWork,
-        finish: Option<crate::provider::Finish>,
+        finish: Option<crate::provider::Answer>,
         deadline: tokio::time::Instant,
         cancelled: bool,
         failure: WorkerCause,
@@ -904,12 +904,12 @@ impl RunLoop<'_> {
                 AgentDisposition::Failed
             },
             summary: if success {
-                finish.as_ref().map(|f| f.summary.clone())
+                finish.as_ref().map(|f| super::answer_summary(&f.text))
             } else {
                 None
             },
             result: if success {
-                finish.as_ref().map(|f| f.result.clone())
+                finish.as_ref().map(|f| f.text.clone())
             } else {
                 None
             },

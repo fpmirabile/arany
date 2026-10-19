@@ -424,7 +424,12 @@ impl RunLoop<'_> {
             }
             // Compacted steps may be the only carriers of the current contract and budget, so reintroduce both.
             input.goal_plan_contract = self.ledger().plan_contract()?;
-            input.goal_budget = Some(self.ledger().effective_budget()?);
+            input.goal_budget = if self.ledger().autonomous() || input.goal_plan_contract.is_some()
+            {
+                Some(self.ledger().effective_budget()?)
+            } else {
+                None
+            };
         }
         Ok(())
     }

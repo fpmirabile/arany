@@ -819,17 +819,8 @@ impl SessionView {
             })
         };
         direct()
-            .filter(|run| {
-                run.status == RunStatus::Finished
-                    && run.finished_sequence.is_some_and(|end| end <= sequence)
-            })
-            .find_map(|run| run.primary().and_then(|agent| agent.summary.as_deref()))
-            .map(super::title_preview)
-            .or_else(|| {
-                direct()
-                    .next()
-                    .map(|run| super::title_preview(&run.objective))
-            })
+            .next()
+            .map(|run| super::title_preview(&run.objective))
             .or_else(|| self.inherited_title.clone())
             .unwrap_or_else(|| "Empty conversation".into())
     }

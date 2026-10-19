@@ -4,7 +4,7 @@ use crate::provider::test_support::{
     researcher_request, tool_context,
 };
 use crate::provider::{
-    AgentPhase, CompactionItem, Delegate, Finish, HistoryTurn, UnansweredStatus, render,
+    AgentPhase, Answer, CompactionItem, Delegate, HistoryTurn, UnansweredStatus, render,
 };
 use crate::session::{CollaborationPolicy, RunId, SessionId};
 
@@ -24,7 +24,14 @@ fn decode(request: &ProviderRequest, fixture: &Value) -> Result<ProviderResponse
             model: MODEL,
             output_cap: request.max_output_tokens,
             secret: KEY,
-            offered: conversation.tools.as_deref().unwrap_or_default(),
+            offered: &conversation
+                .tools
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .chain(outcome_specs(&conversation.outcome))
+                .collect::<Vec<_>>(),
+            review: request.input.role == crate::provider::PromptRole::ToolReview,
         },
     )
 }
@@ -47,8 +54,8 @@ fn text_block(text: &str) -> Value {
     json!({"type": "text", "text": text})
 }
 
-fn finish_text() -> &'static str {
-    r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
+fn answer_text() -> &'static str {
+    r#"answer"#
 }
 
 fn tool_use(id: &str, name: &str, input: Value) -> Value {
@@ -69,11 +76,9 @@ fn tool_names(body: &Value) -> Vec<&str> {
 }
 
 fn outcome_types(body: &Value) -> Vec<&str> {
-    body["output_config"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|branch| branch["properties"]["type"]["enum"][0].as_str().unwrap())
+    tool_names(body)
+        .into_iter()
+        .filter(|name| *name == "arany_delegate")
         .collect()
 }
 
@@ -187,9 +192,9 @@ fn outbound_tool_choice_is_auto_without_parallel() {
         json!({"type": "auto", "disable_parallel_tool_use": true})
     );
     assert_eq!(tool_body["output_config"]["effort"], "low");
-    assert_eq!(outcome_types(&tool_body), ["finish"]);
+    assert_eq!(outcome_types(&tool_body), [] as [&str; 0]);
     let plain = body(&read_only_request(MODEL), Effort::Low);
-    assert!(plain.get("tools").is_none() && plain.get("tool_choice").is_none());
+    assert!(plain["tools"] == json!([]) && plain["tool_choice"]["type"] == "none");
     assert_eq!(plain.to_string().matches("\"cache_control\":").count(), 1);
 }
 
@@ -199,7 +204,7 @@ fn inbound_tool_use_stop_yields_one_request_and_keeps_text_and_thinking_in_turn(
     let content = json!([
         {"type": "thinking", "thinking": "private", "signature": "sig"},
         {"type": "redacted_thinking", "data": "opaque"},
-        text_block("not parsed {\"outcome\":{\"type\":\"finish\"}"),
+        text_block("Inspecting the file."),
         tool_use("toolu_1", "arany_read", read_input())
     ]);
     let answer = decode(&request, &response("tool_use", content.clone())).unwrap();
@@ -244,7 +249,7 @@ fn tool_use_stop_records_its_own_wire_provenance() {
     ));
     let finish = decode(
         &request,
-        &response("end_turn", json!([text_block(finish_text())])),
+        &response("end_turn", json!([text_block(answer_text())])),
     )
     .unwrap();
     assert_eq!(
@@ -340,7 +345,7 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
         ),
         (
             "end_turn with a tool_use",
-            response("end_turn", json!([text_block(finish_text()), one.clone()])),
+            response("end_turn", json!([text_block(answer_text()), one.clone()])),
         ),
         (
             "tool_use with only thinking",
@@ -361,7 +366,7 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
             "unknown name",
             response(
                 "tool_use",
-                json!([tool_use("toolu_1", "arany_finish", json!({}))]),
+                json!([tool_use("toolu_1", "arany_unknown", json!({}))]),
             ),
         ),
         (
@@ -441,7 +446,7 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
 fn anthropic_usage_reports_cache_read_and_creation_separately() {
     let answer = decode(
         &read_only_request(MODEL),
-        &response("end_turn", json!([text_block(finish_text())])),
+        &response("end_turn", json!([text_block(answer_text())])),
     )
     .expect("cached finish");
     assert_eq!(answer.usage.input_tokens, Some(19));
@@ -457,7 +462,7 @@ fn anthropic_usage_reports_cache_read_and_creation_separately() {
             json!(u64::from(u32::MAX) + 1),
             json!(u32::MAX),
         ] {
-            let mut malformed = response("end_turn", json!([text_block(finish_text())]));
+            let mut malformed = response("end_turn", json!([text_block(answer_text())]));
             malformed["usage"][field] = invalid;
             assert!(
                 decode(&read_only_request(MODEL), &malformed).is_err(),
@@ -468,14 +473,14 @@ fn anthropic_usage_reports_cache_read_and_creation_separately() {
 }
 
 #[test]
-fn inbound_end_turn_requires_exactly_one_text_block_as_finish_or_delegate() {
-    let request = read_only_request(MODEL);
+fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
+    let mut request = read_only_request(MODEL);
     let finish = response(
         "end_turn",
         json!([
             {"type": "thinking", "thinking": "private", "signature": "sig"},
             {"type": "redacted_thinking", "data": "opaque"},
-            text_block(finish_text())
+            text_block(answer_text())
         ]),
     );
     let answer = decode(&request, &finish).expect("schema-constrained finish");
@@ -483,7 +488,7 @@ fn inbound_end_turn_requires_exactly_one_text_block_as_finish_or_delegate() {
     assert_eq!(answer.usage.input_tokens, Some(19));
     assert!(matches!(
         answer.outcome,
-        ProviderOutcome::Finish(Finish { summary, result }) if summary == "done" && result == "answer"
+        ProviderOutcome::Answer(Answer { text: result }) if result == "answer"
     ));
     assert_eq!(
         answer.turn.items("anthropic").unwrap().len(),
@@ -504,10 +509,16 @@ fn inbound_end_turn_requires_exactly_one_text_block_as_finish_or_delegate() {
         Some(12)
     );
 
+    request.collaboration = CollaborationPolicy::Auto {
+        max_active_children: 3,
+    };
+    request.phase = AgentPhase::RootPlan;
     let delegate = response(
-        "end_turn",
-        json!([text_block(
-            r#"{"outcome":{"type":"delegate","children":[{"objective":"a","profile":null},{"objective":"b","profile":null}]}}"#
+        "tool_use",
+        json!([tool_use(
+            "delegate_1",
+            "arany_delegate",
+            json!({"children":[{"objective":"a","profile":null},{"objective":"b","profile":null}], "agent":null})
         )]),
     );
     assert!(matches!(
@@ -538,7 +549,7 @@ fn inbound_end_turn_requires_exactly_one_text_block_as_finish_or_delegate() {
         "compaction never accepts a Tool stop"
     );
     for malformed in [json!({"type":"text"}), json!({"type":"text","text":null})] {
-        for (compaction, valid) in [(false, finish_text()), (true, r#"{"summary":"short"}"#)] {
+        for (compaction, valid) in [(false, answer_text()), (true, r#"{"summary":"short"}"#)] {
             let fixture = response("end_turn", json!([malformed, text_block(valid)]));
             let accepted = if compaction {
                 decode_compaction(&serde_json::to_vec(&fixture).unwrap(), MODEL, 1024).is_ok()
@@ -550,7 +561,6 @@ fn inbound_end_turn_requires_exactly_one_text_block_as_finish_or_delegate() {
     }
     let bad = [
         response("end_turn", json!([])),
-        response("end_turn", json!([text_block("{}"), text_block("{}")])),
         response("end_turn", json!([{"type": "citation", "text": "x"}])),
         response("end_turn", json!([text_block("{}"), {"type": "thinking"}])),
         response("end_turn", json!([{"type": "text"}])),
@@ -570,7 +580,7 @@ fn inbound_end_turn_requires_exactly_one_text_block_as_finish_or_delegate() {
         );
     }
     let mut too_many_blocks = vec![json!({"type": "thinking"}); MAX_CONTENT_BLOCKS];
-    too_many_blocks.push(text_block(finish_text()));
+    too_many_blocks.push(text_block(answer_text()));
     assert!(decode(&request, &response("end_turn", json!(too_many_blocks))).is_err());
     let drift = [
         ("model", json!("claude-sonnet-5-5")),
@@ -593,19 +603,10 @@ fn inbound_end_turn_requires_exactly_one_text_block_as_finish_or_delegate() {
             "bad envelope case {index}"
         );
     }
-    for text in [
-        r#"{"outcome":{"type":"finish","summary":"x"}}"#,
-        r#"{"outcome":{"type":"finish","summary":"x","result":"y","extra":1}}"#,
-        r#"{"outcome":{"type":"delegate","children":[],"result":"x"}}"#,
-        r#"{"outcome":{"type":"unknown"}}"#,
-        r#"{"outcome":{"type":"tool","call":{"operation":"list","path":"."}}}"#,
-    ] {
-        let fixture = response("end_turn", json!([text_block(text)]));
-        assert!(
-            decode(&request, &fixture).is_err(),
-            "invalid outcome shape {text}"
-        );
-    }
+    let joined = response("end_turn", json!([text_block("hola"), text_block("! 🚀")]));
+    assert!(
+        matches!(decode(&request, &joined).unwrap().outcome, ProviderOutcome::Answer(Answer { text }) if text == "hola! 🚀")
+    );
     assert!(
         decode_compaction(
             &serde_json::to_vec(&response(
@@ -648,17 +649,37 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
             role_request.input.goal_context_facts = None;
         }
         assert_eq!(body(&role_request, Effort::Low)["model"], model);
+        if role == crate::provider::PromptRole::ToolReview {
+            assert_eq!(
+                body(&role_request, Effort::Low)["output_config"]["format"]["type"],
+                "json_schema"
+            );
+            role_request.model = MODEL.into();
+            let valid = response("end_turn", json!([text_block(r#"{"verdict":"approve"}"#)]));
+            assert!(
+                matches!(decode(&role_request, &valid).unwrap().outcome, ProviderOutcome::Answer(Answer { text }) if text == "approve")
+            );
+            for text in [
+                "approve",
+                r#"{"verdict":"allow"}"#,
+                r#"{"verdict":"approve","extra":true}"#,
+            ] {
+                assert!(
+                    decode(
+                        &role_request,
+                        &response("end_turn", json!([text_block(text)]))
+                    )
+                    .is_err()
+                );
+            }
+        }
     }
     let request = read_only_request(MODEL);
     let rendered = body(&request, Effort::Max);
     assert_eq!(rendered["model"], MODEL);
     assert_eq!(rendered["max_tokens"], 4096);
     assert_eq!(rendered["stream"], false);
-    assert_eq!(rendered["output_config"]["format"]["type"], "json_schema");
-    assert_eq!(
-        rendered["output_config"]["format"]["schema"],
-        crate::provider::restrict_outcome_schema(crate::provider::outcome_schema(), &request)
-    );
+    assert!(rendered["output_config"].get("format").is_none());
     assert_eq!(rendered["output_config"]["effort"], "max");
     assert!(!rendered["system"].to_string().contains("canary"));
     let messages = rendered["messages"].as_array().unwrap();
@@ -676,29 +697,29 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
         assert!(text.contains(canary), "{canary}");
     }
     assert!(!text.contains("run_id") && !text.contains("agent_run_id"));
-    for absent in ["tools", "tool_choice", "metadata", "container"] {
+    for absent in ["metadata", "container"] {
         assert!(rendered.get(absent).is_none(), "{absent}");
     }
     assert!(encode_request(&rendered).is_ok());
     for (collaboration, planning) in [
-        (CollaborationPolicy::Single, vec!["finish"]),
+        (CollaborationPolicy::Single, vec![]),
         (
             CollaborationPolicy::Auto {
                 max_active_children: 0,
             },
-            vec!["finish"],
+            vec![],
         ),
         (
             CollaborationPolicy::Auto {
                 max_active_children: 3,
             },
-            vec!["finish", "delegate"],
+            vec!["arany_delegate"],
         ),
         (
             CollaborationPolicy::Team {
                 max_active_children: 3,
             },
-            vec!["delegate"],
+            vec!["arany_delegate"],
         ),
     ] {
         for phase in [AgentPhase::RootPlan, AgentPhase::RootSynthesis] {
@@ -718,7 +739,7 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
                 if phase == AgentPhase::RootPlan {
                     planning.clone()
                 } else {
-                    vec!["finish"]
+                    vec![]
                 }
             );
         }
@@ -727,7 +748,7 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
     child.phase = AgentPhase::ChildWork;
     child.collaboration = CollaborationPolicy::Single;
     let child_body = body(&child, Effort::Low);
-    assert_eq!(outcome_types(&child_body), ["finish"]);
+    assert_eq!(outcome_types(&child_body), [] as [&str; 0]);
     assert_eq!(child_body["system"].as_array().unwrap().len(), 1);
     {
         use crate::provider::{ImageOrigin, ProviderImage, test_image};
@@ -877,9 +898,7 @@ fn overloaded_stream_after_tool_input_never_allows_fallback() {
 #[test]
 fn streamed_messages_require_closed_blocks_and_exclude_thinking_from_preview() {
     use crate::provider::{PreviewText, ResponsePreview};
-    let outcome =
-        json!({"outcome":{"type":"finish","summary":"done","result":"line one\nline two 🚀"}})
-            .to_string();
+    let outcome = "line one\nline two 🚀";
     let wire = sse(&[
         message_start(),
         json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
@@ -910,12 +929,19 @@ fn streamed_messages_require_closed_blocks_and_exclude_thinking_from_preview() {
             model: "model-1",
             output_cap: 32,
             secret: KEY,
-            offered: conversation.tools.as_deref().unwrap_or_default(),
+            offered: &conversation
+                .tools
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .chain(outcome_specs(&conversation.outcome))
+                .collect::<Vec<_>>(),
+            review: request.input.role == crate::provider::PromptRole::ToolReview,
         },
     )
     .unwrap();
     assert!(
-        matches!(accepted.outcome, ProviderOutcome::Finish(Finish { result, .. }) if result == "line one\nline two 🚀")
+        matches!(accepted.outcome, ProviderOutcome::Answer(Answer { text: result }) if result == "line one\nline two 🚀")
     );
     assert_eq!(accepted.usage.input_tokens, Some(19));
     assert_eq!(accepted.usage.cache_read_input_tokens, Some(4));
@@ -974,6 +1000,7 @@ fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewe
         output_cap: 4096,
         secret: KEY,
         offered: conversation.tools.as_deref().unwrap(),
+        review: false,
     };
     let accepted = decode_run(&first, &scope).unwrap();
     let ProviderOutcome::Tools(requests) = accepted.outcome else {
@@ -1073,6 +1100,42 @@ fn assert_no_schema_bounds(value: &Value, at: &str) {
 }
 
 #[test]
+fn streamed_delegate_accepts_the_bounded_assignment_envelope_beyond_tool_argument_bytes() {
+    let arguments = json!({"agent":null, "children":vec![json!({"objective":"x".repeat(2048),"profile":null});8]}).to_string();
+    assert!(arguments.len() > MAX_TOOL_ARGUMENT_BYTES);
+    let wire = sse(&[
+        message_start(),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"delegate_1","name":"arany_delegate","input":{}}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":arguments}}),
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":8}}),
+        json!({"type":"message_stop"}),
+    ]);
+    let (preview, observed) = crate::provider::ResponsePreview::new();
+    let response = run_stream(&wire, preview).unwrap().unwrap();
+    assert!(observed.borrow().answer.is_empty());
+    let mut request = primary_request("model-1");
+    request.collaboration = CollaborationPolicy::Team {
+        max_active_children: 8,
+    };
+    let offered = outcome_specs(&render::conversation(&request).unwrap().outcome);
+    let accepted = decode_run(
+        &response,
+        &RunScope {
+            model: "model-1",
+            output_cap: 4096,
+            secret: KEY,
+            offered: &offered,
+            review: false,
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(accepted.outcome, ProviderOutcome::Delegate(Delegate { children, .. }) if children.len() == 8)
+    );
+}
+
+#[test]
 fn provider_bound_schemas_carry_no_validation_keywords() {
     assert_no_schema_bounds(&body(&read_only_request(MODEL), Effort::Low), "read_only");
     let mut request = primary_request(MODEL);
@@ -1108,7 +1171,7 @@ fn steering_notes_are_user_input_data_never_system_instructions() {
 }
 
 #[test]
-fn child_research_request_offers_only_read_only_tools_and_finish() {
+fn child_research_request_offers_only_read_only_tools_and_text_at_exhaustion() {
     let request = researcher_request(MODEL);
     let rendered = body(&request, Effort::Low);
     assert_eq!(
@@ -1131,7 +1194,7 @@ fn child_research_request_offers_only_read_only_tools_and_finish() {
             .get("plan_contract")
             .is_none()
     }));
-    assert_eq!(outcome_types(&rendered), ["finish"]);
+    assert_eq!(outcome_types(&rendered), [] as [&str; 0]);
     let mut exhausted = request.clone();
     let mut spent = catalog();
     spent["tool_calls_remaining"] = json!(0);
@@ -1155,7 +1218,7 @@ fn child_research_request_offers_only_read_only_tools_and_finish() {
             .contains("No Tool calls remain")
     );
     assert_eq!(rendered["tool_choice"]["type"], "auto");
-    assert_eq!(outcome_types(&spent_body), ["finish"]);
+    assert_eq!(outcome_types(&spent_body), [] as [&str; 0]);
 }
 
 #[test]
@@ -1190,35 +1253,8 @@ fn git_reads_join_the_native_tools_when_cataloged() {
     );
 }
 
-fn count_unions(value: &Value) -> usize {
-    match value {
-        Value::Object(map) => {
-            usize::from(map.contains_key("anyOf") || map.get("type").is_some_and(Value::is_array))
-                + map.values().map(count_unions).sum::<usize>()
-        }
-        Value::Array(items) => items.iter().map(count_unions).sum(),
-        _ => 0,
-    }
-}
-
-fn count_optional(value: &Value) -> usize {
-    match value {
-        Value::Object(map) => {
-            let own = match (map.get("properties"), map.get("required")) {
-                (Some(Value::Object(properties)), Some(Value::Array(required))) => {
-                    properties.len().saturating_sub(required.len())
-                }
-                _ => 0,
-            };
-            own + map.values().map(count_optional).sum::<usize>()
-        }
-        Value::Array(items) => items.iter().map(count_optional).sum(),
-        _ => 0,
-    }
-}
-
 #[test]
-fn full_catalog_request_stays_within_the_strict_schema_limits() {
+fn full_catalog_uses_non_strict_tools_without_a_run_text_schema() {
     let mut request = primary_request(MODEL);
     request.collaboration = CollaborationPolicy::Auto {
         max_active_children: 3,
@@ -1232,9 +1268,7 @@ fn full_catalog_request_stays_within_the_strict_schema_limits() {
             .all(|tool| tool.get("strict").is_none()),
         "the plan-contract unions keep Tool definitions non-strict"
     );
-    let format = &rendered["output_config"]["format"]["schema"];
-    assert!(count_unions(format) <= 16);
-    assert!(count_optional(format) <= 24);
+    assert!(rendered["output_config"].get("format").is_none());
 }
 
 fn thinking_tool_reply(id: &str) -> Value {
@@ -1350,6 +1384,7 @@ fn a_quoted_preamble_before_tool_use_does_not_break_the_stream() {
         output_cap: 4096,
         secret: KEY,
         offered: conversation.tools.as_deref().unwrap(),
+        review: false,
     };
     assert!(decode_run(&completed, &scope).is_ok());
     let leaked = r#"I hold synthetic-key here"#;
@@ -1462,20 +1497,23 @@ fn assignment_objects_pin_eligible_names_and_reject_malformed_or_reflected_field
     let mut request = read_only_request(MODEL);
     request.phase = AgentPhase::RootPlan;
     request.input.assignment_profiles = vec!["inspect".into()];
-    let schema = body(&request, Effort::High)["output_config"]["format"]["schema"].clone();
-    let delegate = schema["properties"]["outcome"]["anyOf"]
+    let rendered = body(&request, Effort::High);
+    let delegate = &rendered["tools"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|branch| branch["properties"]["type"]["enum"][0] == "delegate")
-        .unwrap();
+        .find(|tool| tool["name"] == "arany_delegate")
+        .unwrap()["input_schema"];
     assert_eq!(
         delegate["properties"]["children"]["items"]["properties"]["profile"]["enum"],
         json!(["inspect", null])
     );
     for (child, valid) in crate::provider::test_support::assignment_shapes() {
         let outcome = json!({"outcome": {"type": "delegate", "children": [child]}});
-        let fixture = response("end_turn", json!([text_block(&outcome.to_string())]));
+        let fixture = response(
+            "tool_use",
+            crate::provider::render::semantic::messages_content(&outcome),
+        );
         assert_eq!(decode(&request, &fixture).is_ok(), valid);
     }
     for field in ["objective", "profile"] {
@@ -1485,7 +1523,10 @@ fn assignment_objects_pin_eligible_names_and_reject_malformed_or_reflected_field
         assert!(
             decode(
                 &request,
-                &response("end_turn", json!([text_block(&outcome.to_string())]))
+                &response(
+                    "tool_use",
+                    crate::provider::render::semantic::messages_content(&outcome)
+                )
             )
             .is_err()
         );

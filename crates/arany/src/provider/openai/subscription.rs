@@ -191,7 +191,7 @@ async fn probe_model_at(
         input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into()),
     };
     let response = invoke_at(client, endpoint.clone(), access_token, &direct, effort).await?;
-    if !matches!(&response.outcome, ProviderOutcome::Finish(value) if !value.summary.trim().is_empty() && !value.result.trim().is_empty() && value.summary.len() <= 8 * 1024 && value.result.len() <= 8 * 1024)
+    if !matches!(&response.outcome, ProviderOutcome::Answer(value) if !value.text.trim().is_empty() && value.text.len() <= 8 * 1024)
     {
         return Err(ProviderError::InvalidOutcome);
     }
@@ -527,7 +527,8 @@ fn subscription_body(
 ) -> Result<Vec<u8>, ProviderError> {
     super::super::image::validate_images(request)?;
     let mut body = wire::run_body_with_effort(request, conversation, effort)?;
-    if let Some(tools) = &conversation.tools {
+    if request.input.role != PromptRole::ToolReview {
+        let tools = conversation.tools.as_deref().unwrap_or_default();
         let allowed = wire::allowed_functions(request, tools, &conversation.outcome);
         let functions = body
             .get_mut("tools")
@@ -538,7 +539,11 @@ fn subscription_body(
                 .as_str()
                 .is_some_and(|name| allowed.iter().any(|allowed| allowed == name))
         });
-        body["tool_choice"] = json!("required");
+        body["tool_choice"] = if allowed.is_empty() {
+            json!("none")
+        } else {
+            json!("auto")
+        };
     }
     // The ChatGPT route is stateless, so replayed items drop their server ids and keep their content.
     for item in body["input"].as_array_mut().into_iter().flatten() {

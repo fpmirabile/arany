@@ -4,7 +4,7 @@ use arany::test_support::{
     scenario::*,
 };
 use arany::{
-    AgentPhase, CollaborationPolicy, Delegate, Engine, EngineConfig, Finish,
+    AgentPhase, Answer, CollaborationPolicy, Delegate, Engine, EngineConfig,
     ProviderCallDisposition, ProviderError, ProviderOutcome, Providers, RunCancellation,
     RunControls, RunHints, StateRoot, Store,
 };
@@ -35,10 +35,7 @@ async fn committed(root: &Path, session: arany::SessionId) -> (SessionView, Vec<
 }
 
 fn finish(text: &str) -> ProviderOutcome {
-    ProviderOutcome::Finish(Finish {
-        summary: text.into(),
-        result: text.into(),
-    })
+    ProviderOutcome::Answer(Answer { text: text.into() })
 }
 
 #[tokio::test]
@@ -122,17 +119,15 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                             profile: None,
                         }],
                     })));
-                    responses.push_back(Ok(ProviderOutcome::Finish(Finish {
-                        summary: "child done".into(),
-                        result: "Child result".into(),
+                    responses.push_back(Ok(ProviderOutcome::Answer(Answer {
+                        text: "Child result".into(),
                     })));
                 }
                 responses.push_back(response);
                 if case == "invalid finish" && !cancel {
                     for _ in 0..2 {
-                        responses.push_back(Ok(ProviderOutcome::Finish(Finish {
-                            summary: String::new(),
-                            result: "Unaccepted result".into(),
+                        responses.push_back(Ok(ProviderOutcome::Answer(Answer {
+                            text: "Unaccepted result".into(),
                         })));
                     }
                 }
@@ -186,7 +181,7 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                         let document: serde_json::Value =
                             serde_json::from_str(line).expect("canonical JSONL");
-                        assert_eq!(document["event_version"], 11);
+                        assert_eq!(document["event_version"], 12);
                         assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                     }
                 }

@@ -98,10 +98,7 @@ fn compaction_request() -> CompactionRequest {
 }
 
 fn completed(output_tokens: Option<u32>) -> Vec<u8> {
-    completed_with_text(
-        output_tokens,
-        r#"{"outcome":{"type":"finish","summary":"safe","result":"done"}}"#,
-    )
+    completed_with_text(output_tokens, r#"done"#)
 }
 
 fn completed_with_text(output_tokens: Option<u32>, text: &str) -> Vec<u8> {
@@ -130,6 +127,11 @@ fn completed_with_id(id: &str, output_tokens: Option<u32>, text: &str) -> Vec<u8
             response.as_object_mut().unwrap().remove("usage");
         }
     }
+    if let Ok(value) = serde_json::from_str::<Value>(text)
+        && value["outcome"]["type"] == "delegate"
+    {
+        response["output"] = crate::provider::render::semantic::responses_output(&value);
+    }
     format!(
         "event: response.created\r\ndata: {{\"type\":\"response.created\"}}\r\n\r\nevent: response.completed\r\ndata: {}\r\n\r\n",
         json!({"type": "response.completed", "response": response})
@@ -149,7 +151,7 @@ fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
         value["input"][0]["content"][0]["text"],
         "Synthetic objective"
     );
-    assert_eq!(value["text"]["format"]["type"], "json_schema");
+    assert!(value.get("text").is_none());
     for forbidden in ["max_output_tokens", "truncation", "previous_response_id"] {
         assert!(value.get(forbidden).is_none(), "{forbidden}");
     }
@@ -164,7 +166,7 @@ fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
     });
     let coding: Value =
         serde_json::from_slice(&body_for(&coding, Effort::Medium).unwrap()).unwrap();
-    assert_eq!(coding["tool_choice"], "required");
+    assert_eq!(coding["tool_choice"], "auto");
     assert_eq!(coding["parallel_tool_calls"], false);
     assert!(coding.get("text").is_none());
     assert!(
@@ -286,10 +288,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
             "item":{"id":"rs_synthetic", "type":"reasoning", "summary":[]}});
         let prefix = format!("data: {created}\n\ndata: {done}\n\n");
         for (operation, text) in [
-            (
-                "Run",
-                r#"{"outcome":{"type":"finish","summary":"safe","result":"done"}}"#,
-            ),
+            ("Run", r#"done"#),
             ("compaction", r#"{"summary":"Condensed"}"#),
         ] {
             for populated in [false, true] {
@@ -375,11 +374,6 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         for (label, pointer, value) in [
             ("commentary only", "/item/phase", json!("commentary")),
             ("refusal", "/item/content/0/type", json!("refusal")),
-            (
-                "malformed outcome",
-                "/item/content/0/text",
-                json!("plain text"),
-            ),
         ] {
             let mut changed = done.clone();
             *changed.pointer_mut(pointer).unwrap() = value;
@@ -417,7 +411,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
                 "{label}"
             );
         }
-        let reflected = prefix.replace("safe", TOKEN);
+        let reflected = prefix.replace("\"done\"", &format!("\"{TOKEN}\""));
         assert!(
             StreamDecoder::new(TOKEN)
                 .feed(reflected.as_bytes())
@@ -442,7 +436,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         .unwrap()
         .expect("complete response");
     let decoded = wire::decode_streamed_run(&body, &scope_for(&request())).expect("strict outcome");
-    assert!(matches!(decoded.outcome, ProviderOutcome::Finish(_)));
+    assert!(matches!(decoded.outcome, ProviderOutcome::Answer(_)));
     assert_eq!(decoded.usage.output_tokens, Some(12));
     for (name, ending, named) in [
         ("LF", "\n", true),
@@ -751,7 +745,7 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
     assert_eq!(decoded.usage.cache_read_input_tokens, Some(7));
     let wire_request = server.await.unwrap();
     let body: Value = serde_json::from_str(wire_request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-    assert_eq!(body["tool_choice"], "required");
+    assert_eq!(body["tool_choice"], "auto");
     assert_eq!(body["parallel_tool_calls"], false);
     assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
     let stream = String::from_utf8(completed(Some(12)))
@@ -786,7 +780,7 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
             .expect(label);
         assert_eq!(response.usage.output_tokens, Some(12), "{label}");
         assert!(
-            matches!(response.outcome, ProviderOutcome::Finish(ref value) if value.result == "done")
+            matches!(response.outcome, ProviderOutcome::Answer(ref value) if value.text == "done")
         );
         let wire_request = server.await.expect("server");
         assert!(wire_request.starts_with("POST /v1/responses HTTP/1.1\r\n"));
@@ -822,14 +816,6 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
                 .replace("model-a", "model-b")
                 .into_bytes(),
             crate::ProviderFailureReason::ResponseContract,
-        ),
-        (
-            "wrong outcome",
-            completed_with_text(
-                Some(12),
-                r#"{"outcome":{"type":"finish","summary":"safe"}}"#,
-            ),
-            crate::ProviderFailureReason::OutcomeContract,
         ),
         (
             "interrupted",
@@ -956,10 +942,12 @@ async fn transport_rejects_non_event_and_encoded_replies() {
         "model": "model-a",
         "output": [{
             "type": "message", "role": "assistant", "status": "completed",
-            "content": [{"type": "output_text", "text": r#"{"outcome":{"type":"finish","summary":"safe","result":"done"}}"#}]
+            "content": [{"type": "output_text", "text": r#"done"#}]
         }],
         "usage": {"input_tokens": 8, "output_tokens": 12}
-    }).to_string().into_bytes();
+    })
+    .to_string()
+    .into_bytes();
     for (label, extra, body) in [
         (
             "non-streamed completed JSON",
@@ -1076,11 +1064,7 @@ async fn direct_route_http_failures_are_classified_without_exposing_body() {
 
 #[tokio::test]
 async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes() {
-    let direct = event_reply(completed_with_id(
-        "resp_direct",
-        Some(12),
-        r#"{"outcome":{"type":"finish","summary":"safe","result":"done"}}"#,
-    ));
+    let direct = event_reply(completed_with_id("resp_direct", Some(12), r#"done"#));
     let delegate = event_reply(completed_with_id(
         "resp_delegate",
         Some(12),
@@ -1108,14 +1092,11 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
         assert_eq!(body["stream"], true);
         assert!(body.get("max_output_tokens").is_none());
         assert!(!request.contains("private-workspace-canary"));
-        assert_eq!(
-            body["text"]["format"]["name"],
-            if index == 2 {
-                "arany_compaction"
-            } else {
-                "arany_outcome"
-            }
-        );
+        if index == 2 {
+            assert_eq!(body["text"]["format"]["name"], "arany_compaction");
+        } else {
+            assert!(body.get("text").is_none());
+        }
     }
 
     let wrong_direct = event_reply(completed_with_id(
@@ -1128,11 +1109,7 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
         Some(12),
         r#"{"outcome":{"type":"delegate","children":[{"objective":"Explain two","profile":null}]}}"#,
     ));
-    let wrong_delegate = event_reply(completed_with_id(
-        "resp_delegate",
-        Some(12),
-        r#"{"outcome":{"type":"finish","summary":"safe","result":"done"}}"#,
-    ));
+    let wrong_delegate = event_reply(completed_with_id("resp_delegate", Some(12), r#"done"#));
     let blank_compact = event_reply(completed_with_id(
         "resp_compact",
         Some(12),
@@ -1146,7 +1123,7 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
     let over_cap = event_reply(completed_with_id(
         "resp_direct",
         Some(PROBE_OUTPUT_CAP + 1),
-        r#"{"outcome":{"type":"finish","summary":"safe","result":"done"}}"#,
+        r#"done"#,
     ));
     for (label, replies) in [
         ("wrong direct", vec![wrong_direct]),
@@ -1174,7 +1151,10 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
             if label == "local output cap" {
                 matches!(error, ProviderError::LocalOutputLimit)
             } else {
-                matches!(error, ProviderError::InvalidOutcome)
+                matches!(
+                    error,
+                    ProviderError::InvalidOutcome | ProviderError::InvalidOutcomeContract
+                )
             },
             "{label}"
         );
@@ -1196,8 +1176,8 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
 
 #[test]
 fn attached_stream_preview_is_in_place_and_never_exposes_wire_arguments() {
-    let outcome =
-        r#"{"outcome":{"result":"hello\n\uD83D\uDE80","type":"finish","summary":"done"}}"#;
+    let outcome = r#"hello
+🚀"#;
     let final_item = json!({"id":"msg_final","type":"message","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":outcome}]});
     let commentary = json!({"id":"msg_comment","type":"message","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Public progress"}]});
     let mut events = vec![
@@ -1319,7 +1299,7 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
 }
 
 #[test]
-fn chatgpt_keeps_phase_specific_functions_until_probe_p3() {
+fn chatgpt_uses_auto_with_phase_specific_functions() {
     let mut researcher = crate::provider::test_support::researcher_request("model-a");
     let active: Value =
         serde_json::from_slice(&body_for(&researcher, Effort::Low).unwrap()).unwrap();
@@ -1332,7 +1312,7 @@ fn chatgpt_keeps_phase_specific_functions_until_probe_p3() {
         assert_eq!(value[field], active[field], "{field}");
     }
     assert_eq!(value["prompt_cache_key"], researcher.session_id.to_string());
-    assert_eq!(value["tool_choice"], "required");
+    assert_eq!(value["tool_choice"], "none");
     let names = |body: &Value| {
         body["tools"]
             .as_array()
@@ -1342,7 +1322,7 @@ fn chatgpt_keeps_phase_specific_functions_until_probe_p3() {
             .collect::<Vec<_>>()
     };
     assert!(names(&active).contains(&"arany_read".into()));
-    assert_eq!(names(&value), ["arany_finish"]);
+    assert!(names(&value).is_empty());
     let mut primary = crate::provider::test_support::primary_request("model-a");
     for policy in [
         crate::session::CollaborationPolicy::Auto {
@@ -1363,16 +1343,11 @@ fn chatgpt_keeps_phase_specific_functions_until_probe_p3() {
             assert_eq!(planning[field], synthesis[field], "{field}");
         }
         for body in [&planning, &synthesis] {
-            assert_eq!(body["tool_choice"], "required");
+            assert_eq!(body["tool_choice"], "auto");
             assert_eq!(body["prompt_cache_key"], primary.session_id.to_string());
         }
         assert!(names(&planning).contains(&"arany_delegate".into()));
-        assert_eq!(
-            names(&planning).contains(&"arany_finish".into()),
-            !matches!(policy, crate::session::CollaborationPolicy::Team { .. })
-        );
         assert!(!names(&synthesis).contains(&"arany_delegate".into()));
-        assert!(names(&synthesis).contains(&"arany_finish".into()));
         assert_ne!(planning["tools"], synthesis["tools"]);
     }
     let mut next_run = primary.clone();

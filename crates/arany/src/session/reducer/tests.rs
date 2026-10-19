@@ -2289,7 +2289,7 @@ mod goal_replay_tests {
         });
 
         let view = SessionView::replay_open(session_id, &journal(session_id, events))
-            .expect("unknown usage does not block a Finish")
+            .expect("unknown usage does not block a Answer")
             .expect("Session exists");
         assert_eq!(view.runs[0].agents[0].status, AgentStatus::Finished);
     }

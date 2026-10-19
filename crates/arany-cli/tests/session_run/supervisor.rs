@@ -64,9 +64,8 @@ async fn supervisor_corpus_show_is_private_recomputed_and_export_local() {
         content: canaries[3].into(),
     }));
     outcomes.push(tool_outcome(read));
-    outcomes.push(arany::ProviderOutcome::Finish(arany::Finish {
-        summary: "done".into(),
-        result: "done".into(),
+    outcomes.push(arany::ProviderOutcome::Answer(arany::Answer {
+        text: "done".into(),
     }));
     let provider = Arc::new(ScriptedProvider::new(outcomes));
     let mut input = request(&workspace, canaries[0]);

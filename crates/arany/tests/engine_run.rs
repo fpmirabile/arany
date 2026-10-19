@@ -1,9 +1,9 @@
 use arany::test_support::scenario::*;
 use arany::{
-    AdmittedProviders, AgentPhase, AgentStatus, ChatGptAdmission, ChatGptProvenance,
+    AdmittedProviders, AgentPhase, AgentStatus, Answer, ChatGptAdmission, ChatGptProvenance,
     CollaborationPolicy, CompactionFailure, CompactionItem, CompactionRequest, CompactionResponse,
     CompactionStatus, ContextUsage, Delegate, Effort, Engine, EngineConfig, EngineError, Event,
-    Finish, OutputTokenBound, Provider, ProviderCallDisposition, ProviderError, ProviderOutcome,
+    OutputTokenBound, Provider, ProviderCallDisposition, ProviderError, ProviderOutcome,
     ProviderRequest, ProviderResponse, RunCancellation, RunControls, RunHandle, RunHints, RunId,
     RunRequest, RunResult, RunStatus, RunSteering, SessionId, SessionView, StateRoot, Store,
     ToolGrant, UnansweredStatus, rename_session,
@@ -123,9 +123,8 @@ impl Provider for WaitingCompactionProvider {
         self.requests.lock().expect("requests").push(request);
         Ok(ProviderResponse {
             turn: arany::ProviderTurn::scripted(),
-            outcome: ProviderOutcome::Finish(Finish {
-                summary: "seed".into(),
-                result: "Seed answer".into(),
+            outcome: ProviderOutcome::Answer(Answer {
+                text: "Seed answer".into(),
             }),
             response_id: None,
             usage: arany::Usage {
@@ -167,9 +166,8 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         let state_path = temp.path().join("state");
         let account_id = Uuid::now_v7();
         let fingerprint = [7; 32];
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "Synthetic summary".into(),
-            result: "Synthetic answer".into(),
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: "Synthetic answer".into(),
         })])
         .with_chatgpt_account(account_id, fingerprint)
         .with_compactions(vec![Ok(CompactionResponse {
@@ -265,13 +263,11 @@ fn a_tampered_compaction_reference_fails_load() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Finish(Finish {
-                summary: "first".into(),
-                result: "First answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "First answer".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "second".into(),
-                result: "Second answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Second answer".into(),
             }),
         ])
         .with_compactions(vec![Ok(CompactionResponse {
@@ -356,13 +352,11 @@ fn a_fork_before_the_snapshot_event_recompiles_from_canonical_history() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Finish(Finish {
-                summary: "source".into(),
-                result: "Source answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Source answer".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "child".into(),
-                result: "Child answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Child answer".into(),
             }),
         ])
         .with_compactions(vec![Ok(CompactionResponse {
@@ -445,9 +439,8 @@ fn invalid_compaction_snapshot_corpus_fails_before_provider_disclosure() {
             std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
             std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
             let state_path = temp.path().join("state");
-            let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-                summary: "source".into(),
-                result: "Source answer".into(),
+            let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+                text: "Source answer".into(),
             })])
             .with_compactions(vec![Ok(CompactionResponse {
                 summary: "Derived summary".into(),
@@ -560,9 +553,8 @@ fn compaction_input_limit_rejects_before_provider_egress() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Finish(Finish {
-                summary: "done".into(),
-                result: "x".repeat(32 * 1024),
+            ProviderOutcome::Answer(Answer {
+                text: "x".repeat(32 * 1024)
             });
             10
         ]);
@@ -631,9 +623,8 @@ fn compaction_input_limit_rejects_before_provider_egress() {
 
         let maintained_path = temp.path().join("maintained-state");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Finish(Finish {
-                summary: "done".into(),
-                result: "x".repeat(32 * 1024),
+            ProviderOutcome::Answer(Answer {
+                text: "x".repeat(32 * 1024)
             });
             16
         ])
@@ -805,13 +796,11 @@ fn oversized_compaction_output_is_recorded_as_failure_without_a_snapshot() {
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Finish(Finish {
-                summary: "source".into(),
-                result: "Source answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Source answer".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "later".into(),
-                result: "Later answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Later answer".into(),
             }),
         ])
         .with_compactions(vec![
@@ -1050,9 +1039,8 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
             .expect("accepted objective");
         store.close().await.expect("store shutdown");
 
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "finished".into(),
-            result: "Finished answer".into(),
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: "Finished answer".into(),
         })])
         .with_compactions(vec![Ok(CompactionResponse {
             summary: "Unfinished then finished".into(),
@@ -1139,7 +1127,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             (9924, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
-            let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
+            let finish = || ProviderOutcome::Answer(Answer { text: "answer".into() });
             let provider = Arc::new(ScriptedProvider::new(vec![finish()]));
             let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
             let id = run_to_end(&engine, &provider, request(&workspace, "Initial")).await.unwrap().session_id;
@@ -1246,7 +1234,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         // Two children in two slots form one wave with a 4N+6 = 14 Event tail: 9978 admits to 9,999 Events and the root call reserves one more for a recorded plan.
         for (prefix, admitted) in [(9978_i64, true), (9980, false)] {
             let path = temp.path().join(format!("two-child-{prefix}"));
-            let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
+            let finish = || ProviderOutcome::Answer(Answer { text: "answer".into() });
             let provider = Arc::new(ScriptedProvider::new(vec![finish()]));
             let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
             let id = run_to_end(&engine, &provider, request(&workspace, "Initial")).await.unwrap().session_id;
@@ -1308,7 +1296,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             (None, 8, false),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("fork-admission-{index}"));
-            let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() })]));
+            let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "answer".into() })]));
             let engine = engine_support::open(StateRoot::admit(&path).unwrap(), EngineConfig::default()).unwrap();
             let root = run_to_end(&engine, &provider, request(&workspace, "Fork source")).await.unwrap().session_id;
             engine.close().await.unwrap();
@@ -1358,7 +1346,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             );
         }
         let path = temp.path().join("compactions");
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish { summary: "source".into(), result: "answer".into() }), ProviderOutcome::Finish(Finish { summary: "later".into(), result: "later answer".into() })])
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "answer".into() }), ProviderOutcome::Answer(Answer { text: "later answer".into() })])
             .with_compactions((0..66).map(|_| Err(ProviderError::RemoteHttp(403))).collect());
         let calls = provider.compact_requests.clone();
         let provider = Arc::new(provider);
@@ -1400,10 +1388,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
         let state_path = temp.path().join("state");
-        let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-                summary: "source".into(),
-                result: "answer".into(),
-            })]));
+        let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "answer".into() })]));
         let engine = engine_support::open(StateRoot::admit(&state_path).unwrap(), EngineConfig::default())
         .unwrap();
         let id = run_to_end(&engine, &provider, request(&workspace, "Source")).await.unwrap().session_id;
@@ -1428,10 +1413,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
         assert!((target_pages..=target_pages + 1).contains(&pages), "fixture must reach the admission floor");
         transaction.commit().unwrap();
         drop(connection);
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: "r".repeat(32 * 1024),
-        })]).with_compactions(vec![Ok(CompactionResponse {
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "r".repeat(32 * 1024) })]).with_compactions(vec![Ok(CompactionResponse {
             summary: "source and recovered answer".into(),
             response_id: None,
             usage: arany::Usage {
@@ -1493,10 +1475,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection.execute_batch("DROP TABLE capacity_padding; VACUUM;").unwrap();
         drop(connection);
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: "recovered answer".into(),
-        })]).with_compactions(vec![Ok(CompactionResponse {
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "recovered answer".into() })]).with_compactions(vec![Ok(CompactionResponse {
             summary: "source and recovered answer".into(),
             response_id: None,
             usage: arany::Usage {
@@ -1592,7 +1571,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
 }
 
 #[test]
-fn bounded_finish_output_must_fit_canonical_json() {
+fn bounded_answer_output_must_fit_canonical_json() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
@@ -1603,7 +1582,8 @@ fn bounded_finish_output_must_fit_canonical_json() {
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
         for (index, (bytes, child, accepted)) in [
-            (10_000, false, true),
+            (8_000, false, true),
+            (10_000, false, false),
             (32 * 1024, false, false),
             (16 * 1024, true, false),
         ]
@@ -1625,9 +1605,8 @@ fn bounded_finish_output_must_fit_canonical_json() {
             }
             let attempts = if accepted || child { 1 } else { 3 };
             for _ in 0..attempts {
-                responses.push(ProviderOutcome::Finish(Finish {
-                    summary: "done".into(),
-                    result: result.clone(),
+                responses.push(ProviderOutcome::Answer(Answer {
+                    text: result.clone(),
                 }));
             }
             let provider = ScriptedProvider::new(responses);
@@ -1692,9 +1671,8 @@ fn inconsistent_cache_usage_closes_as_invalid_response() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("workspace");
         let state_path = temp.path().join("state");
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: "accepted result".into(),
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: "accepted result".into(),
         })])
         .with_reported_usage(arany::Usage {
             input_tokens: Some(4),
@@ -1821,9 +1799,8 @@ fn team_policy_rejects_a_direct_primary_finish() {
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Finish(Finish {
-                summary: "summary".into(),
-                result: "unearned result".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "unearned result".into()
             });
             3
         ]);
@@ -1894,9 +1871,8 @@ async fn team_planning_refusal_can_be_repaired_with_delegate() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let state = temp.path().join("state");
-    let finish = ProviderOutcome::Finish(Finish {
-        summary: "done".into(),
-        result: "answer".into(),
+    let finish = ProviderOutcome::Answer(Answer {
+        text: "answer".into(),
     });
     let provider = Arc::new(ScriptedProvider::new(vec![
         finish.clone(),
@@ -1931,7 +1907,7 @@ async fn team_planning_refusal_can_be_repaired_with_delegate() {
         assert_eq!(
             requests[1].input.last_answer_refused,
             Some(arany::ProposalRefusal {
-                operation: "finish".into(),
+                operation: "answer".into(),
                 cause: arany::ProposalRefusalCause::Phase
             })
         );
@@ -1974,13 +1950,11 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
                     profile: None,
                 }],
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "checked".into(),
-                result: "Fact is true".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Fact is true".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "synthesized".into(),
-                result: "Final answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Final answer".into(),
             }),
         ]);
         let recorded_requests = Arc::clone(&provider.requests);
@@ -2244,10 +2218,9 @@ fn same_session_operation_is_excluded_while_other_sessions_continue() {
             std::fs::write(workspace.join("notes/facts.txt"), "Facts").expect("include");
             let state_path = temp.path().join("state");
             let initial_engine_provider =
-                Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
-                    Finish {
-                        summary: "initial".into(),
-                        result: "initial answer".into(),
+                Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(
+                    Answer {
+                        text: "initial answer".into(),
                     },
                 )]));
             let initial_engine = engine_support::open(
@@ -2320,9 +2293,8 @@ fn same_session_operation_is_excluded_while_other_sessions_continue() {
                 .expect("committed prefix");
             store.close().await.expect("read-only close");
 
-            let contender_provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-                summary: "after lock".into(),
-                result: "later answer".into(),
+            let contender_provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+                text: "later answer".into(),
             })]);
             let contender_calls = Arc::clone(&contender_provider.requests);
             let contender_provider = Arc::new(contender_provider);
@@ -2416,10 +2388,9 @@ fn same_session_operation_is_excluded_while_other_sessions_continue() {
             store.close().await.expect("read-only close");
 
             let independent_provider =
-                Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
-                    Finish {
-                        summary: "independent".into(),
-                        result: "independent answer".into(),
+                Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(
+                    Answer {
+                        text: "independent answer".into(),
                     },
                 )]));
             let independent = engine_support::open(
@@ -2715,13 +2686,11 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
                     profile: None,
                 }],
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "child".into(),
-                result: "Child answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Child answer".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "done".into(),
-                result: "Answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "Answer".into(),
             }),
         ])
         .with_max_output_tokens(16_384);
@@ -2808,10 +2777,7 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
 
         let local_cap_provider = Arc::new(chatgpt(
             4096,
-            vec![ProviderOutcome::Finish(Finish {
-                summary: "done".into(),
-                result: "ok".into(),
-            })],
+            vec![ProviderOutcome::Answer(Answer { text: "ok".into() })],
         ));
         let local_cap = engine_support::open(
             StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
@@ -3109,14 +3075,12 @@ fn eight_children_use_the_same_ordered_loop() {
                 .collect(),
         })];
         responses.extend((0..8).map(|_| {
-            ProviderOutcome::Finish(Finish {
-                summary: "done".into(),
-                result: "result".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "result".into(),
             })
         }));
-        responses.push(ProviderOutcome::Finish(Finish {
-            summary: "synthesized".into(),
-            result: "final".into(),
+        responses.push(ProviderOutcome::Answer(Answer {
+            text: "final".into(),
         }));
         let provider = ScriptedProvider::new(responses);
         let requests = Arc::clone(&provider.requests);
@@ -3309,9 +3273,8 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
                         profile: None,
                     }],
                 }),
-                ProviderOutcome::Finish(Finish {
-                    summary: "checked".into(),
-                    result: "Fact is true".into(),
+                ProviderOutcome::Answer(Answer {
+                    text: "Fact is true".into(),
                 }),
             ]
             .into_iter()
@@ -3381,9 +3344,8 @@ fn workspace_paths_fail_closed_before_a_run_is_accepted() {
         symlink(temp.path().join("outside"), workspace.join("AGENTS.md"))
             .expect("symlinked instruction");
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "Unexpected call".into(),
-            result: "Unexpected result".into(),
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: "Unexpected result".into(),
         })]);
         let requests = Arc::clone(&provider.requests);
         let state_path = temp.path().join("state");
@@ -3566,9 +3528,8 @@ async fn provisional_text_is_reconciled_before_an_answer_can_commit() {
                 answer: "preview".into(),
                 ..Default::default()
             },
-            completion: Some(ProviderOutcome::Finish(Finish {
-                summary: "done".into(),
-                result: result.into(),
+            completion: Some(ProviderOutcome::Answer(Answer {
+                text: result.into(),
             })),
         };
         let provider = Arc::new(provider);
@@ -3774,9 +3735,8 @@ fn preview_checkpoint_survives_abrupt_process_death() {
         assert!(run.display[0].text.starts_with("DURABLE_CRASH_CANARY:"));
         let goal_id = view.goals[0].id;
         store.close().await.unwrap();
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: "recovered".into(),
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: "recovered".into(),
         })]);
         let requests = provider.requests.clone();
         let provider = Arc::new(provider);
@@ -3817,9 +3777,8 @@ async fn display_limits_preserve_a_maximal_answer_and_record_omitted_commentary(
             commentary,
             commentary_limited: false,
         },
-        completion: Some(ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: answer.clone(),
+        completion: Some(ProviderOutcome::Answer(Answer {
+            text: answer.clone(),
         })),
     };
     let provider = Arc::new(provider);
@@ -3872,10 +3831,8 @@ fn maximal_escaped_objective_with_the_largest_image_fits_its_events() {
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let state_path = temp.path().join("state");
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: "ok".into(),
-        })]);
+        let provider =
+            ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "ok".into() })]);
         let provider = Arc::new(provider);
         let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
@@ -3926,10 +3883,8 @@ fn escape_heavy_session_over_the_compaction_bound_fails_closed_and_keeps_its_jou
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
         let state_path = temp.path().join("state");
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: "ok".into(),
-        })]);
+        let provider =
+            ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "ok".into() })]);
         let provider = Arc::new(provider);
         let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
@@ -4001,12 +3956,7 @@ async fn one_engine_refuses_a_concurrent_submission_and_takes_a_provider_per_sub
         EngineConfig::default(),
     )
     .expect("engine");
-    let answer = |text: &str| {
-        ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: text.into(),
-        })
-    };
+    let answer = |text: &str| ProviderOutcome::Answer(Answer { text: text.into() });
     let first =
         Arc::new(ScriptedProvider::new(vec![answer("first")]).with_profile("scripted", "model-a"));
     let second =
@@ -4160,10 +4110,9 @@ async fn a_handle_dropped_inside_a_provider_call_frees_the_engine_for_the_same_s
         other => panic!("the handle streams the Session start first: {other:?}"),
     };
 
-    let answer = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
-        Finish {
-            summary: "done".into(),
-            result: "reconnected".into(),
+    let answer = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(
+        Answer {
+            text: "reconnected".into(),
         },
     )]));
     let mut next = request(&workspace, "Reconnected");
@@ -4216,29 +4165,23 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         std::fs::create_dir_all(&other_workspace).expect("other workspace");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Finish(Finish {
-                summary: "first".into(),
-                result: "first answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "first answer".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "second".into(),
-                result: "second answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "second answer".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "fork".into(),
-                result: "fork answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "fork answer".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "deep".into(),
-                result: "deep answer".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "deep answer".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "bounded".into(),
-                result: "bounded".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "bounded".into(),
             }),
-            ProviderOutcome::Finish(Finish {
-                summary: "bounded".into(),
-                result: "bounded".into(),
+            ProviderOutcome::Answer(Answer {
+                text: "bounded".into(),
             }),
         ]);
         let requests = Arc::clone(&provider.requests);
@@ -4587,8 +4530,8 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         .unwrap();
         let nested_item = listed.iter().find(|item| item.id == nested_id).unwrap();
         assert_eq!(
-            nested_item.title, "first",
-            "later source summaries must not enter the fork preview"
+            nested_item.title, "First question",
+            "later source objectives must not enter the fork preview"
         );
         assert_eq!(
             nested.inherited_title.as_deref(),
@@ -4963,10 +4906,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                             agent: None,
                             children: vec![arany::ChildAssignment { editor: None, objective: "A".into(), profile: None }],
                         })));
-                        responses.push_back(Ok(ProviderOutcome::Finish(Finish {
-                            summary: "child done".into(),
-                            result: "Child result".into(),
-                        })));
+                        responses.push_back(Ok(ProviderOutcome::Answer(Answer { text: "Child result".into() })));
                         vec![
                             AgentPhase::RootPlan,
                             AgentPhase::ChildWork,
@@ -4979,10 +4919,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     let mut expected_phases = expected_phases;
                     if case == "invalid finish" && !cancel {
                         for _ in 0..2 {
-                            responses.push_back(Ok(ProviderOutcome::Finish(Finish {
-                                summary: String::new(),
-                                result: "Unaccepted result".into(),
-                            })));
+                            responses.push_back(Ok(ProviderOutcome::Answer(Answer { text: "Unaccepted result".into() })));
                             expected_phases.push(phase);
                         }
                     }
@@ -5208,9 +5145,8 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
     recorded.offset = 1;
     assert!(SessionView::replay(session_id, &invalid).is_err());
     store.close().await.unwrap();
-    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "done".into(),
-        result: "accepted answer".into(),
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "accepted answer".into(),
     })]);
     let provider = provider.with_compactions(vec![Ok(CompactionResponse {
         summary: "safe summary".into(),
@@ -5310,10 +5246,9 @@ async fn create_session_on_open_engine_commits_session_started_and_submit_append
     assert!(
         matches!(tokio::time::timeout(Duration::from_secs(10), tap.next()).await.unwrap(), Some(arany::Tapped::Committed(e)) if e.session_id == session && matches!(&e.event, Event::SessionStarted { title,.. } if title == "Explicit"))
     );
-    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
-        Finish {
-            summary: "Answer".into(),
-            result: "Hello".into(),
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(
+        Answer {
+            text: "Hello".into(),
         },
     )]));
     let mut input = request(&workspace, "Hi");
@@ -5520,10 +5455,9 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
                 EngineConfig::default(),
             )
             .expect("resume engine");
-            let peer = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
-                Finish {
-                    summary: "recovered".into(),
-                    result: "No write dispatched".into(),
+            let peer = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(
+                Answer {
+                    text: "No write dispatched".into(),
                 },
             )]));
             let mut next = request(&workspace, "What happened?");
@@ -5542,4 +5476,83 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
             assert!(history[0].assistant.contains("nothing dispatched"));
         }
     }
+}
+
+#[tokio::test]
+async fn greeting_commits_one_text_answer_and_resumes_with_the_first_objective_title() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let state = temp.path().join("state");
+    let answer = "Hola! How can I help?";
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(
+        Answer {
+            text: answer.into(),
+        },
+    )]));
+    let engine = engine_support::open(
+        StateRoot::admit(&state).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
+    let mut input = request(&workspace, "hola!");
+    input.title = None;
+    input.include_paths.clear();
+    let result = run_to_end(&engine, &provider, input)
+        .await
+        .expect("greeting");
+    engine.close().await.expect("closed Engine");
+    {
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].input.goal_budget.is_none());
+    }
+    assert!(provider.responses.lock().expect("script").is_empty());
+    let store =
+        Store::open_read_only(StateRoot::open_existing(&state).expect("state")).expect("store");
+    let events = store.load_session(result.session_id).await.expect("Events");
+    let view = store
+        .load_view(result.session_id)
+        .await
+        .expect("replay")
+        .expect("Session");
+    assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(view.runs[0].assistant_message.as_deref(), Some(answer));
+    assert_eq!(
+        view.runs[0]
+            .agents
+            .first()
+            .expect("primary")
+            .summary
+            .as_deref(),
+        Some(answer)
+    );
+    assert!(view.runs[0].tools.is_empty());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, Event::ProviderCallRecorded { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(&e.event, Event::MessageCommitted { text, .. } if text == answer))
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|e| matches!(
+        e.event,
+        Event::ToolStarted { .. } | Event::ToolFinished { .. }
+    )));
+    store.close().await.expect("closed store");
+    let resumed = resume_session(
+        StateRoot::open_existing(&state).expect("state"),
+        workspace,
+        result.session_id,
+    )
+    .await
+    .expect("resume");
+    assert_eq!(resumed.conversation_title(), "hola!");
 }

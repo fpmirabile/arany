@@ -265,10 +265,7 @@ impl Provider for CacheCanary {
                 crate::tool_outcome(call)
             }
         } else {
-            ProviderOutcome::Finish(Finish {
-                summary: "Selected cache output was explicit".into(),
-                result: "The private build cache persisted between commands, and selected host-cache output appeared only after an explicit read.".into(),
-            })
+            ProviderOutcome::Answer(Answer { text: "The private build cache persisted between commands, and selected host-cache output appeared only after an explicit read.".into() })
         };
         Ok(ProviderResponse {
             turn: arany::ProviderTurn::scripted(),
@@ -1143,12 +1140,19 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                             observations[2]["output"]["sha256"],
                             hash(b"native note\n2026-10-06\n")
                         );
-                        json!({"outcome":{"type":"finish","summary":"command and edit complete","result":"Native command and edit passed."}})
+                        json!("Native command and edit passed.")
                     }
                     _ => unreachable!(),
                 };
                 contexts.push(context);
-                let response = {
+                let response = if outcome.is_string() {
+                    if profile == "openai" {
+                        assert_eq!(body["tool_choice"]["mode"], "auto");
+                        json!({"id":format!("resp_native_{step}"), "status":"completed", "model":model, "output":arany::semantic::responses_output(&outcome), "usage":{"input_tokens":12,"output_tokens":8}})
+                    } else {
+                        json!({"id":format!("msg_native_{step}"),"type":"message","role":"assistant","model":model,"stop_reason":"end_turn","content":arany::semantic::messages_content(&outcome),"usage":{"input_tokens":12,"output_tokens":8}})
+                    }
+                } else {
                     let tool = outcome["outcome"]["type"] == "tool";
                     let mut arguments = if tool {
                         outcome["outcome"]["call"].clone()
@@ -1158,7 +1162,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     let key = if tool { "operation" } else { "type" };
                     let operation = arguments.as_object_mut().unwrap().remove(key).unwrap();
                     if profile == "openai" {
-                        assert_eq!(body["tool_choice"], "required");
+                        assert_eq!(body["tool_choice"]["mode"], "auto");
                         assert_eq!(body["parallel_tool_calls"], false);
                         json!({"id":format!("resp_native_{step}"),"status":"completed","model":model,"output":[
                             {"type":"reasoning","id":format!("rs_native_{step}"),"summary":[],"encrypted_content":"CIPHERTEXT=="},
@@ -1170,7 +1174,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                             {"type":"tool_use","id":format!("toolu_native_{step}"),"name":format!("arany_{}", operation.as_str().unwrap()),"input":arguments}
                         ],"usage":{"input_tokens":12,"output_tokens":8}})
                     } else {
-                        json!({"id":format!("msg_native_{step}"),"type":"message","role":"assistant","model":model,"stop_reason":"end_turn","stop_sequence":null,"content":[{"type":"text","text":outcome.to_string()}],"usage":{"input_tokens":12,"output_tokens":8}})
+                        json!({"id":format!("msg_native_{step}"),"type":"message","role":"assistant","model":model,"stop_reason":"end_turn","stop_sequence":null,"content": arany::semantic::messages_content(&outcome),"usage":{"input_tokens":12,"output_tokens":8}})
                     }
                 }.to_string();
                 write!(input, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();

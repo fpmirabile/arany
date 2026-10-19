@@ -1,7 +1,7 @@
 use crate::provider::conversation::{Block, Conversation, Role};
-use crate::provider::decode::{structured_outcome, tool_function};
+use crate::provider::decode::{review_outcome, tool_function};
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
-use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec};
+use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, outcome_specs};
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
     ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn,
@@ -22,7 +22,7 @@ pub(super) struct MessageStream<'a> {
     secret: &'a str,
     model: &'a str,
     preview: crate::provider::ResponsePreview,
-    result: crate::provider::streaming::ResultDecoder,
+    result: crate::provider::streaming::TextDecoder,
     response: Option<Value>,
     closed: Vec<bool>,
     delta_seen: bool,
@@ -42,7 +42,7 @@ impl<'a> MessageStream<'a> {
             secret,
             model,
             preview,
-            result: crate::provider::streaming::ResultDecoder::new(false),
+            result: crate::provider::streaming::TextDecoder::new(),
             response: None,
             closed: Vec::new(),
             delta_seen: false,
@@ -64,22 +64,10 @@ impl<'a> MessageStream<'a> {
         Ok(None)
     }
 
-    // Tool-adjacent text need not be the structured answer, so failed preview decoding stops only the preview.
     fn publish_preview(&mut self, fragment: &str) {
-        if self.preview_failed {
-            return;
+        if !self.preview_failed {
+            self.preview_failed = self.result.feed(fragment, self.secret).is_err();
         }
-        let published = self
-            .result
-            .feed(fragment, self.secret)
-            .map(str::to_owned)
-            .and_then(|answer| {
-                self.preview.publish(crate::provider::PreviewText {
-                    answer,
-                    ..Default::default()
-                })
-            });
-        self.preview_failed = published.is_err();
     }
 
     fn event(&mut self, event: Value) -> Result<Option<Vec<u8>>, ProviderError> {
@@ -180,7 +168,12 @@ impl<'a> MessageStream<'a> {
                         .and_then(Value::as_str)
                         .ok_or_else(invalid)?;
                     if block.get("type").and_then(Value::as_str) != Some("tool_use")
-                        || self.tool_input.len() + fragment.len() > MAX_TOOL_ARGUMENT_BYTES
+                        || self.tool_input.len() + fragment.len()
+                            > if block["name"] == "arany_delegate" {
+                                crate::store::MAX_EVENT_BYTES
+                            } else {
+                                MAX_TOOL_ARGUMENT_BYTES
+                            }
                     {
                         return Err(ProviderError::InvalidStream);
                     }
@@ -239,7 +232,11 @@ impl<'a> MessageStream<'a> {
                     } else {
                         crate::tools::parse_json(
                             self.tool_input.as_bytes(),
-                            MAX_TOOL_ARGUMENT_BYTES,
+                            if block["name"] == "arany_delegate" {
+                                crate::store::MAX_EVENT_BYTES
+                            } else {
+                                MAX_TOOL_ARGUMENT_BYTES
+                            },
                         )
                         .map_err(|_| ProviderError::InvalidStream)?
                     };
@@ -289,6 +286,21 @@ impl<'a> MessageStream<'a> {
                     }
                     target.insert(key.clone(), value.clone());
                 }
+                if !self.preview_failed {
+                    let text = self.result.feed("", self.secret)?.to_owned();
+                    let preview = if message["stop_reason"] == "tool_use" {
+                        crate::provider::PreviewText {
+                            commentary: if text.is_empty() { vec![] } else { vec![text] },
+                            ..Default::default()
+                        }
+                    } else {
+                        crate::provider::PreviewText {
+                            answer: text,
+                            ..Default::default()
+                        }
+                    };
+                    self.preview.publish(preview)?;
+                }
                 self.delta_seen = true;
             }
             "message_stop" => {
@@ -326,6 +338,7 @@ pub(super) struct RunScope<'a> {
     pub(super) output_cap: u32,
     pub(super) secret: &'a str,
     pub(super) offered: &'a [ToolSpec],
+    pub(super) review: bool,
 }
 
 pub(super) fn decode_run(
@@ -344,7 +357,13 @@ pub(super) fn decode_run(
     let admitted = response.admit(scope.model, scope.output_cap)?;
     let (outcome, provenance) = match admitted.stop {
         Stop::EndTurn => (
-            structured_outcome(&admitted.single_text()?)?,
+            if scope.review {
+                review_outcome(&admitted.single_text()?)?
+            } else {
+                ProviderOutcome::Answer(crate::provider::Answer {
+                    text: admitted.answer_text()?,
+                })
+            },
             ProviderWireProvenance::MessagesEndTurnStorageUnspecified,
         ),
         Stop::ToolUse => (
@@ -401,18 +420,24 @@ pub(crate) fn run_body(
         "output_config": {"format": {"type": "json_schema", "schema": conversation.outcome}, "effort": effort.as_str()},
         "stream": false,
     });
+    if request.input.role != crate::provider::PromptRole::ToolReview {
+        body["output_config"]
+            .as_object_mut()
+            .expect("output config")
+            .remove("format");
+    }
     // Plan-contract unions exceed strict Tool-schema limits; the Engine validates calls instead.
     let exhausted = request
         .input
         .tools
         .as_ref()
-        .is_some_and(ToolContext::finish_only);
-    if let Some(tools) = &conversation.tools {
-        body["tools"] = tools
-            .iter()
+        .is_some_and(ToolContext::answer_only);
+    if request.input.role != crate::provider::PromptRole::ToolReview {
+        let tools = conversation.tools.as_deref().unwrap_or_default();
+        body["tools"] = tools.iter().cloned().chain(outcome_specs(&conversation.outcome))
             .map(|tool| json!({"name": tool.name, "description": tool.description, "input_schema": tool.parameters}))
             .collect();
-        body["tool_choice"] = if exhausted {
+        body["tool_choice"] = if exhausted || body["tools"].as_array().is_none_or(Vec::is_empty) {
             json!({"type": "none"})
         } else {
             json!({"type": "auto", "disable_parallel_tool_use": true})
@@ -658,6 +683,21 @@ impl Admitted {
         text.ok_or(ProviderError::InvalidOutcome)
     }
 
+    fn answer_text(&self) -> Result<String, ProviderError> {
+        let mut text = String::new();
+        for block in &self.content {
+            if block.is_text() {
+                text.push_str(block.text.as_deref().unwrap_or_default());
+            } else if !block.is_thinking() || !text.is_empty() {
+                return Err(ProviderError::InvalidOutcome);
+            }
+        }
+        if text.trim().is_empty() {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        Ok(text)
+    }
+
     fn tool_requests(&self, offered: &[ToolSpec]) -> Result<ProviderOutcome, ProviderError> {
         let mut requests = Vec::new();
         for block in &self.content {
@@ -672,7 +712,7 @@ impl Admitted {
                     operation,
                     block.input.clone().unwrap_or_default(),
                 )?);
-            } else if !block.is_thinking() && !block.is_text() {
+            } else if (!block.is_thinking() && !block.is_text()) || !requests.is_empty() {
                 return Err(ProviderError::InvalidOutcome);
             }
         }

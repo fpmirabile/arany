@@ -135,7 +135,7 @@ fn fixture(dir: &Path) {
             "status": "completed",
             "content": [{
                 "type": "output_text",
-                "text": "{\"outcome\":{\"type\":\"finish\",\"summary\":\"offline summary\",\"result\":\"offline answer\"}}"
+                "text": "offline answer"
             }]
         }],
         "usage": {"input_tokens": 12, "output_tokens": 8}
@@ -312,7 +312,7 @@ fn start_response_server(replies: NativeReplies) -> Server {
 
 fn respond_unreviewed_native(input: &mut impl Write, output: &mut impl Read) {
     for index in 0..2 {
-        let outcome = serde_json::json!({"outcome": {"type": "finish", "summary": "offline summary", "result": "offline answer"}});
+        let outcome = serde_json::json!("offline answer");
         let request = chatgpt::read_request(output);
         let end = request
             .windows(4)
@@ -338,15 +338,16 @@ fn respond_unreviewed_native(input: &mut impl Write, output: &mut impl Read) {
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["store"], false);
         assert_eq!(body["max_output_tokens"], 4096);
-        assert_eq!(body["text"]["format"]["name"], "arany_outcome");
-        assert_eq!(body["text"]["format"]["strict"], true);
+        assert!(body.get("text").is_none());
+        assert_eq!(body["tool_choice"], "none");
         let context = crate::semantic::input(&body);
         assert_eq!(context["objective"], "offline objective");
         let response = serde_json::to_vec(&serde_json::json!({
             "id": format!("resp_native_{index}"), "status": "completed", "model": "gpt-offline-new",
-            "output": [{"type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": outcome.to_string()}]}],
+            "output": arany::semantic::responses_output(&outcome),
             "usage": {"input_tokens": 12, "output_tokens": 8}
-        })).expect("native response JSON");
+        }))
+        .expect("native response JSON");
         input.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()).as_bytes()).expect("native response headers");
         input.write_all(&response).expect("native response body");
     }

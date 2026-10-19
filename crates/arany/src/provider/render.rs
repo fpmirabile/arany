@@ -48,7 +48,11 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
         system: system_blocks(request),
         tools,
         messages,
-        outcome: restrict_outcome_schema(outcome_schema(), request),
+        outcome: if input.role == PromptRole::ToolReview {
+            super::decode::review_schema()
+        } else {
+            restrict_outcome_schema(outcome_schema(), request)
+        },
     })
 }
 
@@ -78,7 +82,7 @@ fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
     let prompt = match request.input.role {
         PromptRole::Primary => prompts::PRIMARY_INSTRUCTIONS,
         PromptRole::Editor => {
-            "Work in the assigned private view using only the offered Tools and admitted commands. Verify the assignment criterion there before Finish with a bounded report. Your changes remain private until the primary integrates and verifies them. Never delegate."
+            "Work in the assigned private view using only the offered Tools and admitted commands. Verify the assignment criterion there before answering with a bounded report. Your changes remain private until the primary integrates and verifies them. Never delegate."
         }
         PromptRole::Researcher => prompts::RESEARCH_INSTRUCTIONS,
         PromptRole::ReadOnly => prompts::READ_ONLY_INSTRUCTIONS,
@@ -292,7 +296,7 @@ fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
         ArgumentBytes => "Reduce the function arguments to the argument byte limit.",
         LeaseOverlap => "Wait for worker settlement or choose paths outside active leases.",
         NotOffered => "Choose an offered operation.",
-        FinishInvalid => "Send a Finish with nonempty summary and result within their byte limits.",
+        AnswerInvalid => "Send a nonempty plain text answer within the answer byte limit.",
         DelegateInvalid => {
             "Send a valid bounded Delegate using the offered assignments and profiles."
         }

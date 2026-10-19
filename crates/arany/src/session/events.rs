@@ -146,7 +146,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "MessageCommitted" => Some(6),
         "AgentSpawned" => Some(11),
         "AgentFinished" => Some(10),
-        "ProviderCallRecorded" => Some(11),
+        "ProviderCallRecorded" => Some(12),
         "WorkerDataChunk"
         | "WorkerDataSealed"
         | "WorkerStopObserved"

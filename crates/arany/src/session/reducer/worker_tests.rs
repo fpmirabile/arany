@@ -1104,7 +1104,7 @@ fn worker_protocol_receipts_handover_order_and_verification_are_causal() {
         },
     };
     let finished = f.events.pop().unwrap();
-    refused(&f, handover.clone(), "handover before Finish");
+    refused(&f, handover.clone(), "handover before Answer");
     f.push(finished);
     let h = f.push(handover.clone());
     refused(&f, handover, "duplicate handover");
@@ -1517,7 +1517,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
     let expected = [
         ("RunStarted", 16),
         ("AgentSpawned", 11),
-        ("ProviderCallRecorded", 11),
+        ("ProviderCallRecorded", 12),
         ("AgentFinished", 10),
         ("ToolStarted", 12),
         ("ToolFinished", 16),

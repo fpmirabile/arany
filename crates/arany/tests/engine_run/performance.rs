@@ -47,17 +47,14 @@ fn team_two_core_latency_on_named_host() {
                         },
                     ],
                 }),
-                ProviderOutcome::Finish(Finish {
-                    summary: "child".into(),
-                    result: "done".into(),
+                ProviderOutcome::Answer(Answer {
+                    text: "done".into(),
                 }),
-                ProviderOutcome::Finish(Finish {
-                    summary: "child".into(),
-                    result: "done".into(),
+                ProviderOutcome::Answer(Answer {
+                    text: "done".into(),
                 }),
-                ProviderOutcome::Finish(Finish {
-                    summary: "synthesized".into(),
-                    result: "team answer".into(),
+                ProviderOutcome::Answer(Answer {
+                    text: "team answer".into(),
                 }),
             ]);
         }
