@@ -141,6 +141,7 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
         "overwrite",
         "mixed",
         "saturated",
+        "saturated_blocked",
         "uncertain",
         "bounds",
     ] {
@@ -298,7 +299,7 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
             result.unwrap();
             continue;
         }
-        if matches!(case, "drift" | "kept" | "overwrite" | "mixed") {
+        if matches!(case, "drift" | "kept" | "overwrite" | "mixed" | "saturated_blocked") {
             std::fs::write(workspace.join("src/a"), "external").unwrap();
         }
         let (before, _) = closed_view(&state, thread).await;
@@ -360,7 +361,7 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
                 assert_eq!(std::fs::read(workspace.join("src/a")).unwrap(), b"external");
                 params["confirmOverwrite"] = json!(true);
             }
-            if case == "saturated" {
+            if case.starts_with("saturated") {
                 let probe = outbound_probe;
                 for _ in 0..OUTBOUND_CAPACITY {
                     probe
@@ -370,16 +371,26 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
                 drop(probe);
                 input.send(request(11, "thread/rewind", params)).await.unwrap();
                 input.send(request(12, "thread/list", json!({}))).await.unwrap();
-                input.send(ClientMessage::Eof).await.unwrap();
-                let mut reply = None;
-                while let Some(message) = output.recv().await {
+                if case == "saturated" {
+                    input.send(ClientMessage::Eof).await.unwrap();
+                }
+                let (mut reply, mut busy) = (None, false);
+                while reply.is_none() || !busy {
+                    let message = output.recv().await.expect("every request is answered");
                     let value = serde_json::to_value(message).unwrap();
-                    if value["id"] == 11 {
-                        reply = Some(value);
+                    match value["id"].as_i64() {
+                        Some(11) => reply = Some(value),
+                        Some(12) => busy = true,
+                        _ => {}
                     }
                 }
                 let reply = reply.expect("rewind answered");
-                assert_ne!(reply["result"]["rewind"]["outcome"], "uncertain", "{reply}");
+                if case == "saturated_blocked" {
+                    assert_eq!(reply["error"]["data"]["reason"], "rewindBlocked", "{reply}");
+                    input.send(ClientMessage::Eof).await.unwrap();
+                } else {
+                    assert_ne!(reply["result"]["rewind"]["outcome"], "uncertain", "{reply}");
+                }
                 return;
             }
             input
@@ -416,7 +427,9 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
         );
         result.unwrap();
         let (after, view) = closed_view(&state, thread).await;
-        if case == "saturated" {
+        if case == "saturated_blocked" {
+            assert_eq!(after, before);
+        } else if case == "saturated" {
             if let Some(operation) = view.rewinds.operations.last() {
                 assert_ne!(operation.outcome(), arany::rewind::RewindOutcome::Uncertain);
             }

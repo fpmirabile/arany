@@ -453,6 +453,8 @@ impl Engine {
             .await?;
         let checkpoint = if files.is_empty() {
             Checkpoint::not_needed()
+        } else if cancellation.is_cancelled() {
+            Checkpoint::skipped(CheckpointReason::StoreUnavailable)
         } else {
             let capture = crate::store::CheckpointCapture {
                 session,

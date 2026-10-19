@@ -258,7 +258,7 @@ pub(in crate::cli) async fn run_configured(
                                 let mut busy = Vec::new();
                                 let result = loop {
                                     tokio::select! {
-                                        result = restoration.as_mut() => break result?,
+                                        result = restoration.as_mut() => break result,
                                         message = inbound.recv(), if !shutdown => match message {
                                             None | Some(ClientMessage::Eof) => {
                                                 cancellation.cancel();
@@ -284,6 +284,7 @@ pub(in crate::cli) async fn run_configured(
                                 for reply in busy {
                                     send(&outbound, reply).await.map_err(internal)?;
                                 }
+                                let result = result?;
                                 send(&outbound, response(id.clone(), &result))
                                     .await
                                     .map_err(internal)?;
