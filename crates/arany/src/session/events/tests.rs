@@ -1420,7 +1420,13 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        for kind in ["ToolFinished", "RunStarted", "HookStarted", "HookFinished"] {
+        for kind in [
+            "ToolStarted",
+            "ToolFinished",
+            "RunStarted",
+            "HookStarted",
+            "HookFinished",
+        ] {
             let version = payload_version(kind).expect("known kind");
             for stale in [version - 1, version + 1] {
                 assert!(matches!(
@@ -1470,6 +1476,67 @@ mod payload_version_tests {
     }
 
     #[test]
+    fn tool_events_reject_internal_rewind_sources() {
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        let mut observation = read_observation(run, agent);
+        observation.disposition = crate::tools::ToolDisposition::Denied;
+        observation.attestation = None;
+        let events = [
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: agent,
+                intent: observation.intent.clone(),
+                active_ceiling_ms: 1,
+            },
+            Event::ToolFinished {
+                checkpoint: None,
+                run_id: run,
+                agent_run_id: agent,
+                observation,
+            },
+        ];
+        let call = crate::tools::ToolCall::ApplyChangeset {
+            source: ChangesetSource::Rewind {
+                plan_digest: [3; 32],
+                bytes: 1,
+                sha256: [4; 32],
+            },
+        };
+        for mut event in events {
+            let mut payload: serde_json::Value =
+                serde_json::from_str(&event.payload().unwrap()).unwrap();
+            let intent = match &mut event {
+                Event::ToolStarted { intent, .. } => {
+                    payload["intent"]["call"] = serde_json::to_value(&call).unwrap();
+                    intent
+                }
+                Event::ToolFinished { observation, .. } => {
+                    payload["observation"]["intent"]["call"] = serde_json::to_value(&call).unwrap();
+                    &mut observation.intent
+                }
+                _ => unreachable!(),
+            };
+            intent.call = call.clone();
+            assert!(intent.valid());
+            if let Event::ToolFinished { observation, .. } = &event {
+                assert!(observation.valid());
+            }
+            assert!(matches!(event.validate(), Err(ReplayError::InvalidPayload)));
+            assert!(matches!(
+                Event::decode(
+                    event.kind(),
+                    event.version(),
+                    &payload.to_string(),
+                    Some(run),
+                    Some(agent),
+                ),
+                Err(ReplayError::InvalidPayload)
+            ));
+        }
+    }
+
+    #[test]
     fn a_tool_finished_bump_rejects_its_previous_version() {
         let run = RunId::new();
         let agent = AgentRunId::new();
@@ -1480,9 +1547,9 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(15));
+        assert_eq!(payload_version("ToolFinished"), Some(16));
         assert_eq!(
-            Event::decode("ToolFinished", 15, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 16, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1490,7 +1557,7 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                14,
+                16,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1502,9 +1569,9 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 15, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", 16, &invalid, Some(run), Some(agent)).is_err());
         }
-        for previous in [14, 13, 12, 11, 10, 9, 8, 7] {
+        for previous in [15, 14, 13, 12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1557,7 +1624,7 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(11));
+        assert_eq!(payload_version("ToolStarted"), Some(12));
         assert_eq!(payload_version("ToolPermissionDecided"), Some(4));
     }
 
@@ -1696,7 +1763,7 @@ mod payload_version_tests {
             let payload = event.payload().expect("payload");
             let version = match event {
                 Event::RunStarted { .. } => 16,
-                Event::ToolStarted { .. } => 11,
+                Event::ToolStarted { .. } => 12,
                 Event::RunFinished { .. } => 8,
                 _ => 7,
             };

@@ -175,6 +175,9 @@ impl Engine {
         cancellation: RunCancellation,
     ) -> Result<RewindFinished, EngineError> {
         let bytes = serde_json::to_vec(&changeset).map_err(|_| EngineError::InvalidRequest)?;
+        if crate::session::worker::decode_rewind_data(&bytes).is_err() {
+            return Err(EngineError::RewindBlocked);
+        }
         let files = changeset
             .files
             .iter()
@@ -502,11 +505,21 @@ async fn check_batch(
     changes: &mut Vec<FileChange>,
 ) -> Result<(), EngineError> {
     use crate::tools::ToolError;
-    let (runtime, batch) = (runtime.clone(), changes.clone());
-    match tokio::task::spawn_blocking(move || runtime.rewind_batch(&batch))
-        .await
-        .map_err(|_| ToolError::Operation)
-        .and_then(|checked| checked)
+    let runtime = runtime.clone();
+    let changeset = WorkerChangeset {
+        files: changes.clone(),
+    };
+    match tokio::task::spawn_blocking(move || {
+        let bytes = serde_json::to_vec(&changeset).map_err(|_| ToolError::Operation)?;
+        if bytes.len() > crate::session::worker::WORKER_DATA_BYTES {
+            return Err(ToolError::Limit);
+        }
+        crate::session::worker::decode_rewind_data(&bytes).map_err(|_| ToolError::Path)?;
+        runtime.rewind_batch(&changeset.files)
+    })
+    .await
+    .map_err(|_| ToolError::Operation)
+    .and_then(|checked| checked)
     {
         Ok(()) => {}
         Err(ToolError::Limit) => return Err(EngineError::RewindTooLarge),
@@ -742,6 +755,40 @@ mod tests {
             assert!(refused.files()[0].issues.contains(&RewindIssue::Unsafe));
             assert!(!refused.can_restore(), "{path}");
         }
+        for paths in [
+            ["src/missing", "src/missing/child"],
+            ["src/Missing", "src/missing"],
+        ] {
+            let paths = paths.map(str::to_owned);
+            publications_at(&mut view, &paths, 3);
+            let sealed = view.runs[0]
+                .workers
+                .data
+                .iter_mut()
+                .find(|s| {
+                    s.reference.purpose == crate::session::worker::WorkerDataPurpose::Handover
+                })
+                .unwrap();
+            let WorkerDataFacts::Changes(files) = &mut sealed.facts else {
+                unreachable!()
+            };
+            for file in files {
+                file.before = WorkerBaseVersion::Absent;
+            }
+            let refused = engine
+                .prepare_rewind(request(Vec::new(), paths.to_vec()), &view)
+                .await
+                .unwrap()
+                .preview;
+            assert_eq!(refused.files().len(), 2);
+            assert!(
+                refused
+                    .files()
+                    .iter()
+                    .all(|f| f.issues == [RewindIssue::Unsafe])
+            );
+            assert!(!refused.can_restore());
+        }
         engine.close().await.unwrap();
     }
 
@@ -815,6 +862,24 @@ mod tests {
                 after: Some(FileVersion::from_bytes(b"new", false)),
             }],
         };
+        let mut overlapping = changeset.clone();
+        overlapping.files.push(FileChange {
+            path: "src/a/b".into(),
+            before: None,
+            after: Some(FileVersion::from_bytes(b"new", false)),
+        });
+        assert!(matches!(
+            engine
+                .publish_rewind(
+                    session,
+                    started.clone(),
+                    runtime.clone(),
+                    overlapping,
+                    RunCancellation::new(),
+                )
+                .await,
+            Err(EngineError::RewindBlocked)
+        ));
         assert!(matches!(
             engine
                 .publish_rewind(session, started, runtime, changeset, RunCancellation::new())

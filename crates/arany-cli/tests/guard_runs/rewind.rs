@@ -237,12 +237,20 @@ async fn case(case: &str) {
         )
         .unwrap();
     }
-    if ["race", "cancel"].contains(&case) {
-        assert!(matches!(
-            result,
-            Err(EngineError::RewindPreviewExpired | EngineError::CancelledBeforeStart)
-        ));
+    if case == "race" {
+        assert!(
+            matches!(result, Err(EngineError::RewindPreviewExpired)),
+            "{result:?}"
+        );
         assert!(workspace.join("notes/new.txt").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"raced");
+    } else if case == "cancel" {
+        assert!(
+            matches!(result, Err(EngineError::CancelledBeforeStart)),
+            "{result:?}"
+        );
+        assert!(workspace.join("notes/new.txt").exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"changed");
     } else if ["go_race", "cancel_started"].contains(&case) {
         let finished = result.unwrap();
         assert_eq!(
