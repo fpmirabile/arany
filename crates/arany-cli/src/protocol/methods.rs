@@ -61,7 +61,7 @@ pub struct ThreadRewindParams {
 fn rewind_paths<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
     let paths = Vec::<String>::deserialize(deserializer)?;
     if paths.len() > 64
-        || paths.iter().any(|p| p.is_empty() || p.len() > 4096)
+        || paths.iter().any(|p| p.is_empty() || p.len() > 512)
         || paths.windows(2).any(|p| p[0] >= p[1])
     {
         return Err(D::Error::custom("invalid rewind selections"));

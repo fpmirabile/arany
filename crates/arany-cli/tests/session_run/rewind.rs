@@ -166,6 +166,17 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
             from,
             b"Choose a checkpoint",
         );
+        if linear {
+            wait(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                b" UTC",
+            );
+            assert!(!String::from_utf8_lossy(&transcript[from..]).contains(" ms UTC"));
+        }
         if !linear {
             let from = transcript.len();
             input.write_all(b"\x1b").unwrap();

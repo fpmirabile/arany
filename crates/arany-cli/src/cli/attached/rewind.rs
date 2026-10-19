@@ -144,18 +144,25 @@ async fn journey(
     let events = store.load_session(view.id).await;
     store.close().await.map_err(|e| e.to_string())?;
     let events = events.map_err(|e| e.to_string())?;
+    let clock = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
+    let mut timestamp = clock
+        .prepare("SELECT strftime('%Y-%m-%d %H:%M:%S', ?1 / 1000, 'unixepoch')")
+        .map_err(|e| e.to_string())?;
     let targets = &view.rewinds.checkpoints;
     let rows: Vec<_> = targets
         .iter()
         .map(|target| {
             let label = display::checkpoint_label(view, target);
-            let time = events
-                .iter()
-                .find(|e| e.sequence == target.sequence())
-                .map_or_else(
-                    || "inherited".into(),
-                    |e| format!("{} ms UTC", e.created_at_ms),
-                );
+            let time = match events.iter().find(|e| e.sequence == target.sequence()) {
+                Some(event) => {
+                    let time = timestamp
+                        .query_row([event.created_at_ms], |row| row.get::<_, Option<String>>(0))
+                        .map_err(|e| e.to_string())?
+                        .unwrap_or_else(|| "Unknown".into());
+                    format!("{time} UTC")
+                }
+                None => "inherited".into(),
+            };
             let count = rewind::plan(view, target).map(|p| p.files.len());
             let count = match count {
                 Ok(0) => "no code changes since".into(),
@@ -185,9 +192,11 @@ async fn journey(
                     .unwrap_or_default(),
                 _ => String::new(),
             };
-            format!("{label}{prompt} · {time} · {count}")
+            Ok(format!("{label}{prompt} · {time} · {count}"))
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
+    drop(timestamp);
+    drop(clock);
     let Some(index) = terminal
         .rewind_choice("Choose a checkpoint", &[], &rows, rows.len() - 1)
         .await?
@@ -470,13 +479,19 @@ async fn publish(
     loop {
         tokio::select! {
             result = &mut operation => return result.map_err(|e|Failure::Refused(e.to_string())),
-            input = terminal.next_input() => match input? {
-                crate::terminal::TerminalInput::Interrupt | crate::terminal::TerminalInput::Escape | crate::terminal::TerminalInput::EndOfInput | crate::terminal::TerminalInput::Shutdown(_) => {
-                    cancellation.cancel();
-                    return tokio::time::timeout(std::time::Duration::from_secs(3), &mut operation).await
-                        .map_err(|_|"Rewind outcome unknown: inspect files before continuing".to_owned())?.map_err(|e|Failure::Refused(e.to_string()));
-                }
-                _ => {}
+            input = terminal.next_input() => {
+                let failure = match input {
+                    Ok(crate::terminal::TerminalInput::Shutdown(signal)) => Some(RewindPanelError::Shutdown(signal.name())),
+                    Ok(crate::terminal::TerminalInput::Interrupt | crate::terminal::TerminalInput::Escape | crate::terminal::TerminalInput::EndOfInput) => None,
+                    Err(error) => Some(error.into()),
+                    _ => continue,
+                };
+                cancellation.cancel();
+                let result = (&mut operation).await;
+                return match failure {
+                    Some(error) => Err(Failure::Terminal(error)),
+                    None => result.map_err(|e|Failure::Refused(e.to_string())),
+                };
             }
         }
     }

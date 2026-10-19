@@ -600,6 +600,19 @@ async fn rewind_preview_tokens_bind_thread_head_expiry_and_fork_without_replayin
             .unwrap();
         let token = next(&mut output).await["result"]["previewToken"].clone();
         let (before, _) = closed_view(&state, source).await;
+        for field in ["kept", "overwrite"] {
+            let mut params =
+                json!({"threadId":thread,"previewToken":token,"restore":"conversation"});
+            params[field] = json!(["x".repeat(513)]);
+            input
+                .send(request(11, "thread/rewind", params))
+                .await
+                .unwrap();
+            assert_eq!(
+                next(&mut output).await["error"]["data"]["reason"],
+                "invalidParams"
+            );
+        }
         input
             .send(request(
                 11,

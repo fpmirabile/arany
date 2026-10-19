@@ -86,7 +86,12 @@ pub(super) async fn preview(
             Err(error) => return Err(Fault::engine(error)),
         }
     };
-    let files = preview_files(&plan, code.as_ref());
+    let (plan, code, files) = tokio::task::spawn_blocking(move || {
+        let files = preview_files(&plan, code.as_ref());
+        (plan, code, files)
+    })
+    .await
+    .map_err(|_| Fault::engine(EngineError::CoordinatorFailed))?;
     if !files.is_empty()
         && files
             .iter()

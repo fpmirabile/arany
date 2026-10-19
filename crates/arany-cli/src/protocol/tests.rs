@@ -76,9 +76,20 @@ fn rewind_conformance_covers_closed_states_receipts_and_selection_bounds() {
         }
     }
     for field in ["kept", "overwrite"] {
-        let mut row = input.clone();
-        row[field] = json!(["x".repeat(4097)]);
-        assert!(serde_json::from_value::<ThreadRewindParams>(row).is_err());
+        for (path, valid) in [
+            ("x".repeat(512), true),
+            ("x".repeat(513), false),
+            ("é".repeat(256), true),
+            ("é".repeat(257), false),
+            ("x".repeat(4097), false),
+        ] {
+            let mut row = input.clone();
+            row[field] = json!([path]);
+            assert_eq!(
+                serde_json::from_value::<ThreadRewindParams>(row).is_ok(),
+                valid
+            );
+        }
     }
     for outcome in [
         "restored",

@@ -77,7 +77,10 @@ pub fn line_counts(change: &FileChange) -> Option<(u32, u32)> {
     let before = text(change.before.as_ref())?;
     let after = text(change.after.as_ref())?;
     let (old, new) = changed_lines(&before, &after);
-    Some((new.len() as u32, old.len() as u32))
+    Some((
+        u32::try_from(new.len()).ok()?,
+        u32::try_from(old.len()).ok()?,
+    ))
 }
 
 pub fn compare_pages(change: &FileChange) -> Vec<Vec<String>> {
