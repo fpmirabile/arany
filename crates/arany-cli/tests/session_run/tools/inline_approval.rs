@@ -333,12 +333,32 @@ impl Driver {
             input.write_all(answer).unwrap();
             self.answered = true;
         }
-        if self.answered
-            && !self.closed
-            && (text.contains("APPROVAL_FINAL")
-                || text.contains("Action denied or approval expired")
-                || text.contains("Run cancelled"))
-        {
+        if !self.answered || self.closed {
+            return;
+        }
+        let Some(end) = [
+            "APPROVAL_FINAL",
+            "Action denied or approval expired",
+            "Run cancelled",
+        ]
+        .iter()
+        .filter_map(|marker| text.find(marker))
+        .min() else {
+            return;
+        };
+        // Ctrl+D does not end active work, so wait until the Run has returned to the idle composer.
+        let idle = if case.starts_with("linear") {
+            text[end..].contains("Input:")
+        } else {
+            crate::session_picker::screen_rows(
+                bytes,
+                80,
+                if case == "unguarded-page-up" { 50 } else { 24 },
+            )
+            .iter()
+            .any(|row| row.trim_start().starts_with("ready · "))
+        };
+        if idle {
             input.write_all(b"\x04").unwrap();
             self.closed = true;
         }
