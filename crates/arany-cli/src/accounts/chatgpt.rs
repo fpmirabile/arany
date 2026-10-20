@@ -104,6 +104,16 @@ pub(crate) async fn check_selected_model(
                 status,
                 advice: admission_http_advice(status),
             },
+            ProviderError::RateLimited(_) | ProviderError::QuotaExceeded => {
+                AuthorizationError::ConformanceHttp {
+                    status: 429,
+                    advice: admission_http_advice(429),
+                }
+            }
+            ProviderError::RemoteServerError(status, _) => AuthorizationError::ConformanceHttp {
+                status,
+                advice: admission_http_advice(status),
+            },
             ProviderError::RemoteStreamCode(code) => AuthorizationError::ConformanceStream {
                 advice: stream_failure_advice(&code),
                 code,

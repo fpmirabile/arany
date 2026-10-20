@@ -489,7 +489,7 @@ Bounds:
 
 ## Open questions
 
-- R8 Event shape: a new retry Event or a field on `ProviderCallRecorded`. Owner: the R8 author, decided in the PR against the reducer's reservation rules. It does not block R1-R7.
+- R8 Event shape. Decided in R8: a new fixed-size `ProviderRetryScheduled` Event at payload version 1. A field on `ProviderCallRecorded` cannot commit before re-dispatch, because that record closes the call.
 
 ## Exit criteria
 

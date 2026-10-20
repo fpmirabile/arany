@@ -86,6 +86,7 @@ mod goal_recovery_tests {
                 lifecycle_hook_sequence: None,
                 provider_sequences: Default::default(),
                 provider_fallbacks: Vec::new(),
+                provider_retries: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -981,6 +982,153 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn provider_retry_replay_requires_an_open_reservation_bounded_attempts_and_budget() {
+        use crate::provider::{
+            MAX_PROVIDER_RETRY_DELAY_MS, ProviderRetry, ProviderRole, RetryCause,
+        };
+        let (session, goal, run, actor) = (
+            SessionId::new(),
+            GoalId::new(),
+            RunId::new(),
+            AgentRunId::new(),
+        );
+        let retry = |attempt: u8| Event::ProviderRetryScheduled {
+            run_id: run,
+            agent_run_id: actor,
+            retry: ProviderRetry {
+                role: ProviderRole::Primary,
+                call_index: 0,
+                attempt,
+                cause: RetryCause::ServerError,
+                delay_ms: 1000 << attempt,
+            },
+        };
+        let mut facts = vec![goal_started(goal, GoalBudget::default())];
+        facts.extend(start_run(
+            goal,
+            run,
+            actor,
+            config(CollaborationPolicy::Single, false),
+        ));
+        let mut completion = complete_run_and_goal(goal, run, actor);
+        // The reservation admits 20 s of active time; the valid waits use 14 s of it.
+        if let Event::GoalProviderCallReserved {
+            active_ceiling_ms, ..
+        } = &mut completion[0]
+        {
+            *active_ceiling_ms = 20_000;
+        }
+        for attempt in 1..=3 {
+            completion.insert(usize::from(attempt), retry(attempt));
+        }
+        facts.extend(completion);
+        let events: Vec<_> = facts.clone();
+        let valid = session_with(session, facts);
+        let view = SessionView::replay(session, &valid).unwrap().unwrap();
+        assert_eq!(view.goals[0].provider_calls, 4);
+        assert!(view.goals[0].token_usage_unknown);
+        assert_eq!(view.runs[0].provider_retries.len(), 3);
+        for (end, _) in valid
+            .iter()
+            .enumerate()
+            .filter(|(_, envelope)| matches!(envelope.event, Event::ProviderRetryScheduled { .. }))
+        {
+            // A crash after any retry fact keeps the open reservation and replays without dispatch.
+            let open = SessionView::replay_open(session, &valid[..=end])
+                .unwrap()
+                .unwrap();
+            assert_eq!(open.goals[0].unobserved_provider_calls, [actor]);
+            assert!(open.runs[0].primary().unwrap().provider_calls.is_empty());
+        }
+        let position = |events: &[Event], attempt: u8| {
+            events
+                .iter()
+                .position(|event| {
+                    matches!(event, Event::ProviderRetryScheduled { retry, .. } if retry.attempt == attempt)
+                })
+                .unwrap()
+        };
+        let edit = |events: &mut [Event], attempt: u8, change: &dyn Fn(&mut ProviderRetry)| {
+            let at = position(events, attempt);
+            if let Event::ProviderRetryScheduled { retry, .. } = &mut events[at] {
+                change(retry);
+            }
+        };
+        for case in 0..13 {
+            let mut invalid = events.clone();
+            match case {
+                12 => edit(&mut invalid, 3, &|retry| retry.delay_ms = 15_000),
+                0 => edit(&mut invalid, 1, &|retry| retry.attempt = 2),
+                1 => {
+                    let mut fourth = retry(3);
+                    if let Event::ProviderRetryScheduled { retry, .. } = &mut fourth {
+                        retry.attempt = 4;
+                    }
+                    invalid.insert(position(&invalid, 3) + 1, fourth);
+                }
+                2 => edit(&mut invalid, 1, &|retry| retry.call_index = 1),
+                3 => edit(&mut invalid, 1, &|retry| retry.role = ProviderRole::Child),
+                4 => edit(&mut invalid, 1, &|retry| {
+                    retry.role = ProviderRole::Compaction
+                }),
+                5 => edit(&mut invalid, 1, &|retry| retry.delay_ms = 1999),
+                6 => edit(&mut invalid, 3, &|retry| {
+                    retry.delay_ms = MAX_PROVIDER_RETRY_DELAY_MS + 1;
+                }),
+                7 | 8 => {
+                    let budget = invalid
+                        .iter_mut()
+                        .find_map(|event| match event {
+                            Event::GoalStarted { budget, .. } => Some(budget),
+                            _ => None,
+                        })
+                        .unwrap();
+                    if case == 7 {
+                        budget.max_provider_calls = Some(3);
+                    } else {
+                        budget.max_tokens = Some(100);
+                    }
+                }
+                9 => {
+                    let reserved = invalid
+                        .iter()
+                        .position(|event| matches!(event, Event::GoalProviderCallReserved { .. }))
+                        .unwrap();
+                    let first = invalid.remove(position(&invalid, 1));
+                    invalid.insert(reserved, first);
+                }
+                10 => invalid.insert(
+                    position(&invalid, 1),
+                    Event::AssistantDisplayRecorded {
+                        run_id: run,
+                        agent_run_id: actor,
+                        chunk: crate::session::DisplayChunk {
+                            call_index: 0,
+                            phase: AgentPhase::RootPlan,
+                            category: crate::session::DisplayCategory::Answer,
+                            item: 0,
+                            offset: 0,
+                            text: "partial".into(),
+                        },
+                    },
+                ),
+                _ => {
+                    let recorded = invalid
+                        .iter()
+                        .position(|event| matches!(event, Event::ProviderCallRecorded { .. }))
+                        .unwrap();
+                    let last = invalid.remove(position(&invalid, 3));
+                    invalid.insert(recorded, last);
+                }
+            }
+            assert!(
+                SessionView::replay(session, &session_with(session, invalid)).is_err(),
+                "case {case}"
+            );
+        }
+    }
+
+    #[test]
     fn research_child_review_fallback_requires_its_own_pending_tool() {
         use crate::provider::{ProviderFallback, ProviderRole, Providers};
         let (mut view, goal, run, child) = research_session();
@@ -1066,6 +1214,93 @@ mod goal_replay_tests {
             },
         )
         .expect("child Tool finishes after the review switch");
+    }
+
+    #[test]
+    fn a_pending_child_review_admits_only_review_retries_within_one_bound() {
+        use crate::provider::{ProviderRetry, ProviderRole, RetryCause};
+        let (mut view, goal, run, child) = research_session();
+        view.goals[0]
+            .plan_contract
+            .as_mut()
+            .unwrap()
+            .budget
+            .max_tokens = None;
+        let read = child_intent(
+            run,
+            child,
+            ToolCall::Read {
+                path: "src/lib.rs".into(),
+                offset: None,
+                limit: Some(1024),
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("child Tool request");
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: read,
+                active_ceiling_ms: 0,
+            },
+        )
+        .expect("child Tool starts");
+        apply(
+            &mut view,
+            Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: child,
+                active_ceiling_ms: 60_000,
+            },
+        )
+        .expect("review reservation");
+        let retry = |role, attempt: u8| Event::ProviderRetryScheduled {
+            run_id: run,
+            agent_run_id: child,
+            retry: ProviderRetry {
+                role,
+                call_index: 1,
+                attempt,
+                cause: RetryCause::ServerError,
+                delay_ms: 1000 << attempt,
+            },
+        };
+        // The hostile prefix of three child-turn and three review retries on one reservation fails
+        // at its first child-turn retry, and no role mix extends the one bound of the call.
+        assert!(rejected(&view, retry(ProviderRole::Child, 1)));
+        for attempt in 1..=3 {
+            apply(&mut view, retry(ProviderRole::Review, attempt)).expect("review retry");
+        }
+        for (role, attempt) in [
+            (ProviderRole::Child, 1),
+            (ProviderRole::Child, 4),
+            (ProviderRole::Review, 4),
+        ] {
+            assert!(rejected(&view, retry(role, attempt)), "{role:?} {attempt}");
+        }
+        assert_eq!(view.runs[0].provider_retries.len(), 3);
+        let mut mixed = view.clone();
+        mixed.runs[0].provider_retries.clear();
+        for attempt in 1..=3 {
+            apply(&mut mixed, retry(ProviderRole::Review, attempt)).expect("review retry");
+        }
+        mixed.runs[0].provider_retries[0].1.role = ProviderRole::Child;
+        assert!(
+            rejected(&mixed, retry(ProviderRole::Review, 4)),
+            "a forged mix still shares the call's bound"
+        );
+        // The eventual call record must be the review the retries named.
+        assert!(rejected(
+            &view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested)
+        ));
     }
 
     #[test]
@@ -2823,6 +3058,7 @@ mod goal_replay_tests {
                 lifecycle_hook_sequence: None,
                 provider_sequences: Default::default(),
                 provider_fallbacks: Vec::new(),
+                provider_retries: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -3863,6 +4099,7 @@ mod goal_replay_tests {
                 lifecycle_hook_sequence: None,
                 provider_sequences: Default::default(),
                 provider_fallbacks: Vec::new(),
+                provider_retries: Vec::new(),
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
@@ -4007,6 +4244,7 @@ mod goal_replay_tests {
                     lifecycle_hook_sequence: None,
                     provider_sequences: Default::default(),
                     provider_fallbacks: Vec::new(),
+                    provider_retries: Vec::new(),
                 },
                 RunView {
                     skill: None,
@@ -4050,6 +4288,7 @@ mod goal_replay_tests {
                     lifecycle_hook_sequence: None,
                     provider_sequences: Default::default(),
                     provider_fallbacks: Vec::new(),
+                    provider_retries: Vec::new(),
                 },
             ],
             compactions: Vec::new(),

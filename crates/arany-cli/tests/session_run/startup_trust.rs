@@ -449,13 +449,15 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
             if startup_escape {
                 let from = transcript.len();
                 input.write_all(b"Read-only question\r").unwrap();
+                // The isolated network fails the send, so the call shows its first same-route
+                // retry; Ctrl+C then ends the Run inside the backoff without a further call.
                 wait(
                     &mut output,
                     &mut input,
                     &mut transcript,
                     &mut answered,
                     from,
-                    b"unavailable",
+                    b"Reconnecting",
                 );
                 assert!(
                     !transcript[from..]
@@ -463,12 +465,8 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                         .any(|part| part == b"Do you trust this folder?"),
                     "Escape must admit ephemeral read-only chat without another trust prompt"
                 );
-                let from = from
-                    + transcript[from..]
-                        .windows(b"unavailable".len())
-                        .position(|part| part == b"unavailable")
-                        .unwrap()
-                    + b"unavailable".len();
+                let from = transcript.len();
+                input.write_all(b"\x03").unwrap();
                 wait(
                     &mut output,
                     &mut input,

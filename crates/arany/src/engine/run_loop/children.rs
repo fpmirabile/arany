@@ -3,7 +3,7 @@ use super::{
     Action, ActiveSegment, CallFailure, CallResult, Grant, PrimaryDecision, PrimarySite, RunLoop,
     call_record, decide_primary_call, primary_admitted, valid_answer, wave_deferred,
 };
-use crate::engine::routing::CallScope;
+use crate::engine::routing::{AttemptDecision, CallScope, decide_attempt};
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
 use crate::provider::{
     AgentPhase, Answer, ChildAssignment, ChildResult, PromptRole, ProviderFailureReason,
@@ -990,6 +990,68 @@ impl RunLoop<'_> {
         Box::pin(self.drive_children_inner(children, root_request, queue, segments, deadline))
     }
 
+    // A same-route retry waits out its committed delay inside the task, so cancellation still drains it.
+    fn respawn_attempt(
+        &self,
+        queue: &mut ChildQueue,
+        task_id: Id,
+        index: Option<usize>,
+        delay: Duration,
+        deadline: Instant,
+    ) -> Result<(), EngineError> {
+        let role = if index.is_none() {
+            crate::provider::ProviderRole::Primary
+        } else {
+            crate::provider::ProviderRole::Child
+        };
+        let mut active = queue
+            .active
+            .remove(&task_id)
+            .ok_or(EngineError::CoordinatorFailed)?;
+        let provider = self.routing.bind(
+            role,
+            active.request.agent_run_id,
+            &mut active.request.model,
+            &mut active.request.max_output_tokens,
+        )?;
+        let preview = (index.is_none()
+            || self.routing.chain(role, active.request.agent_run_id)?.len() > 1)
+            .then(|| crate::provider::ResponsePreview::new().0);
+        let request = active.request.clone();
+        let mut cancellation = self.controls.cancellation.clone();
+        let steering = self.controls.steering.clone();
+        let session_id = self.session_id;
+        let handle = queue.calls.spawn(async move {
+            // A pause or cancellation in the wait ends the child's call unsent; the wave then drains.
+            if !delay.is_zero()
+                && crate::engine::routing::back_off(
+                    session_id,
+                    delay,
+                    &mut cancellation,
+                    steering.as_ref(),
+                )
+                .await
+                    != crate::engine::routing::Backoff::Elapsed
+            {
+                return crate::engine::routing::AttemptResult {
+                    result: CallResult::Cancelled,
+                    transient: None,
+                    visible: false,
+                };
+            }
+            crate::engine::routing::invoke_attempt(
+                provider.as_ref(),
+                request,
+                deadline,
+                cancellation,
+                preview,
+            )
+            .await
+        });
+        queue.active.insert(handle.id(), active);
+        Ok(())
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "Keep child retry and settlement ordering together"
@@ -1033,70 +1095,57 @@ impl RunLoop<'_> {
             let Some(index) = queue.active.get(&task_id).map(|active| active.index) else {
                 return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
             };
-            if result.eligible
-                && abort.is_none()
-                && !self.controls.cancellation.is_cancelled()
-                && !self.pause_requested()
-                && Instant::now() < deadline
-            {
-                let retried: Result<bool, EngineError> = async {
-                    let role = if index.is_none() {
-                        crate::provider::ProviderRole::Primary
-                    } else {
-                        crate::provider::ProviderRole::Child
-                    };
-                    let active = queue
-                        .active
-                        .get(&task_id)
-                        .ok_or(EngineError::CoordinatorFailed)?;
-                    let provider = self.routing.provider(role, active.request.agent_run_id)?;
-                    if self
+            let respawn: Result<Option<Duration>, EngineError> = async {
+                let active = queue
+                    .active
+                    .get(&task_id)
+                    .ok_or(EngineError::CoordinatorFailed)?;
+                let role = if index.is_none() {
+                    crate::provider::ProviderRole::Primary
+                } else {
+                    crate::provider::ProviderRole::Child
+                };
+                let facts = self.routing.attempt_facts(
+                    active.request.agent_run_id,
+                    role,
+                    deadline,
+                    abort.is_some()
+                        || self.controls.cancellation.is_cancelled()
+                        || self.pause_requested(),
+                    result.visible,
+                )?;
+                let scope = CallScope {
+                    session_id: self.session_id,
+                    run_id: self.run_id,
+                    agent_run_id: active.request.agent_run_id,
+                };
+                Ok(match decide_attempt(result.transient, facts) {
+                    AttemptDecision::Accept => None,
+                    AttemptDecision::Retry { cause, delay } => self
                         .routing
-                        .switch(
-                            CallScope {
-                                session_id: self.session_id,
-                                run_id: self.run_id,
-                                agent_run_id: active.request.agent_run_id,
-                            },
-                            role,
-                            provider.identity(),
-                            Some(&active.request),
-                        )
+                        .retry(scope, role, cause, delay, Some(&active.request))
                         .await?
-                    {
-                        let mut active = queue
-                            .active
-                            .remove(&task_id)
-                            .ok_or(EngineError::CoordinatorFailed)?;
-                        let provider = self.routing.bind(
-                            role,
-                            active.request.agent_run_id,
-                            &mut active.request.model,
-                            &mut active.request.max_output_tokens,
-                        )?;
-                        let request = active.request.clone();
-                        let cancellation = self.controls.cancellation.clone();
-                        let handle = queue.calls.spawn(async move {
-                            crate::engine::routing::invoke_attempt(
-                                provider.as_ref(),
-                                request,
-                                deadline,
-                                cancellation,
-                                Some(crate::provider::ResponsePreview::new().0),
-                            )
-                            .await
-                        });
-                        queue.active.insert(handle.id(), active);
-                        return Ok(true);
+                        .then_some(delay),
+                    AttemptDecision::Switch => {
+                        let provider = self.routing.provider(role, active.request.agent_run_id)?;
+                        self.routing
+                            .switch(scope, role, provider.identity(), Some(&active.request))
+                            .await?
+                            .then_some(Duration::ZERO)
                     }
-                    Ok(false)
+                })
+            }
+            .await;
+            match respawn {
+                Ok(Some(delay)) => {
+                    if let Err(error) = self.respawn_attempt(queue, task_id, index, delay, deadline)
+                    {
+                        return Err(queue.abort_with(error).await);
+                    }
+                    continue;
                 }
-                .await;
-                match retried {
-                    Ok(true) => continue,
-                    Ok(false) => {}
-                    Err(error) => return Err(queue.abort_with(error).await),
-                }
+                Ok(None) => {}
+                Err(error) => return Err(queue.abort_with(error).await),
             }
             queue.active.remove(&task_id);
             let result = result.result;
@@ -2234,12 +2283,13 @@ fn classify_join(
         Err(error) => (
             error.id(),
             crate::engine::routing::AttemptResult {
-                eligible: false,
                 result: if error.is_cancelled() {
                     CallResult::Cancelled
                 } else {
                     CallResult::Failed(CallFailure::TaskPanic)
                 },
+                transient: None,
+                visible: false,
             },
         ),
     }

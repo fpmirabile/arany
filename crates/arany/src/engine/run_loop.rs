@@ -40,7 +40,6 @@ pub(super) enum CallFailure {
     Timeout,
     Unavailable {
         reason: Option<ProviderFailureReason>,
-        fallback: bool,
     },
     Rejected(Option<ProviderFailureReason>),
     InvalidResponse(Option<ProviderFailureReason>),
@@ -157,6 +156,7 @@ impl<'a> RunLoop<'a> {
                 journal,
                 ledger,
                 publisher: hints,
+                steering: controls.steering.clone(),
             },
             worker_data_bytes: Default::default(),
             worker_requests: Default::default(),
@@ -1080,19 +1080,20 @@ impl<'a> RunLoop<'a> {
     }
 }
 
+// A failure before a decoded outcome also returns its retry cause and any server Retry-After.
 pub(super) async fn invoke_bounded_with_preview(
     provider: &dyn Provider,
     request: ProviderRequest,
     run_deadline: Instant,
     mut cancellation: RunCancellation,
     preview: Option<ResponsePreview>,
-) -> CallResult {
+) -> (CallResult, Option<super::routing::Transient>) {
     if cancellation.is_cancelled() {
-        return CallResult::Cancelled;
+        return (CallResult::Cancelled, None);
     }
     let remaining = run_deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return CallResult::Failed(CallFailure::Timeout);
+        return (CallResult::Failed(CallFailure::Timeout), None);
     }
     let timeout = provider.identity().limits.deadline.min(remaining);
     let output_cap = request.max_output_tokens;
@@ -1102,46 +1103,74 @@ pub(super) async fn invoke_bounded_with_preview(
             None => provider.invoke(request).await,
         }
     };
-    tokio::select! {
+    let result = tokio::select! {
         biased;
-        () = cancellation.cancelled() => CallResult::Cancelled,
-        result = tokio::time::timeout(timeout, invocation) => match result {
-            Ok(Ok(response))
-                if response
-                    .usage
-                    .input_tokens
-                    .is_some_and(|count| count > MAX_REPORTED_INPUT_TOKENS)
-                    || !response.usage.cache_consistent() =>
-            {
-                CallResult::Failed(CallFailure::InvalidResponse(Some(ProviderFailureReason::ResponseContract)))
-            }
-            Ok(Ok(response)) if response.usage.output_tokens.is_some_and(|count| count > output_cap) => {
-                CallResult::Failed(CallFailure::OutputLimit)
-            }
-            Ok(Ok(response)) if response.response_id.as_ref().is_some_and(|id| {
+        () = cancellation.cancelled() => return (CallResult::Cancelled, None),
+        result = tokio::time::timeout(timeout, invocation) => result,
+    };
+    let transient = match &result {
+        Ok(Err(error)) => error
+            .retry_cause()
+            .map(|(cause, retry_after)| super::routing::Transient { cause, retry_after }),
+        _ => None,
+    };
+    let result = match result {
+        Ok(Ok(response))
+            if response
+                .usage
+                .input_tokens
+                .is_some_and(|count| count > MAX_REPORTED_INPUT_TOKENS)
+                || !response.usage.cache_consistent() =>
+        {
+            CallResult::Failed(CallFailure::InvalidResponse(Some(
+                ProviderFailureReason::ResponseContract,
+            )))
+        }
+        Ok(Ok(response))
+            if response
+                .usage
+                .output_tokens
+                .is_some_and(|count| count > output_cap) =>
+        {
+            CallResult::Failed(CallFailure::OutputLimit)
+        }
+        Ok(Ok(response))
+            if response.response_id.as_ref().is_some_and(|id| {
                 id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic())
-            }) => CallResult::Failed(CallFailure::InvalidResponse(Some(ProviderFailureReason::ResponseContract))),
-            Ok(Ok(response)) if response.wire_provenance.is_some_and(|provenance| {
+            }) =>
+        {
+            CallResult::Failed(CallFailure::InvalidResponse(Some(
+                ProviderFailureReason::ResponseContract,
+            )))
+        }
+        Ok(Ok(response))
+            if response.wire_provenance.is_some_and(|provenance| {
                 !provenance.valid_for(
                     response.response_id.as_deref(),
                     response.usage.input_tokens,
                     response.usage.output_tokens,
                 )
-            }) => CallResult::Failed(CallFailure::InvalidResponse(Some(ProviderFailureReason::ResponseContract))),
-            Ok(Ok(response)) => CallResult::Response(response),
-            Ok(Err(error)) => match error.failure_class() {
-                ProviderFailureClass::Unavailable => CallResult::Failed(CallFailure::Unavailable {
-                    reason: error.failure_reason(),
-                    fallback: error.allows_fallback(),
-                }),
-                ProviderFailureClass::Rejected => CallResult::Failed(CallFailure::Rejected(error.failure_reason())),
-                ProviderFailureClass::InvalidOutcome => {
-                    CallResult::Failed(CallFailure::InvalidResponse(error.failure_reason()))
-                }
-            },
-            Err(_) => CallResult::Failed(CallFailure::Timeout),
+            }) =>
+        {
+            CallResult::Failed(CallFailure::InvalidResponse(Some(
+                ProviderFailureReason::ResponseContract,
+            )))
         }
-    }
+        Ok(Ok(response)) => CallResult::Response(response),
+        Ok(Err(error)) => match error.failure_class() {
+            ProviderFailureClass::Unavailable => CallResult::Failed(CallFailure::Unavailable {
+                reason: error.failure_reason(),
+            }),
+            ProviderFailureClass::Rejected => {
+                CallResult::Failed(CallFailure::Rejected(error.failure_reason()))
+            }
+            ProviderFailureClass::InvalidOutcome => {
+                CallResult::Failed(CallFailure::InvalidResponse(error.failure_reason()))
+            }
+        },
+        Err(_) => CallResult::Failed(CallFailure::Timeout),
+    };
+    (result, transient)
 }
 
 fn call_usage(result: &CallResult) -> (Option<u32>, Option<u32>) {

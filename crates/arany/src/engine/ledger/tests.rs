@@ -325,7 +325,8 @@ fn provider_action_reserves_plan_recording_and_terminal_events() {
 }
 
 #[test]
-fn action_bounds_reserve_only_the_selected_roles_switches() {
+fn action_bounds_reserve_each_calls_switches_and_three_retry_facts() {
+    let r = usize::from(crate::provider::MAX_PROVIDER_RETRIES);
     let inherited = Providers::all(vec![()]);
     let configured = Providers {
         primary: vec![(); 3],
@@ -333,52 +334,70 @@ fn action_bounds_reserve_only_the_selected_roles_switches() {
         review: vec![(); 3],
         compaction: vec![()],
     };
-    for (action, extra) in [
+    // Per-call attempt facts: switches of the role's chain plus the three retries.
+    let (primary, child, review, compaction) = (2 + r, 1 + r, 2 + r, r);
+    let calls = MAX_CHILD_TOOL_CALLS + 1;
+    // (action, configured extra, inherited extra)
+    for (action, extra, single) in [
         (
             Action::ProviderCall {
                 previews: false,
                 steering: false,
             },
-            2,
+            primary,
+            r,
         ),
         (
             Action::Child {
                 in_flight: 2,
                 research: false,
             },
-            3,
+            3 * child,
+            3 * r,
         ),
         (
             Action::Child {
                 in_flight: 2,
                 research: true,
             },
-            5,
+            3 * child + review,
+            4 * r,
         ),
-        (Action::Worker { chunks: 1093 }, 12),
-        (Action::Tool, 2),
-        (Action::Review, 2),
-        (Action::Compaction, 0),
-        (Action::BoundaryCompaction { goal: true }, 0),
+        (
+            Action::Worker { chunks: 1093 },
+            review + 8 * child + primary,
+            10 * r,
+        ),
+        (Action::Tool, review, r),
+        (Action::Review, review, r),
+        (Action::Compaction, compaction, r),
+        (Action::BoundaryCompaction { goal: true }, compaction, r),
         (
             Action::Delegation {
                 children: 2,
                 research: false,
             },
-            4,
+            2 * child + primary,
+            3 * r,
         ),
         (
             Action::Delegation {
                 children: 2,
                 research: true,
             },
-            2 * (MAX_CHILD_TOOL_CALLS + 1) + 4 * MAX_CHILD_TOOL_CALLS + 2,
+            2 * calls * child + 2 * MAX_CHILD_TOOL_CALLS * review + primary,
+            (2 * calls + 2 * MAX_CHILD_TOOL_CALLS + 1) * r,
         ),
     ] {
-        assert_eq!(action.max_events_for(&inherited), action.max_events());
+        assert_eq!(
+            action.max_events_for(&inherited),
+            action.max_events() + single,
+            "{action:?}"
+        );
         assert_eq!(
             action.max_events_for(&configured),
-            action.max_events() + extra
+            action.max_events() + extra,
+            "{action:?}"
         );
     }
 }
@@ -420,22 +439,24 @@ fn action_headroom_covers_eligible_chains_longer_than_the_child_default() {
         snapshot,
         profiles: vec![("main".into(), vec![primary]), ("spare".into(), chain)],
     });
+    let r = usize::from(crate::provider::MAX_PROVIDER_RETRIES);
+    // The longest eligible child chain has two switches; every other role has a single route.
     for (action, extra) in [
         (
             Action::Delegation {
                 children: 8,
                 research: true,
             },
-            8 * (MAX_CHILD_TOOL_CALLS + 1) * 2,
+            8 * (MAX_CHILD_TOOL_CALLS + 1) * (2 + r) + 8 * MAX_CHILD_TOOL_CALLS * r + r,
         ),
         (
             Action::Child {
                 in_flight: 2,
                 research: true,
             },
-            6,
+            3 * (2 + r) + r,
         ),
-        (Action::Review, 0),
+        (Action::Review, r),
     ] {
         assert_eq!(
             action.max_events_for_admitted(&providers),
@@ -452,9 +473,13 @@ fn staged_bounds_never_exceed_the_first_admission() {
     };
     assert_eq!(call.max_events(), 7 + 1 + MAX_DISPLAY_CHUNKS);
     let providers = Providers::all(vec![()]);
-    assert_eq!(call.remaining(1, &providers), call.max_events() - 1);
-    assert_eq!(Action::Tool.remaining(0, &providers), 8);
-    assert_eq!(Action::Tool.remaining(1, &providers), 7);
+    let r = usize::from(crate::provider::MAX_PROVIDER_RETRIES);
+    assert_eq!(
+        call.remaining(1, &providers),
+        call.max_events_for(&providers) - 1
+    );
+    assert_eq!(Action::Tool.remaining(0, &providers), 8 + r);
+    assert_eq!(Action::Tool.remaining(1, &providers), 7 + r);
     assert_eq!(Action::Tool.remaining(usize::MAX, &providers), 0);
     for children in 1..=8 {
         let delegation = Action::Delegation {
@@ -466,9 +491,10 @@ fn staged_bounds_never_exceed_the_first_admission() {
             in_flight: u32::try_from(children - 1).unwrap(),
             research: false,
         };
+        // The delegation also covers the synthesis call's retry facts.
         assert_eq!(
             delegation.remaining(last_call_prefix, &providers),
-            last_child.max_events()
+            last_child.max_events_for(&providers) + r
         );
     }
 }

@@ -1,9 +1,15 @@
 use super::{AgentPhase, Provenance, Provider, ProviderIdentity};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub const MAX_PROVIDER_FALLBACKS: usize = 2;
 pub const MAX_PROVIDER_SWITCHES: usize = 64;
+pub const MAX_PROVIDER_RETRIES: u8 = 3;
+// The longest pinned role deadline bounds every wait, including a server Retry-After.
+pub const MAX_PROVIDER_RETRY_DELAY_MS: u32 = 20 * 60 * 1000;
+const RETRY_BASE: Duration = Duration::from_secs(2);
+const RETRY_GAP: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +21,15 @@ pub enum ProviderRole {
 }
 
 impl ProviderRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Child => "child",
+            Self::Review => "review",
+            Self::Compaction => "compaction",
+        }
+    }
+
     pub(crate) fn for_phase(phase: AgentPhase) -> Self {
         match phase {
             AgentPhase::RootPlan | AgentPhase::RootSynthesis => Self::Primary,
@@ -234,15 +249,53 @@ pub struct ProviderFallback {
 
 impl ProviderFallback {
     pub fn notice(&self) -> String {
-        let role = match self.role {
-            ProviderRole::Primary => "primary",
-            ProviderRole::Child => "child",
-            ProviderRole::Review => "review",
-            ProviderRole::Compaction => "compaction",
-        };
+        let role = self.role.label();
         format!(
             "Provider fallback ({role}): the failed call may have consumed usage. {}/{} to {}/{}.",
             self.from.profile, self.from.model, self.to.profile, self.to.model
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryCause {
+    Transport,
+    RateLimited,
+    ServerError,
+    StreamCut,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderRetry {
+    pub role: ProviderRole,
+    pub call_index: u32,
+    pub attempt: u8,
+    pub cause: RetryCause,
+    pub delay_ms: u32,
+}
+
+impl ProviderRetry {
+    /// Exponential gap before same-route `attempt` (one-based): 2 s doubling, at most 10 s.
+    pub(crate) fn backoff(attempt: u8) -> Duration {
+        RETRY_BASE
+            .saturating_mul(1 << attempt.saturating_sub(1).min(8))
+            .min(RETRY_GAP)
+    }
+
+    pub fn notice(&self) -> String {
+        let cause = match self.cause {
+            RetryCause::Transport => "connection failed",
+            RetryCause::RateLimited => "rate limited",
+            RetryCause::ServerError => "server error",
+            RetryCause::StreamCut => "stream interrupted",
+        };
+        format!(
+            "Reconnecting\u{2026} {}/{MAX_PROVIDER_RETRIES} ({}, {cause}, after {} ms): the failed call may have consumed usage.",
+            self.attempt,
+            self.role.label(),
+            self.delay_ms
         )
     }
 }

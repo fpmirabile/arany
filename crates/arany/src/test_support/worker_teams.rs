@@ -561,15 +561,25 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     input.goal = GoalRequest::new(budget, GoalPhase::Implementation);
     let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
     let cancellation = RunCancellation::new();
+    if case == "fallback" {
+        // The journaled retry delays stay; only the waits before each editor's switch end at once.
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        crate::fault::FaultPlan::skip_retry_backoff(session);
+        input.session_id = Some(session);
+        input.title = None;
+    }
     let mut bindings = AdmittedProviders::single(provider.clone());
     let fallback = if case == "fallback" {
         let mut first = super::scenario::ScriptedProvider::new(Vec::new())
             .with_profile("scripted", "first-child");
         first.identity.limits.concurrency = 8;
-        *first.responses.lock().unwrap() = std::collections::VecDeque::from([
-            Err(ProviderError::HttpServerUnavailable),
-            Err(ProviderError::HttpServerUnavailable),
-        ]);
+        // Each editor's first call and its three same-route retries.
+        *first.responses.lock().unwrap() = (0..2 * (usize::from(crate::MAX_PROVIDER_RETRIES) + 1))
+            .map(|_| Err(ProviderError::HttpServerUnavailable(None)))
+            .collect();
         let first = Arc::new(first);
         bindings.roles.child = vec![first.clone(), provider.clone()];
         Some(first)
@@ -678,7 +688,10 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         assert_eq!(provider.maximum.load(Ordering::SeqCst), 1);
     }
     if let Some(first) = fallback {
-        assert_eq!(first.requests.lock().unwrap().len(), 2);
+        assert_eq!(
+            first.requests.lock().unwrap().len(),
+            2 * (usize::from(crate::MAX_PROVIDER_RETRIES) + 1)
+        );
         assert!(first.responses.lock().unwrap().is_empty());
     }
     let session = result.run.session_id;

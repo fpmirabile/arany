@@ -124,7 +124,11 @@ fn transport_error(error: TransportError) -> ProviderError {
         TransportError::Unavailable => ProviderError::Unavailable,
         TransportError::PartialTransport => ProviderError::PartialTransport,
         TransportError::Rejected => ProviderError::Rejected,
-        TransportError::HttpServerUnavailable => ProviderError::HttpServerUnavailable,
+        TransportError::HttpServerUnavailable(after) => ProviderError::HttpServerUnavailable(after),
+        TransportError::RateLimited(after) => ProviderError::RateLimited(after),
+        TransportError::QuotaExceeded => ProviderError::QuotaExceeded,
+        TransportError::Transport => ProviderError::Transport,
+        TransportError::StreamEnded => ProviderError::StreamEnded,
         TransportError::InvalidOutcome => ProviderError::InvalidOutcome,
     }
 }
@@ -133,6 +137,29 @@ fn transport_error(error: TransportError) -> ProviderError {
 mod tests {
     use super::*;
     use crate::{AgentPhase, AgentRunId, CollaborationPolicy, PromptRole, RunId, RunInput};
+
+    #[test]
+    fn only_stream_cuts_and_early_ends_retry_on_the_custom_route() {
+        use crate::provider::RetryCause;
+        for (error, cause) in [
+            (ProviderError::PartialTransport, Some(RetryCause::StreamCut)),
+            (ProviderError::StreamEnded, Some(RetryCause::StreamCut)),
+            (
+                ProviderError::RemoteStreamCode("subscription_sharing_usage_unavailable".into()),
+                None,
+            ),
+            (ProviderError::InvalidStream, None),
+            (ProviderError::CallTimedOut, None),
+        ] {
+            let label = format!("{error:?}");
+            let mapped = transport_error(super::super::transport::stream_failure(error));
+            assert_eq!(
+                mapped.retry_cause().map(|(cause, _)| cause),
+                cause,
+                "{label}"
+            );
+        }
+    }
 
     #[test]
     fn streaming_destination_drift_keeps_legacy_disposition_without_fallback() {

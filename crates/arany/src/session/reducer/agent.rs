@@ -173,8 +173,152 @@ impl SessionView {
     }
 }
 
+fn attempt_role_fits(
+    run: &RunView,
+    agent: &AgentView,
+    role: crate::provider::ProviderRole,
+) -> bool {
+    use crate::provider::ProviderRole;
+    match role {
+        // A child's own pending Tool makes its open call a review, never a child turn.
+        ProviderRole::Child => {
+            agent.role == AgentRole::Child
+                && agent
+                    .tools
+                    .last()
+                    .is_none_or(|tool| tool.observation.is_some())
+        }
+        ProviderRole::Review => {
+            let own_tool = match agent.role {
+                AgentRole::Child => agent.tools.last(),
+                AgentRole::Primary => run.tools.last(),
+            };
+            own_tool.is_some_and(|tool| tool.observation.is_none())
+        }
+        ProviderRole::Primary => {
+            agent.role == AgentRole::Primary
+                && run
+                    .tools
+                    .last()
+                    .is_none_or(|tool| tool.observation.is_some())
+        }
+        ProviderRole::Compaction => agent.role == AgentRole::Primary,
+    }
+}
+
 pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), ReplayError> {
     match event {
+        Event::ProviderRetryScheduled {
+            run_id,
+            agent_run_id,
+            retry,
+        } => {
+            use crate::provider::{MAX_PROVIDER_RETRY_DELAY_MS, ProviderRole};
+            let compaction = retry.role == ProviderRole::Compaction;
+            let run = current
+                .runs
+                .last()
+                .filter(|run| run.id == *run_id)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let active = run.status == super::RunStatus::Active;
+            if !active && !(compaction && run.status.is_terminal()) {
+                return Err(ReplayError::InvalidTransition);
+            }
+            // As for a switch: only a between-Run compaction outside a running Goal is uncharged.
+            let goal = current
+                .goals
+                .iter()
+                .find(|goal| goal.run_ids.contains(run_id));
+            if goal.is_none() && !compaction {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let charge_goal = goal.is_some_and(|goal| goal.status == GoalStatus::Running);
+            let goal_id = goal.map(|goal| goal.id);
+            let reserved = match goal {
+                None => true,
+                Some(goal) if compaction => goal.compaction_call_reserved == Some(*run_id),
+                Some(goal) => goal.unobserved_provider_calls.contains(agent_run_id),
+            };
+            // Unknown failed-attempt usage cannot fit a finite token budget, as for a fallback.
+            if (active || charge_goal)
+                && (!reserved
+                    || !charge_goal
+                    || goal.is_none_or(|goal| {
+                        goal.effective_budget().max_tokens.is_some()
+                            || goal
+                                .effective_budget()
+                                .max_provider_calls
+                                .is_some_and(|limit| goal.provider_calls >= limit)
+                    }))
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let agent = run
+                .agents
+                .iter()
+                .find(|agent| agent.id == *agent_run_id)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let index = if compaction {
+                if active {
+                    run.tools.len()
+                } else {
+                    current.compactions.len()
+                }
+            } else {
+                agent.provider_calls.len()
+            };
+            // One bound per semantic call: compaction numbers its calls apart, every other role shares the actor's.
+            let earlier: Vec<_> = run
+                .provider_retries
+                .iter()
+                .filter(|(actor, prior)| {
+                    actor == agent_run_id
+                        && (prior.role == ProviderRole::Compaction) == compaction
+                        && prior.call_index == retry.call_index
+                })
+                .collect();
+            if earlier.iter().any(|(_, prior)| prior.role != retry.role) {
+                return Err(ReplayError::InvalidTransition);
+            }
+            // Every wait of the call fits the active time its reservation admitted.
+            let waited = earlier
+                .iter()
+                .map(|(_, prior)| u64::from(prior.delay_ms))
+                .sum::<u64>()
+                .saturating_add(u64::from(retry.delay_ms));
+            let allowance = match goal {
+                Some(goal) if charge_goal => goal.unsettled_active_charge_ms(),
+                _ => u64::from(MAX_PROVIDER_RETRY_DELAY_MS),
+            };
+            if !attempt_role_fits(run, agent, retry.role)
+                || active && agent.status != AgentStatus::Active
+                || usize::try_from(retry.call_index).ok() != Some(index)
+                || usize::from(retry.attempt) != earlier.len() + 1
+                || retry.attempt > crate::provider::MAX_PROVIDER_RETRIES
+                || waited > allowance
+                || retry.role == ProviderRole::Primary
+                    && run
+                        .display
+                        .iter()
+                        .any(|chunk| chunk.call_index == retry.call_index)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            current
+                .runs
+                .last_mut()
+                .ok_or(ReplayError::InvalidTransition)?
+                .provider_retries
+                .push((*agent_run_id, retry.clone()));
+            if let (true, Some(goal_id)) = (charge_goal, goal_id) {
+                let goal = current_goal_mut(current, goal_id)?;
+                goal.provider_calls = goal
+                    .provider_calls
+                    .checked_add(1)
+                    .ok_or(ReplayError::InvalidTransition)?;
+                goal.token_usage_unknown = true;
+            }
+        }
         Event::ProviderFallbackUsed {
             run_id,
             agent_run_id,
@@ -224,24 +368,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 .iter()
                 .find(|agent| agent.id == *agent_run_id)
                 .ok_or(ReplayError::InvalidTransition)?;
-            let valid_role = match fallback.role {
-                ProviderRole::Child => agent.role == AgentRole::Child,
-                ProviderRole::Review => {
-                    let own_tool = match agent.role {
-                        AgentRole::Child => agent.tools.last(),
-                        AgentRole::Primary => run.tools.last(),
-                    };
-                    own_tool.is_some_and(|tool| tool.observation.is_none())
-                }
-                ProviderRole::Primary => {
-                    agent.role == AgentRole::Primary
-                        && run
-                            .tools
-                            .last()
-                            .is_none_or(|tool| tool.observation.is_some())
-                }
-                ProviderRole::Compaction => agent.role == AgentRole::Primary,
-            };
+            let valid_role = attempt_role_fits(run, agent, fallback.role);
             let index = if compaction {
                 if active {
                     run.tools.len()
@@ -438,6 +565,12 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 })
                 .is_some_and(|(_, fallback)| {
                     fallback.role != crate::provider::ProviderRole::for_phase(record.phase)
+                })
+                || run.provider_retries.iter().any(|(actor, retry)| {
+                    *actor == *agent_run_id
+                        && retry.role != crate::provider::ProviderRole::Compaction
+                        && retry.call_index == call_index
+                        && retry.role != crate::provider::ProviderRole::for_phase(record.phase)
                 })
             {
                 return Err(ReplayError::InvalidTransition);

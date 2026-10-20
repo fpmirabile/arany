@@ -476,6 +476,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         lifecycle_hook_sequence: None,
                         provider_sequences: Default::default(),
                         provider_fallbacks: Vec::new(),
+                        provider_retries: Vec::new(),
                     });
                     terminal.record_user_run(&view.runs[0]).unwrap();
                     for lines in [50, 100, 200] {

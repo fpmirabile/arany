@@ -458,6 +458,7 @@ pub(super) async fn submit_objective(
     let mut offered: Option<String> = None;
     let mut held: Option<HeldDraft> = None;
     let mut seen_delivered = 0u64;
+    let mut shown_retries = (None, 0usize);
     let shutdown_reason = loop {
         let approval_more = match &pending {
             Some(approval) => terminal
@@ -573,7 +574,21 @@ pub(super) async fn submit_objective(
                 if sent && terminal.restore_draft_input(composer.text().len()).is_err() {
                     break "terminal input failed".to_owned();
                 }
-                let notice = sent.then_some(TerminalNotice::History(STEERING_SENT));
+                let retry = view
+                    .runs
+                    .last()
+                    .filter(|run| run.accepted_sequence > starting_sequence)
+                    .and_then(|run| {
+                        let shown = if shown_retries.0 == Some(run.id) { shown_retries.1 } else { 0 };
+                        shown_retries = (Some(run.id), run.provider_retries.len());
+                        run.provider_retries.get(shown..)?.last()
+                    })
+                    .map(|(_, retry)| crate::presentation::escape_terminal(&retry.notice()));
+                let notice = if sent {
+                    Some(TerminalNotice::History(STEERING_SENT))
+                } else {
+                    retry.as_deref().map(TerminalNotice::Transient)
+                };
                 if draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err() {
                     break "terminal rendering failed".to_owned();
                 }
@@ -1415,6 +1430,7 @@ mod goal_request_tests {
             images: Vec::new(),
             config: None,
             provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
             agents: Vec::new(),
             assistant_message: None,
             status: arany::RunStatus::Finished,

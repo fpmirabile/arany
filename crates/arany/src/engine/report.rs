@@ -99,11 +99,18 @@ pub(super) fn goal_report(
             );
         }
     }
-    for (index, (_, fallback)) in view
+    for (index, notice) in view
         .runs
         .iter()
         .filter(|run| goal.run_ids.contains(&run.id))
-        .flat_map(|run| &run.provider_fallbacks)
+        .flat_map(|run| {
+            let retries = run.provider_retries.iter().map(|(_, retry)| retry.notice());
+            retries.chain(
+                run.provider_fallbacks
+                    .iter()
+                    .map(|(_, fallback)| fallback.notice()),
+            )
+        })
         .take(9)
         .enumerate()
     {
@@ -114,7 +121,7 @@ pub(super) fn goal_report(
         push_goal_report_item(
             &mut report,
             GoalReportSection::Unresolved,
-            &fallback.notice(),
+            &notice,
             &mut omitted_facts,
         );
     }

@@ -440,7 +440,7 @@ async fn run_on_engine(
             if unguarded > 0 {
                 receipt.push_str(&format!("unguarded effects: {unguarded}\n"));
             }
-            if let Some(notice) = crate::presentation::render_goal_provider_fallbacks(goal_runs) {
+            if let Some(notice) = crate::presentation::render_goal_provider_attempts(goal_runs) {
                 receipt.push_str(&notice);
                 receipt.push('\n');
             }
@@ -1281,7 +1281,7 @@ mod tests {
                 Some("RunStarted") => 16,
                 Some("AgentSpawned") => 11,
                 Some("AgentFinished") => 10,
-                Some("ProviderCallRecorded") => 12,
+                Some("ProviderCallRecorded") => 13,
                 Some("RunFinished") => 9,
                 Some("GoalProviderCallReserved") => 7,
                 Some("MessageAccepted") => 7,

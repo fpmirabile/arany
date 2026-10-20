@@ -11,7 +11,7 @@ use aws_lc_rs::hmac;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v29";
+const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v30";
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;

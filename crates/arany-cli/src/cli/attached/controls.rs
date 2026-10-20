@@ -1296,6 +1296,7 @@ mod tests {
             lifecycle_hook_sequence: None,
             provider_sequences: Default::default(),
             provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
         });
         assert_eq!(
             active_command_notice(&view, InteractiveCommand::Status, starting_sequence),
