@@ -589,7 +589,10 @@ impl History {
         for message in self.messages.iter().rev() {
             let text = message_text(view, message, &self.notices);
             if let Some(byte) = text.find(query) {
-                let offset = if message.kind == MessageKind::Supervisor {
+                let offset = if matches!(
+                    message.kind,
+                    MessageKind::Supervisor | MessageKind::Tool | MessageKind::ToolDetails
+                ) {
                     message_rows(message.kind, &text, self.width)
                         .iter()
                         .rposition(|row| row.source_byte <= byte)
@@ -1143,6 +1146,23 @@ mod tests {
                 .join("\n");
             assert_eq!(details.matches("⏺ Read(a)").count(), 4);
             assert_eq!(details.matches("Arguments:").count(), 4);
+        }
+        for width in [16, 40, 80, 120] {
+            for details in [false, true] {
+                let mut history = History::default();
+                history.set_details(details);
+                history.sync(&view, width, 4096);
+                for query in ["Read(a)", "denied", "pinned"] {
+                    assert!(history.search(&view, query));
+                    assert!(
+                        history
+                            .visible(&view)
+                            .iter()
+                            .any(|row| row.matched && row.text.contains(query)),
+                        "width={width}, details={details}, query={query}"
+                    );
+                }
+            }
         }
     }
 

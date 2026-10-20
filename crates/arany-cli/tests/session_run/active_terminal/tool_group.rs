@@ -176,7 +176,11 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
                 &bytes,
                 &mut declined,
             );
-            if !closed && String::from_utf8_lossy(&bytes).contains("TP7_FINAL_ANSWER") {
+            let text = String::from_utf8_lossy(&bytes);
+            if !closed
+                && let Some(answer) = text.find("TP7_FINAL_ANSWER")
+                && text[answer..].contains("Input:")
+            {
                 closed = true;
                 done.send(()).unwrap();
             }
@@ -184,7 +188,6 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
     });
     let waited = finished.recv_timeout(Duration::from_secs(30));
     if waited.is_ok() {
-        thread::sleep(Duration::from_millis(500));
         write_input(&input, b"\x04");
     }
     let result = wait_product(attached.take());
@@ -216,11 +219,18 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
             waited.is_ok()
         ));
     }
-    assert!(waited.is_ok(), "final answer missing");
+    assert!(
+        waited.is_ok(),
+        "final answer and subsequent input prompt missing"
+    );
     assert_eq!(group, 1);
     assert_eq!(denied, 1);
     assert!(!transcript.contains("Tool ·") && !transcript.contains("succeeded"));
     assert!(!transcript.contains(['⏺', '⎿']));
     assert!(!transcript.contains("OMITTED_CANARY"));
-    assert!(result.status.success() || waited.is_ok());
+    assert!(
+        result.status.success(),
+        "attached exit: {:?}",
+        result.status
+    );
 }
