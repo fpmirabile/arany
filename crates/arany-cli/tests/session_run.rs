@@ -60,6 +60,16 @@ fn tool_outcome(call: arany::ToolCall) -> arany::ProviderOutcome {
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn planned(request: &arany::ProviderRequest) -> bool {
+    request.input.goal_plan_contract.is_some()
+        || request
+            .input
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()))
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn safe_run_diagnostics(run: &arany::RunView) -> String {
     let agents = run
         .agents

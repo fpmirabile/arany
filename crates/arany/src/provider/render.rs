@@ -311,9 +311,9 @@ pub(crate) fn history_refusal_block(run: &RunView) -> Option<String> {
         .agents
         .first()?
         .provider_calls
-        .iter()
-        .rev()
-        .find_map(|call| call.refusal.as_ref())?;
+        .last()?
+        .refusal
+        .as_ref()?;
     Some(
         json!({
             "scope": "historical refused proposal; nothing dispatched",

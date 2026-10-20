@@ -119,17 +119,7 @@ impl CompiledContext {
             let assistant = if plain && run.status == RunStatus::Finished && refusal.is_none() {
                 run.assistant_message.clone().ok_or(ContextTooLarge)?
             } else if plain && run.status != RunStatus::Finished {
-                let mut context = crate::provider::history_unanswered_block(run);
-                let last_call_refused = run
-                    .agents
-                    .first()
-                    .and_then(|agent| agent.provider_calls.last())
-                    .is_some_and(|call| call.refusal.is_some());
-                if let Some(refusal) = refusal.filter(|_| !last_call_refused) {
-                    context.push('\n');
-                    context.push_str(&refusal);
-                }
-                context
+                crate::provider::history_unanswered_block(run)
             } else {
                 let mut context = crate::provider::history_tool_block(run);
                 if let Some(refusal) = refusal {

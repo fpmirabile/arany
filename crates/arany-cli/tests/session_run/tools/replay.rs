@@ -1103,12 +1103,7 @@ pub(super) async fn native_command_changeset_corpus(
             &self,
             request: ProviderRequest,
         ) -> Result<ProviderResponse, ProviderError> {
-            let planned = request.input.goal_plan_contract.is_some()
-                || request
-                    .input
-                    .tools
-                    .as_ref()
-                    .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()));
+            let planned = crate::planned(&request);
 
             let mut requests = self.requests.lock().unwrap();
             let review = request.phase == AgentPhase::ToolReview;

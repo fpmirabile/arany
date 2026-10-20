@@ -2041,6 +2041,7 @@ async fn team_planning_refusal_can_be_repaired_with_delegate() {
             }],
         }),
         finish.clone(),
+        finish.clone(),
         finish,
     ]));
     let engine = engine_support::open(
@@ -2056,10 +2057,18 @@ async fn team_planning_refusal_can_be_repaired_with_delegate() {
     let result = run_to_end(&engine, &provider, input)
         .await
         .expect("team repaired");
+    let mut follow_up = request(&workspace, "What happened?");
+    follow_up.include_paths.clear();
+    follow_up.session_id = Some(result.session_id);
+    follow_up.title = None;
+    run_to_end(&engine, &provider, follow_up)
+        .await
+        .expect("follow-up");
     engine.close().await.expect("close engine");
     {
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[4].input.history[0].assistant, "answer");
         assert_eq!(
             requests[1].input.last_answer_refused,
             Some(arany::ProposalRefusal {
@@ -5533,27 +5542,38 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
     };
     use std::os::unix::fs::PermissionsExt;
 
-    for (plan_calls, cause, goal_calls, expected_calls, failure) in [
+    for (plan_calls, cause, goal_calls, expected_calls, failure, alternating) in [
         (
             None,
             ProposalRefusalCause::PlanInvalid,
-            8,
+            Some(8),
             3,
             Some(RunFailure::RefusalLimit),
+            false,
         ),
         (
             Some(1),
             ProposalRefusalCause::PlanBudgetSpent,
-            8,
+            Some(8),
             3,
             Some(RunFailure::RefusalLimit),
+            false,
         ),
         (
             None,
             ProposalRefusalCause::PlanInvalid,
-            2,
+            Some(2),
             2,
             Some(RunFailure::BudgetExhausted),
+            false,
+        ),
+        (
+            None,
+            ProposalRefusalCause::PlanInvalid,
+            None,
+            8,
+            Some(RunFailure::RefusalLimit),
+            true,
         ),
     ] {
         let temp = tempfile::tempdir().expect("fixture");
@@ -5580,7 +5600,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
             },
             resource_class: arany::ToolResourceClass::Default,
             command_timeout_ms: None,
-            paths: vec!["test.txt".into()],
+            paths: vec!["PRIVATE_ARGUMENT_path".into(), "test.txt".into()],
             commands: Vec::new(),
             skills: Vec::new(),
             mcp_tools: Vec::new(),
@@ -5598,13 +5618,20 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
         };
         let provider = Arc::new(ScriptedProvider::new(
             (0..expected_calls)
-                .map(|_| arany::test_support::scenario::plan_outcome(plan.clone()))
+                .map(|index| {
+                    let mut plan = plan.clone();
+                    if alternating && index % 2 == 1 {
+                        plan.mission = "write test.txt containing hello".into();
+                        plan.budget.max_provider_calls = Some(1);
+                    }
+                    arany::test_support::scenario::plan_outcome(plan)
+                })
                 .collect(),
         ));
         let mut input = request(&workspace, "write test.txt containing hello");
         input.include_paths.clear();
         input.goal.budget = Some(GoalBudget {
-            max_provider_calls: Some(goal_calls),
+            max_provider_calls: goal_calls,
             ..Default::default()
         });
         let result = run_with(
@@ -5646,7 +5673,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
         {
             let requests = provider.requests.lock().expect("requests");
             assert!(requests[0].input.last_answer_refused.is_none());
-            for request in &requests[1..] {
+            for (index, request) in requests[1..].iter().enumerate() {
                 assert_eq!(
                     request
                         .input
@@ -5654,7 +5681,11 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
                         .as_ref()
                         .expect("repair note")
                         .cause,
-                    cause
+                    if alternating && index % 2 == 1 {
+                        ProposalRefusalCause::PlanBudgetSpent
+                    } else {
+                        cause
+                    }
                 );
             }
         }
@@ -5676,7 +5707,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
         assert!(!format!("{events:?}").contains("PRIVATE_ARGUMENT_"));
         assert!(!workspace.join("test.txt").exists());
         store.close().await.expect("close store");
-        if plan_calls.is_none() && goal_calls == 8 {
+        if plan_calls.is_none() && goal_calls == Some(8) {
             let crash_path = temp.path().join("crashed-state");
             let crash_store = Store::open(StateRoot::admit(&crash_path).expect("crash state"))
                 .expect("crash store");

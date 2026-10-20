@@ -499,12 +499,7 @@ impl Provider for Proposal {
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let mut requests = self.requests.lock().unwrap();
-        let planned = request.input.goal_plan_contract.is_some()
-            || request
-                .input
-                .tools
-                .as_ref()
-                .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()));
+        let planned = crate::planned(&request);
         let request_index = requests.len().saturating_sub(usize::from(planned));
         if !planned
             && !self.omit_plan

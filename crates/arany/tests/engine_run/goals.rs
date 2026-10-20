@@ -6101,6 +6101,7 @@ async fn optional_plan_narrows_later_calls_and_keeps_the_success_gate() {
         }),
         crate::tool_outcome(facts_read()),
         finish_with("verified"),
+        finish_with("history checked"),
     ]));
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Verify the selected file");
@@ -6117,6 +6118,19 @@ async fn optional_plan_narrows_later_calls_and_keeps_the_success_gate() {
     .await
     .expect("Run");
     engine.close().await.expect("shutdown");
+    let engine = engine_support::open(
+        StateRoot::open_existing(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("reopened Engine");
+    let mut follow_up = request(&workspace, "What happened?");
+    follow_up.include_paths.clear();
+    follow_up.session_id = Some(result.session_id);
+    follow_up.title = None;
+    run_to_end(&engine, &provider, follow_up)
+        .await
+        .expect("follow-up");
+    engine.close().await.expect("follow-up shutdown");
     let (events, view) = replayed(&state_path, result.session_id).await;
     assert_eq!(view.runs[0].status, RunStatus::Finished);
     assert_eq!(view.goals[0].plan_contract, Some(plan));
@@ -6131,7 +6145,11 @@ async fn optional_plan_narrows_later_calls_and_keeps_the_success_gate() {
         arany::ProposalRefusalCause::PlanScopeExcludesCall
     );
     let requests = provider.requests.lock().expect("requests");
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 5);
+    let history = &requests[4].input.history[0].assistant;
+    assert!(history.contains("verified"));
+    assert!(!history.contains("last_answer_refused"));
+    assert!(!history.contains("nothing dispatched"));
     assert!(
         requests[1].input.tools.as_ref().expect("context").steps[0]
             .plan
