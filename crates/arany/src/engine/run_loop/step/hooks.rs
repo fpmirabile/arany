@@ -1,4 +1,4 @@
-use super::{ActiveTime, Answer, Grant, active_time_limit_observation, not_dispatched};
+use super::{ActiveTime, Answer, Grant, StopCause, active_time_limit_observation, not_dispatched};
 use crate::engine::ledger::{Action, duration_ms};
 use crate::engine::run_loop::{RunLoop, TOOL_CLEANUP_OVERHEAD};
 use crate::engine::{EngineError, STORE_ACTION_OVERHEAD};
@@ -91,7 +91,7 @@ impl HookFold {
                 } else {
                     active_time_limit_observation(intent)
                 },
-                refused: child,
+                stop: child.then_some(StopCause::DelegationDeadline),
                 active_time: (!child).then_some(ActiveTime {
                     segment: None,
                     exhausted: true,
@@ -108,7 +108,11 @@ impl HookFold {
                         "Hook outcome uncertain; no operation was dispatched"
                     },
                 ),
-                refused: true,
+                stop: Some(if self.stop == HookStop::Requested {
+                    StopCause::HookStop
+                } else {
+                    StopCause::Uncertain
+                }),
                 active_time: None,
             },
             HookStop::None if self.narrowed.is_some() => Answer {
@@ -123,7 +127,7 @@ impl HookFold {
                             .map_or_else(Default::default, peer_name)
                     ),
                 ),
-                refused: false,
+                stop: None,
                 active_time: None,
             },
             HookStop::None => {
@@ -144,7 +148,7 @@ impl HookFold {
                 Answer {
                     checkpoint: None,
                     observation: not_dispatched(intent, ToolDisposition::Denied, output),
-                    refused: false,
+                    stop: None,
                     active_time: None,
                 }
             }

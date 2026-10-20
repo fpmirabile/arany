@@ -206,7 +206,7 @@ impl Permission {
 struct Answer {
     checkpoint: Option<crate::session::Checkpoint>,
     observation: ToolObservation,
-    refused: bool,
+    stop: Option<StopCause>,
     active_time: Option<ActiveTime>,
 }
 
@@ -793,7 +793,7 @@ impl RunLoop<'_> {
                     Answer {
                         checkpoint: None,
                         observation,
-                        refused: false,
+                        stop: None,
                         active_time: None,
                     }
                 }
@@ -826,10 +826,9 @@ impl RunLoop<'_> {
                 return Ok(Err(StopCause::ActiveTime));
             }
         }
-        Ok(if answer.refused {
-            Err(StopCause::ToolStopped)
-        } else {
-            Ok((answer.observation, narrowed))
+        Ok(match answer.stop {
+            Some(cause) => Err(cause),
+            None => Ok((answer.observation, narrowed)),
         })
     }
 
@@ -1123,7 +1122,7 @@ impl RunLoop<'_> {
                         ToolDisposition::Limit,
                         crate::tools::types::command_timeout_limit_message(requested, maximum),
                     ),
-                    refused: false,
+                    stop: None,
                     active_time: None,
                 }),
                 source,
@@ -1145,7 +1144,7 @@ impl RunLoop<'_> {
                             _ => "Permission mode denied this Tool",
                         },
                     ),
-                    refused: false,
+                    stop: None,
                     active_time: None,
                 }
             };
@@ -1182,7 +1181,7 @@ impl RunLoop<'_> {
                             Verdict::Deny(Answer {
                                 checkpoint: None,
                                 observation: outside_plan(intent),
-                                refused: false,
+                                stop: None,
                                 active_time: None,
                             }),
                             source,
@@ -1269,6 +1268,7 @@ impl RunLoop<'_> {
         let goal_allows = intent.call.is_internal() || self.plan_allows(&intent.call)?;
         let mut approved = true;
         let mut active_time_exhausted = false;
+        let mut paused = false;
         if goal_allows
             && runtime.allows(&intent.call)
             && let Some(mode) = permission.approval
@@ -1328,6 +1328,7 @@ impl RunLoop<'_> {
         } else if self.pause_at_boundary() {
             // A pause requested during review or the approval wait stops the Run before dispatch.
             approved = false;
+            paused = true;
             if let Some(pause) = queue_pause.take() {
                 self.settle_active_pause(pause, None)?;
             }
@@ -1368,7 +1369,13 @@ impl RunLoop<'_> {
             Verdict::Deny(Answer {
                 checkpoint: None,
                 observation,
-                refused: !approved,
+                stop: (!approved).then(|| {
+                    refusal_cause(
+                        active_time_exhausted,
+                        self.controls.cancellation.is_cancelled(),
+                        paused,
+                    )
+                }),
                 active_time: Some(ActiveTime {
                     segment: None,
                     exhausted: active_time_exhausted,
@@ -1389,7 +1396,7 @@ impl RunLoop<'_> {
             Verdict::Deny(Answer {
                 checkpoint: None,
                 observation: not_dispatched(intent, ToolDisposition::Denied, message),
-                refused: false,
+                stop: None,
                 active_time: Some(ActiveTime {
                     segment: None,
                     exhausted: false,
@@ -1446,7 +1453,7 @@ impl RunLoop<'_> {
                     return Ok(Answer {
                         checkpoint: None,
                         observation: active_time_limit_observation(intent),
-                        refused: false,
+                        stop: None,
                         active_time: Some(ActiveTime {
                             segment: None,
                             exhausted: true,
@@ -1459,7 +1466,7 @@ impl RunLoop<'_> {
             return Ok(Answer {
                 checkpoint: None,
                 observation,
-                refused: false,
+                stop: None,
                 active_time: Some(ActiveTime {
                     segment: Some(segment),
                     exhausted: false,
@@ -1506,7 +1513,7 @@ impl RunLoop<'_> {
         Ok(Answer {
             checkpoint,
             observation,
-            refused: false,
+            stop: None,
             active_time: Some(ActiveTime { segment, exhausted }),
         })
     }
@@ -1734,7 +1741,7 @@ impl RunLoop<'_> {
                     ToolDisposition::Denied,
                     "Approval was not granted; no operation was dispatched",
                 ),
-                refused: true,
+                stop: Some(StopCause::ToolStopped),
                 active_time: None,
             })
         };
@@ -2107,6 +2114,18 @@ fn not_dispatched(
     }
 }
 
+fn refusal_cause(active_time_exhausted: bool, cancelled: bool, paused: bool) -> StopCause {
+    if active_time_exhausted {
+        StopCause::ActiveTime
+    } else if cancelled {
+        StopCause::Cancelled
+    } else if paused {
+        StopCause::Paused
+    } else {
+        StopCause::ToolStopped
+    }
+}
+
 fn unavailable_human_approval(intent: EffectIntent) -> (Verdict, PermissionSource) {
     (
         Verdict::Deny(Answer {
@@ -2116,7 +2135,7 @@ fn unavailable_human_approval(intent: EffectIntent) -> (Verdict, PermissionSourc
                 ToolDisposition::Denied,
                 "Human-only approval is unavailable on this channel; no operation was dispatched",
             ),
-            refused: true,
+            stop: Some(StopCause::ToolStopped),
             active_time: None,
         }),
         PermissionSource::UnavailableApproval,

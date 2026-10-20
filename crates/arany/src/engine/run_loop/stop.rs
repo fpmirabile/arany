@@ -5,10 +5,6 @@ pub(super) enum StopCause {
     Uncertain,
     Cancelled,
     HookStop,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "boundary decisions migrate after R1")
-    )]
     Paused,
     ActiveTime,
     Budget,
