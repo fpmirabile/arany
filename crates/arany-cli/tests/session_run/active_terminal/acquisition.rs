@@ -124,12 +124,22 @@ fn startup_without_cursor_replies_restores_raw_mode_without_session() {
     }
 }
 
+fn state_entries(state: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut entries = std::fs::read_dir(state)
+        .expect("State directory")
+        .map(|entry| entry.expect("State entry").file_name())
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries
+}
+
 fn startup_case(case: &str, signal: Option<Signal>) {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
     crate::seed_fullscreen(&state);
+    let seeded = state_entries(&state);
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
     let mut attached =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
@@ -238,7 +248,7 @@ fn startup_case(case: &str, signal: Option<Signal>) {
     assert!(!transcript.contains("Status:"), "no Run receipt: {case}");
     assert!(!transcript.contains("Answer:"), "no Run answer: {case}");
     assert!(
-        !state.join("events.sqlite3").exists(),
+        state_entries(&state) == seeded,
         "no Session state before terminal admission: {case}"
     );
 }

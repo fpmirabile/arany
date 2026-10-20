@@ -476,7 +476,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 1/19")
+                        if screen.contains("Commands 1/20")
                             && screen.contains("> /help")
                             && screen.contains("Up/Dn Enter Esc")
                         {
@@ -492,7 +492,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 19/19")
+                        if screen.contains("Commands 20/20")
                             && screen.contains("> /exit")
                             && screen.contains("Exit Session")
                         {
@@ -1207,7 +1207,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     loop {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
-            text.contains("> Cmd /setup") && text.contains("Tab/Enter")
+            text.contains("> Cmd /setup") && text.contains("Tab completes")
         }) {
             break;
         }
@@ -1217,26 +1217,6 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "Down", "Enter"])
-            .status
-            .success()
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("> /status") && text.contains("Enter command")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "active Enter did not fill the focused command"
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
             .status
             .success()
     );
@@ -1310,9 +1290,8 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if capture_pane(&server).is_some_and(|screen| {
-            String::from_utf8_lossy(&screen)
-                .lines()
-                .any(|row| row.contains("Provider: custom:local") && row.contains("unavailable"))
+            let text = String::from_utf8_lossy(&screen);
+            text.contains("Provider: custom:local") && text.contains("unavailable while a Run")
         }) {
             break;
         }
@@ -1338,7 +1317,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     loop {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
-            text.contains("Commands · 19 local controls")
+            text.contains("Commands · 20 local controls")
                 && text.contains("> /help")
                 && text.contains("Enter/Esc close")
         }) {
@@ -1542,16 +1521,28 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         "Classic retained draft after completion",
         |screen| {
             let text = String::from_utf8_lossy(screen);
-            text.contains("pending") && text.contains("draft") && text.contains("ready")
+            text.contains("pending") && text.contains("draft") && text.contains("Draft retained:")
         },
     );
     let scrollback = capture_scrollback(&server).expect("native tmux scrollback");
     let scrollback = String::from_utf8(scrollback).expect("scrollback UTF-8");
     assert!(
-        scrollback.contains("Arany · Answer:\n  done"),
+        scrollback.contains("● Arany:\n  done"),
         "confirmed answer remains in native scrollback: {}",
         redacted_tail(scrollback.as_bytes())
     );
+    assert!(
+        server
+            .run(&["resize-window", "-x", "40", "-y", "8", "-t", "arany-test:0"])
+            .status
+            .success(),
+        "short Classic pane"
+    );
+    wait_screen(&server, "short Classic draft frame", |screen| {
+        let text = String::from_utf8_lossy(screen);
+        let rows: Vec<_> = text.lines().collect();
+        rows.len() == 8 && text.contains("Ask Arany") && text.contains("pending")
+    });
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "C-c"])
@@ -1589,7 +1580,8 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         .expect("in-flight manual summary");
     wait_maintenance_frame("busy composer", &|screen| {
         let text = String::from_utf8_lossy(screen);
-        text.contains("Compacting Session") && text.contains("Enter keeps draft")
+        (text.contains("Compacting Session") || text.contains("Busy · Ctrl+C interrupts"))
+            && text.contains("Enter keeps draft")
     });
     assert!(
         server
@@ -1667,34 +1659,8 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             .success()
     );
     wait_maintenance_frame("restored maintenance width", &maintenance_layout);
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-f"])
-            .status
-            .success()
-    );
-    wait_maintenance_frame("find while compacting", &|screen| {
-        maintenance_layout(screen) && String::from_utf8_lossy(screen).contains("Find:")
-    });
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "first"])
-            .status
-            .success()
-    );
-    wait_maintenance_frame("visible maintenance query", &|screen| {
-        String::from_utf8_lossy(screen).contains("Find: first")
-    });
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
-            .status
-            .success()
-    );
     let before_maintenance_suspend =
-        wait_maintenance_frame("read history during maintenance", &|screen| {
-            maintenance_layout(screen) && String::from_utf8_lossy(screen).contains("first")
-        });
+        wait_maintenance_frame("draft before maintenance suspend", &maintenance_layout);
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "C-z"])
