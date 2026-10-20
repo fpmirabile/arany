@@ -1632,3 +1632,20 @@ fn assignment_objects_use_native_functions_with_or_without_effect_tools() {
         assert!(decode(&request, &fixture).is_err());
     }
 }
+
+#[test]
+fn final_answer_message_followed_by_a_call_is_a_contract_failure() {
+    let request = primary_request(MODEL);
+    let mut final_message = message("done");
+    final_message["phase"] = json!("final_answer");
+    let call = function_call("arany_read", &read_arguments());
+    assert!(
+        decode(
+            &request,
+            &response("completed", json!([final_message, call.clone()]))
+        )
+        .is_err()
+    );
+    let phase_less = message("working");
+    assert!(decode(&request, &response("completed", json!([phase_less, call]))).is_ok());
+}

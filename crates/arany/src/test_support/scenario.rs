@@ -33,6 +33,7 @@ pub fn plan_outcome(contract: crate::GoalPlanContract) -> crate::ProviderOutcome
 pub struct ScriptedProvider {
     pub identity: ProviderIdentity,
     pub preview: Option<crate::PreviewText>,
+    pub preview_gate: Option<Arc<tokio::sync::Notify>>,
     pub responses: Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>>,
     pub cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
     pub cancel_at_compaction: Option<RunCancellation>,
@@ -57,6 +58,7 @@ impl ScriptedProvider {
                 ..ProviderIdentity::new("scripted", "test-model", crate::Provenance::native())
             },
             preview: None,
+            preview_gate: None,
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
             cancel_at_compaction: None,
@@ -207,6 +209,9 @@ impl Provider for ScriptedProvider {
     ) -> Result<ProviderResponse, ProviderError> {
         if let Some(text) = &self.preview {
             preview.publish(text.clone())?;
+            if let Some(gate) = &self.preview_gate {
+                gate.notified().await;
+            }
         }
         self.invoke(request).await
     }

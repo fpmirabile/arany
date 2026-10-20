@@ -691,10 +691,7 @@ impl WireResponse {
                             .status
                             .as_deref()
                             .is_some_and(|status| status != "completed")
-                        || !matches!(
-                            item.phase.as_deref(),
-                            None | Some("commentary" | "final_answer")
-                        )
+                        || !matches!(item.phase.as_deref(), None | Some("commentary"))
                         || !item.content.as_ref().is_some_and(|parts| {
                             !parts.is_empty()
                                 && parts

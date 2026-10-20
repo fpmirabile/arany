@@ -844,9 +844,9 @@ impl<'a> RunLoop<'a> {
             }
         };
         let mut shown = (**receiver.borrow()).clone();
-        if matches!(&result, CallResult::Response(response) if !matches!(response.outcome, ProviderOutcome::Answer(_)))
-            && !shown.answer.is_empty()
-        {
+        let answered = matches!(&result, CallResult::Response(response) if matches!(response.outcome, ProviderOutcome::Answer(_)));
+        let called = matches!(&result, CallResult::Response(_)) && !answered;
+        if (called || shown.tentative && !answered) && !shown.answer.is_empty() {
             shown.commentary.push(std::mem::take(&mut shown.answer));
         }
         let text = checkpoint.filter(&shown);

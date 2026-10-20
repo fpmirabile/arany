@@ -1614,6 +1614,7 @@ fn answer_text_streams_and_is_withdrawn_when_a_call_follows() {
         let mut decoder = MessageStream::new(KEY, "model-1", publisher);
         decoder.feed(sse(&events).as_bytes()).unwrap();
         assert_eq!(observed.borrow().answer, "Hola ");
+        assert!(observed.borrow().tentative);
         events = vec![
             json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"there"}}),
             json!({"type":"content_block_stop","index":0}),

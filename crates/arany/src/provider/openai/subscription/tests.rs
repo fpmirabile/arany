@@ -1478,3 +1478,27 @@ fn oversized_streamed_answer_leaves_refusal_to_the_engine_instead_of_failing_the
     }
     assert!(observed.borrow().answer.len() <= crate::session::MAX_DISPLAY_TEXT_BYTES);
 }
+
+#[test]
+fn streamed_answer_is_tentative_unless_the_item_is_final_answer() {
+    for (phase, tentative) in [(None, true), (Some("final_answer"), false)] {
+        let mut added = json!({"id":"msg_1","type":"message","role":"assistant","status":"in_progress","content":[]});
+        if let Some(phase) = phase {
+            added["phase"] = json!(phase);
+        }
+        let events = [
+            json!({"type":"response.created","response":{"id":"resp_1","model":"model-a"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":added}),
+            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_1","delta":"hello"}),
+        ];
+        let (publisher, observed) = ResponsePreview::new();
+        let mut decoder = StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher));
+        for event in &events {
+            decoder
+                .feed(format!("data: {event}\n\n").as_bytes())
+                .unwrap();
+        }
+        assert_eq!(observed.borrow().answer, "hello");
+        assert_eq!(observed.borrow().tentative, tentative, "{phase:?}");
+    }
+}

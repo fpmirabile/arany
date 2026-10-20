@@ -5248,6 +5248,8 @@ async fn streamed_text_before_a_call_is_journaled_as_commentary_and_the_run_cont
         tentative: true,
         ..Default::default()
     });
+    let gate = Arc::new(tokio::sync::Notify::new());
+    provider.preview_gate = Some(gate.clone());
     let provider = Arc::new(provider);
     let engine =
         engine_support::open(StateRoot::admit(&state).unwrap(), EngineConfig::default()).unwrap();
@@ -5256,17 +5258,27 @@ async fn streamed_text_before_a_call_is_journaled_as_commentary_and_the_run_cont
     objective.policy = CollaborationPolicy::Team {
         max_active_children: 1,
     };
+    let hints = RunHints::with_previews();
+    let mut previews = hints.previews();
+    // The Engine checkpoints a preview before it publishes it as a hint, so the gate opens after the checkpoint.
+    let opener = tokio::spawn(async move {
+        loop {
+            previews.changed().await;
+            gate.notify_one();
+        }
+    });
     let outcome = run_with(
         &engine,
         &provider,
         objective,
         RunControls {
-            hints: Some(RunHints::with_previews()),
+            hints: Some(hints),
             ..Default::default()
         },
     )
     .await
     .unwrap();
+    opener.abort();
     engine.close().await.unwrap();
     assert_eq!(outcome.run.status, RunStatus::Finished);
     let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
