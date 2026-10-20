@@ -269,6 +269,35 @@ async fn run_with_provider(
     run_on_engine(args, admission, providers, engine, None).await
 }
 
+fn invoked_skill(
+    args: &ExecArgs,
+    admission: &Admission,
+) -> Result<(String, Option<String>), String> {
+    let literal = || Ok((admission.objective.clone(), None));
+    if !args.tools
+        || args.prompt.is_none()
+        || args.goal.is_some()
+        || !admission.objective.starts_with('/')
+    {
+        return literal();
+    }
+    let names = StateRoot::open_existing(&admission.state_dir)
+        .map_err(|_| "Tool configuration unavailable".to_owned())
+        .and_then(|root| {
+            arany::runtime_skill_names(&root, &admission.workspace)
+                .map_err(|error| error.to_string())
+        })?;
+    Ok(
+        match crate::terminal::skill_invocation(&admission.objective, &names) {
+            Some((name, task)) => (
+                crate::terminal::invoked_objective(name, task),
+                Some(name.to_owned()),
+            ),
+            None => (admission.objective.clone(), None),
+        },
+    )
+}
+
 async fn run_on_engine(
     args: ExecArgs,
     admission: Admission,
@@ -290,6 +319,7 @@ async fn run_on_engine(
     };
     let (goal_budget, resource_settings) =
         crate::cli::attached::execution_limits(&admission.state_dir).await?;
+    let (objective, skill) = invoked_skill(&args, &admission)?;
     let mut goal = admission.goal;
     apply_saved_limits(&mut goal, goal_budget, resource_settings);
     let end = run_signalled(
@@ -297,9 +327,10 @@ async fn run_on_engine(
         providers,
         tools,
         RunRequest {
+            skill,
             session_id: admission.session_id,
             title: None,
-            objective: admission.objective,
+            objective,
             images: Vec::new(),
             workspace: admission.workspace,
             include_paths: args.include_paths,
@@ -672,6 +703,53 @@ mod tests {
     }
 
     #[test]
+    fn slash_skill_prompts_invoke_admitted_skills_and_everything_else_stays_literal() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().expect("temp");
+        let workspace = temp.path().join("workspace");
+        for name in ["ask-matt", "help"] {
+            let dir = workspace.join(".agents/skills").join(name);
+            std::fs::create_dir_all(&dir).expect("skill directory");
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: Guide\n---\nBody\n"),
+            )
+            .expect("skill");
+        }
+        let state_dir = temp.path().join("state");
+        let state = StateRoot::admit(&state_dir).expect("state");
+        let config = state_dir.join("tools.json");
+        std::fs::write(
+            &config,
+            r#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[]}"#,
+        )
+        .expect("config");
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).expect("mode");
+        drop(state);
+        let invoked = |prompt: &str, tools: bool| {
+            let mut exec = args(state_dir.clone(), workspace.clone(), prompt);
+            exec.tools = tools;
+            let admission = exec.admit().expect("admitted");
+            invoked_skill(&exec, &admission).expect("skill resolution")
+        };
+        assert_eq!(
+            invoked("/ask-matt do X", true),
+            ("do X".to_owned(), Some("ask-matt".into()))
+        );
+        assert_eq!(
+            invoked("/ask-matt", true),
+            ("/ask-matt".to_owned(), Some("ask-matt".into()))
+        );
+        for literal in ["/help", "//ask-matt", "/unknown x", "ask-matt"] {
+            assert_eq!(invoked(literal, true), (literal.to_owned(), None));
+        }
+        assert_eq!(
+            invoked("/ask-matt do X", false),
+            ("/ask-matt do X".to_owned(), None)
+        );
+    }
+
+    #[test]
     fn stop_signals_cancel_once_then_force() {
         assert_eq!(stop_step(false, StopSignal::Interrupt), StopStep::Cancel);
         assert_eq!(
@@ -915,6 +993,7 @@ mod tests {
             .submit(
                 AdmittedProviders::single(provider),
                 RunRequest {
+                    skill: None,
                     session_id: None,
                     title: Some("Exhausted".into()),
                     objective: "Use the only Provider call".into(),
@@ -1205,6 +1284,7 @@ mod tests {
                 Some("ProviderCallRecorded") => 12,
                 Some("RunFinished") => 9,
                 Some("GoalProviderCallReserved") => 7,
+                Some("MessageAccepted") => 7,
                 _ => 6,
             };
             assert_eq!(line["event_version"], version);

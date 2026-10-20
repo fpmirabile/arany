@@ -2226,3 +2226,26 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
         assert!(decode(&malformed, 12).is_err(), "{key}");
     }
 }
+
+#[test]
+fn accepted_message_requires_current_nullable_skill() {
+    let run_id = Some(RunId::new());
+    assert_eq!(payload_version("MessageAccepted"), Some(7));
+    for skill in [serde_json::Value::Null, serde_json::json!("ask-matt")] {
+        let payload = serde_json::json!({"text":"do X", "images":[], "skill":skill});
+        let event =
+            Event::decode("MessageAccepted", 7, &payload.to_string(), run_id, None).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&event.payload().unwrap()).unwrap(),
+            payload
+        );
+        assert!(Event::decode("MessageAccepted", 6, &payload.to_string(), run_id, None).is_err());
+    }
+    for payload in [
+        serde_json::json!({"text":"do X", "images":[]}),
+        serde_json::json!({"text":"do X", "images":[], "skill":"../escape"}),
+        serde_json::json!({"text":"do X", "images":[], "skill":false}),
+    ] {
+        assert!(Event::decode("MessageAccepted", 7, &payload.to_string(), run_id, None).is_err());
+    }
+}

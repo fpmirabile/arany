@@ -1050,6 +1050,7 @@ pub struct ToolStep {
 /// Live Run state only: replayed turns are never serialized or journaled.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolContext {
+    pub invoked_skill: Option<ToolObservation>,
     pub catalog: String,
     pub history_summary: Option<String>,
     pub steps: Vec<ToolStep>,
@@ -1099,7 +1100,15 @@ impl ToolStep {
 
 const RESULT_ENVELOPE_BYTES: usize = 128;
 
+fn skill_context_bytes(skill: &ToolObservation) -> usize {
+    model_observation(skill).to_string().len() + RESULT_ENVELOPE_BYTES
+}
+
 impl ToolContext {
+    pub(crate) fn with_invoked_skill_len(&self, skill: &ToolObservation) -> usize {
+        self.rendered_len() + skill_context_bytes(skill)
+    }
+
     /// Researcher Tool calls the next request may still make: the newest step's count, else the
     /// catalog's own; `None` for the primary.
     pub fn calls_remaining(&self) -> Option<usize> {
@@ -1145,6 +1154,7 @@ impl ToolContext {
 
     pub(crate) fn rendered_len(&self) -> usize {
         self.catalog.len()
+            + self.invoked_skill.as_ref().map_or(0, skill_context_bytes)
             + self.stop_bytes
             + self.history_summary.as_ref().map_or(0, String::len)
             + self.steps.iter().map(ToolStep::rendered_len).sum::<usize>()
@@ -1152,6 +1162,7 @@ impl ToolContext {
 
     pub(crate) fn projected_len(&self, summary: Option<&str>, steps: usize) -> usize {
         self.catalog.len()
+            + self.invoked_skill.as_ref().map_or(0, skill_context_bytes)
             + self.stop_bytes
             + summary.map_or(0, str::len)
             + self.steps[steps..]

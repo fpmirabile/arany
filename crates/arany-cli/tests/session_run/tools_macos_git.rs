@@ -228,6 +228,7 @@ async fn native_git_journey_helper() {
             &engine,
             &provider,
             RunRequest {
+                skill: None,
                 session_id: None,
                 title: Some("Git".into()),
                 objective: "Inspect Git state".into(),

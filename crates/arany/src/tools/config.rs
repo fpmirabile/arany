@@ -45,6 +45,8 @@ pub(crate) struct ProgramInput {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Skill {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_model_invocation: bool,
     pub name: String,
     pub description: String,
     pub directory: String,

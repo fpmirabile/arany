@@ -63,6 +63,7 @@ mod goal_recovery_tests {
             last_sequence: 1,
             lineage: None,
             runs: vec![RunView {
+                skill: None,
                 failure: None,
                 supervisor: Default::default(),
                 workers: Default::default(),
@@ -311,6 +312,7 @@ mod goal_replay_tests {
                 phase: GoalPhase::Implementation,
             },
             Event::MessageAccepted {
+                skill: None,
                 run_id,
                 text: GOAL_OBJECTIVE.into(),
                 images: Vec::new(),
@@ -2775,6 +2777,7 @@ mod goal_replay_tests {
             last_sequence: 1,
             lineage: None,
             runs: vec![RunView {
+                skill: None,
                 failure: None,
                 supervisor: Default::default(),
                 workers: Default::default(),
@@ -3803,6 +3806,7 @@ mod goal_replay_tests {
             last_sequence: 1,
             lineage: None,
             runs: vec![RunView {
+                skill: None,
                 failure: None,
                 supervisor: Default::default(),
                 workers: Default::default(),
@@ -3971,6 +3975,7 @@ mod goal_replay_tests {
             lineage: None,
             runs: vec![
                 RunView {
+                    skill: None,
                     failure: None,
                     supervisor: Default::default(),
                     workers: Default::default(),
@@ -4004,6 +4009,7 @@ mod goal_replay_tests {
                     provider_fallbacks: Vec::new(),
                 },
                 RunView {
+                    skill: None,
                     failure: None,
                     supervisor: Default::default(),
                     workers: Default::default(),
@@ -6127,6 +6133,127 @@ mod goal_replay_tests {
         )
         .expect("single child request");
     }
+
+    #[test]
+    fn invoked_skill_origin_requires_acceptance_and_observation_before_egress() {
+        let (session, goal, run, actor) = (
+            SessionId::new(),
+            GoalId::new(),
+            RunId::new(),
+            AgentRunId::new(),
+        );
+        let mut events = vec![goal_started(goal, GoalBudget::default())];
+        let mut opening = start_run(goal, run, actor, config(CollaborationPolicy::Single, true));
+        for event in &mut opening {
+            if let Event::MessageAccepted { skill, .. } = event {
+                *skill = Some("ask-matt".into());
+            }
+        }
+        events.extend(opening);
+        let mut view = SessionView::replay_open(session, &session_with(session, events))
+            .unwrap()
+            .unwrap();
+        let intent = child_intent(
+            run,
+            actor,
+            ToolCall::Skill {
+                name: "ask-matt".into(),
+                resource: None,
+            },
+        );
+        let start = |intent: EffectIntent| Event::ToolStarted {
+            run_id: run,
+            agent_run_id: actor,
+            intent,
+            active_ceiling_ms: 0,
+        };
+        assert!(rejected(&view, reserve_child_call(goal, run, actor)));
+        for call in [
+            ToolCall::Skill {
+                name: "other".into(),
+                resource: None,
+            },
+            ToolCall::Skill {
+                name: "ask-matt".into(),
+                resource: Some("references/a.md".into()),
+            },
+        ] {
+            let mut wrong = intent.clone();
+            wrong.call = call;
+            assert!(rejected(&view, start(wrong)));
+        }
+        let mut uninvoked = view.clone();
+        uninvoked.runs[0].skill = None;
+        assert!(rejected(&uninvoked, start(intent.clone())));
+        apply(&mut view, start(intent.clone())).unwrap();
+        assert!(rejected(&view, reserve_child_call(goal, run, actor)));
+        let mut observation = ToolObservation {
+            intent: intent.clone(),
+            disposition: ToolDisposition::Succeeded,
+            output: "pinned guidance".into(),
+            attestation: Some(crate::tools::Attestation::Guard(
+                crate::tools::GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                },
+            )),
+            cache_update: CacheUpdate::NotApplicable,
+            enforcement_cause: None,
+        };
+        let finish = |observation| Event::ToolFinished {
+            checkpoint: None,
+            run_id: run,
+            agent_run_id: actor,
+            observation,
+        };
+        let mut failed = view.clone();
+        observation.disposition = ToolDisposition::Failed;
+        apply(&mut failed, finish(observation.clone())).unwrap();
+        assert!(rejected(&failed, reserve_child_call(goal, run, actor)));
+        observation.disposition = ToolDisposition::Succeeded;
+        apply(&mut view, finish(observation)).unwrap();
+        assert!(rejected(&view, start(intent.clone())));
+        apply(&mut view, reserve_child_call(goal, run, actor)).unwrap();
+        assert!(rejected(&view, start(intent)));
+        apply(
+            &mut view,
+            Event::ProviderCallRecorded {
+                run_id: run,
+                agent_run_id: actor,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::ToolRequested,
+                    Some(1),
+                ),
+            },
+        )
+        .unwrap();
+        let read = child_intent(
+            run,
+            actor,
+            ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: 0,
+                limit: 32,
+            },
+        );
+        apply(&mut view, start(read.clone())).unwrap();
+        apply(&mut view, finish(observation_for(read, b"Fact"))).unwrap();
+        apply(
+            &mut view,
+            Event::GoalCompactionCallReserved {
+                goal_id: goal,
+                run_id: run,
+                active_ceiling_ms: 0,
+            },
+        )
+        .unwrap();
+        let compacted = covering_compaction(&view, goal, run, 2);
+        apply(&mut view, compacted).expect("the Skill prelude does not consume a model Tool step");
+    }
+
     fn definition_preparation(
         model: Option<&str>,
     ) -> (SessionView, GoalId, EffectIntent, ToolObservation) {

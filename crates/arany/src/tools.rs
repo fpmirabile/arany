@@ -775,8 +775,22 @@ impl ToolRuntime {
         )
     }
 
+    pub(crate) fn allows_skill(&self, name: &str) -> bool {
+        self.config.allows(&ToolCall::Skill {
+            name: name.to_owned(),
+            resource: None,
+        })
+    }
+
+    pub(crate) fn hides_skill_from_model(&self, name: &str) -> bool {
+        self.config
+            .skills
+            .iter()
+            .any(|skill| skill.name == name && skill.disable_model_invocation)
+    }
+
     fn skill_rows(&self) -> Vec<serde_json::Value> {
-        self.config.skills.iter().map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect()
+        self.config.skills.iter().filter(|skill| !skill.disable_model_invocation).map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect()
     }
 
     fn command_rows(&self, names: Option<&[String]>) -> Vec<serde_json::Value> {
@@ -807,6 +821,7 @@ impl ToolRuntime {
             return Err(ToolError::Limit);
         }
         Ok(ToolContext {
+            invoked_skill: None,
             stop_bytes: 0,
             catalog,
             history_summary: None,
@@ -912,6 +927,7 @@ impl ToolRuntime {
             return Err(ToolError::Limit);
         }
         Ok(ToolContext {
+            invoked_skill: None,
             stop_bytes: 0,
             catalog,
             history_summary: None,

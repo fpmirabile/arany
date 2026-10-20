@@ -314,6 +314,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         .join("\n");
                     let run_id = RunId::new();
                     view.runs.push(arany::RunView {
+                        skill: None,
                         supervisor: Default::default(),
                         workers: Default::default(),
                         id: run_id,
@@ -1662,6 +1663,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .append(
                 id,
                 Event::MessageAccepted {
+                    skill: None,
                     run_id: pending_run_id,
                     text: "pending objective".into(),
                     images: Vec::new(),
@@ -2321,6 +2323,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     phase: arany::GoalPhase::Research,
                 },
                 Event::MessageAccepted {
+                    skill: None,
                     run_id: interrupted_run,
                     text: "Question".into(),
                     images: Vec::new(),
@@ -2527,6 +2530,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 .append(
                     session_id,
                     Event::MessageAccepted {
+                        skill: None,
                         run_id: next_run,
                         text: "Try again".into(),
                         images: Vec::new(),
@@ -2705,6 +2709,7 @@ fn process_lock_holder() {
             &engine,
             &provider,
             RunRequest {
+                skill: None,
                 session_id: Some(session_id),
                 title: None,
                 objective: "Held in another process".into(),

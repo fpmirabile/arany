@@ -100,7 +100,18 @@ impl Event {
                 }
                 report.validate()
             }
-            Self::MessageAccepted { text, images, .. } => {
+            Self::MessageAccepted {
+                text,
+                images,
+                skill,
+                ..
+            } => {
+                if skill
+                    .as_deref()
+                    .is_some_and(|name| !crate::tools::types::valid_name(name))
+                {
+                    return Err(ReplayError::InvalidPayload);
+                }
                 if text.len() > super::MAX_USER_MESSAGE_BYTES
                     || text.is_empty() && images.is_empty()
                     || !crate::provider::valid_image_collection(images)

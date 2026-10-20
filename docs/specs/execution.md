@@ -163,6 +163,7 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 | `AgentFinished` | 10 |
 | `ProviderCallRecorded` | 12 |
 | `RunFinished` | 9 |
+| `MessageAccepted` | 7; required nullable `skill` names the invoked Skill, null for an ordinary turn |
 | `GoalStarted`, `GoalFinished`, `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
 | `ToolPermissionDecided` | 4 |
 | `SupervisorVerdictRecorded`, `WorkspaceRewindStarted`, `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |

@@ -1517,6 +1517,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
             phase: arany::GoalPhase::Implementation,
         },
         Event::MessageAccepted {
+            skill: None,
             run_id,
             text: "Use the only Provider call".into(),
             images: Vec::new(),
@@ -5183,6 +5184,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
             phase: arany::GoalPhase::Implementation,
         },
         Event::MessageAccepted {
+            skill: None,
             run_id,
             text: "Spend reserved time".into(),
             images: Vec::new(),
@@ -6176,4 +6178,64 @@ async fn optional_plan_narrows_later_calls_and_keeps_the_success_gate() {
         event.sequence = u64::try_from(index + 1).expect("bounded journal");
     }
     assert!(SessionView::replay(result.session_id, &missing).is_err());
+}
+
+#[tokio::test]
+async fn resumed_goal_refuses_plan_excluded_invoked_skill_before_tool_started() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("fixture");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state = temp.path().join("state");
+    let (session_id, goal_id) = interrupted_autonomous_goal(&state, &workspace).await;
+    let skill = workspace.join(".agents/skills/ask-matt");
+    std::fs::create_dir_all(&skill).expect("Skill directory");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: ask-matt\ndescription: Guide\n---\nUntrusted guidance",
+    )
+    .expect("Skill");
+    let engine = facts_engine(StateRoot::open_existing(&state).expect("state"), &state);
+    let config = state.join("tools.json");
+    std::fs::write(
+        &config,
+        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    )
+    .expect("admit project Skill discovery");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+        .expect("private config");
+    let provider = Arc::new(ScriptedProvider::new(vec![finish_with(
+        "Must not be called",
+    )]));
+    let mut input = request(&workspace, "Resume the reviewed Goal");
+    input.session_id = Some(session_id);
+    input.title = None;
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::resume(goal_id, true);
+    input.skill = Some("ask-matt".into());
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("closed refusal rather than journal error");
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert_eq!(outcome.run.failure, Some(arany::RunFailure::ToolStopped));
+    assert!(provider.requests.lock().expect("requests").is_empty());
+    engine.close().await.expect("shutdown");
+    let (events, view) = replayed(&state, session_id).await;
+    let run = view.runs.last().expect("resumed Run");
+    assert_eq!(run.id, outcome.run.id);
+    assert_eq!(run.skill.as_deref(), Some("ask-matt"));
+    assert_eq!(run.status, RunStatus::Failed);
+    assert!(run.tools.is_empty());
+    assert!(!events.iter().any(|event| matches!(event.event,
+        Event::ToolStarted { run_id, .. } | Event::GoalProviderCallReserved { run_id, .. }
+            if run_id == run.id
+    )));
 }

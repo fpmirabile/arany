@@ -1267,6 +1267,7 @@ mod tests {
                         observed.clone(),
                     ))),
                     RunRequest {
+                        skill: None,
                         session_id: session,
                         title: None,
                         objective: "hola hola".into(),
@@ -1341,6 +1342,7 @@ mod tests {
                     observed.clone(),
                 ))),
                 RunRequest {
+                    skill: None,
                     session_id: session,
                     title: None,
                     objective: "explicit Tools".into(),

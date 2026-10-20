@@ -18,6 +18,7 @@ pub(super) fn apply(
             run_id,
             text,
             images,
+            skill,
         } => {
             if current.runs.iter().any(|run| run.id == *run_id) {
                 return Err(ReplayError::InvalidTransition);
@@ -32,6 +33,7 @@ pub(super) fn apply(
                 previous.interrupt();
             }
             current.runs.push(RunView {
+                skill: skill.clone(),
                 supervisor: Default::default(),
                 workers: Default::default(),
                 id: *run_id,

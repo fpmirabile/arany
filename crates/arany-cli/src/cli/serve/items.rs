@@ -52,6 +52,7 @@ pub(super) fn project(
             run_id,
             text,
             images,
+            ..
         } => {
             state.run_id = Some(*run_id);
             state.first_sequence.get_or_insert(envelope.sequence);

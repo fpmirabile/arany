@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v23";
+const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v25";
 
 pub struct CustomProfileCheck {
     profile_name: String,

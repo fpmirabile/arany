@@ -249,6 +249,7 @@ impl AgentView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunView {
+    pub skill: Option<String>,
     pub supervisor: crate::supervisor::SupervisorState,
     pub workers: WorkerState,
     pub id: RunId,
@@ -285,6 +286,20 @@ impl RunView {
                 )
             })
             .count()
+    }
+
+    pub(crate) fn is_invoked_skill_call(&self, call: &crate::tools::ToolCall) -> bool {
+        matches!(call, crate::tools::ToolCall::Skill { name, resource: None } if self.skill.as_ref() == Some(name))
+    }
+
+    pub(crate) fn invoked_skill_read(&self) -> Option<&ToolView> {
+        self.tools
+            .get(self.parse_count())
+            .filter(|tool| self.is_invoked_skill_call(&tool.intent.call))
+    }
+
+    pub(crate) fn initial_tool_count(&self) -> usize {
+        self.parse_count() + usize::from(self.invoked_skill_read().is_some())
     }
 
     // No Tool of the Run has an open or run-stopping hook; a Command's hooks sit on its source Tool.
@@ -391,7 +406,7 @@ impl RunView {
     }
 
     pub(crate) fn model_tools(&self) -> &[ToolView] {
-        &self.tools[self.parse_count()..]
+        &self.tools[self.initial_tool_count()..]
     }
 }
 
@@ -479,6 +494,7 @@ impl ToolView {
 fn model_tool_count(run: &RunView) -> usize {
     run.tools
         .iter()
+        .skip(run.initial_tool_count())
         .filter(|tool| {
             tool.narrowed_call().is_none()
                 && !is_integration_tool(tool)

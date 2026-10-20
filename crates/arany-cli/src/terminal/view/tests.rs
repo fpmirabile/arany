@@ -1512,7 +1512,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
     assert!(row.contains("/prov"));
     assert!(!row.contains("[ider"));
     assert_eq!(composer.text(), "/prov");
-    composer.apply(TerminalInput::Submit);
+    composer.apply(TerminalInput::Tab);
     terminal
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
         .expect("completed command argument frame");
@@ -1531,7 +1531,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
     composer.set_runtime_skills(&["review".into(), "help".into()]);
     for (prefix, focused, category) in [
         ("/rev", "review", "Skill"),
-        ("/he", "help", "Skill"),
+        ("/he", "help", "Cmd"),
         ("/resum", "resume", "Cmd"),
         ("/permissio", "permissions", "Cmd"),
         ("/s", "status", "Cmd"),
@@ -1562,12 +1562,8 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                         .expect("focused completion visible");
                     assert!(focused_y > input_y, "completion stays below input");
                     assert!(row(input_y).contains(&format!("> {prefix}")));
-                    assert!(row(height - 1).starts_with(if category == "Skill" {
-                        "Tab/Enter: $"
-                    } else {
-                        "Tab/Enter: /"
-                    }));
-                    assert!(row(input_y + 1).contains("Tab/Enter"));
+                    assert!(row(height - 1).starts_with("Tab completes"));
+                    assert!(row(input_y + 1).contains("Enter"));
                     assert!(buffer[(0, focused_y)].modifier.contains(Modifier::BOLD));
                     assert_eq!(
                         buffer[(0, focused_y)].fg,

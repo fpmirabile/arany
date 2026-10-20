@@ -406,6 +406,7 @@ mod tests {
         assert!(!idle.status_line.contains("input "));
         let run_id = RunId::new();
         view.runs.push(RunView {
+            skill: None,
             supervisor: Default::default(),
             workers: Default::default(),
             id: run_id,

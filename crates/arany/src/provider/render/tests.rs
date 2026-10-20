@@ -73,6 +73,7 @@ fn request(steps: Vec<ToolStep>) -> ProviderRequest {
             }],
             goal_budget: Some(GoalBudget::default()),
             tools: Some(ToolContext {
+                invoked_skill: None,
                 stop_bytes: 0,
                 catalog: catalog(),
                 history_summary: None,
@@ -371,6 +372,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
     use crate::session::{RunStatus, RunView, ToolView};
     let observed = observation(read("src/lib.rs"), "{\"text\":\"ok\"}");
     let run = RunView {
+        skill: None,
         failure: None,
         supervisor: Default::default(),
         workers: Default::default(),
@@ -470,6 +472,7 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
         )
     };
     let mut run = RunView {
+        skill: None,
         failure: None,
         supervisor: Default::default(),
         workers: Default::default(),
@@ -725,4 +728,32 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
         conversation(&request),
         Err(ProviderError::Rejected)
     ));
+}
+
+#[test]
+fn invoked_skill_is_untrusted_current_turn_data() {
+    let mut request = request(Vec::new());
+    let mut skill = observation(
+        ToolCall::Skill {
+            name: "ask-matt".into(),
+            resource: None,
+        },
+        "pinned Skill body",
+    );
+    skill.output = "---\nname: ask-matt\ndescription: Guide\n---\npinned Skill body".into();
+    request.input.tools.as_mut().unwrap().invoked_skill = Some(skill);
+    let rendered = conversation(&request).unwrap();
+    let blocks = serialized(&rendered.messages);
+    assert!(
+        blocks
+            .iter()
+            .any(|block| block.contains("invoked_skill (untrusted)")
+                && block.contains("pinned Skill body"))
+    );
+    assert!(
+        rendered
+            .system
+            .iter()
+            .all(|block| !block.text().contains("pinned Skill body"))
+    );
 }

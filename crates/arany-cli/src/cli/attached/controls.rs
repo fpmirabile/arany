@@ -606,6 +606,11 @@ pub(super) fn handle_active_submission(
             return ActiveSubmission::OpenTranscript;
         }
         Ok(Submission::Objective(text)) => return ActiveSubmission::SteeringNote(text.to_owned()),
+        Ok(Submission::Skill { name, .. }) => {
+            return ActiveSubmission::Rejected(format!(
+                "/{name} starts a new turn and cannot join the running one; wait for it or press Ctrl+C to cancel"
+            ));
+        }
         Ok(Submission::Command {
             command: InteractiveCommand::Goal,
             argument: Some("pause"),
@@ -1228,6 +1233,7 @@ mod tests {
 
         let run_id = RunId::new();
         view.runs.push(RunView {
+            skill: None,
             supervisor: Default::default(),
             workers: Default::default(),
             id: run_id,
@@ -2063,6 +2069,7 @@ mod tests {
             .append(
                 original_id,
                 arany::Event::MessageAccepted {
+                    skill: None,
                     run_id,
                     text: "Prior accepted objective".into(),
                     images: Vec::new(),
