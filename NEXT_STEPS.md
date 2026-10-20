@@ -31,7 +31,7 @@ Exit: a week of dogfooding with every fallback to another harness recorded here;
 
 ### Pursue, in order
 
-1. **Run probe P1** (owner, live; see [owner-run live probes](#message-native-provider-request-owner-run-live-probes)). Until P1 passes, the Anthropic native route stays "offline-tested, unvalidated live". Follow-up if P1 shows weak schema compliance: move `plan_contract` to its own `arany_plan` Tool so Tool schemas can be strict again.
+1. **Run probe P1** (owner, live; see [owner-run live probes](#message-native-provider-request-owner-run-live-probes)). Until P1 passes, the Anthropic native route stays "offline-tested, unvalidated live".
 2. **In-process read-only Tools: named-host performance.** Remaining: measure Read p95 <= 50 ms on named Linux hosts. The [repeated-Read corpus](./crates/arany/src/tools/tests.rs) reports warm-file dispatch samples in release with `--nocapture`; cold-disk and end-to-end Run latency remain unmeasured. No hosted test gates this latency.
 3. Reserved (attached client integration is done).
 4. **Spec diet** (process, owner-approved). Done: release and Tool review ledgers are collapsed and `agents/` holds working practice only. Keep new behavior facts in their single owning spec.

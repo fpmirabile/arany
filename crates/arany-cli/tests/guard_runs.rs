@@ -1915,27 +1915,6 @@ MessageCommitted
 RunFinished
 GoalFinished";
 
-const PRIMARY_REPAIRED_WRITE: &str = "\
-SessionStarted
-GoalStarted
-GoalRunLinked
-MessageAccepted
-RunStarted
-AgentSpawned
-GoalProviderCallReserved
-ProviderCallRecorded RootPlan
-GoalProviderCallReserved
-ProviderCallRecorded RootPlan
-GoalPlanContractRecorded
-ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
-ToolFinished Succeeded
-GoalProviderCallReserved
-ProviderCallRecorded RootPlan
-AgentFinished
-MessageCommitted
-RunFinished
-GoalFinished";
-
 const PRIMARY_REVIEWED_WRITE: &str = "\
 SessionStarted
 GoalStarted
