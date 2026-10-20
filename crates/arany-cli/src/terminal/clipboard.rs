@@ -800,9 +800,10 @@ fn copy_locally(
             Destination::Tmux => var("TMUX")
                 .ok_or("tmux unavailable")
                 .and_then(|value| tmux_writer(&value))
-                .and_then(|mut command| {
-                    write_process(&mut command, payload, cancelled, deadline, false, cleanup)
-                        .map(|()| "tmux buffer")
+                .and_then(|(mut command, socket)| {
+                    socket.unchanged()?;
+                    write_process(&mut command, payload, cancelled, deadline, false, cleanup)?;
+                    socket.unchanged().map(|()| "tmux buffer")
                 }),
             Destination::Osc52 => continue,
         };
@@ -826,12 +827,12 @@ fn native_writer(
             "clipboard (wl-copy)",
             &["--type", "text/plain;charset=utf-8"],
         ),
-        LocalDisplay::X11 { .. } if installed("xclip").is_ok() => (
+        // xsel is not admitted: its daemon calls setsid() and leaves the owned process group.
+        LocalDisplay::X11 { .. } => (
             "xclip",
             "clipboard (xclip)",
             &["-selection", "clipboard", "-in"],
         ),
-        LocalDisplay::X11 { .. } => ("xsel", "clipboard (xsel)", &["--clipboard", "--input"]),
     };
     let mut command = display.command(client)?;
     command.args(args);
@@ -849,48 +850,76 @@ fn native_writer(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn tmux_socket(value: &std::ffi::OsStr) -> Result<std::path::PathBuf, &'static str> {
-    use std::os::unix::{
-        ffi::OsStrExt,
-        fs::{FileTypeExt, MetadataExt},
-    };
-    let socket = std::path::Path::new(std::ffi::OsStr::from_bytes(
-        value
-            .as_bytes()
-            .split(|byte| *byte == b',')
-            .next()
-            .unwrap_or_default(),
-    ));
-    let uid = rustix::process::getuid().as_raw();
-    let directory = socket
-        .parent()
-        .filter(|_| socket.is_absolute())
-        .and_then(|parent| std::fs::symlink_metadata(parent).ok());
-    let metadata = std::fs::symlink_metadata(socket).ok();
-    match (directory, metadata) {
-        (Some(directory), Some(metadata))
-            if directory.is_dir()
-                && directory.uid() == uid
-                && directory.mode() & 0o077 == 0
-                && metadata.file_type().is_socket()
-                && metadata.uid() == uid =>
-        {
-            Ok(socket.to_owned())
+struct TmuxSocket {
+    path: std::path::PathBuf,
+    identity: (u64, u64),
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl TmuxSocket {
+    fn admit(value: &std::ffi::OsStr) -> Result<Self, &'static str> {
+        use std::os::unix::{
+            ffi::OsStrExt,
+            fs::{FileTypeExt, MetadataExt},
+        };
+        const UNSAFE: &str = "unsafe tmux socket";
+        let path = std::path::Path::new(std::ffi::OsStr::from_bytes(
+            value
+                .as_bytes()
+                .split(|byte| *byte == b',')
+                .next()
+                .unwrap_or_default(),
+        ));
+        let parent = path.parent().filter(|_| path.is_absolute()).ok_or(UNSAFE)?;
+        // A canonical parent has no link components, so these checks cover the directories tmux reaches.
+        if std::fs::canonicalize(parent).ok().as_deref() != Some(parent) {
+            return Err(UNSAFE);
         }
-        _ => Err("unsafe tmux socket"),
+        let uid = rustix::process::getuid().as_raw();
+        for (depth, ancestor) in parent.ancestors().enumerate() {
+            let metadata = std::fs::symlink_metadata(ancestor).map_err(|_| UNSAFE)?;
+            let mode = metadata.mode();
+            // Only root or the user may rename entries; a sticky directory protects entries it does not own.
+            let replaceable = mode & 0o022 != 0 && mode & 0o1000 == 0;
+            let owned = metadata.uid() == uid || metadata.uid() == 0;
+            let private = metadata.uid() == uid && mode & 0o077 == 0;
+            if !metadata.is_dir() || !owned || replaceable || (depth == 0 && !private) {
+                return Err(UNSAFE);
+            }
+        }
+        let socket = std::fs::symlink_metadata(path).map_err(|_| UNSAFE)?;
+        if !socket.file_type().is_socket() || socket.uid() != uid {
+            return Err(UNSAFE);
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            identity: (socket.dev(), socket.ino()),
+        })
+    }
+
+    fn unchanged(&self) -> Result<(), &'static str> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        std::fs::symlink_metadata(&self.path)
+            .is_ok_and(|socket| {
+                socket.file_type().is_socket() && (socket.dev(), socket.ino()) == self.identity
+            })
+            .then_some(())
+            .ok_or("tmux socket changed during copy")
     }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn tmux_writer(value: &std::ffi::OsStr) -> Result<std::process::Command, &'static str> {
-    let socket = tmux_socket(value)?;
+fn tmux_writer(
+    value: &std::ffi::OsStr,
+) -> Result<(std::process::Command, TmuxSocket), &'static str> {
+    let socket = TmuxSocket::admit(value)?;
     let mut command = std::process::Command::new(installed("tmux")?);
     command
         .env_clear()
         .arg("-S")
-        .arg(socket)
+        .arg(&socket.path)
         .args(["load-buffer", "-w", "-"]);
-    Ok(command)
+    Ok((command, socket))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1602,26 +1631,34 @@ mod copy_tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn tmux_copy_requires_an_absolute_private_socket() {
+    fn tmux_copy_requires_an_absolute_private_socket_under_unreplaceable_ancestors() {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        let root = tempfile::tempdir().unwrap();
-        let private = root.path().join("private");
-        let shared = root.path().join("shared");
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&private)
-            .unwrap();
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&shared)
-            .unwrap();
-        let _private = std::os::unix::net::UnixListener::bind(private.join("default")).unwrap();
-        let _shared = std::os::unix::net::UnixListener::bind(shared.join("default")).unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let private = root.join("private");
+        let shared = root.join("shared");
+        let open = root.join("open");
+        for directory in [&private, &shared, &open, &open.join("private")] {
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(directory)
+                .unwrap();
+        }
+        let bind = |path: std::path::PathBuf| std::os::unix::net::UnixListener::bind(path).unwrap();
+        let _listeners = [
+            bind(private.join("default")),
+            bind(shared.join("default")),
+            bind(open.join("private/default")),
+            // Bound while the original exists, so the substitute cannot reuse its inode.
+            bind(private.join("substitute")),
+        ];
         std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(private.join("file"), b"").unwrap();
         let value = |path: &std::path::Path| OsString::from(format!("{},4242,0", path.display()));
+        let admitted =
+            |path: &std::path::Path| TmuxSocket::admit(&value(path)).map(|socket| socket.path);
         let socket = private.join("default");
-        assert_eq!(tmux_socket(&value(&socket)), Ok(socket.clone()));
+        assert_eq!(admitted(&socket), Ok(socket.clone()));
         for rejected in [
             OsString::from("default,4242,0"),
             OsString::new(),
@@ -1629,20 +1666,34 @@ mod copy_tests {
             value(&shared.join("default")),
             value(&private.join("file")),
             value(&private.join("missing")),
+            value(&private.join("../private/default")),
         ] {
             assert_eq!(
-                tmux_socket(&rejected),
+                TmuxSocket::admit(&rejected).map(|socket| socket.path),
                 Err("unsafe tmux socket"),
                 "{rejected:?}"
             );
         }
-        if let Ok(command) = tmux_writer(&value(&socket)) {
+
+        // Another user could rename `open/private` away and substitute their own socket.
+        let nested = open.join("private/default");
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(admitted(&nested), Err("unsafe tmux socket"));
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        assert_eq!(admitted(&nested), Ok(nested.clone()));
+
+        let admitted = TmuxSocket::admit(&value(&socket)).unwrap();
+        assert_eq!(admitted.unchanged(), Ok(()));
+        std::fs::rename(private.join("substitute"), &socket).unwrap();
+        assert_eq!(admitted.unchanged(), Err("tmux socket changed during copy"));
+
+        if let Ok((command, _)) = tmux_writer(&value(&nested)) {
             let args: Vec<_> = command.get_args().collect();
             assert_eq!(
                 args,
                 [
                     std::ffi::OsStr::new("-S"),
-                    socket.as_os_str(),
+                    nested.as_os_str(),
                     "load-buffer".as_ref(),
                     "-w".as_ref(),
                     "-".as_ref(),
