@@ -1030,6 +1030,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
                     output: "Private outcome unknown".into(),
                     attestation: None,
                     enforcement_cause: None,
+                    limit_cause: None,
                     cache_update: CacheUpdate::NotApplicable,
                 },
             });

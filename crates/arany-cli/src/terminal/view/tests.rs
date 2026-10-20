@@ -3180,6 +3180,72 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
             assert_eq!(buffer_row(buffer, 1).trim_end(), "⏺ Write(test.txt)");
             assert_eq!(buffer_row(buffer, 2).trim_end(), "  ⎿ applied");
             assert!(buffer.content().iter().all(|cell| cell.bg == Color::Reset));
+            let mut limited = crate::presentation::tool_fixture(
+                arany::ToolCall::Command {
+                    program: "sh".into(),
+                    args: vec![],
+                    cwd: String::new(),
+                },
+                "untrusted output",
+            );
+            let observation = limited.observation.as_mut().unwrap();
+            observation.intent.limits.runtime_ms = 120_000;
+            observation.disposition = arany::ToolDisposition::Limit;
+            observation.limit_cause = Some(arany::LimitCause::Timeout);
+            observation.cache_update = arany::CacheUpdate::NotAttempted;
+            let rows = super::super::history::display_rows(
+                MessageKind::Tool,
+                &crate::presentation::tool_summary(&limited),
+                usize::from(width),
+            );
+            terminal
+                .draw(|frame| {
+                    draw_frame_with_history(
+                        frame,
+                        &model,
+                        &Composer::default(),
+                        None,
+                        Palette { color },
+                        &rows,
+                        None,
+                    )
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer_row(buffer, 1).trim_end(), "⏺ Command(sh )");
+            assert_eq!(
+                buffer_row(buffer, 2).trim_end(),
+                "  ⎿ limit: timed out after 120 s; /settings raises it"
+            );
+            let output = serde_json::json!({"exit_code":0,
+                "stdout":"head\n…[123398 bytes, 12338 lines omitted; 123408 bytes, 12340 lines total]…\ntail\n",
+                "stderr":"", "stdout_total":{"bytes":123408,"lines":12340},
+                "stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string();
+            let command = crate::presentation::tool_fixture(limited.intent.call.clone(), &output);
+            let rows = super::super::history::display_rows(
+                MessageKind::Tool,
+                &crate::presentation::tool_summary(&command),
+                usize::from(width),
+            );
+            terminal
+                .draw(|frame| {
+                    draw_frame_with_history(
+                        frame,
+                        &model,
+                        &Composer::default(),
+                        None,
+                        Palette { color },
+                        &rows,
+                        None,
+                    )
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer_row(buffer, 1).trim_end(), "⏺ Command(sh )");
+            assert_eq!(
+                buffer_row(buffer, 2).trim_end(),
+                "  ⎿ exit 0 · 12,340 lines (truncated)"
+            );
             let long = crate::presentation::tool_fixture(
                 arany::ToolCall::Read {
                     path: "界".repeat(70),

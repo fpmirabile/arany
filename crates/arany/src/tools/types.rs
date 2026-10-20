@@ -475,6 +475,17 @@ pub struct EffectIntent {
 }
 
 impl EffectIntent {
+    pub fn effective_timeout_ms(&self) -> u32 {
+        let cap = match self.call {
+            ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. } => {
+                GIT_TIMEOUT_MS
+            }
+            ToolCall::McpList { .. } | ToolCall::McpCall { .. } => MCP_TIMEOUT_MS,
+            _ => self.limits.runtime_ms,
+        };
+        self.limits.runtime_ms.min(cap)
+    }
+
     pub(crate) fn digest(&self) -> [u8; 32] {
         digest(&serde_json::to_vec(self).expect("typed intent is serializable"))
     }
@@ -491,6 +502,9 @@ impl EffectIntent {
             && self.limits.valid()
     }
 }
+
+pub(super) const GIT_TIMEOUT_MS: u32 = 20_000;
+pub(super) const MCP_TIMEOUT_MS: u32 = 40_000;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -850,6 +864,17 @@ impl EnforcementCause {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitCause {
+    Timeout,
+    OutputCeiling,
+    ContextFull,
+    ReadCapacity,
+    RequestedTime,
+    Resource,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolObservation {
@@ -857,6 +882,8 @@ pub struct ToolObservation {
     pub disposition: ToolDisposition,
     #[serde(deserialize_with = "Option::deserialize")]
     pub enforcement_cause: Option<EnforcementCause>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub limit_cause: Option<LimitCause>,
     pub output: String,
     #[serde(deserialize_with = "Option::deserialize")]
     pub attestation: Option<Attestation>,
@@ -985,6 +1012,7 @@ impl ToolObservation {
         let private_command = matches!(self.intent.target, EffectTarget::WorkerView { .. })
             && matches!(self.intent.call, ToolCall::Command { .. });
         self.intent.valid()
+            && (self.limit_cause.is_some() == (self.disposition == ToolDisposition::Limit))
             && (private_command
                 || !matches!(
                     self.intent.call,
@@ -1317,6 +1345,9 @@ pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
             _ => "none",
         });
     }
+    if let Some(cause) = observation.limit_cause {
+        value["limit_cause"] = json!(cause);
+    }
     if let Some(cause) = observation.enforcement_cause {
         value["enforcement_cause"] = json!(cause.diagnostic());
     }
@@ -1395,6 +1426,7 @@ mod model_call_tests {
                 output: json!({"sha256":hex_digest(b"new"),"bytes":3}).to_string(),
                 cache_update: CacheUpdate::NotApplicable,
                 enforcement_cause: None,
+                limit_cause: None,
             };
             let original = serde_json::to_vec(&model_observation(&o)).unwrap();
             o.output = json!({"sha256":hex_digest(b"new"),"bytes":3,"executable":true,"before":{"sha256":hex_digest(b"old"),"bytes":3,"executable":true}}).to_string();
@@ -1453,6 +1485,7 @@ mod unguarded_vocabulary_tests {
         ToolObservation {
             attestation: Some(Attestation::for_site(&intent)),
             enforcement_cause: cause,
+            limit_cause: (disposition == ToolDisposition::Limit).then_some(LimitCause::Resource),
             intent,
             disposition,
             output: String::new(),
@@ -1516,6 +1549,7 @@ mod unguarded_vocabulary_tests {
             intent: host.clone(),
             disposition: ToolDisposition::Succeeded,
             enforcement_cause: None,
+            limit_cause: None,
             output: serde_json::to_string(&CommandResult {
                 exit_code: Some(0),
                 stdout: String::new(),
@@ -1547,6 +1581,7 @@ mod unguarded_vocabulary_tests {
             intent: host.clone(),
             disposition: ToolDisposition::Succeeded,
             enforcement_cause: None,
+            limit_cause: None,
             output: String::new(),
             attestation: Some(Attestation::Unguarded(unguarded_receipt(&host))),
             cache_update: CacheUpdate::NotApplicable,

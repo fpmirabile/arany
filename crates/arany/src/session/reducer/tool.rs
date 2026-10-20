@@ -536,6 +536,7 @@ pub(super) fn apply(
                 && (!no_review
                     || observation.intent.limits.runtime_ms != requested
                     || observation.disposition != crate::tools::ToolDisposition::Limit
+                    || observation.limit_cause != Some(crate::tools::LimitCause::RequestedTime)
                     || observation.attestation.is_some()
                     || observation.cache_update != crate::tools::CacheUpdate::NotApplicable
                     || observation.output
