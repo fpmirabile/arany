@@ -335,10 +335,7 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
             .filter(|part| *part == b"\x1b[6n")
             .count();
         assert!(queries <= 32, "bounded cursor queries");
-        while answered < queries {
-            input.write_all(b"\x1b[2;1R").expect("cursor response");
-            answered += 1;
-        }
+        crate::reply_positioned_cursor_queries(&mut input, &stderr_bytes, &mut answered);
         assert!(
             Instant::now() < deadline,
             "picker frame not drawn; stderr: {}; stdout: {}",
@@ -389,10 +386,7 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
                     .filter(|part| *part == b"\x1b[6n")
                     .count();
                 assert!(queries <= 32, "bounded cursor queries");
-                while answered < queries {
-                    input.write_all(b"\x1b[2;1R").expect("cursor response");
-                    answered += 1;
-                }
+                crate::reply_positioned_cursor_queries(&mut input, &stderr_bytes, &mut answered);
                 let recent = &stderr_bytes[frame_at..];
                 if recent.windows(capture.len()).any(|part| part == capture)
                     && recent.windows(cursor.len()).any(|part| part == cursor)

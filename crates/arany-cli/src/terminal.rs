@@ -502,7 +502,14 @@ impl AttachedTerminal {
         }
         let palette = self.palette();
         let mut progress = view::PermissionFrameProgress { more: true, page };
-        self.draw_frame(|frame| {
+        let width = self
+            .terminal
+            .as_mut()
+            .expect("owned terminal")
+            .size()?
+            .width;
+        let height = view::permission_height(&lines, width, false, profile_start);
+        self.draw_frame(height, |frame| {
             if frame.area().width >= 16 && frame.area().height >= 8 {
                 progress = view::draw_permission_frame(
                     frame,
@@ -563,7 +570,14 @@ impl AttachedTerminal {
         }
         let palette = self.palette();
         let mut more = true;
-        self.draw_frame(|frame| {
+        let width = self
+            .terminal
+            .as_mut()
+            .expect("owned terminal")
+            .size()?
+            .width;
+        let height = view::permission_height(&lines, width, true, None);
+        self.draw_frame(height, |frame| {
             if frame.area().width >= 16 && frame.area().height >= 8 {
                 let width = frame.area().width;
                 let choices: &[&str] = match (
@@ -1207,10 +1221,21 @@ impl AttachedTerminal {
     }
 
     fn prepare_frame(&mut self) -> Result<(), TerminalError> {
+        let height = self
+            .terminal
+            .as_mut()
+            .expect("owned terminal")
+            .get_frame()
+            .area()
+            .height;
+        self.prepare_frame_height(height)
+    }
+
+    fn prepare_frame_height(&mut self, height: u16) -> Result<(), TerminalError> {
         let terminal = self.terminal.as_mut().expect("owned terminal");
         if self.mode == TerminalMode::Classic {
             let offset = terminal.backend().cursor_offset();
-            let resized = resize_classic(terminal, offset, || {
+            let resized = resize_classic(terminal, offset, height, || {
                 let mut backend = TerminalBackend::new(TerminalMode::Classic, None);
                 backend.detach();
                 backend
@@ -1230,9 +1255,10 @@ impl AttachedTerminal {
 
     fn draw_frame(
         &mut self,
+        height: u16,
         render: impl FnOnce(&mut ratatui::Frame<'_>),
     ) -> Result<(), TerminalError> {
-        self.prepare_frame()?;
+        self.prepare_frame_height(height)?;
         let terminal = self.terminal.as_mut().expect("owned terminal");
         terminal.draw(render)?;
         let area = terminal.get_frame().area();
@@ -1277,7 +1303,37 @@ impl AttachedTerminal {
                 .as_ref()
                 .map(|_| TerminalNotice::Transient("Reading clipboard... draft retained"))
         });
-        self.prepare_frame()?;
+        let screen = Rect::from((
+            ratatui::layout::Position::ORIGIN,
+            self.terminal.as_mut().expect("owned terminal").size()?,
+        ));
+        let mut model = match state {
+            SnapshotState::Preparing => PresentationModel::preparing(view, screen.width),
+            _ => PresentationModel::from_session(view, screen.width),
+        };
+        let height = if let Some(picker) = picker {
+            composer_height(composer, screen)
+                .saturating_add(1)
+                .saturating_add(
+                    u16::try_from(picker.items.len().max(1).saturating_add(3))
+                        .unwrap_or(u16::MAX)
+                        .min(12),
+                )
+                .max(8)
+                .min(screen.height)
+        } else if self.mode == TerminalMode::Classic {
+            self.classic_history
+                .sync(view, usize::from(screen.width), usize::from(screen.height));
+            view::classic_height(
+                &model,
+                composer,
+                screen,
+                self.classic_history.live_rows(view).len(),
+            )
+        } else {
+            screen.height
+        };
+        self.prepare_frame_height(height)?;
         self.sync_native(view)?;
         if self.mode == TerminalMode::Classic
             && let Some(TerminalNotice::History(text)) = notice
@@ -1300,10 +1356,6 @@ impl AttachedTerminal {
             .expect("inline terminal")
             .get_frame()
             .area();
-        let mut model = match state {
-            SnapshotState::Preparing => PresentationModel::preparing(view, area.width),
-            _ => PresentationModel::from_session(view, area.width),
-        };
         if matches!(state, SnapshotState::Busy) {
             model.draft_action = DraftAction::Retain;
             model.status_line = "Busy · Ctrl+C interrupts".to_owned();
@@ -1359,17 +1411,19 @@ impl AttachedTerminal {
         } else {
             self.history_mut().status()
         };
+        let status_notice = notice
+            .filter(|notice| {
+                matches!(notice, TerminalNotice::Transient(_))
+                    || (self.mode == TerminalMode::Fullscreen && history_height == 0)
+            })
+            .map(TerminalNotice::text);
         let palette = self.palette();
-        self.draw_frame(|frame| {
+        self.draw_frame(height, |frame| {
             draw_frame_with_history(
                 frame,
                 &model,
                 composer,
-                notice
-                    .filter(|notice| {
-                        matches!(notice, TerminalNotice::Transient(_)) || history_height == 0
-                    })
-                    .map(TerminalNotice::text),
+                status_notice,
                 palette,
                 &history_rows,
                 history_status.as_deref(),
@@ -1463,7 +1517,13 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        self.draw_frame(|frame| {
+        let width = self
+            .terminal
+            .as_mut()
+            .expect("owned terminal")
+            .size()?
+            .width;
+        self.draw_frame(if width < 20 { 8 } else { 7 }, |frame| {
             draw_setup_frame(
                 frame,
                 step,
@@ -1491,7 +1551,13 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        self.draw_frame(|frame| {
+        let width = self
+            .terminal
+            .as_mut()
+            .expect("owned terminal")
+            .size()?
+            .width;
+        self.draw_frame(if width < 20 { 8 } else { 7 }, |frame| {
             draw_setup_text_frame(frame, title, instruction, draft, notice, palette)
         })?;
         Ok(())
@@ -1527,7 +1593,7 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        self.draw_frame(|frame| {
+        self.draw_frame(8, |frame| {
             draw_setup_choices_frame(
                 frame,
                 title,
@@ -1559,7 +1625,14 @@ impl AttachedTerminal {
         let palette = self.palette();
         let mut has_more = false;
         let mut visible = false;
-        self.draw_frame(|frame| {
+        let width = self
+            .terminal
+            .as_mut()
+            .expect("owned terminal")
+            .size()?
+            .width;
+        let height = view::setup_warning_height(warning, width);
+        self.draw_frame(height, |frame| {
             visible = frame.area().width >= 16 && frame.area().height >= 8;
             has_more = draw_setup_warning_frame(
                 frame,
@@ -1713,8 +1786,12 @@ impl AttachedTerminal {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();
-        let result =
-            self.draw_frame(|frame| draw_session_picker_frame(frame, items, selected, palette));
+        let result = self.draw_frame(
+            u16::try_from(items.len().saturating_add(6))
+                .unwrap_or(u16::MAX)
+                .min(12),
+            |frame| draw_session_picker_frame(frame, items, selected, palette),
+        );
         if let Err(error) = result {
             let _ = self.close_sessions();
             return Err(error);
@@ -1737,7 +1814,9 @@ impl AttachedTerminal {
     ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
         let palette = self.palette();
-        self.draw_frame(|frame| draw_quick_actions_frame(frame, selected, has_draft, palette))?;
+        self.draw_frame(6, |frame| {
+            draw_quick_actions_frame(frame, selected, has_draft, palette)
+        })?;
         Ok(())
     }
 
@@ -1782,7 +1861,7 @@ impl AttachedTerminal {
 
     fn draw_help(&mut self, selected: usize) -> Result<(), TerminalError> {
         let palette = self.palette();
-        self.draw_frame(|frame| draw_help_frame(frame, selected, palette))?;
+        self.draw_frame(20, |frame| draw_help_frame(frame, selected, palette))?;
         Ok(())
     }
 
@@ -1975,12 +2054,14 @@ impl AttachedTerminal {
         let panel = self.agent_panel.as_mut().expect("open agent panel");
         panel.selected = model.selected;
         let (_, screen_height) = size()?;
-        let height = screen_height.clamp(1, 14);
-        panel.scroll = panel.scroll.min(
-            agent_detail_lines(&model, width)
-                .len()
-                .saturating_sub(agent_detail_rows(height, model.choices.len())),
-        );
+        let detail_lines = agent_detail_lines(&model, width).len();
+        let height = u16::try_from(detail_lines.saturating_add(2 + model.choices.len().min(4)))
+            .unwrap_or(u16::MAX)
+            .min(14)
+            .min(screen_height);
+        panel.scroll = panel
+            .scroll
+            .min(detail_lines.saturating_sub(agent_detail_rows(height, model.choices.len())));
         let scroll = panel.scroll;
         if self.mode == TerminalMode::Fullscreen
             && !model.choices.is_empty()
@@ -1989,7 +2070,9 @@ impl AttachedTerminal {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();
-        self.draw_frame(|frame| draw_agent_inspector_frame(frame, &model, scroll, palette))?;
+        self.draw_frame(height, |frame| {
+            draw_agent_inspector_frame(frame, &model, scroll, palette)
+        })?;
         self.agent_picker_area = Some(bottom_area(
             self.terminal
                 .as_mut()
@@ -2086,26 +2169,41 @@ impl AttachedTerminal {
 fn resize_classic<B: Backend>(
     terminal: &mut Terminal<B>,
     cursor_offset: u16,
+    height: u16,
     detached: impl FnOnce() -> B,
 ) -> Result<(), B::Error> {
     let size = terminal.size()?;
-    if size.width >= terminal.get_frame().area().width {
-        return terminal.autoresize();
+    let area = terminal.get_frame().area();
+    let height = height.max(1).min(size.height);
+    if area.width == size.width && area.height == height && area.bottom() == size.height {
+        return Ok(());
     }
-    // Ratatui's Inline shrink clears from screen row zero, including settled transcript.
-    let cursor = terminal.get_cursor_position()?;
+    // Width reflow moves the caret; recover the owned top before clearing transient rows.
+    let top = if size.width != area.width || size.height < area.bottom() {
+        terminal
+            .get_cursor_position()?
+            .y
+            .saturating_sub(cursor_offset)
+    } else {
+        area.y.min(size.height.saturating_sub(1))
+    };
     let backend = terminal.backend_mut();
-    backend.set_cursor_position((0, cursor.y.saturating_sub(cursor_offset)))?;
+    backend.set_cursor_position((0, top))?;
     backend.clear_region(ratatui::backend::ClearType::AfterCursor)?;
     backend.show_cursor()?;
+    backend.set_cursor_position((0, top.max(size.height.saturating_sub(height))))?;
     let backend = std::mem::replace(backend, detached());
     let mut resized = Terminal::with_options(
         backend,
         ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Inline(size.height.min(12)),
+            viewport: ratatui::Viewport::Inline(height),
         },
     )?;
-    resized.clear()?;
+    let area = resized.get_frame().area();
+    resized.backend_mut().set_cursor_position((0, area.y))?;
+    resized
+        .backend_mut()
+        .clear_region(ratatui::backend::ClearType::AfterCursor)?;
     *terminal = resized;
     Ok(())
 }
@@ -2233,7 +2331,7 @@ mod insert_rows_tests {
             for (columns, height) in [(width, 25), (80, 24)] {
                 // TestBackend::resize reshapes its flat scrollback bytes instead of preserving rows.
                 *terminal.backend_mut() = fixture(columns, height, &answer).backend().clone();
-                resize_classic(&mut terminal, 2, || TestBackend::new(1, 1)).unwrap();
+                resize_classic(&mut terminal, 2, 12, || TestBackend::new(1, 1)).unwrap();
                 terminal
                     .draw(|frame| {
                         let area = frame.area();
@@ -2271,7 +2369,7 @@ mod insert_rows_tests {
             before, answer,
             "transcript survives backend 24-to-20 resize"
         );
-        resize_classic(&mut height_shrunk, 2, || TestBackend::new(1, 1)).unwrap();
+        resize_classic(&mut height_shrunk, 2, 12, || TestBackend::new(1, 1)).unwrap();
         let rows = text_rows(height_shrunk.backend().scrollback())
             .into_iter()
             .chain(text_rows(height_shrunk.backend().buffer()))
@@ -2286,7 +2384,7 @@ mod insert_rows_tests {
         let mut short = fixture(80, 8, &answer);
         assert_eq!(short.get_frame().area().height, 8);
         short.backend_mut().resize(80, 24);
-        resize_classic(&mut short, 2, || TestBackend::new(1, 1)).unwrap();
+        resize_classic(&mut short, 2, 12, || TestBackend::new(1, 1)).unwrap();
         assert_eq!(short.get_frame().area().height, 12);
         let rows = text_rows(short.backend().scrollback())
             .into_iter()
@@ -2301,6 +2399,65 @@ mod insert_rows_tests {
             actual, answer,
             "native transcript after short-screen recovery"
         );
+    }
+
+    #[test]
+    fn classic_grow_and_shrink_clear_only_transient_rows() {
+        use ratatui::widgets::{Paragraph, Widget};
+        for height in [8, 12, 24, 50] {
+            let mut backend = TestBackend::new(80, height);
+            let mut settled = Buffer::empty(Rect::new(0, height - 5, 80, 1));
+            Paragraph::new("settled history").render(settled.area, &mut settled);
+            backend
+                .draw(Buffer::empty(settled.area).diff(&settled).into_iter())
+                .unwrap();
+            backend.set_cursor_position((0, height - 4)).unwrap();
+            let mut terminal = Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Inline(4),
+                },
+            )
+            .unwrap();
+            for needed in [4, height, 6, 4] {
+                resize_classic(&mut terminal, 0, needed, || TestBackend::new(1, 1)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        let area = frame.area();
+                        frame.render_widget(
+                            Paragraph::new(if needed > 4 { "dialog" } else { "composer" }),
+                            area,
+                        );
+                        frame.set_cursor_position((2, area.y));
+                    })
+                    .unwrap();
+                let area = terminal.get_frame().area();
+                assert_eq!(area, Rect::new(0, height - needed, 80, needed));
+                let rows = text_rows(terminal.backend().buffer());
+                assert!(
+                    rows[..usize::from(area.y)]
+                        .iter()
+                        .all(|row| row.is_empty() || row == "settled history"),
+                    "stale transient rows at {height}/{needed}: {rows:?}"
+                );
+                let all_rows = text_rows(terminal.backend().scrollback())
+                    .into_iter()
+                    .chain(rows)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    all_rows
+                        .iter()
+                        .filter(|row| row.as_str() == "settled history")
+                        .count(),
+                    1
+                );
+                assert!(
+                    text_rows(terminal.backend().scrollback())
+                        .iter()
+                        .all(|row| row.is_empty() || row == "settled history")
+                );
+            }
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -2417,7 +2574,7 @@ mod insert_rows_tests {
             let viewport = terminal.get_frame().area();
             terminal.backend_mut().inner.resize(40, 24);
             terminal.backend_mut().failure = Some(failure);
-            let error = resize_classic(&mut terminal, 0, || FailingResizeBackend {
+            let error = resize_classic(&mut terminal, 0, 12, || FailingResizeBackend {
                 inner: TestBackend::new(1, 1),
                 shown: Rc::new(StateCell::new(false)),
                 failure: None,

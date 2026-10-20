@@ -2059,9 +2059,9 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             result.status.success(),
             "inline setup journey failed at {columns}"
         );
-        assert_eq!(
-            answered.cursor_queries, 1,
-            "Classic observes the cursor only at acquisition at {columns}"
+        assert!(
+            (1..=128).contains(&answered.cursor_queries),
+            "Classic observes the cursor at acquisition and height changes at {columns}"
         );
         let text = String::from_utf8(transcript).expect("PTY UTF-8");
         assert!(
@@ -3709,9 +3709,9 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
         );
         assert!(result.stderr.is_empty());
         assert_eq!(
-            answered.cursor_queries,
-            usize::from(!linear),
-            "only Classic observes the cursor, once at acquisition"
+            answered.cursor_queries > 0,
+            !linear,
+            "only Classic observes the cursor at acquisition and height changes"
         );
         let text = String::from_utf8(transcript).expect("screen-reader UTF-8");
         if linear {

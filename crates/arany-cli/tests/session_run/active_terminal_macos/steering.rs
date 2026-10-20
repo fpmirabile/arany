@@ -215,10 +215,11 @@ fn run_native(note_delivery: bool, classic: bool) {
                     .filter(|part| *part == b"\x1b[6n")
                     .count();
                 assert!(queries <= 32, "bounded native cursor queries");
-                while answered_queries < queries {
-                    input.write_all(b"\x1b[24;1R").unwrap();
-                    answered_queries += 1;
-                }
+                crate::reply_positioned_cursor_queries(
+                    &mut input,
+                    &transcript,
+                    &mut answered_queries,
+                );
                 crate::process::decline_workspace_consent(
                     &mut input.try_clone().unwrap(),
                     &transcript,

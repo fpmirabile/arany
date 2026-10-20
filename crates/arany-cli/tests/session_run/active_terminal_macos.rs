@@ -1143,11 +1143,8 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         256 * 1024,
         |bytes| {
             let count = bytes.windows(4).filter(|part| *part == b"\x1b[6n").count();
-            assert!(count <= 16);
-            while queries < count {
-                input.write_all(b"\x1b[2;1R").unwrap();
-                queries += 1;
-            }
+            assert!(count <= 128);
+            super::reply_positioned_cursor_queries(&mut input, bytes, &mut queries);
             crate::process::decline_workspace_consent(&mut input, bytes, &mut declined);
             if stage == 0
                 && bytes
@@ -1157,16 +1154,29 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
                 from = bytes.len();
                 input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
                 stage = 1;
-            } else if (4..=7).contains(&stage) {
+            } else if (4..=9).contains(&stage) {
                 let cursor = b"\x1b[?25h\x1b[22;3H";
                 let tail = &bytes[from..];
                 let (needle, send): (&[u8], &[u8]) = match stage {
                     4 => (b"Resume \xc2\xb7", b"\x1b"),
                     5 => (cursor, b"/agents\r"),
-                    6 => (b"gents", b"\x1b"),
+                    6 => (b"Last", b"\x1b"),
+                    7 => (cursor, b"/help\r"),
+                    8 => (b"local controls", b"\x1b"),
                     _ => (cursor, b"/exit\r"),
                 };
-                if tail.windows(needle.len()).any(|part| part == needle) {
+                if tail.windows(needle.len()).any(|part| part == needle)
+                    && (!matches!(stage, 4 | 6 | 8)
+                        || tail.windows(6).any(|part| part == b"\x1b[?25l"))
+                {
+                    if let Some(row) = match stage {
+                        5 => Some(18),
+                        7 => Some(11),
+                        9 => Some(5),
+                        _ => None,
+                    } {
+                        super::assert_classic_owned_clear(tail, row);
+                    }
                     from = bytes.len();
                     input.write_all(send).unwrap();
                     stage += 1;
@@ -1216,7 +1226,8 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             );
         },
     );
-    assert_eq!(stage, 8);
+    assert_eq!(stage, 10);
+    super::assert_classic_owned_clear(&output.stderr[from..], 21);
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stderr);
     for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {

@@ -429,10 +429,11 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 "linear ownership must not query cursor input"
             );
             assert!(queries <= 32, "bounded cursor queries");
-            while answered < queries {
-                write_input(&reader_input, b"\x1b[1;1R");
-                answered += 1;
-            }
+            crate::reply_positioned_cursor_queries(
+                &mut *reader_input.lock().expect("fixture input"),
+                &bytes,
+                &mut answered,
+            );
             while next < patterns.len() {
                 let Some(matched) =
                     crate::process::pty_text_matches(&bytes[search_from..], patterns[next]).next()
@@ -1314,9 +1315,10 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             );
         }
     }
-    for (command, needle) in [
-        (&b"/resume\r"[..], &b"Resume \xc2\xb7"[..]),
-        (b"/agents\r", b"gents"),
+    for (command, needle, owned_row) in [
+        (&b"/resume\r"[..], &b"Resume \xc2\xb7"[..], 18),
+        (b"/agents\r", b"Last", 11),
+        (b"/help\r", b"local controls", 5),
     ] {
         let from = transcript.len();
         input.write_all(command).unwrap();
@@ -1328,16 +1330,27 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             from,
             needle,
         );
-        input.write_all(b"\x1b").unwrap();
         wait(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
             from,
+            b"\x1b[?25l",
+        );
+        let close_from = transcript.len();
+        input.write_all(b"\x1b").unwrap();
+        wait(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            close_from,
             b"\x1b[?25h\x1b[22;3H",
         );
+        super::assert_classic_owned_clear(&transcript[close_from..], owned_row);
     }
+    let exit_from = transcript.len();
     input.write_all(b"/exit\r").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while child.child().try_wait().unwrap().is_none() {
@@ -1347,6 +1360,7 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
     }
     assert!(wait_product(child.take()).status.success());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
+    super::assert_classic_owned_clear(&transcript[exit_from..], 21);
     let text = String::from_utf8_lossy(&transcript);
     for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {
         assert!(

@@ -156,15 +156,10 @@ impl AttachedTerminal {
             } else {
                 let palette = self.palette();
                 let mut more = true;
-                self.terminal
-                    .as_mut()
-                    .expect("inline terminal")
-                    .draw(|frame| {
-                        more = draw_rewind_frame(
-                            frame, title, &lines, &choices, selected, page, palette,
-                        );
-                    })
-                    .map_err(super::TerminalError::Io)?;
+                self.draw_frame(12, |frame| {
+                    more =
+                        draw_rewind_frame(frame, title, &lines, &choices, selected, page, palette);
+                })?;
                 more
             };
             let linear = self.is_linear();
