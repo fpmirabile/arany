@@ -3744,6 +3744,7 @@ printf 'native command success'
                         &runtime.config,
                         root,
                         crate::tools::ToolLimits::default().cache_bytes > 0,
+                        crate::tools::ToolLimits::default().result_bytes as usize,
                     ))
                     .unwrap();
                 let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
@@ -3760,6 +3761,7 @@ printf 'native command success'
                         &runtime.config,
                         root,
                         crate::tools::ToolLimits::default().cache_bytes > 0,
+                        crate::tools::ToolLimits::default().result_bytes as usize,
                     ))
                     .unwrap();
                 let result: serde_json::Value = serde_json::from_str(&result).unwrap();

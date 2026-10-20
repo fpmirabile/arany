@@ -2525,7 +2525,7 @@ int main(void) {
                     if **planned == call
             ));
             let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
-            let result: Value = serde_json::from_str(&observation.output).unwrap();
+            let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
             assert_eq!(result["stdout_total"]["bytes"], 1048591);
             assert!(
                 result["stdout"]

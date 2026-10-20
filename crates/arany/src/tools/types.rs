@@ -991,6 +991,11 @@ impl ToolObservation {
                     || serde_json::from_str::<Value>(&self.output)
                         .is_ok_and(|v| v.get("exit_code").is_some()))
                 || serde_json::from_str::<CommandResult>(&self.output).is_ok_and(|r| r.valid()))
+            && (!matches!(
+                self.intent.call,
+                ToolCall::McpCall { .. } | ToolCall::McpList { .. }
+            ) || self.disposition != ToolDisposition::Succeeded
+                || super::output::valid_mcp(&self.output))
             && (!private_command
                 || matches!(
                     self.cache_update,

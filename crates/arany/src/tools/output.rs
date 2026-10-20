@@ -165,6 +165,7 @@ pub(super) fn fit_streams(
 }
 
 pub(super) fn valid_total(total: OutputTotal, text: &str) -> bool {
+    // Lossy decoding turns one to three invalid bytes into one U+FFFD.
     let minimum_bytes = |s: &str| {
         s.chars()
             .map(|c| {
@@ -176,11 +177,14 @@ pub(super) fn valid_total(total: OutputTotal, text: &str) -> bool {
             })
             .sum::<u64>()
     };
-    if minimum_bytes(text) <= total.bytes && text.lines().count() as u64 <= total.lines {
-        return total.bytes <= DRAIN_BYTES && total.lines <= total.bytes;
-    }
+    let lines = |s: &str| s.bytes().filter(|&b| b == b'\n').count() as u64;
     if total.bytes > DRAIN_BYTES || total.lines > total.bytes {
         return false;
+    }
+    if (minimum_bytes(text)..=text.len() as u64).contains(&total.bytes)
+        && text.lines().count() as u64 == total.lines
+    {
+        return true;
     }
     // Only the exact Engine marker can account for bytes outside the captured streams.
     for (start, _) in text.match_indices("\n…[") {
@@ -191,26 +195,27 @@ pub(super) fn valid_total(total: OutputTotal, text: &str) -> bool {
         let Some((omitted, counts)) = counts.split_once(" bytes, ") else {
             continue;
         };
-        let Some((lines, totals)) = counts.split_once(" lines omitted; ") else {
+        let Some((omitted_lines, totals)) = counts.split_once(" lines omitted; ") else {
             continue;
         };
-        let (Ok(omitted), Ok(lines)) = (omitted.parse::<u64>(), lines.parse::<u64>()) else {
+        let (Ok(omitted), Ok(omitted_lines)) =
+            (omitted.parse::<u64>(), omitted_lines.parse::<u64>())
+        else {
             continue;
         };
         if totals != format!("{} bytes, {} lines total", total.bytes, total.lines) {
             continue;
         }
         let head = &text[..start];
+        let Some(shown_min) = total.bytes.checked_sub(omitted) else {
+            continue;
+        };
+        let shown_lines =
+            lines(head) + lines(tail) + u64::from(!tail.is_empty() && !tail.ends_with('\n'));
         if omitted > 0
-            && omitted <= total.bytes
-            && lines <= total.lines
-            && minimum_bytes(head) + minimum_bytes(tail) <= total.bytes - omitted
-            && head
-                .bytes()
-                .chain(tail.bytes())
-                .filter(|&b| b == b'\n')
-                .count() as u64
-                <= total.lines - lines
+            && (minimum_bytes(head) + minimum_bytes(tail)..=(head.len() + tail.len()) as u64)
+                .contains(&shown_min)
+            && omitted_lines == total.lines.saturating_sub(shown_lines)
         {
             return true;
         }
@@ -252,6 +257,29 @@ impl CommandWindows {
                 && (w.head.len() + w.tail.len()) as u64 == w.total.bytes.min(budget as u64)
         })
     }
+}
+
+pub(super) fn valid_mcp(output: &str) -> bool {
+    let Ok(serde_json::Value::Object(object)) = serde_json::from_str(output) else {
+        return false;
+    };
+    let whole = object.contains_key("structured_content") || object.contains_key("tools");
+    let Some(total) = object.get("output_total") else {
+        return whole;
+    };
+    let Ok(total) = serde_json::from_value::<OutputTotal>(total.clone()) else {
+        return false;
+    };
+    !whole
+        && matches!(
+            object.get("content").and_then(|c| c.as_array()).map(Vec::as_slice),
+            Some([item]) if item["type"] == "text" && item["text"].as_str().is_some_and(|text| total.valid_for(text) && text.contains("\n…["))
+        )
+}
+
+#[cfg(test)]
+fn preview_forged() -> &'static str {
+    "x\n…[1 bytes, 0 lines omitted; 501 bytes, 1 lines total]…\nx"
 }
 
 #[cfg(test)]
@@ -305,6 +333,90 @@ mod tests {
         ));
         assert_eq!(window.total().bytes, 16);
         assert!(!OutputTotal { bytes: 1, lines: 1 }.valid_for("forged output"));
+        let marker = "head\n…[8 bytes, 2 lines omitted; 16 bytes, 3 lines total]…\ntail";
+        let total = OutputTotal {
+            bytes: 16,
+            lines: 3,
+        };
+        assert!(total.valid_for(marker));
+        for (total, text) in [
+            (
+                OutputTotal {
+                    bytes: 1000,
+                    lines: 999,
+                },
+                "ok",
+            ),
+            (
+                OutputTotal {
+                    bytes: 16,
+                    lines: 3,
+                },
+                "head\ntail",
+            ),
+            (
+                OutputTotal {
+                    bytes: 17,
+                    lines: 3,
+                },
+                marker,
+            ),
+            (
+                OutputTotal {
+                    bytes: 16,
+                    lines: 4,
+                },
+                marker,
+            ),
+            (
+                total,
+                "head\n…[9 bytes, 2 lines omitted; 16 bytes, 3 lines total]…\ntail",
+            ),
+            (
+                total,
+                "head\n…[8 bytes, 1 lines omitted; 16 bytes, 3 lines total]…\ntail",
+            ),
+            (
+                total,
+                "head\n…[8 bytes, 2 lines omitted; 16 bytes, 3 lines total]…\nlonger tail",
+            ),
+            (
+                OutputTotal {
+                    bytes: 1000,
+                    lines: 1,
+                },
+                "x\n…[8 bytes, 2 lines omitted; 16 bytes, 3 lines total]…\ny",
+            ),
+        ] {
+            assert!(!total.valid_for(text), "{total:?} {text:?}");
+        }
+    }
+
+    #[test]
+    fn mcp_results_require_consistent_totals() {
+        let mut window = Window::new(64);
+        window.push(&[b'x'; 500], DRAIN_BYTES).unwrap();
+        let total = window.total();
+        let preview = window.preview(64);
+        let good = serde_json::json!({"server":"s","content":[{"type":"text","text":preview}],"output_total":total});
+        assert!(valid_mcp(&good.to_string()));
+        let mut bad = good.clone();
+        bad.as_object_mut().unwrap().remove("output_total");
+        assert!(!valid_mcp(&bad.to_string()));
+        let mut bad = good.clone();
+        bad["output_total"]["bytes"] = 501.into();
+        assert!(!valid_mcp(&bad.to_string()));
+        let mut bad = good.clone();
+        bad["content"][0]["text"] = "x".into();
+        assert!(!valid_mcp(&bad.to_string()));
+        let mut bad = good;
+        bad["content"][0]["text"] = preview_forged().into();
+        assert!(!valid_mcp(&bad.to_string()));
+        let whole = serde_json::json!({"server":"s","structured_content":null,"content":[]});
+        assert!(valid_mcp(&whole.to_string()));
+        let mut bad = whole;
+        bad["output_total"] = serde_json::json!(total);
+        assert!(!valid_mcp(&bad.to_string()));
     }
 
     #[test]
