@@ -341,8 +341,7 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
             "{action:?} at {index} bounds {bound} Events but appends {observed}",
         );
     }
-    // Admission checks headroom once and holds nothing back, so each Event needs an earlier Store admission whose slots reach it.
-    // Sealed-data allowances budget their own chunks, so only call, Tool and settlement admissions count as headroom.
+    // Exclude sealed-data allowances: only call, Tool and settlement admissions cover Event headroom.
     let admissions: Vec<_> = super::admissions::recorded(events[0].session_id)
         .into_iter()
         .filter(|(_, slots)| *slots <= MAX_ACTION_SLOTS)

@@ -362,8 +362,7 @@ impl GoalLedger {
         self.read(|_, in_flight| in_flight.children).unwrap_or(0)
     }
 
-    // Admission holds nothing back, so a primary step reserves what draining every editor still holding its lease appends,
-    // whether that editor waits in a Provider call, a worker Tool, an approval or Guard capacity.
+    // Admission holds nothing back, so a primary step reserves every lease-holding editor's drain.
     pub(super) fn drain_headroom(&self) -> usize {
         self.view(|view| {
             let Some(run) = view.runs.last() else {

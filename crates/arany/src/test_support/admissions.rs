@@ -12,7 +12,7 @@ pub(crate) fn record(session: SessionId, count: usize, slots: usize) {
     }
 }
 
-/// The (journal position, Event slots) of every admission the Store accepted for the Session.
+// (journal position, Event slots) per accepted Store admission.
 pub fn recorded(session: SessionId) -> Vec<(usize, usize)> {
     ADMISSIONS
         .lock()
