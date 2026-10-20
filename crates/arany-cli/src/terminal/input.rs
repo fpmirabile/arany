@@ -391,6 +391,14 @@ struct CursorState {
 
 impl CursorQuery {
     #[cfg(unix)]
+    fn waiting(&self) -> bool {
+        let (state, _) = &*self.0;
+        state
+            .lock()
+            .is_ok_and(|state| state.waiting && state.position.is_none())
+    }
+
+    #[cfg(unix)]
     pub(super) fn query(&self, output: &mut impl io::Write) -> io::Result<(u16, u16)> {
         let (state, ready) = &*self.0;
         let mut state = state

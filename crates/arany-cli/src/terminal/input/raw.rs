@@ -22,6 +22,8 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 const MAX_KEY_SEQUENCE_BYTES: usize = 64;
 const RECORD_DEADLINE: Duration = Duration::from_secs(10);
 const OUTBOX_LIMIT: usize = 256;
+const READ_BUFFER_BYTES: usize = 4096;
+const MAX_BACKLOG: usize = OUTBOX_LIMIT + READ_BUFFER_BYTES;
 const OUTBOX_RETRY: Duration = Duration::from_millis(2);
 const PASTE_END: &[u8; 6] = b"\x1b[201~";
 
@@ -38,10 +40,15 @@ pub(super) fn start(
     std::thread::Builder::new()
         .name("arany-terminal-input".into())
         .spawn(move || {
-            if let Err(error) = read(&mut poll, &mut input, &sender, &shutdown, &cursor) {
+            let mut outbox = Outbox {
+                sender: &sender,
+                backlog: VecDeque::new(),
+            };
+            let result = read(&mut poll, &mut input, &mut outbox, &shutdown, &cursor);
+            cursor.close();
+            if let Err(error) = result {
                 let _ = sender.blocking_send(Err(error));
             }
-            cursor.close();
         })
 }
 
@@ -52,9 +59,15 @@ struct Outbox<'a> {
 }
 
 impl Outbox<'_> {
-    fn push(&mut self, event: ReaderEvent) -> bool {
+    fn push(&mut self, event: ReaderEvent) -> io::Result<bool> {
+        if self.backlog.len() == MAX_BACKLOG && !self.flush() {
+            return Ok(false);
+        }
+        if self.backlog.len() == MAX_BACKLOG {
+            return Err(io::Error::other("terminal input backlog exceeded"));
+        }
         self.backlog.push_back(event);
-        self.flush()
+        Ok(self.flush())
     }
 
     fn flush(&mut self) -> bool {
@@ -75,30 +88,26 @@ impl Outbox<'_> {
 fn read(
     poll: &mut Poll,
     input: &mut File,
-    sender: &mpsc::Sender<io::Result<ReaderEvent>>,
+    outbox: &mut Outbox<'_>,
     shutdown: &AtomicBool,
     cursor: &CursorQuery,
 ) -> io::Result<()> {
     let fd = input.as_raw_fd();
     let mut events = Events::with_capacity(4);
-    let mut bytes = [0; 4096];
+    let mut bytes = [0; READ_BUFFER_BYTES];
     let mut decoder = Decoder::default();
-    let mut outbox = Outbox {
-        sender,
-        backlog: VecDeque::new(),
-    };
     let mut geometry = crossterm::terminal::size().ok();
     while !shutdown.load(Ordering::Acquire) {
         if !outbox.flush() {
             return Ok(());
         }
-        if outbox.backlog.len() >= OUTBOX_LIMIT {
+        if outbox.backlog.len() >= OUTBOX_LIMIT && !cursor.waiting() {
             std::thread::sleep(OUTBOX_RETRY);
             continue;
         }
         let now = Instant::now();
         if let Some(event) = decoder.expire(now)?
-            && !outbox.push(event)
+            && !outbox.push(event)?
         {
             return Ok(());
         }
@@ -106,7 +115,7 @@ fn read(
         if resized != geometry {
             geometry = resized;
             if let Some((width, height)) = resized
-                && !outbox.push(ReaderEvent::Event(Event::Resize(width, height)))
+                && !outbox.push(ReaderEvent::Event(Event::Resize(width, height)))?
             {
                 return Ok(());
             }
@@ -138,7 +147,7 @@ fn read(
                     if let Some(event) = decoder.feed(byte, now) {
                         if let ReaderEvent::CursorPosition(column, row) = event {
                             cursor.respond(column, row);
-                        } else if !outbox.push(event) {
+                        } else if !outbox.push(event)? {
                             return Ok(());
                         }
                     }
@@ -581,4 +590,73 @@ fn mouse(button: u16, column: u16, row: u16, release: bool) -> Option<ReaderEven
         row: row.checked_sub(1)?,
         modifiers,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{io::Write, os::fd::OwnedFd, os::unix::net::UnixStream};
+
+    #[test]
+    fn cursor_reply_bypasses_full_channel_and_backlog_without_losing_keys() {
+        let (mut peer, input) = UnixStream::pair().unwrap();
+        input.set_nonblocking(true).unwrap();
+        let mut input = File::from(OwnedFd::from(input));
+        let mut poll = Poll::new().unwrap();
+        let fd = input.as_raw_fd();
+        poll.registry()
+            .register(&mut SourceFd(&fd), Token(0), Interest::READABLE)
+            .unwrap();
+        let (sender, mut receiver) = mpsc::channel(super::super::INPUT_QUEUE_CAPACITY);
+        let event = || key(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Press).unwrap();
+        for _ in 0..super::super::INPUT_QUEUE_CAPACITY {
+            assert!(sender.try_send(Ok(event())).is_ok());
+        }
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let cursor = CursorQuery::default();
+        peer.write_all(b"x\x1b[3;5R").unwrap();
+        let stopped = Arc::clone(&shutdown);
+        let query = cursor.clone();
+        let reader = std::thread::spawn(move || {
+            let mut outbox = Outbox {
+                sender: &sender,
+                backlog: (0..OUTBOX_LIMIT).map(|_| event()).collect(),
+            };
+            let result = read(&mut poll, &mut input, &mut outbox, &stopped, &cursor);
+            (result, outbox.backlog)
+        });
+        let reply = query.query(&mut Vec::new());
+        shutdown.store(true, Ordering::Release);
+        let (result, backlog) = reader.join().unwrap();
+        result.unwrap();
+        assert_eq!(reply.unwrap(), (4, 2));
+        assert_eq!(backlog.len(), OUTBOX_LIMIT + 1);
+        for event in backlog {
+            assert!(matches!(
+                event,
+                ReaderEvent::Event(Event::Key(KeyEvent {
+                    code: KeyCode::Char('x'),
+                    ..
+                }))
+            ));
+        }
+        for _ in 0..super::super::INPUT_QUEUE_CAPACITY {
+            assert!(matches!(
+                receiver.try_recv().unwrap().unwrap(),
+                ReaderEvent::Event(Event::Key(KeyEvent {
+                    code: KeyCode::Char('x'),
+                    ..
+                }))
+            ));
+        }
+        assert!(receiver.try_recv().is_err());
+        let (sender, _receiver) = mpsc::channel(1);
+        assert!(sender.try_send(Ok(event())).is_ok());
+        let mut outbox = Outbox {
+            sender: &sender,
+            backlog: (0..MAX_BACKLOG).map(|_| event()).collect(),
+        };
+        assert!(outbox.push(event()).is_err());
+        assert_eq!(outbox.backlog.len(), MAX_BACKLOG);
+    }
 }

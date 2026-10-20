@@ -118,7 +118,7 @@ Manual and automatic compaction preserve draft, caret and history through succes
 
 Draft feedback counts graphemes, including accepted whitespace; combined emoji and combining accents count as one. Storage and physical-line admission keep their UTF-8 bounds, so the UI promises no fixed Unicode-character maximum. Capacity errors ask the user to shorten input or paste a smaller section. Human attachment sizes use rounded decimal KB; canonical data and machine exports keep exact bytes.
 
-The sole raw reader keeps reads nonblocking through shutdown, so signal-flushed input cannot strand its join. A lone Escape waits at most one poll interval. Key repeats, releases and unowned focus or mouse events are ignored.
+The sole raw reader keeps reads nonblocking through shutdown, so signal-flushed input cannot strand its join. Its 32-event delivery channel applies backpressure at 256 backlogged events; a pending [cursor query](#terminal-continuity-and-provisional-text) permits read-ahead up to a hard cap of 4,352 backlogged events. Exceeding that cap closes input with an explicit error rather than dropping keys or growing without bound. A lone Escape waits at most one poll interval. Key repeats, releases and unowned focus or mouse events are ignored.
 
 ## Interactive commands and completion
 

@@ -1251,6 +1251,14 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         0,
         b"\x1b[?25h\x1b[22;3H",
     );
+    let first_query = transcript
+        .windows(4)
+        .position(|part| part == b"\x1b[6n")
+        .expect("Classic startup cursor query");
+    assert!(
+        transcript[..first_query].ends_with(b"\x1b[24;1H"),
+        "Classic reserves rows below any existing shell output"
+    );
     // The following transcript gesture is a reader-order barrier for both ignored page keys.
     let from = transcript.len();
     input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
