@@ -541,6 +541,40 @@ fn drain(pipe: &mut Option<impl Read>, bytes: &mut Vec<u8>, cap: usize, channel:
     }
 }
 
+#[cfg(unix)]
+pub fn wait_readable(fd: impl AsFd) {
+    use rustix::event::{PollFd, PollFlags, Timespec};
+    let timeout = Timespec {
+        tv_sec: 0,
+        tv_nsec: 50_000_000,
+    };
+    let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+    match rustix::event::poll(&mut fds, Some(&timeout)) {
+        Ok(_) | Err(rustix::io::Errno::INTR) => {}
+        Err(error) => panic!("terminal poll: {error}"),
+    }
+}
+
+pub fn terminal_wait_report(
+    what: &str,
+    started: Instant,
+    first_byte: Option<Instant>,
+    transcript: &[u8],
+    status: Option<std::process::ExitStatus>,
+) -> String {
+    let start = transcript.len().saturating_sub(512);
+    let tail = String::from_utf8_lossy(&transcript[start..])
+        .chars()
+        .flat_map(char::escape_default)
+        .collect::<String>();
+    let first = first_byte.map(|at| at.duration_since(started));
+    format!(
+        "{what}; elapsed={:?}; first_byte={first:?}; child={status:?}; bytes={}; transcript_tail={tail}",
+        started.elapsed(),
+        transcript.len()
+    )
+}
+
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub fn decline_workspace_consent(
     input: &mut impl std::io::Write,

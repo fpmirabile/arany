@@ -561,7 +561,11 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             Event::RunFinished {
                 run_id: run,
                 disposition: RunDisposition::Failed,
-                failure: Some(arany::RunFailure::ProviderCall),
+                failure: Some(if later_failure {
+                    arany::RunFailure::ProviderCall
+                } else {
+                    arany::RunFailure::ToolStopped
+                }),
                 active_ms: 0,
             },
         ]);
@@ -743,7 +747,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
-            failure: Some(arany::RunFailure::ProviderCall),
+            failure: Some(arany::RunFailure::ToolStopped),
             active_ms: 0,
         },
     ]);
@@ -790,7 +794,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
-            failure: Some(arany::RunFailure::ProviderCall),
+            failure: Some(arany::RunFailure::ToolStopped),
             active_ms: 0,
         },
     ]);
@@ -979,7 +983,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunFinished {
             run_id: run,
             disposition: RunDisposition::Failed,
-            failure: Some(arany::RunFailure::ProviderCall),
+            failure: Some(arany::RunFailure::ToolStopped),
             active_ms: 0,
         },
     ]);

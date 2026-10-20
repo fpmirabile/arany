@@ -1,3 +1,4 @@
+pub mod admissions;
 pub mod approval;
 pub mod engine;
 pub mod git;

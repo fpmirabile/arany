@@ -109,6 +109,7 @@ fn trace_snapshot(root: &Path) -> serde_json::Value {
                         | "bytes-overflow"
                         | "files-overflow"
                         | "directory-conversion"
+                        | "rust-build"
                 ) {
                     return None;
                 }
@@ -366,11 +367,36 @@ fn guarded_runtime_profile_checks_mount_topology_before_dispatch() {
     native_journey("tools::native_runtime_mount_journey_helper");
 }
 
+#[test]
+#[ignore = "requires an explicit local Rust sysroot; native offline Guard build journey"]
+fn guarded_offline_rust_build_uses_selected_runtime_and_sdk() {
+    let sysroot = std::env::var_os("ARANY_TEST_RUST_SYSROOT")
+        .expect("set ARANY_TEST_RUST_SYSROOT to one physical versioned macOS Rust sysroot");
+    let sysroot = validate_rust_sysroot(Path::new(&sysroot));
+    native_journey_with_rust_sysroot("tools::native_offline_rust_build_helper", Some(&sysroot));
+}
+
 pub(super) fn native_journey(helper: &str) {
+    native_journey_with_rust_sysroot(helper, None);
+}
+
+fn native_journey_with_rust_sysroot(helper: &str, rust_sysroot: Option<&Path>) {
     let _gate = crate::process::NATIVE_GATE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().unwrap();
+    let fixture_root = if rust_sysroot.is_some() {
+        let root = std::fs::canonicalize(temp.path())
+            .expect("physical temporary root")
+            .join("fixture root 'quoted'");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        root
+    } else {
+        temp.path().to_path_buf()
+    };
     for directory in [
         "account",
         "account/guard-trace",
@@ -380,30 +406,33 @@ pub(super) fn native_journey(helper: &str) {
     ] {
         std::fs::DirBuilder::new()
             .mode(0o700)
-            .create(temp.path().join(directory))
+            .create(fixture_root.join(directory))
             .unwrap();
     }
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", helper, "--ignored", "--nocapture"])
         .env_clear()
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+        .env("ARANY_TEST_ACCOUNT_ROOT", fixture_root.join("account"))
         .env(
             "ARANY_TEST_GUARD_TRACE",
-            temp.path().join("account/guard-trace"),
+            fixture_root.join("account/guard-trace"),
         )
-        .env("ARANY_TEST_FILE_JOURNEY_ROOT", temp.path())
-        .env("HOME", temp.path().join("home"))
-        .env("XDG_STATE_HOME", temp.path().join("environment-state"))
-        .env("XDG_DATA_HOME", temp.path().join("environment-data"))
-        .current_dir(temp.path());
+        .env("ARANY_TEST_FILE_JOURNEY_ROOT", &fixture_root)
+        .env("HOME", fixture_root.join("home"))
+        .env("XDG_STATE_HOME", fixture_root.join("environment-state"))
+        .env("XDG_DATA_HOME", fixture_root.join("environment-data"))
+        .current_dir(&fixture_root);
+    if let Some(rust_sysroot) = rust_sysroot {
+        command.env("ARANY_TEST_RUST_SYSROOT", rust_sysroot);
+    }
     let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         command.bounded_output_for(Duration::from_secs(360), 32 * 1024)
     }))
     .unwrap_or_else(|_| {
         panic!(
             "native journey observer failed: {}",
-            trace_snapshot(temp.path())
+            trace_snapshot(&fixture_root)
         )
     })
     .unwrap();
@@ -413,7 +442,7 @@ pub(super) fn native_journey(helper: &str) {
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
-        trace_snapshot(temp.path())
+        trace_snapshot(&fixture_root)
     );
     crate::process::assert_single_test_completed(&output.stdout, "native file journey");
     assert!(
@@ -421,6 +450,122 @@ pub(super) fn native_journey(helper: &str) {
         "native journey stderr: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn validate_rust_sysroot(path: &Path) -> std::path::PathBuf {
+    assert!(path.is_absolute(), "Rust sysroot path must be absolute");
+    let canonical = std::fs::canonicalize(path).expect("physical Rust sysroot");
+    assert_eq!(
+        canonical, path,
+        "Rust sysroot path must already be physical"
+    );
+    for executable in ["bin/rustc", "bin/cargo"] {
+        let metadata = std::fs::metadata(canonical.join(executable)).unwrap();
+        assert!(metadata.is_file());
+        assert_ne!(metadata.permissions().mode() & 0o111, 0);
+    }
+    let output = setup_context("Rust toolchain version probe", || {
+        std::process::Command::new(canonical.join("bin/rustc"))
+            .args(["--version", "--verbose"])
+            .env_clear()
+            .current_dir(&canonical)
+            .bounded_output_for(Duration::from_secs(10), 4096)
+            .expect("bounded Rust toolchain version probe")
+    });
+    assert!(
+        output.status.success(),
+        "Rust toolchain version probe failed: {output:?}"
+    );
+    let details = String::from_utf8(output.stdout).expect("Rust version output is UTF-8");
+    assert!(output.stderr.is_empty());
+    let field = |name: &str| {
+        details
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}: ")))
+            .unwrap_or_else(|| panic!("Rust version output lacks {name}"))
+    };
+    let release = field("release");
+    let host = field("host");
+    assert!(
+        release.len() <= 64
+            && release.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+')
+            })
+    );
+    let expected_host = match std::env::consts::ARCH {
+        "aarch64" => "aarch64-apple-darwin",
+        "x86_64" => "x86_64-apple-darwin",
+        architecture => panic!("unsupported native macOS architecture: {architecture}"),
+    };
+    assert_eq!(host, expected_host, "selected Rust sysroot host");
+    assert_eq!(
+        canonical.file_name().and_then(std::ffi::OsStr::to_str),
+        Some(format!("{release}-{host}").as_str()),
+        "Rust sysroot directory must be its exact versioned toolchain name"
+    );
+    canonical
+}
+
+fn assert_apple_runtime_baseline(root: &Path, sdk: &Path) {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let sdk_settings = sdk.join("SDKSettings.plist");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(sdk_settings)
+        .expect("baseline physical SDK settings file is readable");
+    let metadata = file.metadata().unwrap();
+    assert!(metadata.is_file() && (1..=1024 * 1024).contains(&metadata.len()));
+    let mut first_byte = [0];
+    file.read_exact(&mut first_byte)
+        .expect("bounded SDK settings read");
+
+    let compiler = setup_context("baseline clang --version", || {
+        std::process::Command::new("/Library/Developer/CommandLineTools/usr/bin/clang")
+            .arg("--version")
+            .env_clear()
+            .env("HOME", root.join("home"))
+            .env("TMPDIR", root)
+            .current_dir(root)
+            .bounded_output_for(Duration::from_secs(5), 4096)
+            .expect("bounded baseline Command Line Tools invocation")
+    });
+    assert!(
+        compiler.status.success(),
+        "baseline Command Line Tools invocation failed: status {}",
+        compiler.status
+    );
+    assert!(!compiler.stdout.is_empty() || !compiler.stderr.is_empty());
+
+    let neighbor = setup_context("baseline llvm-nm --version", || {
+        std::process::Command::new("/Library/Developer/CommandLineTools/usr/bin/llvm-nm")
+            .arg("--version")
+            .env_clear()
+            .env("HOME", root.join("home"))
+            .env("TMPDIR", root)
+            .current_dir(root)
+            .bounded_output_for(Duration::from_secs(5), 4096)
+            .expect("bounded baseline Command Line Tools neighbor invocation")
+    });
+    assert!(
+        neighbor.status.success(),
+        "baseline Command Line Tools neighbor invocation failed: status {}",
+        neighbor.status
+    );
+    assert!(!neighbor.stdout.is_empty() || !neighbor.stderr.is_empty());
+}
+
+fn setup_context<T>(stage: &str, operation: impl FnOnce() -> T) -> T {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)).unwrap_or_else(|panic| {
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic");
+        panic!("offline Rust build setup failed at {stage}: {message}");
+    })
 }
 
 #[tokio::test]
@@ -848,6 +993,7 @@ struct RuntimeJourney {
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     calls: Vec<ToolCall>,
     resource_class: arany::ToolResourceClass,
+    command_timeout_ms: Option<u32>,
 }
 
 fn build_goal_request() -> arany::GoalRequest {
@@ -917,7 +1063,7 @@ impl Provider for RuntimeJourney {
                     paths: Vec::new(),
                     commands: vec![program],
                     resource_class: self.resource_class,
-                    command_timeout_ms: None,
+                    command_timeout_ms: self.command_timeout_ms,
                     skills: Vec::new(),
                     mcp_tools: Vec::new(),
                     success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
@@ -951,6 +1097,385 @@ impl Provider for RuntimeJourney {
     async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
         Err(ProviderError::InvalidOutcome)
     }
+}
+
+#[tokio::test]
+#[ignore = "isolated helper owned by native offline Rust build journey"]
+async fn native_offline_rust_build_helper() {
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    trace_case(root, "rust-build");
+    assert_eq!(StateRoot::account_path().unwrap(), root.join("account"));
+
+    let source_sysroot =
+        std::env::var_os("ARANY_TEST_RUST_SYSROOT").expect("validated parent Rust sysroot");
+    let source_sysroot = setup_context("source Rust sysroot validation", || {
+        validate_rust_sysroot(Path::new(&source_sysroot))
+    });
+    let versioned_name = source_sysroot.file_name().unwrap();
+    let rustup = root.join("home/.rustup");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&rustup)
+        .unwrap();
+    let toolchains = rustup.join("toolchains");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&toolchains)
+        .unwrap();
+    let copied = setup_context("private Rust sysroot clone", || {
+        std::process::Command::new("/bin/cp")
+            .args(["-cR"])
+            .arg(&source_sysroot)
+            .arg(&toolchains)
+            .env_clear()
+            .env("HOME", root.join("home"))
+            .env("TMPDIR", root)
+            .current_dir(root)
+            .bounded_output_for(Duration::from_secs(45), 4096)
+            .expect("bounded private Rust sysroot clone")
+    });
+    assert!(copied.status.success(), "Rust sysroot clone: {copied:?}");
+    assert!(copied.stdout.is_empty() && copied.stderr.is_empty());
+    let rust_sysroot = toolchains.join(versioned_name);
+    assert_eq!(
+        setup_context("cloned Rust sysroot validation", || {
+            validate_rust_sysroot(&rust_sysroot)
+        }),
+        rust_sysroot
+    );
+
+    let workspace = root.join("workspace");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&workspace)
+        .unwrap();
+    std::fs::create_dir(workspace.join("src")).unwrap();
+    private_file(
+        &workspace.join("Cargo.toml"),
+        br#"[package]
+name = "offline-rust-fixture"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    private_file(
+        &workspace.join("Cargo.lock"),
+        b"# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 4\n\n[[package]]\nname = \"offline-rust-fixture\"\nversion = \"0.1.0\"\n",
+    );
+    private_file(
+        &workspace.join("src/main.rs"),
+        br#"fn main() { println!("offline-rust-build-executed"); }
+"#,
+    );
+    const APPLE_COMPILER: &str = "/Library/Developer/CommandLineTools/usr";
+    let permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    let choices = permissions.runtime_profile_choices();
+    let rust = choices
+        .iter()
+        .find(|option| option.group == "Rust" && option.path == rust_sysroot)
+        .expect("copied exact Rust sysroot candidate");
+    let compiler = choices
+        .iter()
+        .find(|option| {
+            option.group == "Command Line Tools compiler"
+                && option.path == Path::new(APPLE_COMPILER)
+        })
+        .expect("physical Apple Command Line Tools compiler candidate");
+    let sdk = choices
+        .iter()
+        .find(|option| option.group == "macOS SDK" && option.detected)
+        .expect("physical versioned macOS SDK candidate");
+    assert!(rust.detected && compiler.detected && sdk.detected);
+    setup_context("Apple runtime baseline probes", || {
+        assert_apple_runtime_baseline(root, &sdk.path)
+    });
+    assert_eq!(rust.version.as_deref(), versioned_name.to_str());
+    assert_eq!(compiler.version, None);
+    assert!(sdk.version.is_some());
+    let apple_sdk = sdk.path.to_str().unwrap();
+    let rust_token = rust.token.clone();
+    let compiler_token = compiler.token.clone();
+    let sdk_token = sdk.token.clone();
+
+    let mut permissions = permissions;
+    permissions
+        .remember_profiles(
+            true,
+            arany::ApprovalMode::Request,
+            std::slice::from_ref(&rust_token),
+        )
+        .unwrap();
+    let rust_only = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    let denied_apple = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            format!(
+                "set -eu; if {{ IFS= read -r _; }} < '{apple_sdk}/SDKSettings.plist' 2>/dev/null; then exit 41; fi; if '{APPLE_COMPILER}/bin/clang' --version >/dev/null 2>&1; then exit 42; fi; printf 'unselected-apple-runtimes-denied\\n'"
+            ),
+        ],
+        cwd: String::new(),
+    };
+    let (denied, denied_requests) = run_offline_build_case(
+        root,
+        &workspace,
+        "state-denied-apple",
+        "Unselected Apple runtimes",
+        "Verify Apple compiler and SDK access remain denied without those profiles",
+        rust_only,
+        denied_apple.clone(),
+    )
+    .await;
+    assert_eq!(denied.run.tools.len(), 1);
+    let denied_observation = denied.run.tools[0]
+        .observation
+        .as_ref()
+        .expect("denied Apple runtime receipt");
+    let denied_output: serde_json::Value =
+        serde_json::from_str(&denied_observation.output).unwrap();
+    assert_eq!(denied_output["exit_code"], 0);
+    assert_eq!(
+        denied_output["stdout"],
+        "unselected-apple-runtimes-denied\n"
+    );
+    assert_guarded_build_observation(denied_observation);
+    assert_provider_journal(&denied_requests, &denied_apple);
+    assert_closed_build_replay(root, "state-denied-apple", &denied).await;
+
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    let selected = [rust_token, compiler_token, sdk_token];
+    permissions
+        .remember_profiles(true, arany::ApprovalMode::Request, &selected)
+        .unwrap();
+    let selected = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    let build = ToolCall::Command {
+        program: "sh".into(),
+        args: vec![
+            "-c".into(),
+            r#"set -eu
+check_success() {
+    label=$1
+    shift
+    if "$@"; then
+        return 0
+    else
+        status=$?
+    fi
+    printf 'offline build precondition failed: %s status=%s\n' "$label" "$status" >&2
+    exit 44
+}
+check_success positional-zero test "$0" = "offline build 'entry"
+check_success positional-one test "$1" = "argument with ' quote"
+check_success compiler-readable test -r /Library/Developer/CommandLineTools/usr/bin/llvm-nm
+if /Library/Developer/CommandLineTools/usr/bin/llvm-nm --version >/dev/null; then
+    printf 'offline build precondition failed: compiler-execution status=0 expected=1\n' >&2
+    exit 44
+else
+    status=$?
+    if test "$status" -ne 1; then
+        printf 'offline build precondition failed: compiler-execution status=%s expected=1\n' "$status" >&2
+        exit 44
+    fi
+fi
+cargo build --locked --offline --jobs 1
+test -x "$CARGO_TARGET_DIR/debug/offline-rust-fixture"
+test "$("$CARGO_TARGET_DIR/debug/offline-rust-fixture")" = offline-rust-build-executed
+printf 'OFFLINE_RUST_BUILD_EXECUTED\n'
+"#
+            .into(),
+            "offline build 'entry".into(),
+            "argument with ' quote".into(),
+        ],
+        cwd: String::new(),
+    };
+    let (built, build_requests) = run_offline_build_case(
+        root,
+        &workspace,
+        "state-built",
+        "Offline Rust build",
+        "Build and execute a standard-library-only Rust program under the selected runtime and SDK",
+        selected,
+        build.clone(),
+    )
+    .await;
+    assert_eq!(built.run.tools.len(), 1);
+    let build_observation = built.run.tools[0]
+        .observation
+        .as_ref()
+        .expect("offline Rust build receipt");
+    let build_output: serde_json::Value = serde_json::from_str(&build_observation.output).unwrap();
+    assert_eq!(
+        build_output["exit_code"], 0,
+        "Rust build output: {build_output}"
+    );
+    assert_eq!(build_output["stdout"], "OFFLINE_RUST_BUILD_EXECUTED\n");
+    let build_stderr = build_output["stderr"].as_str().unwrap_or_default();
+    assert!(
+        build_stderr.contains(
+            "/Library/Developer/CommandLineTools/usr/bin/llvm-nm: Operation not permitted\n"
+        ),
+        "unselected llvm-nm exec refusal diagnostic: {build_stderr:?}"
+    );
+    assert_guarded_build_observation(build_observation);
+    assert_provider_journal(&build_requests, &build);
+    assert_closed_build_replay(root, "state-built", &built).await;
+}
+
+async fn run_offline_build_case(
+    root: &Path,
+    workspace: &Path,
+    state_name: &str,
+    title: &str,
+    objective: &str,
+    permissions: arany::WorkspacePermissions,
+    call: ToolCall,
+) -> (arany::RunOutcome, Arc<Mutex<Vec<ProviderRequest>>>) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(RuntimeJourney {
+        requests: requests.clone(),
+        calls: vec![call.clone()],
+        resource_class: arany::ToolResourceClass::Build,
+        command_timeout_ms: Some(60_000),
+    });
+    let engine = arany::test_support::engine::open(
+        StateRoot::admit(&root.join(state_name)).unwrap(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    let run = run_with(
+        &engine,
+        &provider,
+        RunRequest {
+            session_id: None,
+            title: Some(title.into()),
+            objective: objective.into(),
+            images: Vec::new(),
+            workspace: workspace.to_path_buf(),
+            include_paths: Vec::new(),
+            policy: CollaborationPolicy::Single,
+            goal: build_goal_request(),
+        },
+        RunControls {
+            tools: ToolGrant::Trusted(permissions),
+            approvals: Some(approvals),
+            ..Default::default()
+        },
+    );
+    let approve = async {
+        let mut calls = Vec::new();
+        while let Some(approval) = inbox.next().await {
+            let matches = calls.is_empty() && approval.intent.call == call;
+            calls.push(approval.intent.call.clone());
+            approval.decide(matches);
+            if calls.len() == 2 {
+                break;
+            }
+        }
+        calls
+    };
+    let (outcome, approved_calls) = tokio::time::timeout(Duration::from_secs(120), async {
+        tokio::join!(run, approve)
+    })
+    .await
+    .expect("bounded native offline build run");
+    engine.close().await.unwrap();
+    let outcome = outcome.unwrap_or_else(|error| panic!("native build Engine failed: {error}"));
+    let failure = outcome.run.tools.first().and_then(|tool| {
+        tool.observation.as_ref().map(|observation| {
+            (
+                observation.output.chars().take(4096).collect::<String>(),
+                arany::test_support::recorded_tool_failure(observation.intent.id)
+                    .map(|failure| failure.chars().take(512).collect::<String>()),
+            )
+        })
+    });
+    assert_eq!(
+        outcome.run.status,
+        RunStatus::Finished,
+        "native build case {state_name} failed: {}; failure={failure:?}",
+        crate::safe_run_diagnostics(&outcome.run),
+    );
+    assert_eq!(approved_calls, [call], "one exact native build approval");
+    (outcome, requests)
+}
+
+fn assert_guarded_build_observation(observation: &arany::ToolObservation) {
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert_eq!(
+        observation.intent.limits.resource_class,
+        arany::ToolResourceClass::Build
+    );
+    assert_eq!(
+        observation.intent.limits.resource_profile,
+        ToolResourceProfile::MacosSupervised
+    );
+    assert_eq!(observation.intent.limits.runtime_ms, 60_000);
+    let receipt = observation
+        .attestation
+        .as_ref()
+        .and_then(arany::Attestation::guard)
+        .expect("native Rust build Guard receipt");
+    assert_eq!(receipt.limits, observation.intent.limits);
+    assert_eq!(
+        receipt.enforcement_digest,
+        observation.intent.enforcement_digest
+    );
+}
+
+fn assert_provider_journal(requests: &Arc<Mutex<Vec<ProviderRequest>>>, call: &ToolCall) {
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let first = requests[0].input.tools.as_ref().unwrap().observations();
+    assert!(first.is_empty());
+    let second = requests[1].input.tools.as_ref().unwrap().observations();
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].intent.call, *call);
+    assert_eq!(second[0].disposition, ToolDisposition::Succeeded);
+}
+
+async fn assert_closed_build_replay(root: &Path, state_name: &str, outcome: &arany::RunOutcome) {
+    let store =
+        Store::open_read_only(StateRoot::open_existing(&root.join(state_name)).unwrap()).unwrap();
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let replay = SessionView::replay(outcome.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs.as_slice(), std::slice::from_ref(&outcome.run));
+    assert_eq!(replay.runs[0].status, RunStatus::Finished);
+    let goal = replay.goals.first().expect("replayed build Goal");
+    assert_eq!(goal.status, arany::GoalStatus::Completed);
+    assert!(goal.report.as_ref().is_some_and(|report| {
+        report
+            .evidence
+            .iter()
+            .any(|item| item == "Command sh exited 0.")
+    }));
+    let finished = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            arany::Event::ToolFinished { observation, .. } => Some(observation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.len(), 1);
+    assert_eq!(
+        finished[0],
+        outcome.run.tools[0].observation.as_ref().unwrap()
+    );
 }
 
 struct MountedRuntimeImage(Option<std::path::PathBuf>);
@@ -1080,6 +1605,7 @@ async fn native_runtime_mount_journey_helper() {
         requests: refused_requests.clone(),
         calls: vec![runtime_call.clone()],
         resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
     });
     let engine = arany::test_support::engine::open(
         StateRoot::admit(&refused_state).unwrap(),
@@ -1206,6 +1732,7 @@ async fn native_runtime_mount_journey_helper() {
         requests: seed_requests,
         calls: vec![cache_seed.clone()],
         resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
     });
     let seed_engine = arany::test_support::engine::open(
         StateRoot::admit(&state_success).unwrap(),
@@ -1355,6 +1882,7 @@ async fn native_runtime_mount_journey_helper() {
         requests: accepted_requests.clone(),
         calls: accepted_calls.clone(),
         resource_class: arany::ToolResourceClass::Build,
+        command_timeout_ms: None,
     });
     let engine = arany::test_support::engine::open(
         StateRoot::open_existing(&state_success).unwrap(),
@@ -1629,6 +2157,7 @@ async fn native_runtime_mount_journey_helper() {
         requests: verify_requests,
         calls: vec![verify_cache.clone()],
         resource_class: arany::ToolResourceClass::Default,
+        command_timeout_ms: None,
     });
     let verify_engine = arany::test_support::engine::open(
         StateRoot::open_existing(&state_success).unwrap(),

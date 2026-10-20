@@ -132,6 +132,7 @@ impl TeamProvider {
                                 | "defer_finish"
                                 | "budget_calls"
                                 | "primary_time"
+                                | "primary_denial"
                                 | "cancel_background"
                         ) {
                             WorkerMode::Background
@@ -271,7 +272,7 @@ impl TeamProvider {
             "private edit reached Workspace early",
         );
         self.ready.send(index).await.unwrap();
-        if self.case == "primary_time" {
+        if matches!(self.case, "primary_time" | "primary_denial") {
             self.gates[6].add_permits(1);
         }
         let permit = self.gates[index].acquire().await.unwrap();
@@ -325,7 +326,12 @@ impl TeamProvider {
         }
         if matches!(
             self.case,
-            "leased_edit" | "background" | "command" | "budget_calls" | "primary_time"
+            "leased_edit"
+                | "background"
+                | "command"
+                | "budget_calls"
+                | "primary_time"
+                | "primary_denial"
         ) && prior == 1
         {
             return tool_outcome(if self.case == "command" {
@@ -413,6 +419,10 @@ impl Provider for TeamProvider {
             self.gates[6].acquire_many(2).await.unwrap().forget();
             tokio::time::pause();
             tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+        }
+        if self.case == "primary_denial" && request.phase == AgentPhase::RootSynthesis && step == 2
+        {
+            self.gates[6].acquire_many(2).await.unwrap().forget();
         }
         let outcome = if request.phase == AgentPhase::ChildWork {
             self.child(&request, step).await?
@@ -539,8 +549,14 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     });
     let mut input = request(&workspace, "Edit independent notes");
     input.include_paths.clear();
-    input.policy = CollaborationPolicy::Team {
-        max_active_children: 8,
+    input.policy = if case == "primary_denial" {
+        CollaborationPolicy::Auto {
+            max_active_children: 3,
+        }
+    } else {
+        CollaborationPolicy::Team {
+            max_active_children: 8,
+        }
     };
     input.goal = GoalRequest::new(budget, GoalPhase::Implementation);
     let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
@@ -578,7 +594,10 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let result = loop {
         tokio::select! {
             result = &mut handle.result => break result,
-            Some(approval) = inbox.next() => { approval.decide(true); },
+            Some(approval) = inbox.next() => {
+                let allow = !(case == "primary_denial" && matches!(&approval.intent.call, ToolCall::Write { path, .. } if path == "notes/free"));
+                approval.decide(allow);
+            },
             Some(index) = arrivals.recv() => {
                 ready.push(index);
                 if case.starts_with("hook_") { if index == 7 { provider.gates[7].add_permits(1); } }
@@ -594,6 +613,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                     if case.starts_with("cancel_") { cancellation.cancel(); }
                     else if case == "c1_failure" { provider.gates[7].add_permits(1); }
                     else if case == "failure" { provider.gates[0].add_permits(1); }
+                    else if case == "primary_denial" {}
                     else if matches!(case, "background" | "command" | "leased_edit" | "defer_finish" | "budget_calls" | "primary_time") { if primary_seen { for gate in &provider.gates { gate.add_permits(1); } } }
                     else { provider.gates[1].add_permits(1); if case == "mixed" { provider.gates[7].add_permits(1); } }
                 }
@@ -674,6 +694,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             | "hard_cap"
             | "budget_calls"
             | "primary_time"
+            | "primary_denial"
             | "turn_limit"
             | "resume_unknown"
     );
@@ -697,6 +718,26 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
             .all(|a| a.status != AgentStatus::Active
                 && a.assignment.as_ref().is_none_or(|w| w.released.is_some()))
     );
+    if case == "primary_denial" {
+        assert_eq!(run.agents.len(), 3, "primary and two in-flight editors");
+        assert_eq!(run.failure, Some(RunFailure::ToolStopped));
+        for editor in run.agents.iter().skip(1) {
+            let outcome = &editor
+                .assignment
+                .as_ref()
+                .unwrap()
+                .outcome
+                .as_ref()
+                .unwrap()
+                .1;
+            assert_eq!(
+                outcome.disposition,
+                crate::worker::WorkerDisposition::Cancelled
+            );
+            assert_eq!(outcome.cause, crate::worker::WorkerCause::Cancelled);
+            assert!(editor.assignment.as_ref().unwrap().integration.is_none());
+        }
+    }
     if case == "hook_sibling_stop" {
         let researcher = run.agents.last().unwrap();
         assert_eq!(researcher.status, AgentStatus::StoppedByHook);

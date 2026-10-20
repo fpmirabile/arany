@@ -111,26 +111,25 @@ impl CompiledContext {
             if selected.len() == MAX_HISTORY_RUNS {
                 break;
             }
+            if run.accepted_sequence <= covered_sequence {
+                continue;
+            }
             let refusal = crate::provider::history_refusal_block(run);
-            let has_refusal = refusal.is_some();
-            if run.status != RunStatus::Finished
-                && !has_refusal
-                && run.model_tools().is_empty()
-                && run.worker_history().is_empty()
-            {
-                continue;
-            }
-            if run
-                .finished_sequence
-                .is_some_and(|sequence| sequence <= covered_sequence)
-            {
-                continue;
-            }
-            let assistant = if run.model_tools().is_empty()
-                && run.worker_history().is_empty()
-                && !has_refusal
-            {
+            let plain = run.model_tools().is_empty() && run.worker_history().is_empty();
+            let assistant = if plain && run.status == RunStatus::Finished && refusal.is_none() {
                 run.assistant_message.clone().ok_or(ContextTooLarge)?
+            } else if plain && run.status != RunStatus::Finished {
+                let mut context = crate::provider::history_unanswered_block(run);
+                let last_call_refused = run
+                    .agents
+                    .first()
+                    .and_then(|agent| agent.provider_calls.last())
+                    .is_some_and(|call| call.refusal.is_some());
+                if let Some(refusal) = refusal.filter(|_| !last_call_refused) {
+                    context.push('\n');
+                    context.push_str(&refusal);
+                }
+                context
             } else {
                 let mut context = crate::provider::history_tool_block(run);
                 if let Some(refusal) = refusal {

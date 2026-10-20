@@ -276,6 +276,48 @@ pub(super) fn detach_bootstrap_ports() -> bool {
     }
 }
 
+#[cfg(test)]
+pub(super) struct MachLookupProbe(u32);
+
+#[cfg(test)]
+impl MachLookupProbe {
+    pub(super) fn new() -> Self {
+        let mut port = 0;
+        // SAFETY: The initialized SDK-sized output lives through the call; success owns one send right.
+        assert_eq!(
+            unsafe { task_get_special_port(mach_task_self_, TASK_BOOTSTRAP_PORT, &mut port) },
+            0
+        );
+        assert_ne!(port, 0);
+        Self(port)
+    }
+
+    pub(super) fn lookup(&self) -> i32 {
+        unsafe extern "C" {
+            fn bootstrap_look_up(port: u32, name: *const libc::c_char, service: *mut u32) -> i32;
+        }
+        let mut service = 0;
+        // SAFETY: The retained bootstrap right, fixed C string and initialized output live through the call.
+        let status =
+            unsafe { bootstrap_look_up(self.0, c"com.apple.system.logger".as_ptr(), &mut service) };
+        if status == 0 {
+            drop(Self(service));
+        }
+        status
+    }
+}
+
+#[cfg(test)]
+impl Drop for MachLookupProbe {
+    fn drop(&mut self) {
+        unsafe extern "C" {
+            fn mach_port_deallocate(task: u32, name: u32) -> i32;
+        }
+        // SAFETY: This wrapper owns one send-right reference in the current task and releases it once.
+        assert_eq!(unsafe { mach_port_deallocate(mach_task_self_, self.0) }, 0);
+    }
+}
+
 pub(super) fn unentitled_code(path: &Path) -> Result<Option<bool>, ToolError> {
     use core_foundation::base::{CFType, TCFType};
     use core_foundation::dictionary::CFDictionary;
@@ -552,10 +594,14 @@ pub(super) fn spawn_in_coalition(program: &CStr, coalition: u64) -> Result<(), i
 
 #[cfg(test)]
 pub(super) fn ignore_cpu_signal_with_watchdog(seconds: u32) -> bool {
-    // The watchdog and disposition are process-wide and retain no borrowed memory.
+    let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+    // The initialized mask is copied; the process-wide watchdog and disposition retain no pointer.
     unsafe {
         libc::alarm(seconds);
         libc::signal(libc::SIGXCPU, libc::SIG_IGN) != libc::SIG_ERR
+            && libc::sigemptyset(mask.as_mut_ptr()) == 0
+            && libc::sigaddset(mask.as_mut_ptr(), libc::SIGXCPU) == 0
+            && libc::pthread_sigmask(libc::SIG_BLOCK, mask.as_ptr(), std::ptr::null_mut()) == 0
     }
 }
 

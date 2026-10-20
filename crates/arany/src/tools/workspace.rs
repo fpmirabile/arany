@@ -640,6 +640,64 @@ mod tests {
         assert!(candidates.iter().any(|candidate| {
             candidate.grant.kind == RuntimeKind::CargoCache && candidate.grant.path == cache
         }));
+        #[cfg(target_os = "macos")]
+        {
+            use super::super::toolchains::RuntimeManager;
+
+            let compilers = candidates
+                .iter()
+                .filter(|candidate| candidate.grant.kind == RuntimeKind::AppleCompiler)
+                .collect::<Vec<_>>();
+            assert!(compilers.iter().all(|compiler| {
+                compiler.grant.manager == RuntimeManager::AppleCommandLineTools
+                    && compiler.grant.path == Path::new("/Library/Developer/CommandLineTools/usr")
+                    && compiler.grant.verify_host().is_ok()
+            }));
+            let sdks = candidates
+                .iter()
+                .filter(|candidate| candidate.grant.kind == RuntimeKind::AppleSdk)
+                .collect::<Vec<_>>();
+            assert!(sdks.iter().all(|candidate| {
+                !candidate.grant.kind.is_toolchain()
+                    && !candidate.grant.kind.is_cache()
+                    && candidate.grant.kind.sandbox_cache_path().is_none()
+                    && candidate.grant.path.is_dir()
+                    && candidate
+                        .grant
+                        .path
+                        .extension()
+                        .is_some_and(|extension| extension == "sdk")
+            }));
+            for sdk in sdks {
+                sdk.grant.verify_host().unwrap();
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert!(candidates.iter().all(|candidate| {
+            !matches!(
+                candidate.grant.kind,
+                RuntimeKind::AppleCompiler | RuntimeKind::AppleSdk
+            )
+        }));
+        let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let access = WorkspacePermissions::load(&workspace, &state)
+            .unwrap()
+            .with_candidates(Ok(candidates.clone()));
+        let choices = access.runtime_profile_choices();
+        for candidate in candidates.iter().filter(|candidate| {
+            matches!(
+                candidate.grant.kind,
+                RuntimeKind::AppleCompiler | RuntimeKind::AppleSdk
+            )
+        }) {
+            let choice = choices
+                .iter()
+                .find(|choice| choice.token == candidate.token)
+                .unwrap();
+            assert!(!choice.selected);
+        }
         rust.grant.verify_host().unwrap();
 
         let mut wrong_version = rust.grant.clone();
@@ -657,6 +715,58 @@ mod tests {
             replaced.verify_host(),
             Err(ToolError::ChangedInput)
         ));
+    }
+
+    #[test]
+    fn apple_runtime_kinds_are_opt_in_and_fail_closed_outside_macos() {
+        use super::super::toolchains::{RuntimeKind, RuntimeManager};
+
+        let compiler = RuntimeKind::AppleCompiler;
+        let sdk = RuntimeKind::AppleSdk;
+        assert!(compiler.is_toolchain());
+        assert!(!compiler.is_cache());
+        assert!(!sdk.is_toolchain());
+        assert!(!sdk.is_cache());
+        assert_eq!(sdk.sandbox_cache_path(), None);
+
+        let grant = |kind, version: Option<&str>, path: &str| RuntimeGrant {
+            kind,
+            manager: RuntimeManager::AppleCommandLineTools,
+            version: version.map(str::to_owned),
+            path: PathBuf::from(path),
+            device: 1,
+            inode: 1,
+        };
+        let compiler = grant(compiler, None, "/Library/Developer/CommandLineTools/usr");
+        let sdk = grant(
+            sdk,
+            Some("15.4"),
+            "/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk",
+        );
+
+        #[cfg(target_os = "macos")]
+        {
+            validate_selection(&[compiler.clone(), sdk.clone()]).unwrap();
+            assert!(validate_selection(&[sdk.clone(), sdk.clone()]).is_err());
+            for version in ["15", "15.04", "015.4", "15.4.0.1", "999999.4"] {
+                let malformed = grant(
+                    RuntimeKind::AppleSdk,
+                    Some(version),
+                    &format!("/Library/Developer/CommandLineTools/SDKs/MacOSX{version}.sdk"),
+                );
+                assert!(validate_selection(&[malformed]).is_err());
+            }
+            let alias = grant(
+                RuntimeKind::AppleSdk,
+                Some("15.0"),
+                "/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk",
+            );
+            assert!(validate_selection(&[alias]).is_err());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(validate_selection(&[compiler, sdk]).is_err());
+        }
     }
 
     #[test]
