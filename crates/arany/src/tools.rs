@@ -91,8 +91,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
     Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause, FileChange,
-    FileVersion, GuardReceipt, MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall, ToolContext,
-    ToolDisposition, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,
+    FileVersion, GuardReceipt, LimitCause, MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall,
+    ToolContext, ToolDisposition, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,
     ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant,
     UnguardedReceipt,
 };
@@ -121,6 +121,8 @@ pub enum ToolError {
     Limit,
     #[error("Command output passed the 1 GiB per-stream drain ceiling")]
     OutputCeiling,
+    #[error("Tool runtime expired")]
+    Timeout(String),
     #[error("Tool file precondition changed")]
     Conflict,
     #[error("Tool operation failed")]
@@ -1003,6 +1005,7 @@ impl ToolRuntime {
         {
             return ToolObservation {
                 enforcement_cause: None,
+                limit_cause: None,
                 intent,
                 disposition: ToolDisposition::Denied,
                 output: crate::tools::PRIVATE_IMAGE_REQUIRED.into(),
@@ -1027,6 +1030,7 @@ impl ToolRuntime {
         {
             return ToolObservation {
                 enforcement_cause: None,
+                limit_cause: None,
                 intent,
                 disposition: ToolDisposition::Denied,
                 output: "Tool operation is outside the pinned grant".into(),
@@ -1091,6 +1095,7 @@ impl ToolRuntime {
         });
         let mut observation = ToolObservation {
             enforcement_cause: None,
+            limit_cause: outcome.limit_cause,
             attestation,
             intent,
             disposition: outcome.disposition,
@@ -1099,6 +1104,7 @@ impl ToolRuntime {
         };
         if !observation.valid() {
             observation.disposition = ToolDisposition::Limit;
+            observation.limit_cause = Some(crate::tools::LimitCause::Resource);
             observation.output = "Tool result exceeded its reserved serialized capacity".into();
         }
         observation
@@ -1143,7 +1149,11 @@ impl ToolRuntime {
             .as_ref()
             .map(|reads| std::sync::Arc::clone(&reads.slots).try_acquire_owned())
         else {
-            return unattested_limit(intent, "In-process read capacity is full; nothing was read");
+            return unattested_limit(
+                intent,
+                LimitCause::ReadCapacity,
+                "In-process read capacity is full; nothing was read",
+            );
         };
         let (runtime, read_intent) = (self.clone(), intent.clone());
         let read = tokio::task::spawn_blocking(move || {
@@ -1163,12 +1173,14 @@ impl ToolRuntime {
                 Ok(Ok(Ok(result))) => result,
                 Ok(Ok(Err(error))) => return unstarted_observation(intent, error),
                 Ok(Err(_)) => Err(ToolError::Operation),
-                Err(_) => return unattested_limit(intent, "Tool result or resource limit reached"),
+                Err(_) => return unattested_limit(intent, LimitCause::Timeout, "Tool runtime expired"),
             },
         };
-        let (disposition, output, enforcement_cause) = dispatch::outcome(&intent, result);
+        let (disposition, output, enforcement_cause, limit_cause) =
+            dispatch::outcome(&intent, result);
         let mut observation = ToolObservation {
             enforcement_cause,
+            limit_cause,
             attestation: Some(Attestation::InProcess {
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
@@ -1181,6 +1193,7 @@ impl ToolRuntime {
         };
         if !observation.valid() {
             observation.disposition = ToolDisposition::Limit;
+            observation.limit_cause = Some(crate::tools::LimitCause::Resource);
             observation.enforcement_cause = None;
             observation.output = "Tool result exceeded its reserved serialized capacity".into();
         }
@@ -1202,9 +1215,10 @@ static IN_PROCESS_READS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semapho
         std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_IN_PROCESS_READS))
     });
 
-fn unattested_limit(intent: EffectIntent, output: &str) -> ToolObservation {
+fn unattested_limit(intent: EffectIntent, cause: LimitCause, output: &str) -> ToolObservation {
     ToolObservation {
         enforcement_cause: None,
+        limit_cause: Some(cause),
         intent,
         disposition: ToolDisposition::Limit,
         output: output.into(),
@@ -1216,6 +1230,7 @@ fn unattested_limit(intent: EffectIntent, output: &str) -> ToolObservation {
 fn cancelled_read(intent: EffectIntent) -> ToolObservation {
     ToolObservation {
         enforcement_cause: None,
+        limit_cause: None,
         intent,
         disposition: ToolDisposition::Cancelled,
         output: "Read cancelled; nothing in the Workspace changed".into(),
@@ -1284,6 +1299,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     record_failure(site, &intent, &error);
     ToolObservation {
         enforcement_cause,
+        limit_cause: None,
         output: match error {
             ToolError::QueueFull => format!("{error}. No operation was dispatched."),
             _ => format!(
@@ -1307,6 +1323,7 @@ fn uncertain_observation(
     let stage = failure_stage(&error);
     ToolObservation {
         enforcement_cause: None,
+        limit_cause: None,
         intent,
         disposition: ToolDisposition::Uncertain,
         output: format!(

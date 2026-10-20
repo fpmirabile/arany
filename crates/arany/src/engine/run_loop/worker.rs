@@ -511,6 +511,7 @@ impl RunLoop<'_> {
                     attestation: None,
                     cache_update: CacheUpdate::NotApplicable,
                     enforcement_cause: None,
+                    limit_cause: None,
                 });
             }
         };
@@ -524,6 +525,7 @@ impl RunLoop<'_> {
                     attestation: None,
                     cache_update: CacheUpdate::NotApplicable,
                     enforcement_cause: None,
+                    limit_cause: None,
                 });
             }
         };
@@ -546,6 +548,7 @@ impl RunLoop<'_> {
             }),
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
+            limit_cause: None,
         };
         self.worker.lock().await.insert(id, view);
         Ok(observation)

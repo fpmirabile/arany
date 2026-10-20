@@ -3,9 +3,9 @@ use super::cancel::Cancellation;
 use super::config::Program;
 use super::fs::{identity, open_directory, open_file};
 use super::guard::{reap_owned_child, runtime_path};
-use super::output::{Window, read_window};
+use super::output::{Window, read_window_into};
 use super::toolchains::RuntimeGrant;
-use super::types::{CommandChangeset, ToolDisposition};
+use super::types::{CommandChangeset, LimitCause, ToolDisposition};
 use crate::session::WorkspaceIdentity;
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
@@ -33,6 +33,7 @@ pub(super) struct Request<'a> {
 
 pub(super) struct Outcome {
     pub(super) disposition: ToolDisposition,
+    pub(super) limit_cause: Option<LimitCause>,
     pub(super) output: String,
     pub(super) spawned: bool,
     pub(super) descendants_stopped: bool,
@@ -44,6 +45,7 @@ impl Outcome {
     fn unstarted(disposition: ToolDisposition, output: &str) -> Self {
         Self {
             disposition,
+            limit_cause: (disposition == ToolDisposition::Limit).then_some(LimitCause::Resource),
             output: output.into(),
             spawned: false,
             descendants_stopped: false,
@@ -55,6 +57,7 @@ impl Outcome {
     fn started(disposition: ToolDisposition, output: &str, descendants_stopped: bool) -> Self {
         Self {
             disposition,
+            limit_cause: (disposition == ToolDisposition::Limit).then_some(LimitCause::Resource),
             output: output.into(),
             spawned: true,
             descendants_stopped,
@@ -66,7 +69,7 @@ impl Outcome {
 
 enum Ended {
     Done(std::process::ExitStatus, Window, Window, usize),
-    Timeout,
+    Timeout(Window, Window, usize),
     Cancelled,
     Failed(ToolError),
 }
@@ -145,12 +148,30 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
             "Unguarded run cancelled; host effects may have occurred",
             stopped,
         ),
-        Ended::Failed(ToolError::OutputCeiling) => Outcome::started(
-            ToolDisposition::Limit,
-            "output_ceiling: output passed 1 GiB; stopped; host effects may have occurred",
-            stopped,
-        ),
-        Ended::Timeout | Ended::Failed(ToolError::Limit) => Outcome::started(
+        Ended::Failed(ToolError::OutputCeiling) => {
+            let mut outcome = Outcome::started(
+                ToolDisposition::Limit,
+                "Output passed 1 GiB; stopped; host effects may have occurred",
+                stopped,
+            );
+            outcome.limit_cause = Some(LimitCause::OutputCeiling);
+            outcome
+        }
+        Ended::Timeout(stdout, stderr, budget) => {
+            let output = super::process::fit_command(
+                None,
+                &stdout,
+                &stderr,
+                CommandChangeset::default(),
+                budget,
+                super::process::Truncation::Allow,
+            )
+            .unwrap_or_else(|_| "Tool runtime expired; host effects may have occurred".into());
+            let mut outcome = Outcome::started(ToolDisposition::Limit, &output, stopped);
+            outcome.limit_cause = Some(LimitCause::Timeout);
+            outcome
+        }
+        Ended::Failed(ToolError::Limit) => Outcome::started(
             ToolDisposition::Limit,
             "Tool result or resource limit reached; host effects may have occurred",
             stopped,
@@ -184,6 +205,8 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
             };
             Outcome {
                 disposition,
+                limit_cause: (disposition == ToolDisposition::Limit)
+                    .then_some(LimitCause::Resource),
                 output,
                 spawned: true,
                 descendants_stopped: stopped,
@@ -203,6 +226,8 @@ async fn wait(
     let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
         return Ended::Failed(ToolError::Operation);
     };
+    let mut stdout = Window::new(cap);
+    let mut stderr = Window::new(cap);
     let work = tokio::time::timeout(deadline, async {
         tokio::try_join!(
             async {
@@ -210,18 +235,19 @@ async fn wait(
                     .await
                     .map_err(|_| ToolError::Operation)
             },
-            read_window(out, cap),
-            read_window(err, cap)
+            read_window_into(out, &mut stdout),
+            read_window_into(err, &mut stderr)
         )
     });
-    tokio::select! {
+    let joined = tokio::select! {
         biased;
-        () = cancellation.cancelled() => Ended::Cancelled,
-        joined = work => match joined {
-            Ok(Ok((status, stdout, stderr))) => Ended::Done(status, stdout, stderr, cap),
-            Ok(Err(error)) => Ended::Failed(error),
-            Err(_) => Ended::Timeout,
-        },
+        () = cancellation.cancelled() => return Ended::Cancelled,
+        joined = work => joined,
+    };
+    match joined {
+        Ok(Ok((status, (), ()))) => Ended::Done(status, stdout, stderr, cap),
+        Ok(Err(error)) => Ended::Failed(error),
+        Err(_) => Ended::Timeout(stdout, stderr, cap),
     }
 }
 
@@ -405,10 +431,20 @@ mod tests {
         let fixture = fixture();
         let started = std::time::Instant::now();
         let outcome = fixture
-            .sh("sleep 30 & echo $! > pid; sleep 30", "", 1_000)
+            .sh(
+                "printf partial; printf error >&2; sleep 30 & echo $! > pid; sleep 30",
+                "",
+                1_000,
+            )
             .await;
         assert_eq!(outcome.disposition, ToolDisposition::Limit);
         assert!(outcome.descendants_stopped);
+        assert_eq!(outcome.limit_cause, Some(LimitCause::Timeout));
+        assert_eq!(stdout(&outcome), "partial");
+        let result: super::super::types::CommandResult =
+            serde_json::from_str(&outcome.output).unwrap();
+        assert_eq!(result.stderr, "error");
+        assert!(result.changeset.files.is_empty());
         assert!(started.elapsed() < Duration::from_secs(10));
         let pid: i32 = std::fs::read_to_string(fixture.workspace.join("pid"))
             .unwrap()
@@ -482,17 +518,23 @@ mod tests {
     fn unconfirmed_reap_or_group_is_uncertain_for_every_ending() {
         for (reaped, stopped) in [(false, true), (true, false), (false, false)] {
             for ended in [
-                Ended::Timeout,
+                Ended::Timeout(Window::default(), Window::default(), 4096),
                 Ended::Cancelled,
                 Ended::Failed(ToolError::Operation),
             ] {
                 let outcome = settle(ended, reaped, stopped);
                 assert_eq!(outcome.disposition, ToolDisposition::Uncertain);
                 assert_eq!(outcome.output, UNCONFIRMED);
+                assert_eq!(outcome.limit_cause, None);
             }
         }
         assert_eq!(
-            settle(Ended::Timeout, true, true).disposition,
+            settle(
+                Ended::Timeout(Window::default(), Window::default(), 4096),
+                true,
+                true
+            )
+            .disposition,
             ToolDisposition::Limit
         );
     }

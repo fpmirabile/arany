@@ -103,7 +103,7 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                 })),
                 intent, disposition: arany::ToolDisposition::Succeeded,
                 output: serde_json::json!({"exit_code":0,"stdout":serde_json::json!({"continue":false,"stopReason":reason}).to_string(),"stderr":"","stdout_total":{"bytes":serde_json::json!({"continue":false,"stopReason":reason}).to_string().len(),"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string(),
-                cache_update: arany::CacheUpdate::NotApplicable, enforcement_cause: None,
+                cache_update: arany::CacheUpdate::NotApplicable, enforcement_cause: None, limit_cause: None,
             },
         },
     };
@@ -176,11 +176,11 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         assert_eq!(
             connection
                 .execute(
-                    "UPDATE events SET event_version=6 WHERE kind='HookFinished'",
+                    "UPDATE events SET event_version=7 WHERE kind='HookFinished'",
                     []
                 )
                 .unwrap(),

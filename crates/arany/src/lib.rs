@@ -83,7 +83,7 @@ pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{
     ApprovalInbox, ApprovalMode, ApprovalReply, Attestation, CacheUpdate, CommandChangeset,
     DefinitionFilePin, DefinitionRegistryPin, EffectIntent, EnforcementCause, FileChange,
-    FileVersion, GuardReceipt, MAX_SKILLS, NetworkGrant, OutputTotal, ProjectSkills,
+    FileVersion, GuardReceipt, LimitCause, MAX_SKILLS, NetworkGrant, OutputTotal, ProjectSkills,
     RuntimeProfileOption, ToolApproval, ToolApprovals, ToolCall, ToolContext, ToolDisposition,
     ToolError, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
     ToolResourceProfile, ToolResourceSettings, ToolStep, TrustRecordError, TrustReset,

@@ -553,11 +553,15 @@ impl RunLoop<'_> {
         self.append(Event::ToolFinished {
             run_id: self.run_id,
             agent_run_id: child.agent_run_id,
-            observation: not_dispatched(
-                intent,
-                ToolDisposition::Limit,
-                "Delegation deadline reached; no operation was dispatched",
-            ),
+            observation: {
+                let mut observation = not_dispatched(
+                    intent,
+                    ToolDisposition::Limit,
+                    "Delegation deadline reached; no operation was dispatched",
+                );
+                observation.limit_cause = Some(crate::tools::LimitCause::Timeout);
+                observation
+            },
 
             checkpoint: None,
         })
@@ -789,6 +793,7 @@ impl RunLoop<'_> {
                     };
                     if timed_out && observation.disposition == ToolDisposition::Cancelled {
                         observation.disposition = ToolDisposition::Limit;
+                        observation.limit_cause = Some(crate::tools::LimitCause::Timeout);
                     }
                     Answer {
                         checkpoint: None,
@@ -1117,11 +1122,15 @@ impl RunLoop<'_> {
             (
                 Verdict::Deny(Answer {
                     checkpoint: None,
-                    observation: not_dispatched(
-                        intent,
-                        ToolDisposition::Limit,
-                        crate::tools::types::command_timeout_limit_message(requested, maximum),
-                    ),
+                    observation: {
+                        let mut observation = not_dispatched(
+                            intent,
+                            ToolDisposition::Limit,
+                            crate::tools::types::command_timeout_limit_message(requested, maximum),
+                        );
+                        observation.limit_cause = Some(crate::tools::LimitCause::RequestedTime);
+                        observation
+                    },
                     stop: None,
                     active_time: None,
                 }),
@@ -2112,6 +2121,8 @@ fn not_dispatched(
 ) -> ToolObservation {
     ToolObservation {
         enforcement_cause: None,
+        limit_cause: (disposition == ToolDisposition::Limit)
+            .then_some(crate::tools::LimitCause::Resource),
         intent,
         disposition,
         output: output.into(),

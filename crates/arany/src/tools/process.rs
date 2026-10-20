@@ -120,7 +120,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
                 let mut err = super::output::Window::new(site.intent.limits.result_bytes as usize);
                 out.push(&stdout, super::output::DRAIN_BYTES)?;
                 err.push(&stderr, super::output::DRAIN_BYTES)?;
-                Ok((status, out, err))
+                Ok((Some(status), out, err))
             }
             Err(error) => Err(error),
         }
@@ -136,16 +136,33 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         writer.abort();
     }
     let (status, out, err) = captured?;
+    let timed_out = status.is_none();
+    let exit_code = status.and_then(|status| status.code());
     #[cfg(target_os = "linux")]
     let changeset = {
         site.stop_descendants().await?;
-        match before {
-            Some(before) => super::fs::command_changeset(site.workspace, &before)?,
-            None => super::types::CommandChangeset::default(),
+        if timed_out {
+            super::types::CommandChangeset::default()
+        } else {
+            match before {
+                Some(before) => super::fs::command_changeset(site.workspace, &before)?,
+                None => super::types::CommandChangeset::default(),
+            }
         }
     };
     #[cfg(not(target_os = "linux"))]
     let changeset = super::types::CommandChangeset::default();
+    command_output(site, exit_code, timed_out, out, err, changeset)
+}
+
+fn command_output(
+    site: &GuardContext<'_>,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    out: super::output::Window,
+    err: super::output::Window,
+    changeset: super::types::CommandChangeset,
+) -> Result<String, ToolError> {
     let budget = site.intent.limits.result_bytes as usize;
     let truncation = if site.hook_stdin.is_some() {
         Truncation::Refuse
@@ -156,13 +173,13 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         site.intent.target,
         crate::session::worker::EffectTarget::WorkerView { .. }
     ) {
-        return super::output::fit_streams(
+        let output = super::output::fit_streams(
             &out,
             &err,
             budget.saturating_sub(WORKER_CAPTURE_RESULT_BYTES),
             |stdout, stderr| {
                 serde_json::to_string(&crate::session::worker::WorkerCommandResult {
-                    exit_code: status.code(),
+                    exit_code,
                     stdout: stdout.into(),
                     stderr: stderr.into(),
                     stdout_total: out.total(),
@@ -171,36 +188,46 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
                 })
                 .map_err(|_| ToolError::Operation)
             },
-        );
+        )?;
+        return if timed_out {
+            Err(ToolError::Timeout(output))
+        } else {
+            Ok(output)
+        };
     }
     #[cfg(target_os = "macos")]
     {
         if matches!(truncation, Truncation::Refuse) {
-            fit_command(
-                status.code(),
-                &out,
-                &err,
-                changeset.clone(),
-                budget,
-                truncation,
-            )?;
+            fit_command(exit_code, &out, &err, changeset.clone(), budget, truncation)?;
         }
         super::output::CommandWindows {
             stdout: out,
             stderr: err,
         }
         .send()?;
-        fit_command(
-            status.code(),
+        let output = fit_command(
+            exit_code,
             &super::output::Window::default(),
             &super::output::Window::default(),
             changeset,
             budget,
             truncation,
-        )
+        )?;
+        if timed_out {
+            Err(ToolError::Timeout(output))
+        } else {
+            Ok(output)
+        }
     }
     #[cfg(not(target_os = "macos"))]
-    fit_command(status.code(), &out, &err, changeset, budget, truncation)
+    {
+        let output = fit_command(exit_code, &out, &err, changeset, budget, truncation)?;
+        if timed_out {
+            Err(ToolError::Timeout(output))
+        } else {
+            Ok(output)
+        }
+    }
 }
 
 pub(super) fn fit_command(

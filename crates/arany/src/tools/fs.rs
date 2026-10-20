@@ -2151,6 +2151,7 @@ mod path_tests {
                 ToolDisposition::Denied,
                 "File path is unavailable or outside the admitted regular-file boundary".into(),
                 None,
+                None,
             )
         );
         #[cfg(target_os = "linux")]

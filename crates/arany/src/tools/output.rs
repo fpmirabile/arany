@@ -120,11 +120,10 @@ fn encoded_len(text: &str) -> usize {
     serde_json::to_string(text).expect("JSON string").len() - 2
 }
 
-pub(super) async fn read_window<R: AsyncRead + Unpin>(
+pub(super) async fn read_window_into<R: AsyncRead + Unpin>(
     mut reader: R,
-    cap: usize,
-) -> Result<Window, ToolError> {
-    let mut window = Window::new(cap);
+    window: &mut Window,
+) -> Result<(), ToolError> {
     let mut chunk = [0; 8192];
     loop {
         let count = reader
@@ -132,7 +131,7 @@ pub(super) async fn read_window<R: AsyncRead + Unpin>(
             .await
             .map_err(|_| ToolError::Operation)?;
         if count == 0 {
-            return Ok(window);
+            return Ok(());
         }
         window.push(&chunk[..count], DRAIN_BYTES)?;
     }

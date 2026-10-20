@@ -1304,6 +1304,8 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             intent: intent.clone(),
             disposition,
             enforcement_cause: None,
+            limit_cause: (disposition == arany::ToolDisposition::Limit)
+                .then_some(arany::LimitCause::Resource),
             output: "bounded\noutput".into(),
             attestation: None,
             cache_update: CacheUpdate::NotApplicable,
@@ -1321,6 +1323,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         enforcement_cause: None,
+        limit_cause: None,
         output: String::new(),
         attestation: None,
         cache_update: CacheUpdate::Uncertain,

@@ -38,6 +38,8 @@ mod goal_success_tests {
         };
         ToolObservation {
             enforcement_cause: None,
+            limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
+                .then_some(crate::tools::LimitCause::Resource),
             attestation: Some(crate::tools::Attestation::Guard(GuardReceipt {
                 contract_version: 1,
                 intent_digest: intent.digest(),
@@ -1466,6 +1468,7 @@ mod payload_version_tests {
         };
         crate::tools::ToolObservation {
             enforcement_cause: None,
+            limit_cause: None,
             attestation: Some(crate::tools::Attestation::InProcess {
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
@@ -1550,9 +1553,9 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(18));
+        assert_eq!(payload_version("ToolFinished"), Some(19));
         assert_eq!(
-            Event::decode("ToolFinished", 18, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 19, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1560,7 +1563,7 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                18,
+                19,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1572,9 +1575,34 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 18, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", 19, &invalid, Some(run), Some(agent)).is_err());
         }
-        for previous in [17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
+        let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        missing.as_object_mut().unwrap().remove("limit_cause");
+        assert!(
+            Event::decode(
+                "ToolFinished",
+                19,
+                &missing.to_string(),
+                Some(run),
+                Some(agent)
+            )
+            .is_err()
+        );
+        let mut unknown: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        unknown["disposition"] = "limit".into();
+        unknown["limit_cause"] = "invented".into();
+        assert!(
+            Event::decode(
+                "ToolFinished",
+                19,
+                &unknown.to_string(),
+                Some(run),
+                Some(agent)
+            )
+            .is_err()
+        );
+        for previous in [18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1686,6 +1714,7 @@ mod payload_version_tests {
             ("HookFinished", 4),
             ("HookFinished", 5),
             ("HookFinished", 6),
+            ("HookFinished", 7),
             ("AgentFinished", 8),
             ("AgentFinished", 9),
             ("ProviderCallRecorded", 12),
