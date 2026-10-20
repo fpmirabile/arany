@@ -52,13 +52,38 @@ fn reply_positioned_cursor_queries(
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn observed_clear_rows(bytes: &[u8]) -> Vec<usize> {
+    let mut rows = Vec::new();
+    for (start, _) in bytes
+        .windows(2)
+        .enumerate()
+        .filter(|(_, part)| *part == b"\x1b[")
+    {
+        let rest = &bytes[start + 2..];
+        let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+        if digits > 0 && rest[digits..].starts_with(b";1H\x1b[J") && rows.len() < 16 {
+            rows.push(
+                String::from_utf8_lossy(&rest[..digits])
+                    .parse()
+                    .unwrap_or(0),
+            );
+        }
+    }
+    rows
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn assert_classic_owned_clear(bytes: &[u8], row: usize) {
     let clear = format!("\x1b[{row};1H\x1b[J");
     assert!(
         bytes
             .windows(clear.len())
             .any(|part| part == clear.as_bytes()),
-        "Classic must clear its previous owned area from row {row}"
+        "Classic must clear its previous owned area from row {row}; observed clears at rows {:?}; tail {:?}",
+        observed_clear_rows(bytes),
+        String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(400)..])
+            .escape_debug()
+            .to_string()
     );
     assert!(
         !bytes.windows(4).any(|part| part == b"\x1b[2J"),
