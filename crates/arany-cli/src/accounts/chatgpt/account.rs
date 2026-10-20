@@ -540,13 +540,11 @@ pub(super) async fn admitted_selected_for_run(
     let (fingerprint, context_window_tokens) = tokio::task::spawn_blocking(move || {
         let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
         let state = StateRoot::open_existing(&path).map_err(|_| AuthorizationError::Unavailable)?;
-        let fingerprint = admitted_model_at(&state, &workspace, &admitted, &model, effort)?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| AuthorizationError::EvidenceUnavailable)?
             .as_secs();
-        let window = checked_window_at(&state, &workspace, &admitted, &model, effort, now)?;
-        Ok::<_, AuthorizationError>((fingerprint, window))
+        admitted_model_at(&state, &workspace, &admitted, &model, effort, now)
     })
     .await
     .map_err(|_| AuthorizationError::Unavailable)??;
@@ -558,39 +556,14 @@ pub(super) async fn admitted_selected_for_run(
 }
 
 // Only a current check of this exact account, model and effort supplies its catalog window.
-fn checked_window_at(
-    state: &StateRoot,
-    workspace: &Path,
-    selected: &SelectedAccount,
-    model: &str,
-    effort: Effort,
-    now: u64,
-) -> Result<Option<u32>, AuthorizationError> {
-    let fingerprint = model_check_fingerprint(selected, model, effort)?;
-    state
-        .with_account_replacement_lock(workspace, || {
-            let index = AccountIndex::read(state)?;
-            verify_selected_snapshot(&index, selected)?;
-            Ok(model_check_valid(&index, selected.id, fingerprint, now)
-                .then(|| {
-                    index
-                        .model_checks
-                        .iter()
-                        .find(|check| check.fingerprint == fingerprint)
-                        .and_then(|check| check.context_window_tokens)
-                })
-                .flatten())
-        })
-        .map_err(|_| AuthorizationError::Unavailable)?
-}
-
 fn admitted_model_at(
     state: &StateRoot,
     workspace: &Path,
     selected: &SelectedAccount,
     model: &str,
     effort: Effort,
-) -> Result<[u8; 32], AuthorizationError> {
+    now: u64,
+) -> Result<([u8; 32], Option<u32>), AuthorizationError> {
     let fingerprint = account_fingerprint(
         selected,
         model,
@@ -598,11 +571,21 @@ fn admitted_model_at(
         ACCOUNT_ADMISSION_VERSION,
         "no-preflight-inference;strict-stream-outcomes;local-output-bound",
     )?;
+    let check_fingerprint = model_check_fingerprint(selected, model, effort)?;
     state
         .with_account_replacement_lock(workspace, || {
             let index = AccountIndex::read(state)?;
             verify_selected_snapshot(&index, selected)?;
-            Ok(fingerprint)
+            let window = model_check_valid(&index, selected.id, check_fingerprint, now)
+                .then(|| {
+                    index
+                        .model_checks
+                        .iter()
+                        .find(|check| check.fingerprint == check_fingerprint)
+                        .and_then(|check| check.context_window_tokens)
+                })
+                .flatten();
+            Ok((fingerprint, window))
         })
         .map_err(|_| AuthorizationError::Unavailable)?
 }

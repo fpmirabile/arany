@@ -168,7 +168,7 @@ impl RunConfig {
 
     // Only ChatGPT check evidence carries a window, and it only resizes within the hard ceilings.
     fn context_window_valid(&self) -> bool {
-        let ceiling = super::content_ceiling(self.context_window_tokens) as u32;
+        let ceiling = super::content_ceiling(self.context_window_tokens);
         self.context_window_tokens.is_none_or(|tokens| {
             crate::provider::admitted_context_window(u64::from(tokens)).is_some()
                 && self.custom_profile_provenance.is_none()
@@ -176,11 +176,11 @@ impl RunConfig {
         }) && self
             .context_usage
             .as_ref()
-            .is_none_or(|usage| usage.budget_bytes <= ceiling)
+            .is_none_or(|usage| usage.budget_bytes as usize <= ceiling)
             && self
                 .tool_policy
                 .as_ref()
-                .is_none_or(|policy| policy.max_context_bytes <= ceiling)
+                .is_none_or(|policy| policy.max_context_bytes as usize <= ceiling)
     }
 
     pub(crate) fn identity(&self) -> Option<crate::provider::ProviderIdentity> {
