@@ -16,16 +16,17 @@ Arany is a harness for multi-agent coding teams that can be trusted to work auto
 The goal: one normal engineering day in this repository (explore, multi-file edits, tests, commit and PR) without falling back to Claude Code, then the owner's other repositories. These items come before the list below; none weakens a guarantee.
 
 1. **Tool protocol slices 1-5** ([plan](./planning/tools-protocol/README.md)), then its live checks 1-4 on ChatGPT.
-2. **ChatGPT route limits like Codex.** The local output cap must not count reasoning tokens (or must match the API routes), and the 120 s per-call deadline becomes a stream-idle deadline. Bump the check versions.
-3. **Bounded Provider retries** ([engine loop D8](./planning/engine-loop/README.md)). On a 429, a 5xx or a stream cut before a decoded outcome, retry on the same route with backoff, like Codex, Claude Code and OpenCode. Each attempt commits first and is charged to the Goal, including a cut attempt the Provider may have billed; nothing is hidden. A Provider call is not a Workspace effect, so a retry never repeats an effect; Tool effects with unknown outcomes stay Uncertain and are never retried.
-4. **Attached-turn defaults.** A Goal budget that fits ordinary turns, a Write/Edit cap of at least 64 KiB, large drafts as attachments, and nested plus user-global `AGENTS.md`.
-5. **`cargo test` here inside the Guard.** Toolchain and Cargo cache selection in folder trust, and a Build profile on more cores; measure `cargo test -p arany --lib`.
-6. **Engine loop "decide, then apply" refactor** after tools-protocol slice 5 ([plan](./planning/engine-loop/README.md)).
-7. **Real-scale command snapshot** (security pass). Respect `.gitignore`, skip files over 1 MiB instead of aborting, and raise the 2,048-file, 32 MiB and 8 KiB changeset caps.
-8. **Development command environment** (security pass). Use all cores by default, plus opt-in network through a per-project domain allowlist behind a Guard proxy, like the Claude Code sandbox and Codex `network_access`.
-9. **Git write workflow.** Typed Guard operations (`commit`, `branch`, `switch`) on the neutralized view, plus approved prefix rules for `git push` and `gh pr`. Until then, exact-command "Always allow" rules.
-10. **Tool ergonomics.** Regex and glob Search beyond 64 rows, a Glob Tool, larger Write/Edit, MultiEdit, typed delete and move; parallel reads with item 10 below.
-11. **Visible reliability.** Green macOS CI on `main`, a closed flake list, and Linux p95 for Read, Edit and a command end to end.
+2. **Tool output limits like the peers** ([plan](./planning/tool-output-limits/README.md)): truncate instead of failing, line-paged Read, clear old results, honest "not found".
+3. **ChatGPT route limits like Codex.** The local output cap must not count reasoning tokens (or must match the API routes), and the 120 s per-call deadline becomes a stream-idle deadline. Bump the check versions.
+4. **Bounded Provider retries** ([engine loop D8](./planning/engine-loop/README.md)). On a 429, a 5xx or a stream cut before a decoded outcome, retry on the same route with backoff, like Codex, Claude Code and OpenCode. Each attempt commits first and is charged to the Goal, including a cut attempt the Provider may have billed; nothing is hidden. A Provider call is not a Workspace effect, so a retry never repeats an effect; Tool effects with unknown outcomes stay Uncertain and are never retried.
+5. **Attached-turn defaults.** A Goal budget that fits ordinary turns, a Write/Edit cap of at least 64 KiB, large drafts as attachments, and nested plus user-global `AGENTS.md`.
+6. **`cargo test` here inside the Guard.** Toolchain and Cargo cache selection in folder trust, and a Build profile on more cores; measure `cargo test -p arany --lib`.
+7. **Engine loop "decide, then apply" refactor** after tools-protocol slice 5 ([plan](./planning/engine-loop/README.md)).
+8. **Real-scale command snapshot** (security pass). Respect `.gitignore`, skip files over 1 MiB instead of aborting, and raise the 2,048-file, 32 MiB and 8 KiB changeset caps.
+9. **Development command environment** (security pass). Use all cores by default, plus opt-in network through a per-project domain allowlist behind a Guard proxy, like the Claude Code sandbox and Codex `network_access`.
+10. **Git write workflow.** Typed Guard operations (`commit`, `branch`, `switch`) on the neutralized view, plus approved prefix rules for `git push` and `gh pr`. Until then, exact-command "Always allow" rules.
+11. **Tool ergonomics.** Regex and glob Search beyond 64 rows, a Glob Tool, larger Write/Edit, MultiEdit, typed delete and move; parallel reads with item 10 below.
+12. **Visible reliability.** Green macOS CI on `main`, a closed flake list, and Linux p95 for Read, Edit and a command end to end.
 
 Exit: a week of dogfooding with every fallback to another harness recorded here; done when a full day passes without one.
 
