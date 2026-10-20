@@ -206,7 +206,7 @@ pub(super) fn respond_after_catalog(
     assert!(direct.get("max_output_tokens").is_none());
     assert!(direct.get("previous_response_id").is_none());
     assert!(direct.get("text").is_none());
-    assert_eq!(direct["tool_choice"], "none");
+    assert!(direct.get("tool_choice").is_none() && direct.get("tools").is_none());
     let context: serde_json::Value = crate::semantic::input(&direct);
     assert_eq!(
         context,

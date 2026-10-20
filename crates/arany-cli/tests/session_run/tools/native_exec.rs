@@ -1063,7 +1063,11 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 assert_eq!(context["phase"], "root_plan");
                 assert_eq!(context["collaboration"], json!({"mode":"single"}));
                 assert_eq!(context["objective"], "Native Tool CLI");
-                assert_eq!(context["goal_budget"], json!(arany::GoalBudget::default()));
+                assert_eq!(
+                    context["goal_budget"],
+                    Value::Null,
+                    "a plain turn sends no budget block"
+                );
                 assert_eq!(
                     context["goal_plan_contract"],
                     Value::Null,

@@ -893,7 +893,11 @@ fn assert_goal_provider_request(request: &ProviderRequest, expected_budget: &ara
     assert_eq!(request.phase, AgentPhase::RootPlan);
     assert_eq!(request.collaboration, CollaborationPolicy::Single);
     assert_eq!(request.input.objective, "Guard corpus");
-    assert_eq!(request.input.goal_budget.as_ref(), Some(expected_budget));
+    assert!(
+        request.input.goal_budget.is_none(),
+        "a plain turn sends no budget block"
+    );
+    assert_eq!(&request.input.pinned_budget, expected_budget);
     assert!(request.input.goal_plan_contract.is_none());
     assert!(request.input.tools.is_some());
 }

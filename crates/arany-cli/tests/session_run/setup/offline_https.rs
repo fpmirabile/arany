@@ -339,7 +339,7 @@ fn respond_unreviewed_native(input: &mut impl Write, output: &mut impl Read) {
         assert_eq!(body["store"], false);
         assert_eq!(body["max_output_tokens"], 4096);
         assert!(body.get("text").is_none());
-        assert_eq!(body["tool_choice"], "none");
+        assert!(body.get("tool_choice").is_none() && body.get("tools").is_none());
         let context = crate::semantic::input(&body);
         assert_eq!(context["objective"], "offline objective");
         let response = serde_json::to_vec(&serde_json::json!({
