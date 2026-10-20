@@ -367,8 +367,21 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<Candidate>, ToolError> {
     }
     #[cfg(target_os = "macos")]
     discover_apple_runtimes(&mut candidates)?;
-    candidates.sort_by(|left, right| left.token.cmp(&right.token));
+    candidates.sort_by(|left, right| {
+        profile_order((&left.grant, &left.token), (&right.grant, &right.token))
+    });
     Ok(candidates)
+}
+
+pub(super) fn profile_order(
+    (left, left_token): (&RuntimeGrant, &str),
+    (right, right_token): (&RuntimeGrant, &str),
+) -> std::cmp::Ordering {
+    left.kind
+        .cmp(&right.kind)
+        .then_with(|| right.version.cmp(&left.version))
+        .then_with(|| left.path.cmp(&right.path))
+        .then_with(|| left_token.cmp(right_token))
 }
 
 pub(crate) fn validate_selection(grants: &[RuntimeGrant]) -> Result<(), ToolError> {

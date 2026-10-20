@@ -22,11 +22,9 @@ fn wait(
     let end = Instant::now() + Duration::from_secs(10);
     loop {
         pump(output, input, transcript, answered);
-        if let Some(offset) = transcript[from..]
-            .windows(needle.len())
-            .position(|s| s == needle)
+        if let Some(matched) = crate::process::pty_text_matches(&transcript[from..], needle).next()
         {
-            return from + offset + needle.len();
+            return from + matched.end;
         }
         assert!(
             Instant::now() < end,

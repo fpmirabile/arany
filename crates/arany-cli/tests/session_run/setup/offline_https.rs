@@ -363,11 +363,9 @@ fn wait_for_sanitized(
 ) -> usize {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(offset) = transcript[start..]
-            .windows(needle.len())
-            .position(|part| part == needle)
+        if let Some(matched) = crate::process::pty_text_matches(&transcript[start..], needle).next()
         {
-            return start + offset;
+            return start + matched.start;
         }
         pump(output, input, transcript, answered);
         assert!(
