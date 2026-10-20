@@ -1705,7 +1705,7 @@ impl AttachedTerminal {
                 .draw_sessions(items, selected)
                 .map_err(TerminalError::Io);
         }
-        if self.mouse_capture.is_none() {
+        if self.mode == TerminalMode::Fullscreen && self.mouse_capture.is_none() {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();
@@ -1978,7 +1978,10 @@ impl AttachedTerminal {
                 .saturating_sub(agent_detail_rows(height, model.choices.len())),
         );
         let scroll = panel.scroll;
-        if !model.choices.is_empty() && self.mouse_capture.is_none() {
+        if self.mode == TerminalMode::Fullscreen
+            && !model.choices.is_empty()
+            && self.mouse_capture.is_none()
+        {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();

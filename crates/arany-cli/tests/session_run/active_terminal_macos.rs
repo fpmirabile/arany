@@ -1157,6 +1157,20 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
                 from = bytes.len();
                 input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
                 stage = 1;
+            } else if (4..=7).contains(&stage) {
+                let cursor = b"\x1b[?25h\x1b[22;3H";
+                let tail = &bytes[from..];
+                let (needle, send): (&[u8], &[u8]) = match stage {
+                    4 => (b"Resume \xc2\xb7", b"\x1b"),
+                    5 => (cursor, b"/agents\r"),
+                    6 => (b"gents", b"\x1b"),
+                    _ => (cursor, b"/exit\r"),
+                };
+                if tail.windows(needle.len()).any(|part| part == needle) {
+                    from = bytes.len();
+                    input.write_all(send).unwrap();
+                    stage += 1;
+                }
             } else if (1..=3).contains(&stage)
                 && bytes[from..]
                     .windows(b"reached;".len())
@@ -1190,7 +1204,7 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
                     .write_all(match stage {
                         1 => b"\x0f",
                         2 => b"/transcript\r",
-                        _ => b"/exit\r",
+                        _ => b"/resume\r",
                     })
                     .unwrap();
                 stage += 1;
@@ -1202,7 +1216,7 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             );
         },
     );
-    assert_eq!(stage, 4);
+    assert_eq!(stage, 8);
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stderr);
     for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {

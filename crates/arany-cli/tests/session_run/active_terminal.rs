@@ -1314,6 +1314,30 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             );
         }
     }
+    for (command, needle) in [
+        (&b"/resume\r"[..], &b"Resume \xc2\xb7"[..]),
+        (b"/agents\r", b"gents"),
+    ] {
+        let from = transcript.len();
+        input.write_all(command).unwrap();
+        wait(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            needle,
+        );
+        input.write_all(b"\x1b").unwrap();
+        wait(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            b"\x1b[?25h\x1b[22;3H",
+        );
+    }
     input.write_all(b"/exit\r").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while child.child().try_wait().unwrap().is_none() {
