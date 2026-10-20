@@ -184,16 +184,13 @@ the submission's `RunResult.stopped`, so a live turn and its `thread/resume`
 history agree. It is absent while the Run is open and when the Run finished
 without stopping its Goal. Otherwise it is one of:
 
-- `{reason:"goalExhausted",limit}` for the latest Run of a Goal whose committed
-  `GoalFinished.exhausted` is true. `limit` is `tokens` when the effective
-  finite token ceiling is reached or token usage is unknown, else `calls`, else
-  `activeTime` within the 5 s Store-action margin, else `runs`.
+- `{reason:"goalExhausted",limit}`, where `limit` is `tokens`, `calls`,
+  `activeTime` or `runs`, following [Goal exhaustion projection](./goals.md#lifecycle-budgets-and-recovery).
 - `paused`: the Goal waits at this latest Finished or Cancelled Run for an
   explicit resume.
 - `cancelled` or `stoppedByHook`.
-- For a Run with no terminal receipt: `uncertain` only when it committed a Tool
-  or hook without a journaled outcome or with an uncertain one; otherwise
-  `goalExhausted` when its counts prove the budget spent, else `interrupted`.
+- For a Run with no terminal receipt: `uncertain`, `goalExhausted` or
+  `interrupted`, following [accepted outcomes](./execution.md#accepted-outcomes).
 - `{reason:"failed",failure}` with the journal's snake_case `RunFailure`. A
   failure on the last permitted call is not budget exhaustion.
 

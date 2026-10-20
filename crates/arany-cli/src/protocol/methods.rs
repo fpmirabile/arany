@@ -1058,7 +1058,7 @@ fn run_failure_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"enum": ["provider_call", "proposal_refused", "budget_exhausted", "tool_stopped", "definition_invalid", "plan_admission", "tool_context_full", "workers_unverified", "criterion_unmet", "refusal_limit"], "type": "string"})
 }
 
-// A new RunFailure variant fails this match until the schema enum above lists it.
+// Keep this exhaustive match and the serialized-variant schema test in sync.
 const _: fn(arany::RunFailure) = |failure| match failure {
     arany::RunFailure::ProviderCall
     | arany::RunFailure::ProposalRefused

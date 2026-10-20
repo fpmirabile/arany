@@ -1,5 +1,6 @@
 use super::{
-    GoalStatus, GoalView, RunFailure, RunStatus, RunView, STORE_ACTION_OVERHEAD_MS, SessionView,
+    GoalStatus, GoalUsage, GoalView, RunFailure, RunStatus, RunView, STORE_ACTION_OVERHEAD_MS,
+    SessionView,
 };
 use crate::tools::{CacheUpdate, ToolDisposition};
 
@@ -43,11 +44,11 @@ impl SessionView {
             .rev()
             .find(|candidate| goal.run_ids.contains(&candidate.id))
             .is_some_and(|candidate| candidate.id == run.id);
-        project(goal, run, latest)
+        project(goal, run, latest, goal.resume_usage(self).runs)
     }
 }
 
-fn project(goal: &GoalView, run: &RunView, latest: bool) -> Option<RunStop> {
+fn project(goal: &GoalView, run: &RunView, latest: bool, accepted_runs: usize) -> Option<RunStop> {
     match run.status {
         RunStatus::Pending | RunStatus::Active => return None,
         RunStatus::Interrupted if unknown_effect(run) => return Some(RunStop::Uncertain),
@@ -58,9 +59,14 @@ fn project(goal: &GoalView, run: &RunView, latest: bool) -> Option<RunStop> {
         | RunStatus::StoppedByHook => {}
     }
     // A Run left without a terminal receipt by a spent budget proves the exhaustion from its counts.
-    if latest
-        && (goal.budget_closed || (run.status == RunStatus::Interrupted && goal.budget_spent()))
-    {
+    let spent = goal.effective_budget().spent(GoalUsage {
+        runs: accepted_runs,
+        provider_calls: goal.provider_calls,
+        active_ms: goal.active_ms,
+        known_tokens: goal.known_tokens,
+        token_usage_unknown: goal.token_usage_unknown,
+    });
+    if latest && (goal.budget_closed || (run.status == RunStatus::Interrupted && spent)) {
         return Some(RunStop::GoalExhausted(exhausted_limit(goal)));
     }
     let paused = latest && matches!(goal.status, GoalStatus::Running | GoalStatus::Interrupted);
@@ -313,7 +319,7 @@ mod tests {
             let mut run = unanswered_run(status);
             run.failure = failure(status);
             assert_eq!(
-                project(&goal(goal_status, closed), &run, latest),
+                project(&goal(goal_status, closed), &run, latest, 0),
                 expected,
                 "{status:?} in a {goal_status:?} Goal, closed {closed}, latest {latest}"
             );
@@ -363,12 +369,12 @@ mod tests {
         for (index, (tools, goal, expected)) in rows.into_iter().enumerate() {
             let mut run = unanswered_run(RunStatus::Interrupted);
             run.tools = tools;
-            assert_eq!(project(goal, &run, true), Some(expected), "row {index}");
+            assert_eq!(project(goal, &run, true, 0), Some(expected), "row {index}");
         }
         let mut finished = unanswered_run(RunStatus::Failed);
         finished.tools = vec![tool(None)];
         assert_eq!(
-            project(&goal(GoalStatus::Failed, false), &finished, true),
+            project(&goal(GoalStatus::Failed, false), &finished, true, 0),
             Some(RunStop::Failed(RunFailure::ProposalRefused)),
             "a terminal receipt keeps its own outcome"
         );
@@ -438,5 +444,16 @@ mod tests {
         assert_eq!(view.run_stop(&first), None);
         assert_eq!(view.run_stop(&second), Some(RunStop::Uncertain));
         assert_eq!(view.run_stop(&unanswered_run(RunStatus::Failed)), None);
+        // The unaccepted link consumes no Run budget; unsettled time stays out of this projection.
+        view.goals[0].active_ceiling_ms = 60_000;
+        for (max_runs, expected) in [
+            (3, RunStop::Interrupted),
+            (2, RunStop::GoalExhausted(GoalLimit::Runs)),
+        ] {
+            view.goals[0].budget.max_runs = max_runs;
+            view.runs[1].tools.clear();
+            assert_eq!(view.run_stop(&view.runs[1]), Some(expected));
+            assert_eq!(view.goals[0].run_ids.len(), 3);
+        }
     }
 }

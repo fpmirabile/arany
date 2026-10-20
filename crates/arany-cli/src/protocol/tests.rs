@@ -177,6 +177,37 @@ fn codec_round_trips_requests_notifications_responses_and_errors() {
 }
 
 #[test]
+fn goal_stop_failure_schema_lists_every_serialized_run_failure() {
+    let schema = protocol_schema();
+    let failed = schema["$defs"]["GoalStop"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variant| variant["properties"]["reason"]["const"] == "failed")
+        .unwrap();
+    let listed = failed["properties"]["failure"]["enum"].as_array().unwrap();
+    let failures = [
+        arany::RunFailure::ProviderCall,
+        arany::RunFailure::ProposalRefused,
+        arany::RunFailure::BudgetExhausted,
+        arany::RunFailure::ToolStopped,
+        arany::RunFailure::DefinitionInvalid,
+        arany::RunFailure::PlanAdmission,
+        arany::RunFailure::ToolContextFull,
+        arany::RunFailure::WorkersUnverified,
+        arany::RunFailure::CriterionUnmet,
+        arany::RunFailure::RefusalLimit,
+    ];
+    assert_eq!(listed.len(), failures.len());
+    for failure in failures {
+        assert!(
+            listed.contains(&serde_json::to_value(failure).unwrap()),
+            "{failure:?}"
+        );
+    }
+}
+
+#[test]
 fn every_conformance_message_validates_against_the_schema() {
     let schema = protocol_schema();
     let validator = jsonschema::options()
