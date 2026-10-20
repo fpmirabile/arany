@@ -160,7 +160,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         "WorkspaceRewindStarted" | "WorkspaceRewindFinished" | "ProviderFallbackUsed" => Some(1),
         "ToolPermissionDecided" => Some(4),
         "HookStarted" => Some(3),
-        "HookFinished" => Some(6),
+        "HookFinished" => Some(7),
         "ToolFinished" => Some(18),
         "RunStarted" => Some(16),
         "RunFinished" => Some(9),

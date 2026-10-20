@@ -1685,6 +1685,7 @@ mod payload_version_tests {
             ("HookFinished", 3),
             ("HookFinished", 4),
             ("HookFinished", 5),
+            ("HookFinished", 6),
             ("AgentFinished", 8),
             ("AgentFinished", 9),
             ("ProviderCallRecorded", 8),

@@ -58,14 +58,14 @@ impl Window {
     }
 
     pub(super) fn preview(&self, keep: usize) -> String {
-        let tail: Vec<u8> = self.tail.iter().copied().collect();
+        let stored: Vec<u8> = self.head.iter().chain(&self.tail).copied().collect();
         if self.total.bytes <= keep as u64 {
-            let mut bytes = self.head.clone();
-            bytes.extend(tail);
-            return String::from_utf8_lossy(&bytes).into_owned();
+            return String::from_utf8_lossy(&stored).into_owned();
         }
-        let mut head = &self.head[..keep.div_ceil(2).min(self.head.len())];
-        let mut tail = &tail[tail.len().saturating_sub(keep / 2)..];
+        let head_len = keep.div_ceil(2).min(self.head.len());
+        let tail_len = (keep / 2).min(stored.len() - head_len);
+        let mut head = &stored[..head_len];
+        let mut tail = &stored[stored.len() - tail_len..];
         // Drop only the incomplete character at a window edge, before lossy decoding.
         let start = head.len().saturating_sub(4);
         if let Some(offset) = head[start..].iter().rposition(|b| b & 0xc0 != 0x80) {
@@ -320,6 +320,15 @@ mod tests {
                     "keep={keep}, total={total:?}, text={preview:?}"
                 );
             }
+        }
+        for cap in [16, 24, 32, 64] {
+            let mut window = Window::new(cap);
+            window.push(b"head\nmiddle\ntail", DRAIN_BYTES).unwrap();
+            assert_eq!(
+                window.preview(12),
+                "head\nm\n…[4 bytes, 0 lines omitted; 16 bytes, 3 lines total]…\ne\ntail",
+                "cap={cap}"
+            );
         }
         let mut window = Window::new(8);
         window.push(b"head\nmiddle\ntail", DRAIN_BYTES).unwrap();
