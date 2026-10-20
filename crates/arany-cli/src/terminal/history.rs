@@ -1071,6 +1071,7 @@ mod tests {
 
     fn run(objective: &str, answer: &str) -> RunView {
         RunView {
+            skill: None,
             supervisor: Default::default(),
             workers: Default::default(),
             id: RunId::new(),
@@ -1926,6 +1927,7 @@ mod tests {
                 let answer = format!("answer {index:04} {answer_body}");
                 for event in [
                     Event::MessageAccepted {
+                        skill: None,
                         run_id,
                         text: objective,
                         images: Vec::new(),

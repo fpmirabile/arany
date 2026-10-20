@@ -411,6 +411,7 @@ async fn selected_cache_canary_helper_inner() {
             &seed_engine,
             &seed_engine_provider,
             RunRequest {
+                skill: None,
                 session_id: None,
                 title: Some("Private cache seed".into()),
                 objective: "Seed a bounded private cache archive".into(),
@@ -554,6 +555,7 @@ async fn selected_cache_canary_helper_inner() {
         Box::pin(async {
             cache_progress("selected-run-start");
             let outcome = run_with(&engine, &provider, RunRequest {
+                skill: None,
                 session_id: None,
                 title: Some("Selected cache canary".into()),
                 objective:
@@ -790,6 +792,7 @@ async fn selected_cache_canary_helper_inner() {
             &verify_engine,
             &verify_engine_provider,
             RunRequest {
+                skill: None,
                 session_id: None,
                 title: Some("Cache overflow recovery".into()),
                 objective: "Verify the previous private cache survived a rejected update".into(),

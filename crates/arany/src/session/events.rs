@@ -139,11 +139,11 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "GoalRunLinked"
         | "GoalResumed"
         | "GoalPlanContractRecorded"
-        | "MessageAccepted"
         | "GoalContextCompacted"
         | "GoalSteeringNoteRecorded"
         | "AssistantDisplayRecorded"
         | "MessageCommitted" => Some(6),
+        "MessageAccepted" => Some(7),
         "AgentSpawned" => Some(11),
         "AgentFinished" => Some(10),
         "ProviderCallRecorded" => Some(12),
@@ -274,6 +274,7 @@ pub enum Event {
         exhausted: bool,
     },
     MessageAccepted {
+        skill: Option<String>,
         run_id: RunId,
         text: String,
         images: Vec<crate::provider::ImageAttachment>,
@@ -484,6 +485,8 @@ struct TextPayload {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MessagePayload {
+    #[serde(deserialize_with = "required_skill")]
+    skill: Option<String>,
     text: String,
     #[serde(deserialize_with = "crate::provider::deserialize_images")]
     images: Vec<crate::provider::ImageAttachment>,
@@ -881,7 +884,13 @@ impl Event {
                 exhausted: *exhausted,
                 report: report.clone(),
             }),
-            Self::MessageAccepted { text, images, .. } => serialize(&MessagePayload {
+            Self::MessageAccepted {
+                text,
+                images,
+                skill,
+                ..
+            } => serialize(&MessagePayload {
+                skill: skill.clone(),
                 text: text.clone(),
                 images: images.clone(),
             }),
@@ -1156,6 +1165,7 @@ impl Event {
             "MessageAccepted" if run_id.is_some() && agent_run_id.is_none() => {
                 let data: MessagePayload = parse(payload)?;
                 Self::MessageAccepted {
+                    skill: data.skill,
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                     text: data.text,
                     images: data.images,
@@ -1349,4 +1359,17 @@ fn serialize<T: Serialize>(value: &T) -> Result<String, ReplayError> {
 
 fn parse<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T, ReplayError> {
     serde_json::from_str(value).map_err(|_| ReplayError::InvalidPayload)
+}
+
+fn required_skill<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let skill = Option::<String>::deserialize(deserializer)?;
+    if skill
+        .as_deref()
+        .is_some_and(|name| !crate::tools::types::valid_name(name))
+    {
+        return Err(serde::de::Error::custom("invalid Skill name"));
+    }
+    Ok(skill)
 }

@@ -2,6 +2,7 @@ use super::*;
 
 pub(crate) fn unanswered_run(status: RunStatus) -> RunView {
     RunView {
+        skill: None,
         supervisor: Default::default(),
         workers: Default::default(),
         id: RunId::new(),

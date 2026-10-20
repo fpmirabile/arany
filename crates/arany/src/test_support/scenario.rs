@@ -361,6 +361,7 @@ impl Provider for WaitingProvider {
 
 pub fn request(workspace: &Path, objective: &str) -> RunRequest {
     RunRequest {
+        skill: None,
         session_id: None,
         title: Some("Research".into()),
         objective: objective.into(),

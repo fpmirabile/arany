@@ -344,6 +344,10 @@ pub(super) fn preflight_idle_run(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "submission carries independent Run inputs"
+)]
 pub(super) async fn submit_objective(
     engine: &arany::Engine,
     terminal: &mut AttachedTerminal,
@@ -352,6 +356,7 @@ pub(super) async fn submit_objective(
     view: &mut SessionView,
     composer: &mut Composer,
     objective: String,
+    skill: Option<String>,
 ) -> Result<RunSubmission, String> {
     let profile = view
         .defaults
@@ -407,6 +412,7 @@ pub(super) async fn submit_objective(
     }
     goal.resource_settings = execution_settings.resources;
     let request = RunRequest {
+        skill,
         session_id: Some(view.id),
         title: None,
         objective,
@@ -1397,6 +1403,7 @@ mod goal_request_tests {
         view.goals[0].status = arany::GoalStatus::Failed;
         view.goals[0].budget_closed = true;
         let run = arany::RunView {
+            skill: None,
             supervisor: Default::default(),
             workers: Default::default(),
             id: arany::RunId::new(),

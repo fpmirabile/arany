@@ -38,7 +38,7 @@ use clipboard::{ClipboardContent, ClipboardRead};
 use commands::help_len;
 pub use commands::{
     CommandAvailability, CommandParseError, InteractiveCommand, Submission, command_completions,
-    parse_submission,
+    invoked_objective, parse_submission, skill_invocation,
 };
 pub use composer::{CompletionLayout, Composer, ComposerEdit};
 use history::History;

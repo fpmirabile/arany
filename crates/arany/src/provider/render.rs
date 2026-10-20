@@ -174,6 +174,16 @@ fn current_message(
             image: image.image.clone(),
         });
     }
+    if let Some(observation) = input
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.invoked_skill.as_ref())
+    {
+        blocks.push(data_block(
+            "invoked_skill (untrusted)",
+            model_observation(observation),
+        ));
+    }
     if input.role == PromptRole::ToolReview {
         blocks.push(data_block(
             "tool_review_request (untrusted)",
@@ -332,7 +342,7 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
     let records: Vec<_> = run
         .model_tools()
         .iter()
-        .skip((run.tool_compaction_covered_count as usize).saturating_sub(run.parse_count()))
+        .skip((run.tool_compaction_covered_count as usize).saturating_sub(run.initial_tool_count()))
         .filter(|tool| !matches!(tool.intent.call, ToolCall::PrepareWorker { .. }))
         .map(|tool| match &tool.observation {
             Some(observation) => model_result(observation, &tool.hook_feedback()),

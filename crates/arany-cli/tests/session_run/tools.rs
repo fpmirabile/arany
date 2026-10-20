@@ -264,6 +264,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             &engine,
             &provider,
             RunRequest {
+                skill: None,
                 session_id: None,
                 title: Some("Tools".into()),
                 objective: "Complete the synthetic coding journey".into(),
@@ -574,6 +575,7 @@ fn basic_config(state_path: &Path) {
 
 fn proposal_request(workspace: &Path) -> RunRequest {
     RunRequest {
+        skill: None,
         session_id: None,
         title: None,
         objective: "Guard corpus".into(),
@@ -3108,6 +3110,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
             &engine,
             &provider,
             RunRequest {
+                skill: None,
                 session_id: None,
                 title: Some("Git".into()),
                 objective: "Inspect Git state".into(),

@@ -159,6 +159,7 @@ pub(super) fn discover(workspace: &Path, admitted: &mut Vec<Skill>) -> Result<()
             .take(192)
             .collect::<String>();
         admitted.push(Skill {
+            disable_model_invocation: disables_model_invocation(&bytes),
             name: name.clone(),
             description: if preview.trim().is_empty() {
                 format!("Project Skill {name}")
@@ -379,6 +380,36 @@ pub(super) fn metadata(expected_name: &str, bytes: &[u8]) -> Result<Value, ToolE
     )
 }
 
+// Discovery reads this literal opt-out only; YAML stays in the Guard.
+pub(super) fn disables_model_invocation(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return true;
+    };
+    frontmatter(text).is_some_and(|header| {
+        let indentation = header
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+            .map(|line| line.len() - line.trim_start().len())
+            .min()
+            .unwrap_or_default();
+        header
+            .lines()
+            .filter(|line| line.len() - line.trim_start().len() == indentation)
+            .any(|line| {
+                let Some((key, value)) = line.split_once(':') else {
+                    return false;
+                };
+                key.trim().trim_matches(['\'', '"']) == "disable-model-invocation"
+                    && value
+                        .split('#')
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .eq_ignore_ascii_case("true")
+            })
+    })
+}
+
 fn frontmatter(text: &str) -> Option<&str> {
     let text = text
         .strip_prefix("---\n")
@@ -513,6 +544,23 @@ pub(crate) fn parse_json_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discovery_opt_out_is_literal_data_without_yaml_evaluation() {
+        for (declaration, disabled) in [
+            ("disable-model-invocation: true", true),
+            ("disable-model-invocation: true # explicit only", true),
+            ("disable-model-invocation: false", false),
+            ("disable-model-invocation: TRUE", true),
+            ("description: |\n  disable-model-invocation: true", false),
+            ("description: disable-model-invocation: true", false),
+            ("allowed-tools: Bash", false),
+        ] {
+            let source =
+                format!("---\nname: useful\ndescription: Guidance\n{declaration}\n---\nBody");
+            assert_eq!(disables_model_invocation(source.as_bytes()), disabled);
+        }
+    }
+
     #[test]
     fn portable_metadata_accepts_real_scalars_and_rejects_ambiguity() {
         for source in [

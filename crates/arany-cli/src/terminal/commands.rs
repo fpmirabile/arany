@@ -71,6 +71,10 @@ impl InteractiveCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Submission<'a> {
     Objective(&'a str),
+    Skill {
+        name: &'a str,
+        task: &'a str,
+    },
     Command {
         command: InteractiveCommand,
         argument: Option<&'a str>,
@@ -390,6 +394,23 @@ pub fn parse_submission(line: &str) -> Result<Submission<'_>, CommandParseError>
     Err(CommandParseError::Unknown {
         suggestion: suggest(name),
     })
+}
+
+pub fn skill_invocation<'a>(text: &'a str, skills: &[String]) -> Option<(&'a str, &'a str)> {
+    let control = text.strip_prefix('/')?;
+    let (name, task) = control
+        .split_once(char::is_whitespace)
+        .unwrap_or((control, ""));
+    (skills.iter().any(|skill| skill == name) && !command_completions("/").contains(&name))
+        .then_some((name, task.trim()))
+}
+
+pub fn invoked_objective(name: &str, task: &str) -> String {
+    if task.is_empty() {
+        format!("/{name}")
+    } else {
+        task.to_owned()
+    }
 }
 
 pub fn command_completions(prefix: &str) -> Vec<&'static str> {

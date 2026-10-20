@@ -162,6 +162,7 @@ mod goal_workspace_lease_tests {
                 matches!(event, Event::GoalRunLinked { .. })
             });
         let request = RunRequest {
+            skill: None,
             session_id: Some(session_id),
             title: None,
             objective: "Link the Run before its acknowledgment is lost".into(),
@@ -235,6 +236,7 @@ mod goal_workspace_lease_tests {
         workspace: &std::path::Path,
     ) -> RunRequest {
         RunRequest {
+            skill: None,
             session_id: Some(session_id),
             title: None,
             objective: RESUMABLE_OBJECTIVE.into(),

@@ -420,6 +420,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             .append(
                 current_id,
                 arany::Event::MessageAccepted {
+                    skill: None,
                     run_id,
                     text: "Prior accepted objective".into(),
                     images: Vec::new(),
@@ -1053,23 +1054,10 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         menu_at,
         b"> Cmd /resume",
     );
-    let completed_at = transcript.len();
-    input
-        .write_all(b"\r")
-        .expect("complete resume without executing");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        completed_at,
-        b"[session-id]",
-    );
-    assert!(!String::from_utf8_lossy(&transcript[completed_at..]).contains("Resume · 1"));
     let picker_at = transcript.len();
     input
         .write_all(b"\r")
-        .expect("execute resume without an argument");
+        .expect("Enter invokes the focused resume entry");
     wait_for_after(
         &mut output,
         &mut input,
@@ -1107,25 +1095,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         b"> Cmd /status",
     );
     let status_at = transcript.len();
-    input
-        .write_all(b"\r")
-        .expect("complete focused status without submitting prefix");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        status_at,
-        10,
-    );
-    assert!(
-        !String::from_utf8_lossy(&transcript[status_at..]).contains("error:"),
-        "Enter must complete the focused command, not reject its prefix: {}",
-        tail(&transcript)
-    );
-    input
-        .write_all(b"\r")
-        .expect("submit completed local status");
+    input.write_all(b"\r").expect("invoke focused status");
     wait_for_after(
         &mut output,
         &mut input,
@@ -3286,4 +3256,84 @@ esac
             store.close().await.expect("close Store");
         });
     }
+}
+
+#[test]
+fn slash_skill_enter_submits_the_admitted_name_and_task() {
+    use arany_cli::terminal::{
+        CompletionLayout, Composer, ComposerEdit, Submission, TerminalInput,
+    };
+    let mut composer = Composer::default();
+    composer.set_runtime_skills(&["ask-matt".into(), "help".into()]);
+    composer.set_completion_layout(CompletionLayout::Combined);
+    for (draft, task) in [
+        ("/ask-matt", ""),
+        ("/ask-matt do X", "do X"),
+        ("/ask-matt /ask-matt", "/ask-matt"),
+        ("/ask-m", ""),
+    ] {
+        composer.clear();
+        composer.insert_paste(draft).unwrap();
+        assert_eq!(
+            composer.apply(TerminalInput::Submit),
+            ComposerEdit::Unchanged
+        );
+        assert_eq!(
+            composer.submission(),
+            Ok(Submission::Skill {
+                name: "ask-matt",
+                task
+            })
+        );
+    }
+    for (draft, objective) in [("/ask-matt", "/ask-matt"), ("/ask-matt do X", "do X")] {
+        composer.clear();
+        composer.insert_paste(draft).unwrap();
+        let Ok(Submission::Skill { name, task }) = composer.submission() else {
+            panic!("admitted Skill submission");
+        };
+        assert_eq!(
+            arany_cli::terminal::invoked_objective(name, task),
+            objective
+        );
+    }
+    let mut tabs = Composer::default();
+    tabs.set_runtime_skills(&["ask-matt".into()]);
+    tabs.set_completion_layout(CompletionLayout::Tabs);
+    tabs.insert_paste("/ask-m").unwrap();
+    assert_eq!(tabs.apply(TerminalInput::Submit), ComposerEdit::Unchanged);
+    assert_eq!(
+        tabs.submission(),
+        Ok(Submission::Skill {
+            name: "ask-matt",
+            task: ""
+        })
+    );
+    tabs.clear();
+    tabs.set_runtime_skills(&["ask-matt".into(), "ask-mary".into()]);
+    tabs.insert_paste("/ask-m").unwrap();
+    assert_eq!(tabs.apply(TerminalInput::Submit), ComposerEdit::Unchanged);
+    assert_eq!(tabs.text(), "/ask-m");
+    assert!(tabs.submission().is_err());
+    composer.clear();
+    composer.insert_paste("/ask-m").unwrap();
+    assert_eq!(composer.apply(TerminalInput::Tab), ComposerEdit::Changed);
+    assert_eq!(composer.text(), "/ask-matt ");
+    for literal in ["//ask-matt", "$ask-matt"] {
+        composer.clear();
+        composer.insert_paste(literal).unwrap();
+        assert!(matches!(
+            composer.submission(),
+            Ok(Submission::Objective(_))
+        ));
+    }
+    composer.clear();
+    composer.insert_paste("/help").unwrap();
+    assert!(matches!(
+        composer.submission(),
+        Ok(Submission::Command { .. })
+    ));
+    composer.clear();
+    composer.insert_paste("/unadmitted").unwrap();
+    assert!(composer.submission().is_err());
 }

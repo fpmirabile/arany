@@ -775,6 +775,7 @@ mod tests {
         let run_id = RunId::new();
         view.last_sequence = 2;
         view.runs.push(RunView {
+            skill: None,
             supervisor: Default::default(),
             workers: Default::default(),
             id: run_id,

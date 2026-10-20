@@ -1165,6 +1165,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
             .append(
                 session_id,
                 Event::MessageAccepted {
+                    skill: None,
                     run_id: interrupted_run_id,
                     text: "Unfinished question".into(),
                     images: Vec::new(),
@@ -5838,4 +5839,66 @@ async fn greeting_commits_one_text_answer_and_resumes_with_the_first_objective_t
     .await
     .expect("resume");
     assert_eq!(resumed.conversation_title(), "hola!");
+}
+
+#[tokio::test]
+async fn invoked_skill_denial_is_journaled_before_any_provider_call() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
+    let skill = workspace.join(".agents/skills/ask-matt");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: ask-matt\ndescription: Guide\n---\nUntrusted guidance",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(std::env::current_exe().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (file, bytes) in [
+        ("tools.json", br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#.as_slice()),
+        ("permissions.json", br#"{"permissions":{"deny":["Skill"]}}"#.as_slice()),
+    ] {
+        std::fs::write(state.join(file), bytes).unwrap();
+        std::fs::set_permissions(state.join(file), std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        arany::test_support::goals::finish_with("Must not be called"),
+    ]));
+    let mut input = request(&workspace, "do X");
+    input.skill = Some("ask-matt".into());
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert_eq!(outcome.run.failure, Some(arany::RunFailure::ToolStopped));
+    assert!(provider.requests.lock().unwrap().is_empty());
+    engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    let view = store.load_view(outcome.session_id).await.unwrap().unwrap();
+    assert_eq!(view.runs[0].skill.as_deref(), Some("ask-matt"));
+    assert_eq!(view.runs[0].tools.len(), 1);
+    assert!(events.iter().any(|event| matches!(&event.event, Event::ToolFinished { observation, .. } if observation.disposition == arany::ToolDisposition::Denied)));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+    );
+    store.close().await.unwrap();
 }

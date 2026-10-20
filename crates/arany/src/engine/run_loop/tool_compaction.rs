@@ -163,7 +163,7 @@ impl RunLoop<'_> {
             return Ok(None);
         }
         let events = self.journal.store().load_session(self.session_id).await?;
-        let (previously_covered, total_tools, parsed) = self.ledger().view(|view| {
+        let (previously_covered, total_tools, initialized) = self.ledger().view(|view| {
             let run = view
                 .runs
                 .iter()
@@ -171,13 +171,16 @@ impl RunLoop<'_> {
                 .ok_or(EngineError::InvalidHistory)?;
             Ok::<_, EngineError>((
                 run.tool_compaction_covered_count,
-                u32::try_from(run.model_tools().len()).map_err(|_| EngineError::InvalidHistory)?,
-                u32::try_from(run.parse_count()).map_err(|_| EngineError::InvalidHistory)?,
+                u32::try_from(run.tools.len() - run.initial_tool_count())
+                    .map_err(|_| EngineError::InvalidHistory)?,
+                u32::try_from(run.initial_tool_count()).map_err(|_| EngineError::InvalidHistory)?,
             ))
         })??;
-        // Covered counts index the Run's Tool Events, so the leading parse steps count as already covered.
-        let previously_covered = previously_covered.max(parsed);
-        if total_tools.saturating_sub(previously_covered - parsed) as usize != total_observations {
+        // Initialization reads count as already covered; their pinned context stays live.
+        let previously_covered = previously_covered.max(initialized);
+        if total_tools.saturating_sub(previously_covered - initialized) as usize
+            != total_observations
+        {
             return Err(EngineError::InvalidHistory);
         }
         let summary_placeholder = "x".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES);

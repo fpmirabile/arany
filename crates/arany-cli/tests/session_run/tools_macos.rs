@@ -693,6 +693,7 @@ async fn native_file_journey_helper() {
         &engine,
         &provider,
         RunRequest {
+            skill: None,
             session_id: None,
             title: Some("Native files".into()),
             objective: "Complete the synthetic native file journey".into(),
@@ -889,6 +890,7 @@ async fn native_file_journey_helper() {
         &fresh,
         &fresh_provider,
         RunRequest {
+            skill: None,
             session_id: Some(outcome.session_id),
             title: None,
             objective: "Verify a fresh native command snapshot".into(),
@@ -1345,6 +1347,7 @@ async fn run_offline_build_case(
         &engine,
         &provider,
         RunRequest {
+            skill: None,
             session_id: None,
             title: Some(title.into()),
             objective: objective.into(),
@@ -1620,6 +1623,7 @@ async fn native_runtime_mount_journey_helper() {
         &engine,
         &provider,
         RunRequest {
+            skill: None,
             session_id: None,
             title: Some("Mounted runtime refusal".into()),
             objective: "Check runtime mount topology".into(),
@@ -1749,6 +1753,7 @@ async fn native_runtime_mount_journey_helper() {
         &seed_engine,
         &seed_engine_provider,
         RunRequest {
+            skill: None,
             session_id: None,
             title: Some("Private cache seed".into()),
             objective: "Seed a bounded private cache archive".into(),
@@ -1906,6 +1911,7 @@ async fn native_runtime_mount_journey_helper() {
             &engine,
             &provider,
             RunRequest {
+                skill: None,
                 session_id: None,
                 title: Some("Rejected native storage granularity".into()),
                 objective: "The unsupported resource values must not be dispatched".into(),
@@ -1925,6 +1931,7 @@ async fn native_runtime_mount_journey_helper() {
         &engine,
         &provider,
         RunRequest {
+            skill: None,
             session_id: None,
             title: Some("Selected runtime success".into()),
             objective:
@@ -2175,6 +2182,7 @@ async fn native_runtime_mount_journey_helper() {
         &verify_engine,
         &verify_engine_provider,
         RunRequest {
+            skill: None,
             session_id: None,
             title: Some("Cache overflow recovery".into()),
             objective: "Verify the previous private cache survived a rejected update".into(),
@@ -2356,6 +2364,7 @@ int main(void) {
                     &engine,
                     &provider,
                     RunRequest {
+                        skill: None,
                         session_id: None,
                         title: Some(format!("Native {case}")),
                         objective: "Stop this synthetic native command".into(),
