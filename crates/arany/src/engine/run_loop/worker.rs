@@ -1566,7 +1566,6 @@ mod terminal_tests {
                 W::Failed,
                 C::Budget,
             ),
-            // An own hook stop that is journaled but not settled is no `stopped_by_hook` fact.
             (
                 C::InvalidOutcome,
                 WorkerFacts::default(),
