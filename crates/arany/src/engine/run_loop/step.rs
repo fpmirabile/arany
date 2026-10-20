@@ -1372,8 +1372,9 @@ impl RunLoop<'_> {
                 stop: (!approved).then(|| {
                     refusal_cause(
                         active_time_exhausted,
-                        self.controls.cancellation.is_cancelled(),
                         paused,
+                        self.controls.cancellation.is_cancelled(),
+                        false,
                     )
                 }),
                 active_time: Some(ActiveTime {
@@ -1741,7 +1742,12 @@ impl RunLoop<'_> {
                     ToolDisposition::Denied,
                     "Approval was not granted; no operation was dispatched",
                 ),
-                stop: Some(StopCause::ToolStopped),
+                stop: Some(refusal_cause(
+                    false,
+                    self.pause_requested(),
+                    self.controls.cancellation.is_cancelled(),
+                    Instant::now() >= deadline,
+                )),
                 active_time: None,
             })
         };
@@ -2114,13 +2120,20 @@ fn not_dispatched(
     }
 }
 
-fn refusal_cause(active_time_exhausted: bool, cancelled: bool, paused: bool) -> StopCause {
+fn refusal_cause(
+    active_time_exhausted: bool,
+    paused: bool,
+    cancelled: bool,
+    deadline_reached: bool,
+) -> StopCause {
     if active_time_exhausted {
         StopCause::ActiveTime
-    } else if cancelled {
-        StopCause::Cancelled
     } else if paused {
         StopCause::Paused
+    } else if cancelled {
+        StopCause::Cancelled
+    } else if deadline_reached {
+        StopCause::DelegationDeadline
     } else {
         StopCause::ToolStopped
     }
@@ -2628,5 +2641,19 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn refusals_keep_their_own_cause() {
+        for (flags, expected) in [
+            ([true, true, true, true], StopCause::ActiveTime),
+            ([false, true, true, true], StopCause::Paused),
+            ([false, false, true, true], StopCause::Cancelled),
+            ([false, false, false, true], StopCause::DelegationDeadline),
+            ([false, false, false, false], StopCause::ToolStopped),
+        ] {
+            let [active, paused, cancelled, deadline] = flags;
+            assert_eq!(refusal_cause(active, paused, cancelled, deadline), expected);
+        }
     }
 }
