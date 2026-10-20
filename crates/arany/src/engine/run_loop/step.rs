@@ -1,4 +1,5 @@
 use super::children::ChildWork;
+use super::stop::{SizingRefusal, StepEnd, StopCause};
 use super::{
     ActivePause, ActiveSegment, CallResult, RunLoop, TOOL_CLEANUP_OVERHEAD, TOOL_REVIEW_DEADLINE,
     call_record,
@@ -71,12 +72,6 @@ impl Grant<'_> {
             }
         }
     }
-}
-
-enum SizingRefusal {
-    DelegationDeadline,
-    ActiveTime,
-    ContextFull,
 }
 
 enum Verdict {
@@ -224,13 +219,19 @@ struct ActiveTime {
 pub(in crate::engine) type BoxedStep<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, EngineError>> + Send + 'a>>;
 
+pub(super) type IntentResult = Result<(ToolObservation, Option<ToolCall>), StopCause>;
+
 impl RunLoop<'_> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "R1 keeps the step pipeline in journal order"
+    )]
     pub(super) async fn execute_step(
         &self,
         mut grant: Grant<'_>,
         request: ToolRequest,
         turn: ProviderTurn,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<StepEnd, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
         let source_call = request.call.clone();
         let mut call = source_call.clone();
@@ -253,17 +254,24 @@ impl RunLoop<'_> {
             let intent =
                 match self.sized_intent(&grant, runtime, &step, call.clone(), &source_call)? {
                     Ok(intent) => intent,
-                    Err(SizingRefusal::DelegationDeadline) => {
-                        self.record_delegation_deadline(&grant, runtime, call)
-                            .await?;
-                        return Ok(false);
+                    Err(refusal @ SizingRefusal::DelegationDeadline) => {
+                        match self.record_delegation_deadline(&grant, runtime, call).await {
+                            Ok(()) => {}
+                            Err(EngineError::Tool(ToolError::Limit)) => {
+                                return Ok(StepEnd::Stopped(StopCause::Capacity));
+                            }
+                            Err(error) => return Err(error),
+                        }
+                        return Ok(StepEnd::Stopped(refusal.into()));
                     }
-                    Err(SizingRefusal::ActiveTime) => {
+                    Err(refusal @ SizingRefusal::ActiveTime) => {
                         self.active_time_floor
                             .store(true, std::sync::atomic::Ordering::Relaxed);
-                        return Ok(false);
+                        return Ok(StepEnd::Stopped(refusal.into()));
                     }
-                    Err(SizingRefusal::ContextFull) => return Self::context_overflow(&grant),
+                    Err(refusal @ SizingRefusal::ContextFull) => {
+                        return Ok(StepEnd::Stopped(refusal.into()));
+                    }
                 };
             let command = matches!(intent.call, ToolCall::Command { .. })
                 && matches!(intent.target, crate::worker::EffectTarget::Workspace);
@@ -271,14 +279,18 @@ impl RunLoop<'_> {
             let narrowable =
                 matches!(grant, Grant::Primary { .. }) && narrowings < MAX_NARROWINGS_PER_STEP;
             // Boxed: approval and dispatch futures otherwise inflate every enclosing agent step.
-            let Some((observation, narrowed)) = self
+            let (observation, narrowed) = match self
                 .run_intent(&grant, runtime, intent, &source_call, narrowable)
                 .await?
-            else {
-                return Ok(false);
+            {
+                Ok(observed) => observed,
+                Err(cause) => return Ok(StepEnd::Stopped(cause)),
             };
             if observation.stops_run() || self.controls.cancellation.is_cancelled() {
-                return Ok(false);
+                return Ok(StepEnd::Stopped(Self::observation_stop(
+                    &observation,
+                    self.controls.cancellation.is_cancelled(),
+                )));
             }
             let changeset = if command
                 && observation.attestation.is_some()
@@ -289,7 +301,7 @@ impl RunLoop<'_> {
                 match serde_json::from_str::<CommandResult>(&observation.output) {
                     Ok(result) if result.valid() => Some(result.changeset),
                     Err(_) if observation.disposition == ToolDisposition::Failed => None,
-                    _ => return Ok(false),
+                    _ => return Ok(StepEnd::Stopped(StopCause::InvalidCommandResult)),
                 }
             } else {
                 None
@@ -304,10 +316,10 @@ impl RunLoop<'_> {
                 break;
             };
             if self.controls.cancellation.is_cancelled() {
-                return Ok(false);
+                return Ok(StepEnd::Stopped(StopCause::Cancelled));
             }
             if grant.context()?.reserved_len(&step, &[]) > runtime.context_limit_bytes() {
-                return Self::context_overflow(&grant);
+                return Ok(StepEnd::Stopped(StopCause::ContextFull));
             }
             call = ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::CommandReceipt {
@@ -316,7 +328,7 @@ impl RunLoop<'_> {
                 },
             };
             if !call.valid() {
-                return Ok(false);
+                return Ok(StepEnd::Stopped(StopCause::InvalidCommandResult));
             }
         }
         // The hooks see the published tree: a Command's changeset is integrated first.
@@ -336,9 +348,12 @@ impl RunLoop<'_> {
                     step.hook_feedback.insert(narrowings, post.feedback);
                 }
                 HookStop::None => {}
-                HookStop::Uncertain | HookStop::Requested => return Ok(false),
-                HookStop::ActiveTime if grant.deadline().is_some() => return Ok(false),
-                HookStop::ActiveTime => return Err(EngineError::GoalBudgetExhausted),
+                HookStop::Uncertain => return Ok(StepEnd::Stopped(StopCause::Uncertain)),
+                HookStop::Requested => return Ok(StepEnd::Stopped(StopCause::HookStop)),
+                HookStop::ActiveTime if grant.deadline().is_some() => {
+                    return Ok(StepEnd::Stopped(StopCause::DelegationDeadline));
+                }
+                HookStop::ActiveTime => return Ok(StepEnd::Stopped(StopCause::ActiveTime)),
             }
         }
         if matches!(grant, Grant::Primary { .. }) {
@@ -359,25 +374,43 @@ impl RunLoop<'_> {
         }
         grant.context_mut()?.steps.push(step);
         if let Grant::Primary { request, .. } = &mut grant {
-            self.compact_tool_context_if_needed(request).await?;
+            match self.compact_tool_context_if_needed(request).await {
+                Ok(()) => {}
+                Err(EngineError::GoalBudgetExhausted) => {
+                    return Ok(StepEnd::Stopped(StopCause::ActiveTime));
+                }
+                Err(EngineError::ContextTooLarge) => {
+                    return Ok(StepEnd::Stopped(StopCause::ContextFull));
+                }
+                Err(error) => return Err(error),
+            }
             if self.controls.cancellation.is_cancelled() {
-                return Ok(false);
+                return Ok(StepEnd::Stopped(StopCause::Cancelled));
             }
         }
         if self.hook_requested_stop()? {
-            return Ok(false);
+            return Ok(StepEnd::Stopped(StopCause::HookStop));
         }
         if grant.context()?.rendered_len() > runtime.context_limit_bytes() {
-            return Self::context_overflow(&grant);
+            return Ok(StepEnd::Stopped(StopCause::ContextFull));
         }
-        Ok(true)
+        Ok(StepEnd::Continue)
     }
 
-    fn context_overflow(grant: &Grant<'_>) -> Result<bool, EngineError> {
-        if matches!(grant, Grant::Primary { .. }) {
-            Err(EngineError::ContextTooLarge)
+    fn observation_stop(observation: &ToolObservation, cancelled: bool) -> StopCause {
+        let cause = if observation.disposition == ToolDisposition::Uncertain
+            || observation.cache_update == CacheUpdate::Uncertain
+        {
+            StopCause::Uncertain
+        } else if observation.disposition == ToolDisposition::Cancelled {
+            StopCause::Cancelled
         } else {
-            Ok(false)
+            StopCause::ToolStopped
+        };
+        if cancelled {
+            cause.merge(StopCause::Cancelled)
+        } else {
+            cause
         }
     }
 
@@ -649,7 +682,7 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         post_call: &'a ToolCall,
         narrowable: bool,
-    ) -> BoxedStep<'a, Option<(ToolObservation, Option<ToolCall>)>> {
+    ) -> BoxedStep<'a, IntentResult> {
         Box::pin(self.run_intent_inner(grant, runtime, intent, post_call, narrowable))
     }
 
@@ -660,7 +693,7 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         post_call: &ToolCall,
         narrowable: bool,
-    ) -> Result<Option<(ToolObservation, Option<ToolCall>)>, EngineError> {
+    ) -> Result<IntentResult, EngineError> {
         let mut permission = self.permission(grant, runtime, &intent.call);
         if intent.call.is_unguarded()
             && permission.decision != Decision::Deny
@@ -678,11 +711,14 @@ impl RunLoop<'_> {
             }
         }
         let (hook_events, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
-        if !self
+        match self
             .admit_tool(grant, runtime, &intent, permission, hook_events, narrowable)
-            .await?
+            .await
         {
-            return Ok(None);
+            Ok(true) => {}
+            Ok(false) => return Ok(Err(StopCause::Budget)),
+            Err(EngineError::Tool(ToolError::Limit)) => return Ok(Err(StopCause::Capacity)),
+            Err(error) => return Err(error),
         }
         let agent_run_id = intent.agent_run_id;
         // A researcher's Tool runs inside its delegation's reservation.
@@ -709,9 +745,14 @@ impl RunLoop<'_> {
         }
         let mut narrowed = None;
         let mut candidate = None;
-        let verdict = self
+        let verdict = match self
             .before_dispatch(grant, runtime, intent, permission, narrowable)
-            .await?;
+            .await
+        {
+            Ok(verdict) => verdict,
+            Err(EngineError::GoalBudgetExhausted) => return Ok(Err(StopCause::ActiveTime)),
+            Err(error) => return Err(error),
+        };
         let answer = match verdict {
             Verdict::Deny(answer) => answer,
             Verdict::Narrow(answer, call) => {
@@ -782,10 +823,14 @@ impl RunLoop<'_> {
                 self.settle_active_segment(segment)?;
             }
             if active_time.exhausted || self.ledger().active_time_exhausted() {
-                return Err(EngineError::GoalBudgetExhausted);
+                return Ok(Err(StopCause::ActiveTime));
             }
         }
-        Ok((!answer.refused).then_some((answer.observation, narrowed)))
+        Ok(if answer.refused {
+            Err(StopCause::ToolStopped)
+        } else {
+            Ok((answer.observation, narrowed))
+        })
     }
 
     async fn admit_tool(
@@ -2227,7 +2272,8 @@ impl RunLoop<'_> {
         };
         let observation = match self
             .run_intent(&grant, runtime, intent, &call, false)
-            .await?
+            .await
+            .and_then(intent_observation)?
         {
             None => return Ok(SkillInitialization::Stopped),
             Some((observation, _)) => observation,
@@ -2285,7 +2331,8 @@ impl RunLoop<'_> {
             let post_call = intent.call.clone();
             let Some((observation, _)) = self
                 .run_intent(&grant, runtime, intent, &post_call, false)
-                .await?
+                .await
+                .and_then(intent_observation)?
             else {
                 return Ok(false);
             };
@@ -2373,6 +2420,29 @@ fn effective_permission_mode(
             Grant::Primary { .. } => None,
         })
 }
+
+pub(super) fn intent_observation(
+    result: IntentResult,
+) -> Result<Option<(ToolObservation, Option<ToolCall>)>, EngineError> {
+    match result {
+        Ok(observation) => Ok(Some(observation)),
+        Err(StopCause::ActiveTime) => Err(EngineError::GoalBudgetExhausted),
+        Err(StopCause::Capacity) => Err(EngineError::Tool(crate::tools::ToolError::Limit)),
+        Err(
+            StopCause::Uncertain
+            | StopCause::Cancelled
+            | StopCause::HookStop
+            | StopCause::Paused
+            | StopCause::Budget
+            | StopCause::ContextFull
+            | StopCause::DelegationDeadline
+            | StopCause::Refused(_)
+            | StopCause::ToolStopped
+            | StopCause::InvalidCommandResult,
+        ) => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Draft`
+- Status: `In progress`
 - Owner: Fernando Mirabile
 - Last updated: 2026-10-19
 

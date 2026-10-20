@@ -1,5 +1,5 @@
 use super::children::ChildWork;
-use super::step::{BoxedStep, Grant};
+use super::step::{BoxedStep, Grant, intent_observation};
 use super::{Action, RunLoop};
 use crate::engine::EngineError;
 use crate::provider::{ChildAssignment, ProviderRequest};
@@ -749,7 +749,7 @@ impl RunLoop<'_> {
                 false,
             )
             .await?;
-        Ok(observation.map(|(observation, _)| observation))
+        Ok(intent_observation(observation)?.map(|(observation, _)| observation))
     }
 
     pub(super) fn complete_worker<'a>(
@@ -1037,10 +1037,12 @@ impl RunLoop<'_> {
                 false,
             )
             .await?;
-        Ok(observation.and_then(|(o, _)| match o.attestation {
-            Some(Attestation::WorkerData { data, .. }) => Some(data),
-            _ => None,
-        }))
+        Ok(
+            intent_observation(observation)?.and_then(|(o, _)| match o.attestation {
+                Some(Attestation::WorkerData { data, .. }) => Some(data),
+                _ => None,
+            }),
+        )
     }
 
     async fn integrate_worker(
@@ -1095,7 +1097,7 @@ impl RunLoop<'_> {
                 false,
             )
             .await;
-        match result {
+        match result.and_then(intent_observation) {
             Ok(_) | Err(EngineError::GoalBudgetExhausted) => {}
             Err(EngineError::Tool(crate::tools::ToolError::Limit)) => {
                 self.record_capacity_stop().await?

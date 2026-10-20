@@ -20,10 +20,12 @@ use tokio::time::Instant;
 
 mod children;
 pub(super) mod step;
+mod stop;
 mod tool_compaction;
 mod worker;
 
 use step::Grant;
+use stop::{StepEnd, StopCause};
 
 const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
 const TOOL_REVIEW_DEADLINE: Duration = Duration::from_secs(20);
@@ -661,25 +663,46 @@ impl<'a> RunLoop<'a> {
             review_allowed: planning && self.ledger().admits(Action::Review),
         };
         match Box::pin(self.execute_step(grant, request, turn)).await {
-            Ok(true) => {}
-            Ok(false) if self.controls.cancellation.is_cancelled() => {
+            Ok(StepEnd::Continue) => {}
+            Ok(StepEnd::Stopped(cause))
+                if cause != StopCause::ContextFull && self.controls.cancellation.is_cancelled() =>
+            {
                 return self.settle_stopped_primary().await.map(|()| false);
             }
-            Ok(false) if self.ledger().active_time_exhausted() => {
+            Ok(StepEnd::Stopped(cause))
+                if cause != StopCause::ContextFull && self.ledger().active_time_exhausted() =>
+            {
                 return self.settle_stopped_primary().await.map(|()| false);
             }
-            Ok(false) => {
+            Ok(StepEnd::Stopped(StopCause::ActiveTime)) if !self.take_active_time_floor() => {
+                return self.settle_stopped_primary().await.map(|()| false);
+            }
+            Ok(StepEnd::Stopped(StopCause::ActiveTime)) => {
                 return self
-                    .fail_primary(self.tool_stop_cause())
+                    .fail_primary(RunFailure::BudgetExhausted)
                     .await
                     .map(|()| false);
             }
-            Err(EngineError::GoalBudgetExhausted) => {
-                return self.settle_stopped_primary().await.map(|()| false);
-            }
-            Err(EngineError::ContextTooLarge) => {
+            Ok(StepEnd::Stopped(StopCause::ContextFull)) => {
                 return self
                     .fail_primary(RunFailure::ToolContextFull)
+                    .await
+                    .map(|()| false);
+            }
+            Ok(StepEnd::Stopped(
+                StopCause::Uncertain
+                | StopCause::Cancelled
+                | StopCause::HookStop
+                | StopCause::Paused
+                | StopCause::Budget
+                | StopCause::Capacity
+                | StopCause::DelegationDeadline
+                | StopCause::Refused(_)
+                | StopCause::ToolStopped
+                | StopCause::InvalidCommandResult,
+            )) => {
+                return self
+                    .fail_primary(RunFailure::ToolStopped)
                     .await
                     .map(|()| false);
             }
@@ -1221,14 +1244,6 @@ impl<'a> RunLoop<'a> {
     fn take_active_time_floor(&self) -> bool {
         self.active_time_floor
             .swap(false, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn tool_stop_cause(&self) -> RunFailure {
-        if self.take_active_time_floor() {
-            RunFailure::BudgetExhausted
-        } else {
-            RunFailure::ToolStopped
-        }
     }
 
     async fn fail_primary(&self, cause: RunFailure) -> Result<(), EngineError> {
