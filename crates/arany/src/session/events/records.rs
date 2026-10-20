@@ -166,13 +166,13 @@ impl RunConfig {
         }) || self.history_run_ids.len() + 1 >= super::MAX_HISTORY_RUNS * 3 / 4
     }
 
-    // Only native Anthropic and ChatGPT evidence carry a window, and it only resizes within the hard ceilings.
+    // Only ChatGPT check evidence carries a window, and it only resizes within the hard ceilings.
     fn context_window_valid(&self) -> bool {
         let ceiling = super::content_ceiling(self.context_window_tokens) as u32;
         self.context_window_tokens.is_none_or(|tokens| {
             crate::provider::admitted_context_window(u64::from(tokens)).is_some()
                 && self.custom_profile_provenance.is_none()
-                && self.provider != "openai"
+                && !matches!(self.provider.as_str(), "openai" | "anthropic")
         }) && self
             .context_usage
             .as_ref()

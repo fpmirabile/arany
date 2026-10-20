@@ -1296,6 +1296,18 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     }
     assert!(serde_json::from_str::<SummaryEnvelope>(r#"{"summary":"ok","extra":1}"#).is_err());
     assert!(encode_request(&json!({"oversize": "x".repeat(MAX_REQUEST_BYTES)})).is_err());
+    let overhead = r#"{"oversize":""}"#.len();
+    for (window, ceiling) in [
+        (None, 512 * 1024),
+        (Some(32_768), 88_473 + 256 * 1024),
+        (Some(272_000), 734_400 + 256 * 1024),
+        (Some(2_000_000), 1280 * 1024),
+    ] {
+        assert_eq!(crate::provider::request_ceiling(window), ceiling);
+        let body = |len| json!({"oversize": "x".repeat(len - overhead)});
+        assert!(encode_request_within(&body(ceiling), ceiling).is_ok());
+        assert!(encode_request_within(&body(ceiling + 1), ceiling).is_err());
+    }
 }
 
 const SCHEMA_BOUND_KEYWORDS: [&str; 6] = [

@@ -773,14 +773,15 @@ mod account_default_tests {
             .remove("context_window_tokens");
         assert!(serde_json::from_value::<RunConfig>(missing_window).is_err());
         for (provider, window, budget, valid) in [
-            ("anthropic", None, 376 * 1024, true),
-            ("anthropic", None, 376 * 1024 + 1, false),
-            ("anthropic", Some(272_000), 734_400, true),
-            ("anthropic", Some(272_000), 734_401, false),
+            ("chatgpt-like", None, 376 * 1024, true),
+            ("chatgpt-like", None, 376 * 1024 + 1, false),
+            ("chatgpt-like", Some(272_000), 734_400, true),
+            ("chatgpt-like", Some(272_000), 734_401, false),
             ("chatgpt-like", Some(2_000_000), 1024 * 1024, true),
-            ("anthropic", Some(2_000_001), 64 * 1024, false),
-            ("anthropic", Some(32_767), 64 * 1024, false),
+            ("chatgpt-like", Some(2_000_001), 64 * 1024, false),
+            ("chatgpt-like", Some(32_767), 64 * 1024, false),
             ("openai", Some(272_000), 64 * 1024, false),
+            ("anthropic", Some(272_000), 64 * 1024, false),
         ] {
             let mut pinned = ordinary.clone();
             pinned.provider = provider.into();

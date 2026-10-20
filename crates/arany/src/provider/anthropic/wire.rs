@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 const ADAPTER: &str = "anthropic";
+const MAX_REQUEST_BYTES: usize = crate::provider::MAX_PROVIDER_REQUEST_BYTES;
 const MAX_CONTENT_BLOCKS: usize = 16;
 const DELEGATED_OUTPUT: &str = "Arany recorded this call; its result follows in a later message.";
 
@@ -340,9 +341,9 @@ impl<'a> MessageStream<'a> {
     }
 }
 
-pub(super) fn encode_request(request: &Value, max_bytes: usize) -> Result<Vec<u8>, ProviderError> {
+pub(super) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> {
     let body = serde_json::to_vec(request).map_err(|_| ProviderError::Rejected)?;
-    if body.len() > max_bytes {
+    if body.len() > MAX_REQUEST_BYTES {
         return Err(ProviderError::Rejected);
     }
     Ok(body)

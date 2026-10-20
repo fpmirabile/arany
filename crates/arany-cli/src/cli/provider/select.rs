@@ -179,7 +179,7 @@ async fn select_provider_inner(
                 selection.account_id,
             )
             .map_err(|_| SelectionError::AnthropicKeyUnavailable)?;
-            Ok(Arc::new(with_checked_window(provider, state_dir).await))
+            Ok(Arc::new(provider))
         }
         "chatgpt" => {
             let account_id = selection
@@ -213,13 +213,6 @@ async fn select_provider_inner(
                 .map_err(SelectionError::Custom)?;
             Ok(Arc::new(provider))
         }
-    }
-}
-
-async fn with_checked_window(provider: AnthropicProvider, state_dir: &Path) -> AnthropicProvider {
-    match StateRoot::open_existing(state_dir) {
-        Ok(root) => provider.with_checked_window(root).await,
-        Err(_) => provider,
     }
 }
 
@@ -276,16 +269,12 @@ pub(crate) async fn select_env_provider(
                 .map_err(|_| SelectionError::OpenAiEnvKeyUnavailable)?,
         ),
         ProviderArg::Anthropic => Arc::new(
-            with_checked_window(
-                AnthropicProvider::from_env_with_effort(model.to_owned(), effort).map_err(
-                    |error| match error {
-                        arany::ProviderError::Rejected => SelectionError::InvalidAnthropicWorkspace,
-                        _ => SelectionError::AnthropicEnvKeyUnavailable,
-                    },
-                )?,
-                state_dir,
-            )
-            .await,
+            AnthropicProvider::from_env_with_effort(model.to_owned(), effort).map_err(|error| {
+                match error {
+                    arany::ProviderError::Rejected => SelectionError::InvalidAnthropicWorkspace,
+                    _ => SelectionError::AnthropicEnvKeyUnavailable,
+                }
+            })?,
         ),
         ProviderArg::Chatgpt => Arc::new(
             chatgpt::provider_for_run(
