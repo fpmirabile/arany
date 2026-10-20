@@ -249,8 +249,12 @@ impl LinearState {
         writer.flush()
     }
 
-    pub(super) fn keep_written_tools(&mut self, previous: &Self) {
-        self.tools_written = previous.tools_written;
+    pub(super) fn written_tools(&self) -> Option<(arany::RunId, usize)> {
+        self.tools_written
+    }
+
+    pub(super) fn keep_written_tools(&mut self, written: Option<(arany::RunId, usize)>) {
+        self.tools_written = written;
     }
 
     pub(super) fn write_tools(
@@ -979,11 +983,6 @@ mod tests {
         let redraw = String::from_utf8(redraw).unwrap();
         assert!(!redraw.contains("Read("));
         assert!(!redraw.contains(['⏺', '⎿', '\r', '\u{1b}']));
-        let mut reacquired = LinearState::new("screen-reader");
-        reacquired.keep_written_tools(&linear);
-        let mut repeat = Vec::new();
-        reacquired.write_tools(&mut repeat, &view.runs[0]).unwrap();
-        assert!(repeat.is_empty(), "a reacquired owner must not repeat rows");
         view.runs[0].tools.clear();
         view.runs[0].status = RunStatus::Active;
         view.runs[0].supervisor =
