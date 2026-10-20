@@ -2,8 +2,9 @@ use super::super::session_picker::{PtyResponses, pump, tail};
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
 
-const ANSWER: &str = "COPY_CANARY \u{1b}]52;c;aGlqYWNr\u{7} done";
-const DISPLAYED: &str = "COPY_CANARY \\u{001b}]52;c;aGlqYWNr\\u{0007} done";
+// Ratatui skips unchanged blank cells, so a spaceless canary is the only contiguous rendered text.
+const ANSWER: &str = "COPY_CANARY\u{1b}]52;c;aGlqYWNr\u{7}done";
+const DISPLAYED: &str = "COPY_CANARY\\u{001b}]52;c;aGlqYWNr\\u{0007}done";
 const CARET: &[u8] = b"\x1b[?25h\x1b[22;3H";
 
 fn osc52_payloads(bytes: &[u8]) -> Vec<&[u8]> {
