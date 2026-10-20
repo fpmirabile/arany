@@ -908,13 +908,12 @@ impl AttachedTerminal {
                 )?;
                 self.native.objectives.insert(run.id);
             }
-            for (index, tool) in run.tools.iter().enumerate() {
-                if tool.observation.is_some() && !self.native.tools.contains(&(run.id, index)) {
-                    self.insert_native(
-                        history::MessageKind::Tool,
-                        &crate::presentation::tool_summary(tool),
-                    )?;
-                    self.native.tools.insert((run.id, index));
+            for (range, summary) in crate::presentation::settled_tool_groups(run) {
+                if !self.native.tools.contains(&(run.id, range.start)) {
+                    self.insert_native(history::MessageKind::Tool, &summary)?;
+                    for index in range {
+                        self.native.tools.insert((run.id, index));
+                    }
                 }
             }
             if !matches!(
@@ -1400,6 +1399,13 @@ impl AttachedTerminal {
 
     pub fn draw_progress(&mut self, view: &SessionView, notice: &str) -> Result<(), TerminalError> {
         self.draw_progress_with_draft(view, &Composer::default(), notice)
+    }
+
+    pub fn record_tool_rows(&mut self, run: &arany::RunView) -> Result<(), TerminalError> {
+        if let Some(linear) = &mut self.linear {
+            linear.write_tools(&mut io::stderr(), run)?;
+        }
+        Ok(())
     }
 
     pub fn record_user_message(&mut self, objective: &str) -> Result<(), TerminalError> {

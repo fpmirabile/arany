@@ -3060,3 +3060,87 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
         }
     }
 }
+
+#[test]
+fn peer_tool_row_frames_at_80_and_120_columns() {
+    let tool = crate::presentation::tool_fixture(
+        arany::ToolCall::Write {
+            path: "test.txt".into(),
+            expected_digest: None,
+            content: "hello".into(),
+        },
+        "{}",
+    );
+    let model = PresentationModel {
+        status_line: "ready".into(),
+        activity_lines: Vec::new(),
+        setup_required: false,
+        draft_action: DraftAction::Submit,
+        empty_chat: false,
+    };
+    for width in [80, 120] {
+        let rows = super::super::history::display_rows(
+            MessageKind::Tool,
+            &crate::presentation::tool_summary(&tool),
+            usize::from(width),
+        );
+        for color in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_frame_with_history(
+                        frame,
+                        &model,
+                        &Composer::default(),
+                        None,
+                        Palette { color },
+                        &rows,
+                        None,
+                    )
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer_row(buffer, 1).trim_end(), "⏺ Write(test.txt)");
+            assert_eq!(buffer_row(buffer, 2).trim_end(), "  ⎿ applied");
+            assert!(buffer.content().iter().all(|cell| cell.bg == Color::Reset));
+            let long = crate::presentation::tool_fixture(
+                arany::ToolCall::Read {
+                    path: "界".repeat(70),
+                    offset: 0,
+                    limit: 100,
+                },
+                r#"{"text":"one\ntwo\n"}"#,
+            );
+            let rows = super::super::history::display_rows(
+                MessageKind::Tool,
+                &crate::presentation::tool_summary(&long),
+                usize::from(width),
+            );
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_frame_with_history(
+                        frame,
+                        &model,
+                        &Composer::default(),
+                        None,
+                        Palette { color },
+                        &rows,
+                        None,
+                    )
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let first = if width == 80 { 36 } else { 56 };
+            assert_eq!(
+                buffer_row(buffer, 1).replace("界 ", "界").trim_end(),
+                format!("⏺ Read({}", "界".repeat(first))
+            );
+            assert_eq!(
+                buffer_row(buffer, 2).replace("界 ", "界").trim_end(),
+                format!("{})", "界".repeat(70 - first))
+            );
+            assert_eq!(buffer_row(buffer, 3).trim_end(), "  ⎿ 2 lines");
+        }
+    }
+}

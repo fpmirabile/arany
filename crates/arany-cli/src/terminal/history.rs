@@ -186,14 +186,23 @@ impl History {
                     );
                 }
                 self.push_notices_after(Some(MessageSource::User(index)), width);
-                for (tool_index, tool) in run.tools.iter().enumerate() {
-                    let text = if self.details {
-                        crate::presentation::tool_detail_text(tool)
-                    } else {
-                        crate::presentation::tool_summary(tool)
-                    };
+                let groups = if self.details {
+                    run.tools
+                        .iter()
+                        .enumerate()
+                        .map(|(index, tool)| {
+                            (
+                                index..index + 1,
+                                crate::presentation::tool_detail_text(tool),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    crate::presentation::tool_groups(&run.tools).collect()
+                };
+                for (range, text) in groups {
                     self.push(
-                        MessageSource::Tool(index, tool_index),
+                        MessageSource::Tool(index, range.start),
                         if self.details {
                             MessageKind::ToolDetails
                         } else {
@@ -202,7 +211,12 @@ impl History {
                         &text,
                         width,
                     );
-                    self.push_notices_after(Some(MessageSource::Tool(index, tool_index)), width);
+                    for tool_index in range {
+                        self.push_notices_after(
+                            Some(MessageSource::Tool(index, tool_index)),
+                            width,
+                        );
+                    }
                 }
                 for (verdict_index, (_, verdict)) in run.supervisor.verdicts().iter().enumerate() {
                     let source = MessageSource::Supervisor(index, verdict_index);
@@ -344,7 +358,10 @@ impl History {
     }
 
     fn push(&mut self, source: MessageSource, kind: MessageKind, text: &str, width: usize) {
-        let rows = if kind == MessageKind::Supervisor {
+        let rows = if matches!(
+            kind,
+            MessageKind::Supervisor | MessageKind::Tool | MessageKind::ToolDetails
+        ) {
             message_rows(kind, text, width).len()
         } else {
             message_row_count(text, width)
@@ -777,18 +794,24 @@ fn classic_run_cost(run: &RunView, width: usize) -> (usize, usize) {
     let (mut bytes, mut rows) =
         classic_message_cost(MessageKind::User, user_body_bytes, user_body_rows);
     let mut add_message = |kind, text: &str| {
-        let (message_bytes, message_rows) = classic_message_cost(
-            kind,
-            crate::presentation::escaped_terminal_bytes(text),
-            message_row_count(text, width).saturating_sub(2),
-        );
+        let (message_bytes, message_rows) = if kind == MessageKind::Tool {
+            let rendered = message_rows(kind, text, width);
+            (
+                rendered.iter().map(|row| row.text.len()).sum(),
+                rendered.len(),
+            )
+        } else {
+            classic_message_cost(
+                kind,
+                crate::presentation::escaped_terminal_bytes(text),
+                message_row_count(text, width).saturating_sub(2),
+            )
+        };
         bytes = bytes.saturating_add(message_bytes);
         rows = rows.saturating_add(message_rows);
     };
-    for tool in &run.tools {
-        if tool.observation.is_some() {
-            add_message(MessageKind::Tool, &crate::presentation::tool_summary(tool));
-        }
+    for (_, summary) in crate::presentation::settled_tool_groups(run) {
+        add_message(MessageKind::Tool, &summary);
     }
     if let Some(answer) = &run.assistant_message {
         add_message(MessageKind::Assistant, answer);
@@ -853,7 +876,10 @@ fn message_text<'a>(
         MessageSource::Tool(run, tool) => Cow::Owned(if message.kind == MessageKind::ToolDetails {
             crate::presentation::tool_detail_text(&view.runs[run].tools[tool])
         } else {
-            crate::presentation::tool_summary(&view.runs[run].tools[tool])
+            crate::presentation::tool_groups(&view.runs[run].tools[tool..])
+                .next()
+                .expect("indexed Tool group")
+                .1
         }),
         MessageSource::Commentary(_, u32::MAX, _) => Cow::Borrowed(arany::DISPLAY_LIMIT_TEXT),
         MessageSource::Commentary(run, call, item) => Cow::Owned(
@@ -915,7 +941,7 @@ fn message_heading(kind: MessageKind) -> &'static str {
         MessageKind::Error => "Arany · error:",
         MessageKind::Preview => "Arany · provisional:",
         MessageKind::Incomplete => "Arany · incomplete:",
-        MessageKind::Tool | MessageKind::ToolDetails => "Tool:",
+        MessageKind::Tool | MessageKind::ToolDetails => "",
         MessageKind::Commentary => "Arany · commentary:",
         MessageKind::Supervisor => "Supervisor (shadow):",
     }
@@ -930,25 +956,30 @@ fn message_rows(kind: MessageKind, text: &str, width: usize) -> Vec<MessageRow> 
     }
     let width = width.min(MAX_ROW_CELLS);
     let heading = message_heading(kind);
-    let mut rows = vec![MessageRow {
-        text: safe_truncate(heading, width),
-        source_byte: 0,
-    }];
+    let indent = if kind == MessageKind::Tool { "" } else { "  " };
+    let mut rows = if matches!(kind, MessageKind::Tool | MessageKind::ToolDetails) {
+        Vec::new()
+    } else {
+        vec![MessageRow {
+            text: safe_truncate(heading, width),
+            source_byte: 0,
+        }]
+    };
     let mut line_start = 0;
     for logical in text.split('\n') {
-        let mut row = String::from("  ");
-        let mut cells = 2;
+        let mut row = String::from(indent);
+        let mut cells = indent.len();
         let mut row_start = line_start;
         for (byte, grapheme) in logical.grapheme_indices(true) {
             let safe = escape_terminal(grapheme);
             let grapheme_cells = UnicodeWidthStr::width(safe.as_str());
-            if cells + grapheme_cells > width && cells > 2 {
+            if cells + grapheme_cells > width && cells > indent.len() {
                 rows.push(MessageRow {
                     text: row,
                     source_byte: row_start,
                 });
-                row = String::from("  ");
-                cells = 2;
+                row = String::from(indent);
+                cells = indent.len();
                 row_start = line_start + byte;
             }
             if cells + grapheme_cells <= width {
@@ -1062,6 +1093,55 @@ mod tests {
             lifecycle_hook_sequence: None,
             provider_sequences: Default::default(),
             provider_fallbacks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn peer_rows_collapse_reads_but_keep_failure_and_details_at_both_widths() {
+        let mut view = session();
+        let mut run = run("inspect", "done");
+        let read = crate::presentation::tool_fixture(
+            arany::ToolCall::Read {
+                path: "a".into(),
+                offset: 0,
+                limit: 100,
+            },
+            r#"{"text":"a\nb\n"}"#,
+        );
+        let mut failed = read.clone();
+        failed.observation.as_mut().unwrap().disposition = arany::ToolDisposition::Denied;
+        failed.observation.as_mut().unwrap().output = "outside pinned grant".into();
+        run.tools = vec![read.clone(), read.clone(), failed, read];
+        view.runs.push(run);
+        for width in [80, 120] {
+            let mut history = History::default();
+            history.sync(&view, width, 40);
+            let rows = history.visible(&view);
+            let text = rows
+                .iter()
+                .map(|row| row.text.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                text,
+                "You:\n  inspect\n\n⏺ Read(2 operations)\n  ⎿ 4 lines\n\n⏺ Read(a)\n  ⎿ denied: outside pinned grant\n\n⏺ Read(a)\n  ⎿ 2 lines\n\nArany:\n  done\n"
+            );
+            assert!(
+                rows.iter()
+                    .all(|row| UnicodeWidthStr::width(row.text.as_str()) <= width)
+            );
+            let (_, cost) = classic_run_cost(&view.runs[0], width);
+            assert_eq!(cost, rows.len() + 2);
+            history.set_details(true);
+            history.sync(&view, width, 80);
+            let details = history
+                .visible(&view)
+                .iter()
+                .map(|row| row.text.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(details.matches("⏺ Read(a)").count(), 4);
+            assert_eq!(details.matches("Arguments:").count(), 4);
         }
     }
 

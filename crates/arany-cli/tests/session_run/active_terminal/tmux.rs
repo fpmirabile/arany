@@ -1312,7 +1312,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         if capture_pane(&server).is_some_and(|screen| {
             String::from_utf8_lossy(&screen)
                 .lines()
-                .any(|row| row.contains("Provider: custom:local") && row.contains("locked"))
+                .any(|row| row.contains("Provider: custom:local") && row.contains("unavailable"))
         }) {
             break;
         }

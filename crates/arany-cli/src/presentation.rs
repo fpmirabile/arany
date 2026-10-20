@@ -102,57 +102,73 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     let operation = match &tool.intent.call {
         ToolCall::ApplyChangeset {
             source: arany::worker::ChangesetSource::Rewind { .. },
-        } => "Rewind publication".into(),
-        ToolCall::PrepareWorker { .. } => "Worker data preparation".into(),
+        } => "Rewind publication()".into(),
+        ToolCall::PrepareWorker { .. } => "Worker data preparation()".into(),
         ToolCall::ApplyChangeset {
             source: arany::worker::ChangesetSource::WorkerHandover { .. },
-        } => "Worker changeset publication".into(),
-        ToolCall::ParseAgentDefinition { .. } => "Parse agent definition".into(),
-        ToolCall::List { path } => format!("List {path}"),
-        ToolCall::Read { path, .. } => format!("Read {path}"),
-        ToolCall::Search { path, .. } => format!("Search {path}"),
-        ToolCall::Mkdir { path } => format!("Create folder {path}"),
-        ToolCall::Write { path, .. } => format!("Write {path}"),
-        ToolCall::Edit { path, .. } => format!("Edit {path}"),
-        ToolCall::Command { program, .. } => format!("Command {program}"),
-        ToolCall::CommandUnguarded { program, .. } => format!("Unguarded command {program}"),
+        } => "Worker changeset publication()".into(),
+        ToolCall::ParseAgentDefinition { .. } => "Parse agent definition()".into(),
+        ToolCall::List { path } => format!("List({path})"),
+        ToolCall::Read { path, .. } => format!("Read({path})"),
+        ToolCall::Search { path, query } => format!("Search({query}, {path})"),
+        ToolCall::Mkdir { path } => format!("Create folder({path})"),
+        ToolCall::Write { path, .. } => format!("Write({path})"),
+        ToolCall::Edit { path, .. } => format!("Edit({path})"),
+        ToolCall::Command { program, args, .. } => {
+            format!("Command({program} {})", args.join(" "))
+        }
+        ToolCall::CommandUnguarded { program, args, .. } => {
+            format!("Unguarded command({program} {})", args.join(" "))
+        }
         ToolCall::ApplyChangeset {
             source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
-        } => {
-            format!("Publish {} command file changes", changeset.files.len())
-        }
-        ToolCall::Skill { name, .. } => format!("Skill {name}"),
-        ToolCall::McpList { server } => format!("MCP list {server}"),
-        ToolCall::McpCall { server, tool, .. } => format!("MCP {server} / {tool}"),
-        ToolCall::GitStatus { path } => format!("Git status {path}"),
-        ToolCall::GitDiff { path, .. } => format!("Git diff {path}"),
-        ToolCall::GitLog { path, .. } => format!("Git log {path}"),
+        } => format!("Publish({} command file changes)", changeset.files.len()),
+        ToolCall::Skill { name, .. } => format!("Skill({name})"),
+        ToolCall::McpList { server } => format!("MCP list({server})"),
+        ToolCall::McpCall { server, tool, .. } => format!("MCP({server} / {tool})"),
+        ToolCall::GitStatus { path } => format!("Git status({path})"),
+        ToolCall::GitDiff { path, .. } => format!("Git diff({path})"),
+        ToolCall::GitLog { path, .. } => format!("Git log({path})"),
     };
-    let state = match tool
+    let result = match tool.observation.as_ref() {
+        None => "pending".into(),
+        Some(observation) => match observation.disposition {
+            ToolDisposition::Succeeded => match tool.intent.call {
+                ToolCall::Write { .. }
+                | ToolCall::Edit { .. }
+                | ToolCall::Mkdir { .. }
+                | ToolCall::ApplyChangeset { .. } => "applied".into(),
+                _ => read_result_summary(std::slice::from_ref(tool)),
+            },
+            disposition => {
+                let state = match disposition {
+                    ToolDisposition::Denied => "denied",
+                    ToolDisposition::Failed => "failed",
+                    ToolDisposition::Conflict => "conflict",
+                    ToolDisposition::Limit => "limit",
+                    ToolDisposition::Cancelled => "cancelled",
+                    ToolDisposition::Uncertain => "uncertain",
+                    ToolDisposition::Succeeded => {
+                        unreachable!("success has its own result projection")
+                    }
+                };
+                if observation.output.is_empty() {
+                    state.into()
+                } else {
+                    format!("{state}: {}", safe_truncate(&observation.output, 160))
+                }
+            }
+        },
+    };
+    let mut summary = format!("⏺ {}\n  ⎿ {result}", safe_truncate(&operation, 160));
+    if let Some(label) = tool
         .observation
         .as_ref()
-        .map(|observation| observation.disposition)
+        .and_then(|observation| cache_update_label(observation.cache_update))
     {
-        None => "pending",
-        Some(ToolDisposition::Succeeded) => "succeeded",
-        Some(ToolDisposition::Denied) => "denied",
-        Some(ToolDisposition::Failed) => "failed",
-        Some(ToolDisposition::Conflict) => "conflict",
-        Some(ToolDisposition::Limit) => "limit",
-        Some(ToolDisposition::Cancelled) => "cancelled",
-        Some(ToolDisposition::Uncertain) => "uncertain",
-    };
-    let cache_update = tool
-        .observation
-        .as_ref()
-        .and_then(|observation| cache_update_label(observation.cache_update));
-    let mut summary = match cache_update {
-        Some(cache_update) => format!(
-            "Tool · {} · {state} · {cache_update}",
-            safe_truncate(&operation, 160)
-        ),
-        None => format!("Tool · {} · {state}", safe_truncate(&operation, 160)),
-    };
+        summary.push_str(" · ");
+        summary.push_str(label);
+    }
     if let Some(checkpoint) = &tool.checkpoint {
         if let Some(notice) = checkpoint.notice() {
             summary.push_str(" · ");
@@ -212,6 +228,145 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         summary.push_str(" · hook failed (non-blocking)");
     }
     summary
+}
+
+fn read_result_summary(tools: &[arany::ToolView]) -> String {
+    let mut counts = [0usize; 3];
+    let mut units = [false; 3];
+    let mut truncated = false;
+    for tool in tools {
+        let Some(observation) = &tool.observation else {
+            continue;
+        };
+        let output = &observation.output;
+        let value = if output.len() <= 64 * 1024 {
+            serde_json::from_str::<serde_json::Value>(output).ok()
+        } else {
+            None
+        };
+        if let Some(text) = value
+            .as_ref()
+            .and_then(|v| v.get("text"))
+            .and_then(|v| v.as_str())
+        {
+            counts[1] += text.lines().count();
+            units[1] = true;
+        } else if let Some(entries) = value
+            .as_ref()
+            .and_then(|v| v.get("entries"))
+            .and_then(|v| v.as_array())
+        {
+            counts[0] += entries.len();
+            units[0] = true;
+        } else {
+            counts[2] += output.len();
+            units[2] = true;
+        }
+        truncated |= value.as_ref().is_some_and(|v| {
+            v.get("truncated").and_then(|v| v.as_bool()) == Some(true)
+                || v.get("may_be_truncated").and_then(|v| v.as_bool()) == Some(true)
+        });
+    }
+    let mut summary = counts
+        .into_iter()
+        .zip([("entry", "entries"), ("line", "lines"), ("byte", "bytes")])
+        .zip(units)
+        .filter(|(_, present)| *present)
+        .map(|(count, _)| count)
+        .map(|(count, (one, many))| format!("{count} {}", if count == 1 { one } else { many }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if summary.is_empty() {
+        summary = "0 bytes".into();
+    }
+    if truncated {
+        summary.push_str(" (truncated)");
+    }
+    summary
+}
+
+fn read_operation(tool: &arany::ToolView) -> bool {
+    use arany::ToolCall;
+    matches!(
+        tool.intent.call,
+        ToolCall::List { .. }
+            | ToolCall::Read { .. }
+            | ToolCall::Search { .. }
+            | ToolCall::GitStatus { .. }
+            | ToolCall::GitDiff { .. }
+            | ToolCall::GitLog { .. }
+            | ToolCall::Skill { .. }
+            | ToolCall::McpList { .. }
+    )
+}
+
+fn collapsible_read(tool: &arany::ToolView) -> bool {
+    read_operation(tool)
+        && tool.observation.as_ref().is_some_and(|o| {
+            o.disposition == arany::ToolDisposition::Succeeded
+                && o.enforcement_cause.is_none()
+                && o.cache_update == arany::CacheUpdate::NotApplicable
+        })
+        && tool.checkpoint.is_none()
+        && tool.hooks.is_empty()
+        && tool
+            .permission_verdict
+            .as_ref()
+            .is_none_or(|v| v.decision != arany::permissions::Decision::Deny)
+}
+
+pub(crate) fn tool_groups(
+    tools: &[arany::ToolView],
+) -> impl Iterator<Item = (std::ops::Range<usize>, String)> + '_ {
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        let first = tools.get(start)?;
+        let count = if collapsible_read(first) {
+            tools[start..]
+                .iter()
+                .take_while(|tool| {
+                    tool.intent.agent_run_id == first.intent.agent_run_id && collapsible_read(tool)
+                })
+                .count()
+        } else {
+            1
+        };
+        let range = start..start + count;
+        let summary = if count > 1 {
+            format!(
+                "⏺ Read({count} operations)\n  ⎿ {}",
+                read_result_summary(&tools[range.clone()])
+            )
+        } else {
+            tool_summary(first)
+        };
+        start += count;
+        Some((range, summary))
+    })
+}
+
+pub(crate) fn settled_tool_groups(
+    run: &RunView,
+) -> impl Iterator<Item = (std::ops::Range<usize>, String)> + '_ {
+    tool_groups(&run.tools).filter(|(range, _)| {
+        run.tools[range.clone()]
+            .iter()
+            .all(|tool| tool.observation.is_some())
+            && !(run.status == RunStatus::Active
+                && collapsible_read(&run.tools[range.start])
+                && run.tools.get(range.end).is_none_or(|next| {
+                    next.observation.is_none()
+                        && read_operation(next)
+                        && next.intent.agent_run_id == run.tools[range.start].intent.agent_run_id
+                }))
+    })
+}
+
+pub(crate) fn plain_tool_summary(summary: &str) -> String {
+    summary
+        .strip_prefix("⏺ ")
+        .unwrap_or(summary)
+        .replace("\n  ⎿ ", "\nResult: ")
 }
 
 fn cache_update_label(update: arany::CacheUpdate) -> Option<&'static str> {
@@ -1642,18 +1797,150 @@ mod goal_status_tests {
 }
 
 #[cfg(test)]
+pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolView {
+    let intent = arany::EffectIntent {
+        target: arany::worker::EffectTarget::Workspace,
+        id: uuid::Uuid::now_v7(),
+        run_id: arany::RunId::new(),
+        agent_run_id: arany::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call,
+        limits: arany::ToolLimits::default(),
+        expires_at_ms: 1,
+        use_count: 1,
+    };
+    arany::ToolView {
+        checkpoint: None,
+        observation: Some(arany::ToolObservation {
+            intent: intent.clone(),
+            disposition: arany::ToolDisposition::Succeeded,
+            output: output.into(),
+            attestation: None,
+            cache_update: arany::CacheUpdate::NotApplicable,
+            enforcement_cause: None,
+        }),
+        intent,
+        review_call_index: None,
+        permission_verdict: None,
+        hooks: Vec::new(),
+        hook_sequence: None,
+        finished_sequence: Some(1),
+    }
+}
+
+#[cfg(test)]
+mod peer_row_tests {
+    use super::*;
+    use arany::{ToolCall, ToolDisposition};
+
+    #[test]
+    fn tool_rows_show_bounded_results_and_inert_failures() {
+        for (call, output, expected) in [
+            (
+                ToolCall::List { path: ".".into() },
+                r#"{"entries":["a","b"],"may_be_truncated":false}"#,
+                "⏺ List(.)\n  ⎿ 2 entries",
+            ),
+            (
+                ToolCall::List { path: ".".into() },
+                r#"{"entries":[]}"#,
+                "⏺ List(.)\n  ⎿ 0 entries",
+            ),
+            (
+                ToolCall::Read {
+                    path: "src/界.rs".into(),
+                    offset: 0,
+                    limit: 1024,
+                },
+                r#"{"text":"one\ntwo\n","truncated":true}"#,
+                "⏺ Read(src/界.rs)\n  ⎿ 2 lines (truncated)",
+            ),
+            (
+                ToolCall::Skill {
+                    name: "review".into(),
+                    resource: None,
+                },
+                "abc",
+                "⏺ Skill(review)\n  ⎿ 3 bytes",
+            ),
+            (
+                ToolCall::Write {
+                    path: "test.txt".into(),
+                    expected_digest: None,
+                    content: "hello".into(),
+                },
+                "{}",
+                "⏺ Write(test.txt)\n  ⎿ applied",
+            ),
+        ] {
+            let tool = tool_fixture(call, output);
+            assert_eq!(tool_summary(&tool), expected);
+            assert!(!expected.contains("succeeded"));
+        }
+        let mut tool = tool_fixture(
+            ToolCall::Read {
+                path: "bad\u{1b}[2J".into(),
+                offset: 0,
+                limit: 100,
+            },
+            "blocked\u{1b}]52;forged\u{7}\nRun: forged",
+        );
+        for (disposition, label) in [
+            (ToolDisposition::Denied, "denied"),
+            (ToolDisposition::Failed, "failed"),
+            (ToolDisposition::Conflict, "conflict"),
+            (ToolDisposition::Limit, "limit"),
+            (ToolDisposition::Cancelled, "cancelled"),
+            (ToolDisposition::Uncertain, "uncertain"),
+        ] {
+            tool.observation.as_mut().unwrap().disposition = disposition;
+            assert_eq!(
+                tool_summary(&tool),
+                format!(
+                    "⏺ Read(bad\\u{{001b}}[2J)\n  ⎿ {label}: blocked\\u{{001b}}]52;forged\\u{{0007}}\\u{{000a}}Run: forged"
+                )
+            );
+        }
+        tool.observation.as_mut().unwrap().output = "界".repeat(4096);
+        assert!(tool_summary(&tool).len() < 1024);
+        use arany::permissions::{Decision, PermissionSource, PermissionVerdict};
+        tool.observation.as_mut().unwrap().disposition = ToolDisposition::Denied;
+        for (source, marker) in [
+            (PermissionSource::Rule, "permission deny rule"),
+            (PermissionSource::PinnedGrant, "pinned grant denial"),
+            (PermissionSource::Hook, "hook denial"),
+            (PermissionSource::Mode, "permission mode denial"),
+        ] {
+            tool.permission_verdict = Some(PermissionVerdict {
+                intent_digest: [0; 32],
+                decision: Decision::Deny,
+                mode: None,
+                basis: source,
+                source,
+                approved: false,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            });
+            assert!(tool_summary(&tool).ends_with(marker));
+        }
+    }
+}
+
+#[cfg(test)]
 mod git_summary_tests {
     use super::tool_summary;
-    use arany::{AgentRunId, RunId, ToolView};
-    use arany::{EffectIntent, ToolCall, ToolLimits};
-    use uuid::Uuid;
+    use arany::ToolCall;
 
     #[test]
     fn git_reads_summarize_their_paths() {
         for (call, expected) in [
             (
                 ToolCall::GitStatus { path: "src".into() },
-                "Tool · Git status src · pending",
+                "⏺ Git status(src)\n  ⎿ pending",
             ),
             (
                 ToolCall::GitDiff {
@@ -1662,7 +1949,7 @@ mod git_summary_tests {
                     head: None,
                     staged: false,
                 },
-                "Tool · Git diff src · pending",
+                "⏺ Git diff(src)\n  ⎿ pending",
             ),
             (
                 ToolCall::GitLog {
@@ -1670,32 +1957,11 @@ mod git_summary_tests {
                     revision: None,
                     max_count: 1,
                 },
-                "Tool · Git log . · pending",
+                "⏺ Git log(.)\n  ⎿ pending",
             ),
         ] {
-            let tool = ToolView {
-                checkpoint: None,
-                intent: EffectIntent {
-                    target: arany::worker::EffectTarget::Workspace,
-                    id: Uuid::now_v7(),
-                    run_id: RunId::new(),
-                    agent_run_id: AgentRunId::new(),
-                    policy_digest: [1; 32],
-                    enforcement_digest: [2; 32],
-                    workspace_device: 1,
-                    workspace_inode: 2,
-                    call,
-                    limits: ToolLimits::default(),
-                    expires_at_ms: 1,
-                    use_count: 1,
-                },
-                observation: None,
-                review_call_index: None,
-                permission_verdict: None,
-                hooks: Vec::new(),
-                hook_sequence: None,
-                finished_sequence: None,
-            };
+            let mut tool = super::tool_fixture(call, "");
+            tool.observation = None;
             assert_eq!(tool_summary(&tool), expected);
         }
     }
@@ -1769,7 +2035,7 @@ mod enforcement_tests {
         assert_eq!(
             super::tool_summary(&tool),
             format!(
-                "Tool · Write file · succeeded · This change cannot be rewound (checkpoint storage full) · Older checkpoints pruned; code restore unavailable before Run {}",
+                "⏺ Write(file)\n  ⎿ applied · This change cannot be rewound (checkpoint storage full) · Older checkpoints pruned; code restore unavailable before Run {}",
                 tool.intent.run_id
             )
         );
@@ -1875,15 +2141,15 @@ mod unguarded_tests {
     fn host_runs_are_marked_unguarded_everywhere_they_are_summarized() {
         assert_eq!(
             tool_summary(&host_tool(ToolDisposition::Succeeded, true)),
-            "Tool · Unguarded command sh · succeeded · UNGUARDED"
+            "⏺ Unguarded command(sh -c exit 0)\n  ⎿ 0 bytes · UNGUARDED"
         );
         assert_eq!(
             tool_summary(&host_tool(ToolDisposition::Uncertain, false)),
-            "Tool · Unguarded command sh · uncertain · UNGUARDED"
+            "⏺ Unguarded command(sh -c exit 0)\n  ⎿ uncertain · UNGUARDED"
         );
         assert_eq!(
             tool_summary(&host_tool(ToolDisposition::Denied, false)),
-            "Tool · Unguarded command sh · denied"
+            "⏺ Unguarded command(sh -c exit 0)\n  ⎿ denied"
         );
     }
 

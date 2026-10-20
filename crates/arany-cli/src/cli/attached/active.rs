@@ -955,7 +955,7 @@ fn draw_active_snapshot(
         let notice = notice.unwrap_or(TerminalNotice::Transient(match stop {
             ActiveStop::Cancelling => "Cancelling Run...",
             ActiveStop::Pausing => "Pausing at the next step... Ctrl+C cancels now",
-            ActiveStop::Running => "Run in progress... Ctrl+C cancels",
+            ActiveStop::Running => "Run is active; Ctrl+C cancels",
         }));
         if terminal.is_linear() {
             terminal.draw_busy_notice(view, composer, Some(notice))

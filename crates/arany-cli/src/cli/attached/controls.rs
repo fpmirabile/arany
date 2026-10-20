@@ -637,11 +637,16 @@ pub(super) fn handle_active_submission(
         Ok(Submission::Command {
             command: InteractiveCommand::Goal,
             argument: Some(_),
-        }) => "Goal changes are locked for this run; /goal shows status".into(),
+        }) => "/goal changes are unavailable while a Run is active; /goal shows status; Ctrl+C cancels".into(),
         Ok(Submission::Command { command, .. }) => {
-            active_command_notice(view, command, starting_sequence)
+            let notice = active_command_notice(view, command, starting_sequence);
+            if command == InteractiveCommand::New && composer.text().split_whitespace().next() == Some("/clear") {
+                notice.replacen("/new", "/clear", 1)
+            } else {
+                notice
+            }
         }
-        Err(CommandParseError::Empty) => "Run in progress... Ctrl+C cancels".into(),
+        Err(CommandParseError::Empty) => "Run is active; Ctrl+C cancels".into(),
         Err(CommandParseError::Unknown { suggestion }) => {
             return ActiveSubmission::Rejected(match suggestion {
                 Some(name) => format!("Unknown command; did you mean /{name}?"),
@@ -952,8 +957,12 @@ pub(super) fn active_command_notice(
     command: InteractiveCommand,
     starting_sequence: u64,
 ) -> String {
+    let unavailable = format!(
+        "/{} is unavailable while a Run is active; Ctrl+C cancels",
+        command.name()
+    );
     if command.availability(true) == CommandAvailability::Locked {
-        return "Command locked for this run".into();
+        return unavailable;
     }
     let run = view
         .runs
@@ -984,7 +993,7 @@ pub(super) fn active_command_notice(
         },
         InteractiveCommand::Goal => crate::presentation::goal_status(view),
         InteractiveCommand::Agents => {
-            "Collaboration locked for this run; /agents opens details".into()
+            "/agents changes are unavailable while a Run is active; /agents opens details; Ctrl+C cancels".into()
         }
         InteractiveCommand::Provider => {
             let provider = run
@@ -993,7 +1002,7 @@ pub(super) fn active_command_notice(
                     Some(config.provider.as_str())
                 });
             format!(
-                "Provider: {}; locked for this run",
+                "Provider: {}; {unavailable}",
                 provider.unwrap_or("not selected")
             )
         }
@@ -1007,7 +1016,7 @@ pub(super) fn active_command_notice(
                 .and_then(|run| run.config.as_ref())
                 .map_or(view.defaults.effort, |config| config.effort);
             format!(
-                "Model: {} · {}; locked for this run",
+                "Model: {} · {}; {unavailable}",
                 model.unwrap_or("not selected"),
                 effort.map_or("default", Effort::as_str)
             )
@@ -1023,9 +1032,9 @@ pub(super) fn active_command_notice(
             }
         }
         InteractiveCommand::Exit => {
-            "Ctrl+C cancels the active Run; /exit exits after it ends".into()
+            "/exit is unavailable while a Run is active; Ctrl+C cancels; /exit exits after it ends".into()
         }
-        _ => "Command locked for this run".into(),
+        _ => unavailable,
     }
 }
 
@@ -1107,7 +1116,7 @@ mod tests {
         }
         assert!(matches!(
             handle_active_submission(&mut composer, &view, starting_sequence),
-            ActiveSubmission::Notice(ref notice) if notice == "Goal changes are locked for this run; /goal shows status"
+            ActiveSubmission::Notice(ref notice) if notice == "/goal changes are unavailable while a Run is active; /goal shows status; Ctrl+C cancels"
         ));
 
         composer.clear();
@@ -1164,7 +1173,10 @@ mod tests {
         else {
             panic!("command must remain local")
         };
-        assert_eq!(notice, "Provider: not selected; locked for this run");
+        assert_eq!(
+            notice,
+            "Provider: not selected; /provider is unavailable while a Run is active; Ctrl+C cancels"
+        );
         assert!(composer.is_empty());
 
         for character in "/agents".chars() {
@@ -1187,7 +1199,8 @@ mod tests {
                 panic!("model inspection must remain local")
             };
             assert_eq!(
-                notice, "Model: not selected · default; locked for this run",
+                notice,
+                "Model: not selected · default; /model is unavailable while a Run is active; Ctrl+C cancels",
                 "{command}"
             );
             assert!(composer.is_empty());
@@ -1213,7 +1226,7 @@ mod tests {
         assert!(composer.is_empty());
         assert_eq!(view.defaults, SessionDefaults::default());
 
-        for command in ["/new", "/compact", "/settings"] {
+        for command in ["/new", "/clear", "/compact", "/settings"] {
             for character in command.chars() {
                 composer.apply(TerminalInput::Character(character));
             }
@@ -1222,7 +1235,11 @@ mod tests {
             else {
                 panic!("command must remain local")
             };
-            assert_eq!(notice, "Command locked for this run", "{command}");
+            assert_eq!(
+                notice,
+                format!("{command} is unavailable while a Run is active; Ctrl+C cancels"),
+                "{command}"
+            );
             assert!(composer.is_empty());
         }
 
@@ -1315,17 +1332,17 @@ mod tests {
             );
             assert_eq!(
                 active_command_notice(&view, InteractiveCommand::Model, starting_sequence),
-                "Model: gpt-5.4 · default; locked for this run"
+                "Model: gpt-5.4 · default; /model is unavailable while a Run is active; Ctrl+C cancels"
             );
         }
         view.runs.last_mut().expect("previous Run").status = RunStatus::Finished;
         assert_eq!(
             active_command_notice(&view, InteractiveCommand::Agents, starting_sequence),
-            "Collaboration locked for this run; /agents opens details"
+            "/agents changes are unavailable while a Run is active; /agents opens details; Ctrl+C cancels"
         );
         assert_eq!(
             active_command_notice(&view, InteractiveCommand::Model, starting_sequence),
-            "Model: gpt-5.4 · default; locked for this run"
+            "Model: gpt-5.4 · default; /model is unavailable while a Run is active; Ctrl+C cancels"
         );
         view.defaults.provider = Some("anthropic".into());
         view.defaults.model = Some("claude-sonnet-5".into());
@@ -1340,11 +1357,11 @@ mod tests {
         for (command, expected) in [
             (
                 "/provider",
-                "Provider: anthropic; locked for this run".to_owned(),
+                "Provider: anthropic; /provider is unavailable while a Run is active; Ctrl+C cancels".to_owned(),
             ),
             (
                 "/model",
-                "Model: claude-sonnet-5 · low; locked for this run".to_owned(),
+                "Model: claude-sonnet-5 · low; /model is unavailable while a Run is active; Ctrl+C cancels".to_owned(),
             ),
             ("/status", "Preparing message · Ctrl+C cancels".to_owned()),
         ] {

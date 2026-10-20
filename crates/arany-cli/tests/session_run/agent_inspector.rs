@@ -248,7 +248,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
             b"Agent: primary; state: active",
             b"Agent choice: n next",
             b"Agent 2/2: primary; finished",
-            b"Notice: Run in progress... Ctrl+C cancels",
+            b"Notice: Run is active; Ctrl+C cancels",
             b"Agent choice: n next",
             b"z",
             b"Status: finished",

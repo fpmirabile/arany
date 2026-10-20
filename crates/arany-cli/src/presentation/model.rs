@@ -532,6 +532,36 @@ mod tests {
         );
         assert!(tool_capacity_notice(&view, None).is_none());
         assert!(tool_capacity_notice(&view, Some(uuid::Uuid::now_v7())).is_none());
+        let mut list = crate::presentation::tool_fixture(
+            arany::ToolCall::List { path: ".".into() },
+            r#"{"entries":["a","b"]}"#,
+        );
+        let mut read = crate::presentation::tool_fixture(
+            arany::ToolCall::Read {
+                path: "a".into(),
+                offset: 0,
+                limit: 100,
+            },
+            r#"{"text":"a\nb\n"}"#,
+        );
+        list.intent.agent_run_id = intent.agent_run_id;
+        read.intent.agent_run_id = intent.agent_run_id;
+        let tools = vec![list, read];
+        for width in [80, 120] {
+            let model = PresentationModel::from_session(&view, width);
+            assert!(model.activity_lines[0].contains("primary · working"));
+            let rows = crate::presentation::tool_groups(&tools).collect::<Vec<_>>();
+            assert_eq!(
+                rows,
+                vec![(0..2, "⏺ Read(2 operations)\n  ⎿ 2 entries, 2 lines".into())]
+            );
+            assert!(
+                rows[0]
+                    .1
+                    .lines()
+                    .all(|line| UnicodeWidthStr::width(line) <= usize::from(width))
+            );
+        }
         let run = view.runs.last_mut().unwrap();
         let mut intent = intent;
         intent.call = arany::ToolCall::Command {
@@ -559,7 +589,7 @@ mod tests {
             run.tools[0].observation.as_mut().unwrap().cache_update = arany::CacheUpdate::Rejected;
             assert!(
                 crate::presentation::tool_summary(&run.tools[0])
-                    .contains("succeeded · cache not saved (limit)")
+                    .contains("0 bytes · cache not saved (limit)")
             );
             assert_eq!(
                 crate::presentation::render_cache_update_feedback(run),
@@ -577,7 +607,7 @@ mod tests {
             observation.cache_update = arany::CacheUpdate::Uncertain;
             assert!(
                 crate::presentation::tool_summary(&run.tools[0])
-                    .contains("succeeded · cache outcome uncertain")
+                    .contains("0 bytes · cache outcome uncertain")
             );
             assert_eq!(
                 crate::presentation::render_cache_update_feedback(run),
