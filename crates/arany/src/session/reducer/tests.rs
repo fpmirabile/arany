@@ -6183,15 +6183,17 @@ mod goal_replay_tests {
         assert!(rejected(&view, event), "duplicate boundary");
         assert!(rejected(&view, cleared(1, 0)), "regression");
         let bytes = savings(&view, 2, 3);
-        apply(&mut view, cleared(3, bytes)).unwrap();
+        let event = cleared(3, bytes);
+        let mut closed = view.clone();
+        apply(&mut view, event.clone()).expect("valid active Run clearing boundary");
+        closed.runs[0].status = RunStatus::Finished;
+        assert!(rejected(&closed, event), "closed Run");
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
         assert!(rejected(&view, cleared(4, 0)), "open Provider reservation");
         apply(&mut view, requesting_step(run, agent, 1)).unwrap();
         let intent = read_intent(run, agent, "src/lib.rs");
         apply(&mut view, tool_started(run, agent, &intent)).unwrap();
         assert!(rejected(&view, cleared(4, 0)), "open Tool");
-        view.runs[0].status = RunStatus::Finished;
-        assert!(rejected(&view, cleared(4, 0)), "closed Run");
     }
 
     #[test]

@@ -670,7 +670,12 @@ impl crate::Provider for ForegroundWorkerProvider {
         }
         if self.case == "clear_background" && request.phase == AgentPhase::ChildWork && step == 0 {
             self.background_started.notify_one();
-            self.clearing_finished.notified().await;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.clearing_finished.notified(),
+            )
+            .await
+            .expect("primary reaches the clearing boundary");
         }
         let mut release_child = None;
         let outcome = match (request.phase, step) {
@@ -686,7 +691,12 @@ impl crate::Provider for ForegroundWorkerProvider {
             (AgentPhase::RootPlan, 1) => self.delegation(&request),
             (AgentPhase::RootSynthesis, _) if self.case.starts_with("clear_") => {
                 if self.case == "clear_background" && step == 0 {
-                    self.background_started.notified().await;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        self.background_started.notified(),
+                    )
+                    .await
+                    .expect("background worker starts");
                 }
                 if step < 40 {
                     super::scenario::tool_outcome(ToolCall::Read {
@@ -702,6 +712,19 @@ impl crate::Provider for ForegroundWorkerProvider {
                             .as_ref()
                             .is_some_and(|tools| tools.steps.iter().any(|step| step.cleared)),
                         "old results were not cleared",
+                    );
+                    self.check(
+                        request.input.tools.as_ref().is_some_and(|tools| {
+                            tools.steps.first().is_some_and(|step| step.cleared)
+                        }),
+                        "oldest results were not cleared",
+                    );
+                    self.check(
+                        request.input.tools.as_ref().is_some_and(|tools| {
+                            tools.steps.len() >= 3
+                                && tools.steps.iter().rev().take(3).all(|step| !step.cleared)
+                        }),
+                        "three most recent results were not retained",
                     );
                     self.clearing_finished.notify_one();
                     let verified = request.input.tools.as_ref().is_some_and(|tools| {
