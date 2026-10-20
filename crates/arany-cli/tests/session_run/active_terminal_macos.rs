@@ -632,6 +632,15 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
             let workspace = temp.path().join("project");
             let state = temp.path().join("state");
             crate::seed_fullscreen(&state);
+            let entries = || {
+                let mut names = std::fs::read_dir(&state)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<Vec<_>>();
+                names.sort();
+                names
+            };
+            let seeded = entries();
             std::fs::create_dir(&workspace).unwrap();
             let geometry = nix::pty::Winsize {
                 ws_row: 24,
@@ -735,10 +744,7 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
             assert!(output.stdout.is_empty());
             assert!(!transcript.windows(4).any(|part| part == b"\x1b[6n"));
             restored(&input, &before);
-            assert!(
-                !state.join("events.sqlite3").exists(),
-                "no Session admission: {linear} {case}"
-            );
+            assert_eq!(entries(), seeded, "no Session admission: {linear} {case}");
             assert!(!transcript.windows(6).any(|part| part == b"Setup:"));
             assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
             for name in ["fixture-home", "fixture-state", "fixture-data"] {

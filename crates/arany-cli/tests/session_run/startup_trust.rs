@@ -722,6 +722,7 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
     super::isolation::remember_workspace_trust(&account, &workspace, &workspace);
 
     let state = temp.path().join("state");
+    crate::seed_fullscreen(&state);
     let shell = "before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4; code=$?; after=$(stty -g); printf '\\nTTY_AFTER:%s\\n' \"$after\"; exit \"$code\"";
     let mut command = super::isolation::isolated_script(temp.path());
     command
