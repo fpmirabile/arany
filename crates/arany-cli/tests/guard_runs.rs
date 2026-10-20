@@ -3541,3 +3541,100 @@ fn researcher_children_cannot_load_a_model_hidden_skill() {
     store.close().await.unwrap();
     });
 }
+
+#[tokio::test]
+async fn missing_file_targets_fail_with_guard_attestation_and_recover_explicitly() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("notes")).unwrap();
+    let state = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let config = state.join("tools.json");
+    std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let write = || arany::ToolCall::Write {
+        path: "notes/new/file.txt".into(),
+        expected_digest: None,
+        content: "New".into(),
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_outcome(write()),
+        tool_outcome(arany::ToolCall::Mkdir {
+            path: "notes/new/deeper".into(),
+        }),
+        tool_outcome(arany::ToolCall::Edit {
+            path: "notes/missing.txt".into(),
+            expected_digest: Sha256::digest(b"old")
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            old: "old".into(),
+            new: "new".into(),
+        }),
+        tool_outcome(arany::ToolCall::Mkdir {
+            path: "notes/new".into(),
+        }),
+        tool_outcome(write()),
+        arany::test_support::goals::finish_with("Created the parent and wrote the file"),
+    ]));
+    let mut input = request(&workspace, "Write a note after creating its parent");
+    input.include_paths.clear();
+    let result = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    assert!(provider.responses.lock().unwrap().is_empty());
+    assert_eq!(
+        std::fs::read(workspace.join("notes/new/file.txt")).unwrap(),
+        b"New"
+    );
+    assert!(!workspace.join("notes/new/deeper").exists());
+    assert!(!workspace.join("notes/missing.txt").exists());
+    engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    let events = store.load_session(result.session_id).await.unwrap();
+    let view = SessionView::replay(result.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.runs[0], result.run);
+    assert_eq!(view.runs[0].tools.len(), 5);
+    for (index, text) in [
+        (0, "Parent directory not found; create it with Mkdir first"),
+        (1, "Parent directory not found; create it with Mkdir first"),
+        (
+            2,
+            "File or directory not found; List the parent directory to check the path",
+        ),
+    ] {
+        let observation = view.runs[0].tools[index].observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, arany::ToolDisposition::Failed);
+        assert_eq!(observation.output, text);
+        assert!(matches!(
+            observation.attestation,
+            Some(arany::Attestation::Guard(_))
+        ));
+    }
+    for step in &view.runs[0].tools[3..] {
+        assert_eq!(
+            step.observation.as_ref().unwrap().disposition,
+            arany::ToolDisposition::Succeeded
+        );
+    }
+    store.close().await.unwrap();
+}

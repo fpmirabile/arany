@@ -513,7 +513,8 @@ fn system_program_metadata_in(
         path.file_name()
             .and_then(|name| name.to_str())
             .ok_or(ToolError::Path)?,
-    )?;
+    )
+    .map_err(|_| ToolError::Path)?;
     let metadata = file.metadata().map_err(|_| ToolError::Path)?;
     if !crate::tools::fs::macos_system_file(
         metadata.is_file(),

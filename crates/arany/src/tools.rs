@@ -113,6 +113,8 @@ pub enum ToolError {
     ChangedInput,
     #[error("Tool path is not admitted")]
     Path,
+    #[error("Tool file or directory not found")]
+    NotFound,
     #[error("Guard filesystem boundary denied access")]
     FilesystemDenied,
     #[error("Tool resource limit reached")]

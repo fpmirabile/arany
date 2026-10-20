@@ -1947,6 +1947,19 @@ mod peer_row_tests {
             assert_eq!(tool_summary(&tool), expected);
             assert!(!expected.contains("succeeded"));
         }
+        let mut missing = tool_fixture(
+            ToolCall::Read {
+                path: "agents/skills/ponytail/SKILL.md".into(),
+                offset: None,
+                limit: None,
+            },
+            "File or directory not found; List the parent directory to check the path",
+        );
+        missing.observation.as_mut().unwrap().disposition = ToolDisposition::Failed;
+        assert_eq!(
+            tool_summary(&missing),
+            "⏺ Read(agents/skills/ponytail/SKILL.md)\n  ⎿ Error: File or directory not found; List the parent directory to check the path"
+        );
         let mut tool = tool_fixture(
             ToolCall::Read {
                 path: "bad\u{1b}[2J".into(),
