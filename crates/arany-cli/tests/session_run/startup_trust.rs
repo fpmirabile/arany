@@ -1078,6 +1078,81 @@ fn tab_cannot_skip_narrow_folder_consent_pages() {
     );
 }
 
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(not(arany_ci), ignore = "native Linux PTY Classic consent viewport")]
+fn classic_folder_consent_fits_80x24_and_pages_back_when_short() {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::io::Write;
+
+    for (rows, paged) in [(24, false), (14, true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = temp.path().join("state");
+        let shell = format!(
+            "stty rows {rows} cols 80; /arany --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4"
+        );
+        let mut command = super::isolation::isolated_script(temp.path());
+        command
+            .env_clear()
+            .env("ARANY_TEST_STATE", &state)
+            .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+            .env("SHELL", "/bin/sh")
+            .env("TERM", "xterm-256color")
+            .current_dir(&workspace)
+            .args(["-q", "-e", "-c", &shell, "/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+        let mut input = child.child().stdin.take().unwrap();
+        let mut output = child.child().stdout.take().unwrap();
+        let flags = fcntl_getfl(&output).unwrap();
+        fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+        let mut transcript = Vec::new();
+        let mut answered = crate::session_picker::PtyResponses::manual_consent();
+        let mut wait = |input: &mut std::process::ChildStdin, needle: &str, absent: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                super::session_picker::pump(&mut output, input, &mut transcript, &mut answered);
+                let screen = super::session_picker::screen_rows(&transcript, 80, rows).join(" | ");
+                if screen.contains(needle) && (absent.is_empty() || !screen.contains(absent)) {
+                    return screen;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "consent stage {needle} missing: {screen}"
+                );
+                thread::yield_now();
+            }
+        };
+        if !paged {
+            let screen = wait(&mut input, "Trust this folder", "Page 1/");
+            assert!(screen.contains("Continue read only"));
+            assert!(screen.contains("Do you trust this folder?"));
+        } else {
+            let first = wait(&mut input, "Page 1/", "");
+            assert!(first.contains("Do you trust this folder?"));
+            input.write_all(b"\x1b[6~").unwrap();
+            wait(&mut input, "Trust this folder", "Do you trust this folder?");
+            input.write_all(b"\x1b[A").unwrap();
+            wait(&mut input, "Do you trust this folder?", "Trust this folder");
+        }
+        input.write_all(b"\x03").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.child().try_wait().unwrap().is_none() {
+            super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(
+                Instant::now() < deadline,
+                "consent interruption did not exit"
+            );
+            thread::yield_now();
+        }
+    }
+}
+
 #[cfg(all(target_os = "macos", debug_assertions))]
 #[test]
 fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory() {

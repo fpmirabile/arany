@@ -1336,7 +1336,10 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     loop {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
-            text.contains("Ask Arany") && text.contains("primary · working")
+            text.contains("Ask Arany")
+                && text.contains("primary · working")
+                && !text.contains("Commands · 20 local controls")
+                && !text.contains("Enter/Esc close")
         }) {
             break;
         }

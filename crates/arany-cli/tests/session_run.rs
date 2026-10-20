@@ -12,6 +12,85 @@ use std::process::Command;
 #[path = "session_run/worker.rs"]
 mod worker;
 
+#[cfg(unix)]
+fn reply_positioned_cursor_queries(
+    input: &mut impl std::io::Write,
+    bytes: &[u8],
+    answered: &mut usize,
+) {
+    for (index, (offset, _)) in bytes
+        .windows(4)
+        .enumerate()
+        .filter(|(_, part)| *part == b"\x1b[6n")
+        .enumerate()
+    {
+        if index < *answered {
+            continue;
+        }
+        let position = bytes[..offset]
+            .windows(2)
+            .enumerate()
+            .rev()
+            .filter(|(_, part)| *part == b"\x1b[")
+            .find_map(|(start, _)| {
+                let tail = &bytes[start + 2..offset];
+                let end = tail.iter().position(|byte| (0x40..=0x7e).contains(byte))?;
+                (tail[end] == b'H').then_some(&tail[..end])
+            })
+            .expect("Classic query follows an explicit cursor position");
+        assert!(
+            position.len() <= 16
+                && position
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit() || *byte == b';')
+        );
+        input.write_all(b"\x1b[").unwrap();
+        input.write_all(position).unwrap();
+        input.write_all(b"R").unwrap();
+        *answered += 1;
+    }
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn observed_clear_rows(bytes: &[u8]) -> Vec<usize> {
+    let mut rows = Vec::new();
+    for (start, _) in bytes
+        .windows(2)
+        .enumerate()
+        .filter(|(_, part)| *part == b"\x1b[")
+    {
+        let rest = &bytes[start + 2..];
+        let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+        if digits > 0 && rest[digits..].starts_with(b";1H\x1b[J") && rows.len() < 16 {
+            rows.push(
+                String::from_utf8_lossy(&rest[..digits])
+                    .parse()
+                    .unwrap_or(0),
+            );
+        }
+    }
+    rows
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn assert_classic_owned_clear(bytes: &[u8], row: usize) {
+    let clear = format!("\x1b[{row};1H\x1b[J");
+    assert!(
+        bytes
+            .windows(clear.len())
+            .any(|part| part == clear.as_bytes()),
+        "Classic must clear its previous owned area from row {row}; observed clears at rows {:?}; tail {:?}",
+        observed_clear_rows(bytes),
+        String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(400)..])
+            .escape_debug()
+            .to_string()
+    );
+    assert!(
+        !bytes.windows(4).any(|part| part == b"\x1b[2J"),
+        "settled history must not be cleared"
+    );
+}
+
 #[test]
 fn account_path_uses_the_private_binary_fixture() {
     let root = arany::test_support::isolate_account_root();
@@ -551,6 +630,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
         drop(command);
         let mut queries = 0;
         let mut submissions = 0;
+        let mut injected = 0;
         let mut observed_tail = String::new();
         let mut observed_bytes = 0;
         let observation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -569,18 +649,20 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         observed_bytes = bytes.len();
                     }
                     let count = bytes.windows(4).filter(|part| *part == b"\x1b[6n").count();
-                    while queries < count {
+                    if queries < count {
                         assert!(
                             case.starts_with("inline") || case == "cursor-timeout",
                             "only classic queries the admitted terminal"
                         );
-                        if case != "cursor-timeout" {
-                            if case == "inline-query-key" {
+                        if case == "cursor-timeout" {
+                            queries = count;
+                        } else {
+                            if case == "inline-query-key" && injected == submissions {
                                 input.write_all(b"x").unwrap();
+                                injected += 1;
                             }
-                            input.write_all(b"\x1b[1;1R").unwrap();
+                            reply_positioned_cursor_queries(&mut input, bytes, &mut queries);
                         }
-                        queries += 1;
                     }
                     let marker = format!("INPUT_READY:{submissions}");
                     if submissions < if unwind { 1 } else { 2 }

@@ -137,11 +137,8 @@ pub(super) fn pump(
         .windows(4)
         .filter(|part| *part == b"\x1b[6n")
         .count();
-    assert!(queries <= 32, "bounded cursor queries");
-    while answered.cursor_queries < queries {
-        input.write_all(b"\x1b[2;1R").expect("cursor response");
-        answered.cursor_queries += 1;
-    }
+    assert!(queries <= 128, "bounded cursor queries");
+    super::reply_positioned_cursor_queries(input, transcript, &mut answered.cursor_queries);
     if answered.auto_consent {
         let mut declined = false;
         super::process::decline_workspace_consent(

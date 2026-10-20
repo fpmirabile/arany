@@ -334,10 +334,7 @@ fn broken_stderr_during_folder_consent_restores_raw_mode_without_session() {
             .filter(|part| *part == b"\x1b[6n")
             .count();
         assert!(queries <= 32, "bounded cursor queries");
-        while answered < queries {
-            input.write_all(b"\x1b[1;1R").expect("cursor response");
-            answered += 1;
-        }
+        crate::reply_positioned_cursor_queries(&mut input, &stderr_bytes, &mut answered);
         crate::process::decline_workspace_consent(
             &mut suggested_input,
             &stderr_bytes,

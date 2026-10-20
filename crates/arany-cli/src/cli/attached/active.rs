@@ -600,6 +600,7 @@ pub(super) async fn submit_objective(
                             terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
                         }
                         TerminalInput::Tab if !approval_more => approval_choice = (approval_choice + 1) % approval_choices(&pending),
+                        TerminalInput::Up if !approval_more && approval_choice == 0 && approval_page > 0 => approval_page -= 1,
                         TerminalInput::Up if !approval_more => approval_choice = approval_choice.saturating_sub(1),
                         TerminalInput::Down if !approval_more => approval_choice = (approval_choice + 1).min(approval_choices(&pending) - 1),
                         TerminalInput::Down | TerminalInput::PageDown if approval_more => approval_page += 1,

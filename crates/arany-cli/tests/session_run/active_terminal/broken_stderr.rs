@@ -190,10 +190,7 @@ fn run_broken_stderr_case(compaction: bool) {
             .filter(|part| *part == b"\x1b[6n")
             .count();
         assert!(queries <= 32, "bounded cursor-position queries");
-        while answered_queries < queries {
-            input.write_all(b"\x1b[24;1R").expect("cursor response");
-            answered_queries += 1;
-        }
+        crate::reply_positioned_cursor_queries(&mut input, &stderr_bytes, &mut answered_queries);
         let receipt = NATIVE_ANSWER;
         if compaction
             && !compaction_sent

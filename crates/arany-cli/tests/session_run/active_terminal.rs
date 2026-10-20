@@ -429,10 +429,11 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 "linear ownership must not query cursor input"
             );
             assert!(queries <= 32, "bounded cursor queries");
-            while answered < queries {
-                write_input(&reader_input, b"\x1b[1;1R");
-                answered += 1;
-            }
+            crate::reply_positioned_cursor_queries(
+                &mut *reader_input.lock().expect("fixture input"),
+                &bytes,
+                &mut answered,
+            );
             while next < patterns.len() {
                 let Some(matched) =
                     crate::process::pty_text_matches(&bytes[search_from..], patterns[next]).next()
@@ -1250,6 +1251,14 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         0,
         b"\x1b[?25h\x1b[22;3H",
     );
+    let first_query = transcript
+        .windows(4)
+        .position(|part| part == b"\x1b[6n")
+        .expect("Classic startup cursor query");
+    assert!(
+        transcript[..first_query].ends_with(b"\x1b[24;1H"),
+        "Classic reserves rows below any existing shell output"
+    );
     // The following transcript gesture is a reader-order barrier for both ignored page keys.
     let from = transcript.len();
     input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
@@ -1316,7 +1325,8 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
     }
     for (command, needle) in [
         (&b"/resume\r"[..], &b"Resume \xc2\xb7"[..]),
-        (b"/agents\r", b"gents"),
+        (b"/agents\r", b"Last"),
+        (b"/help\r", b"local controls"),
     ] {
         let from = transcript.len();
         input.write_all(command).unwrap();
@@ -1328,16 +1338,33 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             from,
             needle,
         );
-        input.write_all(b"\x1b").unwrap();
         wait(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
             from,
+            b"\x1b[?25l",
+        );
+        let close_from = transcript.len();
+        input.write_all(b"\x1b").unwrap();
+        wait(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            close_from,
             b"\x1b[?25h\x1b[22;3H",
         );
+        // The floored viewport keeps its height, so the frame diff repaints it without a clear.
+        assert!(
+            !transcript[close_from..]
+                .windows(4)
+                .any(|part| part == b"\x1b[2J"),
+            "settled history must not be cleared"
+        );
     }
+    let exit_from = transcript.len();
     input.write_all(b"/exit\r").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while child.child().try_wait().unwrap().is_none() {
@@ -1347,6 +1374,7 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
     }
     assert!(wait_product(child.take()).status.success());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
+    super::assert_classic_owned_clear(&transcript[exit_from..], 1);
     let text = String::from_utf8_lossy(&transcript);
     for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {
         assert!(

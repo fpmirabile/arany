@@ -123,6 +123,17 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
             .unwrap();
         let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
         if !linear {
+            if mode == "--classic" {
+                // Folder consent consumes the first Escape; typing before the composer returns would join it as Alt.
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    0,
+                    b"Ask Arany",
+                );
+            }
             let from = transcript.len();
             // Crossterm collapses adjacent legacy Escape bytes into one event.
             input.write_all(b"saved draft\x1b[27u\x1b[27u").unwrap();
@@ -231,7 +242,7 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
             &mut transcript,
             &mut answered,
             from,
-            b"Second prompt",
+            if linear { b"Second prompt" } else { b"Second" },
         );
         if linear {
             assert!(String::from_utf8_lossy(&transcript[from..]).contains("Draft (not sent):"));

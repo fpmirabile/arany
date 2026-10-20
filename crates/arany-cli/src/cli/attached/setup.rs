@@ -1052,6 +1052,7 @@ pub(super) async fn review_warning(
                 accept_selected = false;
             }
             TerminalInput::Up if has_more => page = page.saturating_sub(1),
+            TerminalInput::Up if !accept_selected && page > 0 => page -= 1,
             TerminalInput::Left | TerminalInput::Up if !has_more => accept_selected = false,
             TerminalInput::Right | TerminalInput::Down if !has_more => accept_selected = true,
             TerminalInput::Tab if !has_more => accept_selected = !accept_selected,
