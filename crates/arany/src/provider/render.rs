@@ -19,7 +19,7 @@ const HISTORY_LABEL: &str =
 pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, ProviderError> {
     request.validate_scope()?;
     let input = &request.input;
-    let mut catalog = input.tools.as_ref().map(|tools| {
+    let catalog = input.tools.as_ref().map(|tools| {
         crate::tools::parse_json(tools.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES)
             .unwrap_or_else(|_| json!(tools.catalog))
     });
@@ -31,20 +31,20 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
         .tools
         .as_ref()
         .is_some_and(|tools| tools.steps.iter().any(|step| step.requests.is_empty()));
-    if let Some(refusal) = &input.last_answer_refused {
-        let catalog = catalog.get_or_insert_with(|| json!({}));
-        catalog
-            .as_object_mut()
-            .ok_or(ProviderError::Rejected)?
-            .insert("last_answer_refused".into(), refusal_note(refusal));
-        if catalog.to_string().len() > MAX_TOOL_CATALOG_BYTES {
-            return Err(ProviderError::Rejected);
-        }
-    }
     messages.push(current_message(request, catalog.as_ref(), delegate_step));
     append_stop_feedback(&mut messages, request, 0);
     if let Some(tools) = &input.tools {
         append_steps(&mut messages, tools, request)?;
+    }
+    if let Some(refusal) = &input.last_answer_refused {
+        let note = refusal_note(refusal);
+        if note.to_string().len() > MAX_TOOL_CATALOG_BYTES {
+            return Err(ProviderError::Rejected);
+        }
+        messages.push(user(vec![data_block(
+            "worker_coordination",
+            json!({"last_answer_refused": note}),
+        )]));
     }
     Ok(Conversation {
         system: system_blocks(request),

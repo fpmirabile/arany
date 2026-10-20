@@ -28,8 +28,6 @@ pub async fn replayed(
 
 /// Splits a journal at each action's first admission and asserts that the action's bound covers the
 /// Events up to the next admission, or up to the end of the journal (the terminal Events).
-const MAX_ACTION_SLOTS: usize = 200;
-
 pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, steering: bool) {
     use crate::Action;
     let primaries: std::collections::HashSet<_> = events
@@ -338,11 +336,11 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
             "{action:?} at {index} bounds {bound} Events but appends {observed}",
         );
     }
-    // Admission checks headroom once and holds nothing back, so each Event needs an earlier Store admission whose slots reach it.
-    // Sealed-data allowances budget their own chunks, so only call, Tool and settlement admissions count as headroom.
+    // A sealed-data allowance budgets its own chunks, so it is not headroom for later Events.
     let admissions: Vec<_> = super::admissions::recorded(events[0].session_id)
         .into_iter()
-        .filter(|(_, slots)| *slots <= MAX_ACTION_SLOTS)
+        .filter(|(_, _, sealed_data)| !sealed_data)
+        .map(|(count, slots, _)| (count, slots))
         .collect();
     assert!(!admissions.is_empty(), "the Store recorded no admissions");
     let first = admissions.iter().map(|(count, _)| *count).min();
