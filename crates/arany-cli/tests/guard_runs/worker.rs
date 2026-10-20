@@ -404,11 +404,17 @@ pub(super) async fn worker_case(case: &'static str) {
             .collect();
         assert!(clears.len() >= 2, "{case}: repeated clearing batches");
         for &(index, count) in &clears {
+            let next = bundle.events[index + 1..].iter().find(|event| {
+                !matches!(
+                    event.event,
+                    Event::GoalCompactionCallReserved { .. } | Event::GoalContextCompacted { .. }
+                )
+            });
             assert!(
-                matches!(bundle.events[index + 1].event,
-                    Event::GoalProviderCallReserved { agent_run_id, .. } if agent_run_id == primary
+                matches!(next.map(|event| &event.event),
+                    Some(Event::GoalProviderCallReserved { agent_run_id, .. }) if *agent_run_id == primary
                 ),
-                "{case}: clearing commits before primary reservation"
+                "{case}: clearing and any summary commit before primary reservation"
             );
             assert!(
                 run.tools[..count]
