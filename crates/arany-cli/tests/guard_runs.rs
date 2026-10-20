@@ -1822,7 +1822,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62426 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1840,7 +1840,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62431 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1858,7 +1858,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1876,7 +1876,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1896,7 +1896,7 @@ GoalProviderCallReserved
 ProviderCallRecorded RootPlan
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1914,7 +1914,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 GoalProviderCallReserved
 ProviderCallRecorded ToolReview
 ToolFinished Succeeded
@@ -1934,7 +1934,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1955,7 +1955,7 @@ ProviderCallRecorded RootPlan
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
-ToolStarted result_bytes=59099 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
@@ -1979,7 +1979,7 @@ ProviderCallRecorded RootPlan
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
-ToolStarted result_bytes=59101 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork

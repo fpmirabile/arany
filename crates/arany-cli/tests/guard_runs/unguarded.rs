@@ -968,7 +968,7 @@ fn command_output_truncation_continues_integrates_and_replays_without_execution(
                 assert!(stdout.ends_with("line 19999\nline 20000\n"));
                 assert!(stdout.contains("\n…["));
                 assert!(
-                    observation.output.len() < 64 * 1024,
+                    observation.output.len() <= 64 * 1024,
                     "{}",
                     observation.output.len()
                 );

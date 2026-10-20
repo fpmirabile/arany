@@ -176,7 +176,7 @@ fn paged_read_workspace(root: &Path) -> std::path::PathBuf {
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(
         workspace.join("notes/data.txt"),
-        format!("{}\n", "x".repeat(1023)).repeat(4 * READS),
+        format!("{}\n", "x".repeat(1023)).repeat(2 * READS),
     )
     .expect("bounded fixture file");
     workspace
@@ -187,8 +187,8 @@ fn paged_read_outcomes() -> Vec<ProviderOutcome> {
         .map(|page| {
             crate::tool_outcome(arany::ToolCall::Read {
                 path: "notes/data.txt".into(),
-                offset: Some(u32::try_from(page * 4 + 1).expect("bounded line offset")),
-                limit: Some(4),
+                offset: Some(u32::try_from(page * 2 + 1).expect("bounded line offset")),
+                limit: Some(2),
             })
         })
         .collect::<Vec<_>>();
