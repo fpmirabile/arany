@@ -379,9 +379,9 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 // Styled text can be split by cursor moves in the raw bytes; the rendered screen is authoritative.
                 // Linear output is an append-only log whose replayed screen keeps stale banners, so only new bytes count.
                 let text = std::str::from_utf8(needle).ok().filter(|_| !linear);
-                while !transcript[from..]
-                    .windows(needle.len())
-                    .any(|part| part == needle)
+                while crate::process::pty_text_matches(&transcript[from..], needle)
+                    .next()
+                    .is_none()
                     && !text.is_some_and(|text| {
                         super::session_picker::screen_contains(transcript, 80, 24, text)
                     })

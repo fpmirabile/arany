@@ -1,7 +1,7 @@
 use super::approval::ApprovalMode;
 use super::config::{Config, Program};
 use super::toolchains::{
-    Candidate, MAX_RUNTIME_GRANTS, RuntimeGrant, discover, validate_selection,
+    Candidate, MAX_RUNTIME_GRANTS, RuntimeGrant, discover, profile_order, validate_selection,
 };
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
 use super::{ToolError, fs};
@@ -216,39 +216,44 @@ impl WorkspacePermissions {
             .iter()
             .filter_map(|grant| grant.token().ok())
             .collect::<std::collections::BTreeSet<_>>();
-        let mut options = self
+        let mut profiles = self
             .candidates
             .iter()
-            .map(|candidate| RuntimeProfileOption {
-                token: candidate.token.clone(),
-                label: candidate.label.clone(),
-                group: candidate.grant.kind.label(),
-                version: candidate.grant.version.clone(),
-                path: candidate.grant.path.clone(),
-                detected: true,
-                selected: selected.contains(&candidate.token),
+            .map(|candidate| {
+                (
+                    &candidate.grant,
+                    candidate.token.clone(),
+                    true,
+                    candidate.label.clone(),
+                )
             })
             .collect::<Vec<_>>();
         for grant in &self.runtime_grants {
             let Ok(token) = grant.token() else {
                 continue;
             };
-            if options.iter().any(|option| option.token == token) {
+            if profiles
+                .iter()
+                .any(|(_, existing, _, _)| *existing == token)
+            {
                 continue;
             }
             let detected = grant.verify_host().is_ok();
-            options.push(RuntimeProfileOption {
+            profiles.push((grant, token, detected, saved_profile_label(grant, detected)));
+        }
+        profiles.sort_by(|left, right| profile_order((left.0, &left.1), (right.0, &right.1)));
+        profiles
+            .into_iter()
+            .map(|(grant, token, detected, label)| RuntimeProfileOption {
+                selected: selected.contains(&token),
                 token,
-                label: saved_profile_label(grant, detected),
+                label,
                 group: grant.kind.label(),
                 version: grant.version.clone(),
                 path: grant.path.clone(),
                 detected,
-                selected: true,
-            });
-        }
-        options.sort_by(|left, right| left.token.cmp(&right.token));
-        options
+            })
+            .collect()
     }
 
     /// Labels of every saved profile, for the inspection notice; a drifted one is marked.
@@ -552,6 +557,80 @@ mod tests {
     use super::*;
 
     const STALE_CARGO_NOTICE: &str = "Runtime profile Cargo archive cache no longer matches; commands using it are rejected until you remove it in /permissions";
+
+    #[test]
+    fn runtime_profile_numbers_follow_kind_version_path_and_token() {
+        use super::super::toolchains::{RuntimeKind, RuntimeManager};
+
+        let mut ordered = [
+            (RuntimeKind::Rust, Some("1.89.0"), "/rust", "z"),
+            (RuntimeKind::Rust, Some("1.88.0"), "/rust", "y"),
+            (RuntimeKind::Node, Some("v22.3.0"), "/a", "x"),
+            (RuntimeKind::Node, Some("v22.3.0"), "/b", "v"),
+            (RuntimeKind::Node, Some("v22.3.0"), "/b", "w"),
+            (RuntimeKind::Python, Some("3.13.0"), "/python", "u"),
+            (RuntimeKind::CargoCache, None, "/cache", "t"),
+            (RuntimeKind::AppleCompiler, None, "/compiler", "s"),
+            (RuntimeKind::AppleSdk, Some("15.4"), "/sdk", "r"),
+            (RuntimeKind::AppleSdk, Some("15.3"), "/sdk", "q"),
+        ]
+        .map(|(kind, version, path, token)| {
+            let grant = RuntimeGrant {
+                kind,
+                manager: RuntimeManager::HostCache,
+                version: version.map(str::to_owned),
+                path: path.into(),
+                device: 1,
+                inode: 2,
+            };
+            Candidate {
+                label: grant.profile_label(),
+                token: token.into(),
+                grant,
+            }
+        });
+        ordered[0].token = ordered[0].grant.token().unwrap();
+        let expected = ordered
+            .iter()
+            .map(|candidate| candidate.token.clone())
+            .collect::<Vec<_>>();
+        for shift in 0..ordered.len() {
+            let mut candidates = ordered.to_vec();
+            candidates.rotate_left(shift);
+            candidates.reverse();
+            let access = WorkspacePermissions {
+                path: "/workspace".into(),
+                identity: WorkspaceIdentity {
+                    device: 1,
+                    inode: 2,
+                },
+                trusted: true,
+                mode: ApprovalMode::AutoEdits,
+                runtime_grants: vec![ordered[0].grant.clone()],
+                candidates,
+                discovery_error: None,
+            };
+            assert_eq!(
+                access
+                    .runtime_profile_choices()
+                    .into_iter()
+                    .map(|choice| choice.token)
+                    .collect::<Vec<_>>(),
+                expected,
+                "shuffle={shift}"
+            );
+            assert_eq!(
+                access
+                    .runtime_profile_choices()
+                    .into_iter()
+                    .filter(|choice| choice.selected)
+                    .map(|choice| choice.token)
+                    .collect::<Vec<_>>(),
+                [ordered[0].token.clone()],
+                "saved selection follows its token after shuffle={shift}"
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]
