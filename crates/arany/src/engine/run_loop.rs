@@ -1002,6 +1002,16 @@ impl<'a> RunLoop<'a> {
         Ok(self.check_tool(&request.call, self.ledger().plan_contract()?.as_ref()))
     }
 
+    fn model_may_propose(&self, call: &crate::tools::ToolCall) -> bool {
+        match call {
+            crate::tools::ToolCall::Skill { name, .. } => self
+                .controls
+                .tools
+                .is_some_and(|tools| !tools.hides_skill_from_model(name)),
+            _ => true,
+        }
+    }
+
     fn check_tool(
         &self,
         call: &crate::tools::ToolCall,
@@ -1018,12 +1028,7 @@ impl<'a> RunLoop<'a> {
         {
             return Err(NotOffered);
         }
-        if let crate::tools::ToolCall::Skill { name, .. } = call
-            && self
-                .controls
-                .tools
-                .is_some_and(|tools| tools.hides_skill_from_model(name))
-        {
+        if !self.model_may_propose(call) {
             return Err(NotOffered);
         }
         if !serde_json::to_vec(call)

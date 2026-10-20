@@ -393,7 +393,6 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let mut next = request(&workspace, "");
         next.title = None;
         next.session_id = Some(first.session_id);
-    next.title = None;
         next.images = vec![second_image.clone()];
         next.policy = CollaborationPolicy::Team { max_active_children: 1 };
         let third = run_to_end(&engine, &provider, next).await.expect("image-only team after reopen");
@@ -405,7 +404,6 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let mut next = request(&workspace, &realistic_objective[..64 * 1024]);
         next.title = None;
         next.session_id = Some(first.session_id);
-    next.title = None;
         next.images = vec![large_image.clone()];
         let fourth = run_to_end(&engine, &provider, next).await.expect("whole-history image clipping");
         assert!(fourth.run.config.as_ref().unwrap().history_run_ids.is_empty());
@@ -3462,6 +3460,83 @@ fn invoked_skill_crash_window_resumes_without_rereading_or_rerunning() {
             .tools
             .as_ref()
             .is_none_or(|tools| tools.invoked_skill.is_none())
+    );
+    store.close().await.unwrap();
+    });
+}
+
+#[test]
+#[cfg_attr(not(arany_ci), ignore = "native Skill Guard read on Linux and macOS")]
+fn researcher_children_cannot_load_a_model_hidden_skill() {
+    let _gate = process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("notes")).unwrap();
+    std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
+    let skill_dir = workspace.join(".agents/skills/ask-matt");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let body = b"---\nname: ask-matt\ndescription: Guide\n---\nGuidance.\n";
+    std::fs::write(skill_dir.join("SKILL.md"), body).unwrap();
+    let state_path = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state_path).unwrap(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
+        "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,"disable_model_invocation":true,
+        "files":{"SKILL.md":Sha256::digest(body).iter().map(|byte| format!("{byte:02x}")).collect::<String>()}
+    }]});
+    let config_path = state_path.join("tools.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            agent: None,
+            children: vec![arany::ChildAssignment {
+                editor: None,
+                objective: "Inspect the fact".into(),
+                profile: None,
+            }],
+        }),
+        tool_outcome(arany::ToolCall::Skill {
+            name: "ask-matt".into(),
+            resource: None,
+        }),
+        ProviderOutcome::Answer(Answer { text: "Child".into() }),
+        ProviderOutcome::Answer(Answer { text: "Team".into() }),
+        ProviderOutcome::Answer(Answer { text: "Team".into() }),
+    ]));
+    let mut input = request(&workspace, "Inspect");
+    input.policy = CollaborationPolicy::Team {
+        max_active_children: 1,
+    };
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await;
+    engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let session = outcome.unwrap().session_id;
+    let events = store.load_session(session).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, Event::ToolStarted { .. })),
+        "a researcher must not dispatch a model-hidden Skill"
     );
     store.close().await.unwrap();
     });

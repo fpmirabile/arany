@@ -1925,6 +1925,7 @@ impl RunLoop<'_> {
         if child.tools.is_some()
             && child.tool_calls_remaining > 0 && child.turns_remaining > 0
             && request.call.valid()
+            && self.model_may_propose(&request.call)
             && (if child.editor {
                 self.proposed_editor(child.agent_run_id)
                     .and_then(|a| self.editor_grant(&a))
