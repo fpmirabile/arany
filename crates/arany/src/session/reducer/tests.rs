@@ -81,6 +81,7 @@ mod goal_recovery_tests {
                 tools: vec![tool],
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
+                tool_results_cleared_count: 0,
                 definitions: Default::default(),
                 display: Vec::new(),
                 steering_notes: Vec::new(),
@@ -3057,6 +3058,7 @@ mod goal_replay_tests {
                 tools: Vec::new(),
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
+                tool_results_cleared_count: 0,
                 definitions: Default::default(),
                 display: Vec::new(),
                 steering_notes: Vec::new(),
@@ -4159,6 +4161,7 @@ mod goal_replay_tests {
                 }],
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
+                tool_results_cleared_count: 0,
                 definitions: Default::default(),
                 display: Vec::new(),
                 steering_notes: Vec::new(),
@@ -4304,6 +4307,7 @@ mod goal_replay_tests {
                     }],
                     tool_compaction_summary: None,
                     tool_compaction_covered_count: 0,
+                    tool_results_cleared_count: 0,
                     definitions: Default::default(),
                     display: Vec::new(),
                     steering_notes: Vec::new(),
@@ -4348,6 +4352,7 @@ mod goal_replay_tests {
                     tools: Vec::new(),
                     tool_compaction_summary: None,
                     tool_compaction_covered_count: 0,
+                    tool_results_cleared_count: 0,
                     definitions: Default::default(),
                     display: Vec::new(),
                     steering_notes: Vec::new(),
@@ -6198,6 +6203,71 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn clearing_rejects_nonmonotone_partial_recent_open_and_forged_boundaries() {
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        for size in [2, 1, 1, 1, 1] {
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, size)).unwrap();
+            for _ in 0..size {
+                let intent = read_intent(run, agent, "src/lib.rs");
+                apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+                apply(
+                    &mut view,
+                    tool_finished(run, agent, &intent, &vec![b'x'; 2048]),
+                )
+                .unwrap();
+            }
+        }
+        let cleared = |count: u32, bytes: u32| Event::ToolResultsCleared {
+            run_id: run,
+            covered_tool_count: count,
+            cleared_bytes: bytes,
+        };
+        let savings = |view: &SessionView, start: usize, end: usize| {
+            let mut before = 0_usize;
+            let mut after = 0_usize;
+            for tool in &view.runs[0].tools[start..end] {
+                let observation = tool.observation.as_ref().unwrap();
+                before += crate::tools::types::model_result(observation, &tool.hook_feedback())
+                    .to_string()
+                    .len();
+                after += crate::tools::types::cleared_model_result(observation)
+                    .to_string()
+                    .len();
+            }
+            u32::try_from(before.saturating_sub(after)).unwrap()
+        };
+        for count in [0, 1, 4, 7] {
+            assert!(
+                rejected(&view, cleared(count, 0)),
+                "invalid clearing boundary {count}"
+            );
+        }
+        let bytes = savings(&view, 0, 2);
+        assert!(
+            rejected(&view, cleared(2, bytes + 1)),
+            "forged byte savings"
+        );
+        let event = cleared(2, bytes);
+        apply(&mut view, event.clone()).expect("whole step leaving at least three recent results");
+        assert_eq!(view.runs[0].tool_results_cleared_count, 2);
+        assert!(rejected(&view, event), "duplicate boundary");
+        assert!(rejected(&view, cleared(1, 0)), "regression");
+        let bytes = savings(&view, 2, 3);
+        let event = cleared(3, bytes);
+        let mut closed = view.clone();
+        apply(&mut view, event.clone()).expect("valid active Run clearing boundary");
+        closed.runs[0].status = RunStatus::Finished;
+        assert!(rejected(&closed, event), "closed Run");
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        assert!(rejected(&view, cleared(4, 0)), "open Provider reservation");
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let intent = read_intent(run, agent, "src/lib.rs");
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        assert!(rejected(&view, cleared(4, 0)), "open Tool");
+    }
+
+    #[test]
     fn tool_started_requires_pending_request() {
         let (mut view, goal, run, agent) = primary_tool_session(false);
         let (first, second, third) = (
@@ -6351,6 +6421,60 @@ mod goal_replay_tests {
         let mut replayed = view.clone();
         apply(&mut replayed, whole).expect("the whole step is covered");
         assert_eq!(replayed.goals[0].compaction_call_reserved, None);
+    }
+
+    #[test]
+    fn goal_compaction_snapshot_binds_its_primary_tool_across_child_tool_finishes() {
+        let (view, goal, run) = compacting_session();
+        let (primary, child) = (view.runs[0].agents[0].id, AgentRunId::new());
+        let finished =
+            |agent, path| tool_finished(run, agent, &read_intent(run, agent, path), b"x");
+        let mut events = journal(
+            view.id,
+            vec![
+                finished(primary, "src/lib.rs"),
+                finished(child, "notes/a"),
+                finished(primary, "src/main.rs"),
+            ],
+        );
+        let compacted = |digest_through, events: &[EventEnvelope]| {
+            let Event::GoalContextCompacted { mut record, .. } =
+                covering_compaction(&view, goal, run, 2)
+            else {
+                unreachable!()
+            };
+            // The second primary Tool is the Run's third ToolFinished.
+            record.covered_sequence = 3;
+            record.source_digest =
+                crate::session::lineage::prefix_digest(events, digest_through).unwrap();
+            EventEnvelope {
+                sequence: 4,
+                session_id: view.id,
+                run_id: Some(run),
+                agent_run_id: None,
+                event: Event::GoalContextCompacted {
+                    goal_id: goal,
+                    run_id: run,
+                    covered_tool_count: 2,
+                    record,
+                },
+                created_at_ms: 0,
+            }
+        };
+        let valid = compacted(3, &events);
+        let stale = compacted(2, &events);
+        events.push(valid);
+        crate::session::compaction::validate_goal_context_compactions(&events)
+            .expect("a child Tool finish does not shift the covered primary Tool");
+        events.pop();
+        events.push(stale);
+        assert!(
+            matches!(
+                crate::session::compaction::validate_goal_context_compactions(&events),
+                Err(ReplayError::InvalidSnapshot)
+            ),
+            "the digest must cover the journal through the covered Tool"
+        );
     }
 
     #[test]

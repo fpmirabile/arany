@@ -29,13 +29,14 @@ pub use routing::{
 };
 mod streaming;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod tool_specs;
 pub use anthropic::AnthropicProvider;
 pub use catalog::{
     ModelEntry, list_native_models, list_native_models_with_api_key,
     list_native_models_with_credentials,
 };
+pub(crate) use conversation::max_turn_bytes;
 pub use conversation::{
     PromptRole, ProviderRequest, ProviderTurn, RunInput, StopHookFeedback, ToolUseId,
 };

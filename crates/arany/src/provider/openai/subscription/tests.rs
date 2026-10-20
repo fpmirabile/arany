@@ -1344,6 +1344,7 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
             facts: None,
             steering_notes: Vec::new(),
             calls_remaining: None,
+            cleared: false,
             hook_feedback: Default::default(),
         });
     coding.input.tools.as_mut().unwrap().steps[0]
@@ -1474,6 +1475,7 @@ fn optional_plan_is_separate_from_effect_schemas_and_has_a_correlated_result() {
             facts: None,
             steering_notes: Vec::new(),
             calls_remaining: None,
+            cleared: false,
             hook_feedback: Default::default(),
         });
     let continuation: serde_json::Value =

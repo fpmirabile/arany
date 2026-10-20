@@ -74,6 +74,18 @@ impl Event {
             }
             Self::GoalRunLinked { .. } | Self::GoalResumed { .. } => Ok(()),
             Self::GoalCompactionCallReserved { .. } => Ok(()),
+            Self::ToolResultsCleared {
+                covered_tool_count,
+                cleared_bytes,
+                ..
+            } => {
+                if *covered_tool_count == 0
+                    || *cleared_bytes as usize > crate::session::MAX_CONTEXT_CONTENT_BYTES
+                {
+                    return Err(ReplayError::InvalidPayload);
+                }
+                Ok(())
+            }
             Self::GoalContextCompacted {
                 covered_tool_count,
                 record,

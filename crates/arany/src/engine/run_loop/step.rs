@@ -13,9 +13,7 @@ use crate::provider::{
 };
 use crate::session::{CollaborationPolicy, Event};
 use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
-use crate::tools::types::{
-    CommandChangeset, CommandResult, MAX_TOOL_ARGUMENT_BYTES, MAX_TOOL_RESULT_BYTES,
-};
+use crate::tools::types::{CommandChangeset, CommandResult, MAX_TOOL_RESULT_BYTES};
 use crate::tools::{
     ActiveActionRequest, ActiveToolWindow, ApprovalMode, ApprovalReply, CacheUpdate, EffectIntent,
     ToolCall, ToolContext, ToolDisposition, ToolError, ToolObservation, ToolRequest,
@@ -223,10 +221,6 @@ pub(in crate::engine) type BoxedStep<'a, T> =
 pub(super) type IntentResult = Result<(ToolObservation, Option<ToolCall>), StopCause>;
 
 impl RunLoop<'_> {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "R1 keeps the step pipeline in journal order"
-    )]
     pub(super) async fn execute_step(
         &self,
         mut grant: Grant<'_>,
@@ -249,6 +243,7 @@ impl RunLoop<'_> {
             facts: None,
             steering_notes: Vec::new(),
             calls_remaining,
+            cleared: false,
             hook_feedback: Default::default(),
         };
         loop {
@@ -374,21 +369,6 @@ impl RunLoop<'_> {
             }
         }
         grant.context_mut()?.steps.push(step);
-        if let Grant::Primary { request, .. } = &mut grant {
-            match self.compact_tool_context_if_needed(request).await {
-                Ok(()) => {}
-                Err(EngineError::GoalBudgetExhausted) => {
-                    return Ok(StepEnd::Stopped(StopCause::ActiveTime));
-                }
-                Err(EngineError::ContextTooLarge) => {
-                    return Ok(StepEnd::Stopped(StopCause::ContextFull));
-                }
-                Err(error) => return Err(error),
-            }
-            if self.controls.cancellation.is_cancelled() {
-                return Ok(StepEnd::Stopped(StopCause::Cancelled));
-            }
-        }
         if self.hook_requested_stop()? {
             return Ok(StepEnd::Stopped(StopCause::HookStop));
         }
@@ -480,18 +460,20 @@ impl RunLoop<'_> {
         });
         let reserved: Vec<_> = std::iter::once(&intent.call).chain(&integration).collect();
         let overhead = grant.context()?.reserved_len(step, &reserved);
-        let integration_capacity = if integration.is_some() {
-            MAX_TOOL_ARGUMENT_BYTES + 128 * 6 + 512
-        } else {
-            0
-        } + self.feedback_reserve(runtime, post_call);
-        let Some(capacity) = runtime.result_capacity(overhead, integration_capacity) else {
+        let reserve = ToolRuntime::step_context_reserve(
+            integration.is_some(),
+            self.feedback_reserve(runtime, post_call),
+        );
+        let Some(capacity) = runtime.result_capacity(overhead, reserve) else {
             return Ok(Err(SizingRefusal::ContextFull));
         };
         intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
             128
         } else {
-            capacity.min(MAX_TOOL_RESULT_BYTES) as u32
+            if capacity < MAX_TOOL_RESULT_BYTES {
+                return Ok(Err(SizingRefusal::ContextFull));
+            }
+            MAX_TOOL_RESULT_BYTES as u32
         };
         Ok(Ok(intent))
     }

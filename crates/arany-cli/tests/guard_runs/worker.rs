@@ -79,6 +79,14 @@ pub(super) async fn worker_case(case: &'static str) {
     std::fs::create_dir_all(workspace.join("notes")).unwrap();
     std::fs::write(workspace.join("notes/a"), "original a").unwrap();
     std::fs::write(workspace.join("notes/b"), "original b").unwrap();
+    if case.starts_with("clear_") {
+        std::fs::create_dir(workspace.join("reads")).unwrap();
+        std::fs::write(
+            workspace.join("reads/facts.txt"),
+            format!("{}\n", "x".repeat(99)).repeat(150),
+        )
+        .unwrap();
+    }
     let canary = "WORKER_UNDISCLOSED_SOURCE_019";
     std::fs::write(workspace.join("private-secret"), canary).unwrap();
     std::fs::create_dir(workspace.join(".git")).unwrap();
@@ -87,6 +95,22 @@ pub(super) async fn worker_case(case: &'static str) {
     let state = temp.path().join("state");
     let root = StateRoot::admit(&state).unwrap();
     private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#);
+    if case.starts_with("clear_") {
+        private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes","reads"],"write":true,"commands":[],"skills":[],"mcp":[]}"#);
+    }
+    if case == "clear_after_wave" {
+        let shell = std::fs::canonicalize("/bin/sh").unwrap();
+        let hash: String = Sha256::digest(std::fs::read(&shell).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
+            "version":1,"workspace_paths":["notes","reads"],"write":true,
+            "commands":[{"name":"sh","executable":shell,"sha256":hash,"interpreter":true,"inputs":[]}],
+            "skills":[],"mcp":[]
+        })).unwrap());
+        private_file(&state.join("permissions.json"), br#"{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"mkdir .ssh","timeout":5}]}]}}"#);
+    }
     std::fs::create_dir(state.join("agents")).unwrap();
     std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
     // Omitted background must select the foreground path.
@@ -197,7 +221,13 @@ pub(super) async fn worker_case(case: &'static str) {
         (engine, None)
     };
     let budget = arany::GoalBudget {
-        max_provider_calls: Some(if case == "calls" { 4 } else { 32 }),
+        max_provider_calls: Some(if case == "calls" {
+            4
+        } else if case.starts_with("clear_") {
+            64
+        } else {
+            32
+        }),
         max_tokens: if case == "hook_stop_tokens" {
             Some(16)
         } else {
@@ -306,6 +336,124 @@ pub(super) async fn worker_case(case: &'static str) {
         .iter()
         .filter(|r| r.phase == AgentPhase::RootSynthesis)
         .count();
+    if case.starts_with("clear_") {
+        let result = result.expect(case);
+        assert_eq!(result.run.run.status, RunStatus::Finished, "{case}");
+        assert_eq!(run.status, RunStatus::Finished, "{case}: strict replay");
+        if case == "clear_after_wave" {
+            let context = calls
+                .iter()
+                .find(|call| call.phase == AgentPhase::RootSynthesis)
+                .unwrap()
+                .input
+                .tools
+                .as_ref()
+                .unwrap();
+            assert!(
+                context
+                    .steps
+                    .iter()
+                    .any(|step| step.observations.iter().enumerate().any(
+                        |(index, observation)| {
+                            matches!(
+                                observation.intent.call,
+                                arany::ToolCall::ApplyChangeset { .. }
+                            ) && step.hook_feedback.get(&index).is_some_and(|lines| {
+                                lines.iter().any(|line| {
+                                    line.contains("command_unguarded")
+                                        && line.contains("mkdir .ssh")
+                                })
+                            })
+                        }
+                    )),
+                "integration carries its Guard-failure rerun proposal before clearing"
+            );
+        }
+        assert_eq!(child_calls, 4, "{case}: worker completed its script");
+        assert_eq!(
+            run.tools
+                .iter()
+                .filter(|tool| matches!(&tool.intent.call,
+                    arany::ToolCall::Read { path, .. } if path == "reads/facts.txt"
+                ))
+                .count(),
+            40,
+            "{case}: all repeated Reads completed"
+        );
+        assert_eq!(
+            synthesis_calls,
+            if case == "clear_background" { 43 } else { 42 },
+            "{case}: exact Read, verification, answer and deferral calls"
+        );
+        let primary = run.agents[0].id;
+        let child_reservation = bundle.events.iter().position(|event| matches!(event.event,
+            Event::GoalProviderCallReserved { agent_run_id, .. } if agent_run_id == run.agents[1].id
+        )).unwrap();
+        let child_record = bundle.events.iter().position(|event| matches!(event.event,
+            Event::ProviderCallRecorded { agent_run_id, .. } if agent_run_id == run.agents[1].id
+        )).unwrap();
+        let clears: Vec<_> = bundle
+            .events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event.event {
+                Event::ToolResultsCleared {
+                    covered_tool_count, ..
+                } => Some((index, covered_tool_count as usize)),
+                _ => None,
+            })
+            .collect();
+        assert!(clears.len() >= 2, "{case}: repeated clearing batches");
+        for &(index, count) in &clears {
+            let next = bundle.events[index + 1..].iter().find(|event| {
+                !matches!(
+                    event.event,
+                    Event::GoalCompactionCallReserved { .. } | Event::GoalContextCompacted { .. }
+                )
+            });
+            assert!(
+                matches!(next.map(|event| &event.event),
+                    Some(Event::GoalProviderCallReserved { agent_run_id, .. }) if *agent_run_id == primary
+                ),
+                "{case}: clearing and any summary commit before primary reservation"
+            );
+            assert!(
+                run.tools[..count]
+                    .iter()
+                    .any(|tool| matches!(tool.intent.call, arany::ToolCall::PrepareWorker { .. })),
+                "{case}: boundary crosses hidden preparation records"
+            );
+            if case == "clear_background" {
+                assert!(
+                    (child_reservation..child_record).contains(&index),
+                    "clearing runs while the gated worker call is active"
+                );
+            } else {
+                assert!(index > child_record, "clearing follows the editor wave");
+                assert!(
+                    run.tools[..count].iter().any(|tool| matches!(
+                        tool.intent.call,
+                        arany::ToolCall::ApplyChangeset { .. }
+                    )),
+                    "the cleared prefix includes the integration result"
+                );
+            }
+        }
+        if case == "clear_background" {
+            let final_context = calls.last().unwrap().input.tools.as_ref().unwrap();
+            assert!(
+                final_context.steps.iter().any(|step| !step.cleared
+                    && step.observations.iter().any(|observation| {
+                        matches!(
+                            observation.intent.call,
+                            arany::ToolCall::ApplyChangeset { .. }
+                        )
+                    })),
+                "the newly published integration stays visible"
+            );
+        }
+        return;
+    }
     if matches!(
         case,
         "tool_deadline"
@@ -671,6 +819,12 @@ fn foreground_worker_deadline_and_stop_refusals_keep_their_causes() {
             .unwrap()
             .block_on(worker_case(case));
     }
+}
+
+#[tokio::test]
+async fn primary_clears_during_a_gated_background_worker_and_after_an_editor_wave() {
+    worker_case("clear_background").await;
+    worker_case("clear_after_wave").await;
 }
 
 #[tokio::test]
