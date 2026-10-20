@@ -59,9 +59,9 @@ fn wait_for_after(
     needle: &[u8],
 ) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript[from..]
-        .windows(needle.len())
-        .any(|part| part == needle)
+    while crate::process::pty_text_matches(&transcript[from..], needle)
+        .next()
+        .is_none()
     {
         pump(output, input, transcript, answered);
         assert!(

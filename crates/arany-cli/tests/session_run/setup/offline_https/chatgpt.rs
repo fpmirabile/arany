@@ -356,9 +356,9 @@ fn wait_for_stage(
     signed: Option<&str>,
 ) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript[start..]
-        .windows(needle.len())
-        .any(|part| part == needle)
+    while crate::process::pty_text_matches(&transcript[start..], needle)
+        .next()
+        .is_none()
     {
         pump(output, input, transcript, answered);
         let mut diagnostic = tail(transcript)

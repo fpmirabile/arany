@@ -434,13 +434,12 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 answered += 1;
             }
             while next < patterns.len() {
-                let Some(offset) = bytes[search_from..]
-                    .windows(patterns[next].len())
-                    .position(|part| part == patterns[next])
+                let Some(matched) =
+                    crate::process::pty_text_matches(&bytes[search_from..], patterns[next]).next()
                 else {
                     break;
                 };
-                search_from += offset + patterns[next].len();
+                search_from += matched.end;
                 stage_sender
                     .send((next, bytes.clone()))
                     .expect("stage receiver");
