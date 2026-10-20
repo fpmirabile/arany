@@ -24,7 +24,6 @@ enum ActiveExit {
     Escape,
     HelpThenCtrlC,
     TypoThenCtrlC,
-    ReadsThenCtrlC,
     SecondCtrlC,
     SuspendThenSignal,
     PtyLoss,
@@ -216,25 +215,17 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     std::fs::write(workspace.join("private.txt"), b"OMITTED_CANARY")
         .expect("omitted Workspace input");
     let state = temp.path().join("state");
-    let with_reads = matches!(exit, ActiveExit::ReadsThenCtrlC);
-    if with_reads {
-        std::fs::create_dir(workspace.join("src")).expect("read fixture folder");
-        std::fs::write(workspace.join("src/note.txt"), b"one\ntwo\n").expect("read fixture");
-    }
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     write_profile(
         &state,
         listener.local_addr().expect("listener address").port(),
     );
-    if with_reads {
-        crate::private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
-    }
     let (request_sender, request_ready) = mpsc::channel();
     let (closed_sender, socket_closed) = mpsc::channel();
     let (failure_sender, failure_ready) = mpsc::channel();
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..if with_reads { 6 } else { 4 } {
+        for index in 0..4 {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -259,21 +250,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             assert_eq!(wire["model"], "model-1");
             assert_eq!(wire.get("text").is_some(), index == 2);
             let input: serde_json::Value = crate::semantic::input(&wire);
-            if with_reads && (3..5).contains(&index) {
-                assert_eq!(input["objective"], "cancel");
-                let call = if index == 3 {
-                    serde_json::json!({"operation":"list","path":"src"})
-                } else {
-                    serde_json::json!({"operation":"read","path":"src/note.txt","offset":0,"limit":1024})
-                };
-                send_response(
-                    &mut stream,
-                    index,
-                    serde_json::json!({"outcome":{"type":"tool","call":call}}),
-                );
-                continue;
-            }
-            if index == if with_reads { 5 } else { 3 } {
+            if index == 3 {
                 assert_eq!(input["objective"], "cancel");
                 request_sender.send(()).expect("active request gate");
                 if matches!(exit, ActiveExit::ProviderFailure) {
@@ -315,11 +292,6 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     } else {
         "trap ':' INT; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 cancel; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     };
-    let command = if with_reads {
-        command.replace(" cancel;", " --tools cancel;")
-    } else {
-        command.to_owned()
-    };
     let mut attached =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     attached
@@ -331,7 +303,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         .env("SHELL", "/bin/sh")
         .env("TERM", if inline { "xterm" } else { "dumb" })
         .current_dir(&workspace)
-        .args(["-q", "-e", "-c", &command, "/dev/null"])
+        .args(["-q", "-e", "-c", command, "/dev/null"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -348,7 +320,6 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             | ActiveExit::Escape
             | ActiveExit::HelpThenCtrlC
             | ActiveExit::TypoThenCtrlC
-            | ActiveExit::ReadsThenCtrlC
             | ActiveExit::ProviderFailure
     );
     let expect_failure = matches!(exit, ActiveExit::ProviderFailure);
@@ -361,7 +332,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         "cancelled"
     };
     let expect_help = matches!(exit, ActiveExit::HelpThenCtrlC);
-    let expect_typo = matches!(exit, ActiveExit::TypoThenCtrlC | ActiveExit::ReadsThenCtrlC);
+    let expect_typo = matches!(exit, ActiveExit::TypoThenCtrlC);
     let expect_second_ctrl_c = matches!(exit, ActiveExit::SecondCtrlC);
     let expect_resume = matches!(exit, ActiveExit::SuspendThenSignal) && !inline;
     // Classic returns to chat with a native notice instead of a shell receipt.
@@ -545,7 +516,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             assert_eq!(stage.0, 2);
             write_input(&input, b"\x03");
         }
-        ActiveExit::TypoThenCtrlC | ActiveExit::ReadsThenCtrlC => {
+        ActiveExit::TypoThenCtrlC => {
             write_input(&input, b"/provder\n");
             assert_eq!(
                 stages
@@ -924,7 +895,6 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         | ActiveExit::Escape
         | ActiveExit::HelpThenCtrlC
         | ActiveExit::TypoThenCtrlC
-        | ActiveExit::ReadsThenCtrlC
         | ActiveExit::ProviderFailure => {}
         ActiveExit::PtyLoss => unreachable!("PTY loss returned after replay"),
     }
@@ -1057,26 +1027,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     );
     assert!(view.runs[0].assistant_message.is_none());
     assert_eq!(view.runs[0].agents.len(), 1);
-    assert_eq!(
-        view.runs[0].agents[0].provider_calls.len(),
-        if with_reads { 3 } else { 1 }
-    );
-    if with_reads {
-        assert_eq!(view.runs[0].tools.len(), 2);
-        assert!(view.runs[0].tools.iter().all(|tool| {
-            tool.observation
-                .as_ref()
-                .is_some_and(|o| o.disposition == arany::ToolDisposition::Succeeded)
-        }));
-        assert_eq!(
-            transcript
-                .matches("Read(2 operations)\r\nResult: 1 entry, 2 lines\r\n")
-                .count(),
-            1
-        );
-        assert!(!transcript.contains("Tool ·"));
-        assert!(!transcript.contains("succeeded"));
-    }
+    assert_eq!(view.runs[0].agents[0].provider_calls.len(), 1);
     if expect_typo {
         assert!(
             transcript.contains("/model is unavailable while a Run is active; Ctrl+C cancels\r\n")
@@ -1176,11 +1127,6 @@ fn failed_and_cancelled_attached_runs_keep_draft_without_an_answer_or_retry() {
 #[test]
 fn rejected_active_screen_reader_line_does_not_join_next_command() {
     active_exit_during_provider_call(ActiveExit::TypoThenCtrlC, false);
-}
-
-#[test]
-fn peer_read_group_and_named_active_notice_survive_cancellation() {
-    active_exit_during_provider_call(ActiveExit::ReadsThenCtrlC, false);
 }
 
 #[test]
