@@ -106,7 +106,8 @@ fn run_case(case: &'static str) {
                     .expect("product handled typeahead Enter before Provider response");
             }
             let command = if case == "unguarded-pages" {
-                format!("exit 42;#{}", "padding ".repeat(40))
+                // The argument alone wraps past one 24-row page, within the 4096-byte argument limit.
+                format!("exit 42;#{}", "padding ".repeat(200))
             } else if case.starts_with("unguarded") {
                 "exit 42".to_owned()
             } else if case == "early-digit" {
@@ -159,7 +160,13 @@ fn run_case(case: &'static str) {
         )
     }))
     .unwrap_or_else(|panic| {
-        driver.annotate(case, "capture");
+        let message = panic
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        let message: String = sanitized(&message).chars().take(200).collect();
+        driver.annotate(case, &format!("capture; panic={message}"));
         std::panic::resume_unwind(panic)
     });
     drop(server);
@@ -170,6 +177,18 @@ fn run_case(case: &'static str) {
     assert!(output.status.success(), "{case}: attached exit");
     assert!(driver.answered, "{case}: approval frame missing");
     assert_replay(&state, &workspace, case);
+}
+
+fn sanitized(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || " _=:,.-()[]".contains(c) {
+                c
+            } else {
+                '.'
+            }
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -195,21 +214,16 @@ impl Driver {
             .filter(|row| !row.is_empty())
             .map(|row| format!("[{row}]"))
             .collect::<String>();
-        let tail: String = screen
-            .chars()
-            .rev()
-            .take(1200)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || " _=:,.-()[]".contains(c) {
-                    c
-                } else {
-                    '.'
-                }
-            })
-            .collect();
+        let tail = sanitized(
+            &screen
+                .chars()
+                .rev()
+                .take(1000)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<String>(),
+        );
         crate::process::annotate_native_fixture(&format!(
             "fixture=inline_approval; case={case}; stage={stage}; answered={}; early={}; pages={}; closed={}; bytes={}; screen={tail}",
             self.answered,
@@ -277,19 +291,21 @@ impl Driver {
         // Choices act only once armed; linear prints its prompt only then.
         let armed = case.starts_with("linear")
             || (1..=3).any(|choice| frame.contains(&format!("› {choice}. ")));
-        if frame != self.last_frame
+        // History rows redraw under the dialog, so only a changed dialog is a new step.
+        let dialog = frame
+            .rfind("Tool approval")
+            .map_or(frame.as_str(), |start| &frame[start..]);
+        if dialog != self.last_frame
             && armed
             && frame.contains("Do you want to proceed?")
             && !self.answered
         {
-            self.last_frame = frame.clone();
-            if case.starts_with("unguarded")
-                && !frame.contains("Run outside the Guard?")
-                && !self.early
-            {
-                if frame.contains("more lines") {
+            self.last_frame = dialog.to_owned();
+            // The guarded attempt is approved once its last page shows; later frames await the re-run.
+            if case.starts_with("unguarded") && !frame.contains("Run outside the Guard?") {
+                if !self.early && frame.contains("more lines") {
                     input.write_all(b"\x1b[6~").unwrap();
-                } else {
+                } else if !self.early {
                     input.write_all(b"1").unwrap();
                     self.early = true;
                 }
