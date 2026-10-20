@@ -174,7 +174,7 @@ pub(super) enum Settlement {
     Cancel,                // Cancelled
     HookStop,              // StoppedByHook
     Unknown,               // no terminal Event; Err(ToolError::Uncertain) (D3)
-    Unsettleable,          // no terminal Event; today Err(GoalBudgetExhausted), RunStop after R7
+    Unsettleable,          // no terminal Event; R7 returns the reopened Run's projected RunStop
 }
 
 pub(super) fn settle(end: PrimaryEnd, facts: &RunFacts) -> Settlement;
@@ -414,7 +414,7 @@ Order (D10): tp1 → tp2 → tp3 → tp4 → tp5 → R1 → R2 → R3a → R3b �
 ### R7: closed `RunStop` at the edges (one author)
 
 - **Scope.**
-  - `RunResult.stopped: Option<RunStop>` with `RunStop::{GoalExhausted(GoalLimit), Paused, Cancelled, StoppedByHook, Uncertain, Failed(RunFailure)}` and `GoalLimit::{Calls, Runs, ActiveTime, Tokens}`.
+  - `RunResult.stopped: Option<RunStop>` with `RunStop::{GoalExhausted(GoalLimit), Paused, Cancelled, StoppedByHook, Uncertain, Interrupted, Failed(RunFailure)}` and `GoalLimit::{Calls, Runs, ActiveTime, Tokens}`. `Uncertain` requires committed evidence of an effect with an unknown outcome; a Run without a terminal receipt and without that evidence is `Interrupted`. A next-Run admission failure has no journaled fact, so it travels as `RunResult.continuation_error` beside the projection.
   - One pure projection from committed Goal and Run views computes it for live results and historical turns alike.
   - `exec`, `serve` and `acp` map it in their adapters. `serve`'s `goal.stopped` text and `items.rs:141-150` re-derivation go, and ACP's mapping uses the projection.
   - `Settlement::Unsettleable` returns its `RunStop` instead of `Err(GoalBudgetExhausted)`.

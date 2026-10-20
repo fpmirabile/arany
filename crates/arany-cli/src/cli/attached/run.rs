@@ -38,6 +38,8 @@ pub(super) enum RunFailure {
     ToolsUnavailable,
     #[error(transparent)]
     Engine(arany::EngineError),
+    #[error("{0}")]
+    Unsettled(&'static str),
 }
 
 pub(super) async fn preflight_selected(
@@ -159,17 +161,33 @@ fn submit_with_providers<'a>(
 
 pub(super) fn finish_run(
     result: Result<RunResult, arany::EngineError>,
+    pause_requested: bool,
 ) -> Result<RunOutcome, RunAttemptError> {
-    match result {
-        Ok(RunResult {
-            run,
-            stopped: Some(reason),
-        }) => Err(RunAttemptError::Stopped {
+    let RunResult {
+        run,
+        stopped,
+        continuation_error,
+    } = result.map_err(classify_run_error)?;
+    // A Run that could not settle has no committed outcome to show, only its projected stop.
+    if !run.run.status.is_outcome() {
+        return Err(RunAttemptError::Failed(RunFailure::Unsettled(
+            stopped.map_or(
+                "Run did not reach a terminal state",
+                crate::cli::exec::stop_text,
+            ),
+        )));
+    }
+    match crate::cli::exec::stop_after_answer(
+        run.run.status,
+        stopped,
+        continuation_error.as_ref(),
+        pause_requested,
+    ) {
+        Some(reason) => Err(RunAttemptError::Stopped {
             outcome: Box::new(run),
-            reason: reason.to_string(),
+            reason,
         }),
-        Ok(RunResult { run, stopped: None }) => Ok(run),
-        Err(error) => Err(classify_run_error(error)),
+        None => Ok(run),
     }
 }
 
@@ -1361,7 +1379,7 @@ mod tests {
                 },
                 RunSteering::new(),
             ) {
-                Ok(handle) => finish_run(handle.await)
+                Ok(handle) => finish_run(handle.await, false)
                     .expect_err("explicit Tool admission must reject before inference"),
                 Err(error) => error,
             };

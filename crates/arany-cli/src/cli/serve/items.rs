@@ -1,6 +1,6 @@
 use arany::{
-    CacheUpdate, EffectIntent, Event, GoalId, GoalView, RunId, RunStatus, RunView, ToolCall,
-    ToolDisposition, ToolObservation,
+    CacheUpdate, EffectIntent, Event, GoalId, GoalView, RunId, RunStatus, RunStop, RunView,
+    SessionView, ToolCall, ToolDisposition, ToolObservation,
 };
 use arany_cli::protocol::{methods::*, rpc::Notification};
 use serde::Serialize;
@@ -135,21 +135,17 @@ pub(super) fn goal_summary(goal: &GoalView) -> GoalSummary {
     }
 }
 
-pub(super) fn turn_summary(run: &RunView, goal: &GoalView, history: bool) -> Turn {
+pub(super) fn turn_summary(
+    view: &SessionView,
+    run: &RunView,
+    goal: &GoalView,
+    history: bool,
+) -> Turn {
+    let stop = view.run_stop(run);
     Turn {
         id: run.id,
         goal_id: goal.id,
-        stop_reason: (goal.budget_closed && goal.run_ids.last() == Some(&run.id)).then(|| {
-            if goal
-                .effective_budget()
-                .max_tokens
-                .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens >= limit)
-            {
-                TurnStopReason::TokenBudgetExhausted
-            } else {
-                TurnStopReason::ActionBudgetExhausted
-            }
-        }),
+        stop_reason: stop.and_then(stop_reason),
         status: match run.status {
             RunStatus::Pending | RunStatus::Active => TurnStatus::InProgress,
             RunStatus::Finished => TurnStatus::Completed,
@@ -169,7 +165,46 @@ pub(super) fn turn_summary(run: &RunView, goal: &GoalView, history: bool) -> Tur
                     .unwrap_or_else(|| "Run failed".into()),
             }
         }),
-        goal: Some(goal_summary(goal)),
+        goal: Some(GoalSummary {
+            stopped: stop.map(goal_stop),
+            ..goal_summary(goal)
+        }),
+    }
+}
+
+fn stop_reason(stop: RunStop) -> Option<TurnStopReason> {
+    match stop {
+        RunStop::GoalExhausted(arany::GoalLimit::Tokens) => {
+            Some(TurnStopReason::TokenBudgetExhausted)
+        }
+        RunStop::GoalExhausted(
+            arany::GoalLimit::Calls | arany::GoalLimit::Runs | arany::GoalLimit::ActiveTime,
+        ) => Some(TurnStopReason::ActionBudgetExhausted),
+        RunStop::Paused
+        | RunStop::Cancelled
+        | RunStop::StoppedByHook
+        | RunStop::Uncertain
+        | RunStop::Interrupted
+        | RunStop::Failed(_) => None,
+    }
+}
+
+fn goal_stop(stop: RunStop) -> GoalStop {
+    match stop {
+        RunStop::GoalExhausted(limit) => GoalStop::GoalExhausted {
+            limit: match limit {
+                arany::GoalLimit::Calls => GoalLimit::Calls,
+                arany::GoalLimit::Runs => GoalLimit::Runs,
+                arany::GoalLimit::ActiveTime => GoalLimit::ActiveTime,
+                arany::GoalLimit::Tokens => GoalLimit::Tokens,
+            },
+        },
+        RunStop::Paused => GoalStop::Paused,
+        RunStop::Cancelled => GoalStop::Cancelled,
+        RunStop::StoppedByHook => GoalStop::StoppedByHook,
+        RunStop::Uncertain => GoalStop::Uncertain,
+        RunStop::Interrupted => GoalStop::Interrupted,
+        RunStop::Failed(failure) => GoalStop::Failed { failure },
     }
 }
 
@@ -336,5 +371,70 @@ pub(in crate::cli) fn tool_item(
             disposition,
             output,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arany::{GoalLimit as Limit, RunFailure};
+    use serde_json::json;
+
+    #[test]
+    fn every_projected_stop_has_one_closed_wire_value() {
+        let rows = [
+            (
+                RunStop::GoalExhausted(Limit::Calls),
+                json!({"reason":"goalExhausted","limit":"calls"}),
+                Some("actionBudgetExhausted"),
+            ),
+            (
+                RunStop::GoalExhausted(Limit::Runs),
+                json!({"reason":"goalExhausted","limit":"runs"}),
+                Some("actionBudgetExhausted"),
+            ),
+            (
+                RunStop::GoalExhausted(Limit::ActiveTime),
+                json!({"reason":"goalExhausted","limit":"activeTime"}),
+                Some("actionBudgetExhausted"),
+            ),
+            (
+                RunStop::GoalExhausted(Limit::Tokens),
+                json!({"reason":"goalExhausted","limit":"tokens"}),
+                Some("tokenBudgetExhausted"),
+            ),
+            (RunStop::Paused, json!({"reason":"paused"}), None),
+            (RunStop::Cancelled, json!({"reason":"cancelled"}), None),
+            (
+                RunStop::StoppedByHook,
+                json!({"reason":"stoppedByHook"}),
+                None,
+            ),
+            (RunStop::Uncertain, json!({"reason":"uncertain"}), None),
+            (RunStop::Interrupted, json!({"reason":"interrupted"}), None),
+            (
+                RunStop::Failed(RunFailure::CriterionUnmet),
+                json!({"reason":"failed","failure":"criterion_unmet"}),
+                None,
+            ),
+        ];
+        let schema = arany_cli::protocol::protocol_schema();
+        let mut stop_schema = schema.clone();
+        stop_schema["$ref"] = json!("#/$defs/GoalStop");
+        let validator = jsonschema::validator_for(&stop_schema).unwrap();
+        for (stop, wire, reason) in rows {
+            let value = serde_json::to_value(goal_stop(stop)).unwrap();
+            assert_eq!(value, wire, "{stop:?}");
+            assert!(validator.is_valid(&value), "{stop:?}");
+            assert_eq!(
+                serde_json::from_value::<GoalStop>(value).unwrap(),
+                goal_stop(stop)
+            );
+            assert_eq!(
+                stop_reason(stop).map(|reason| serde_json::to_value(reason).unwrap()),
+                reason.map(|reason| json!(reason)),
+                "{stop:?}"
+            );
+        }
     }
 }

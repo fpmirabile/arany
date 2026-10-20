@@ -2203,6 +2203,32 @@ fn one_child_team_finishes_only_after_child_result_is_committed() {
             .expect("valid post-call prefix")
             .expect("Session");
         assert_eq!(interrupted.runs[0].status, RunStatus::Interrupted);
+        // A crash after any committed Event before the first effect is an interruption, never an
+        // unknown effect; with no Tool started, every such prefix projects the same stop.
+        let accepted = events
+            .iter()
+            .position(|event| matches!(event.event, Event::MessageAccepted { .. }))
+            .expect("accepted message");
+        let finished = events
+            .iter()
+            .position(|event| matches!(event.event, Event::RunFinished { .. }))
+            .expect("finished Run");
+        assert!(
+            events[accepted..finished]
+                .iter()
+                .all(|event| !matches!(event.event, Event::ToolStarted { .. }))
+        );
+        for end in accepted..finished {
+            let crashed = SessionView::replay(outcome.session_id, &events[..=end])
+                .expect("valid prefix")
+                .expect("Session");
+            assert_eq!(
+                crashed.run_stop(&crashed.runs[0]),
+                Some(arany::RunStop::Interrupted),
+                "crash after {:?}",
+                events[end].event.kind()
+            );
+        }
         assert_eq!(interrupted.runs[0].agents[0].provider_calls.len(), 1);
         assert_eq!(
             interrupted.runs[0].agents[0].provider_calls[0].disposition,

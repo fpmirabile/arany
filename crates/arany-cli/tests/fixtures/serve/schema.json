@@ -414,6 +414,15 @@
       ],
       "type": "object"
     },
+    "GoalLimit": {
+      "enum": [
+        "calls",
+        "runs",
+        "activeTime",
+        "tokens"
+      ],
+      "type": "string"
+    },
     "GoalPauseParams": {
       "additionalProperties": false,
       "properties": {
@@ -467,6 +476,139 @@
       ],
       "type": "string"
     },
+    "GoalStop": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "limit": {
+              "$ref": "#/$defs/GoalLimit"
+            },
+            "reason": {
+              "const": "goalExhausted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "limit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "const": "paused",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "const": "cancelled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "const": "stoppedByHook",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "const": "uncertain",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "const": "interrupted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The next autonomous Run was refused after this one committed; `turn.error` has the message.",
+          "properties": {
+            "reason": {
+              "const": "notAdmitted",
+              "type": "string"
+            },
+            "refusal": {
+              "$ref": "#/$defs/Reason"
+            }
+          },
+          "required": [
+            "reason",
+            "refusal"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "failure": {
+              "enum": [
+                "provider_call",
+                "proposal_refused",
+                "budget_exhausted",
+                "tool_stopped",
+                "definition_invalid",
+                "plan_admission",
+                "tool_context_full",
+                "workers_unverified",
+                "criterion_unmet",
+                "refusal_limit"
+              ],
+              "type": "string"
+            },
+            "reason": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "failure"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "GoalSummary": {
       "additionalProperties": false,
       "properties": {
@@ -474,9 +616,13 @@
           "$ref": "#/$defs/GoalStatus"
         },
         "stopped": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GoalStop"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },

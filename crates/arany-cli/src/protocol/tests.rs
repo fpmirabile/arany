@@ -177,6 +177,37 @@ fn codec_round_trips_requests_notifications_responses_and_errors() {
 }
 
 #[test]
+fn goal_stop_failure_schema_lists_every_serialized_run_failure() {
+    let schema = protocol_schema();
+    let failed = schema["$defs"]["GoalStop"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variant| variant["properties"]["reason"]["const"] == "failed")
+        .unwrap();
+    let listed = failed["properties"]["failure"]["enum"].as_array().unwrap();
+    let failures = [
+        arany::RunFailure::ProviderCall,
+        arany::RunFailure::ProposalRefused,
+        arany::RunFailure::BudgetExhausted,
+        arany::RunFailure::ToolStopped,
+        arany::RunFailure::DefinitionInvalid,
+        arany::RunFailure::PlanAdmission,
+        arany::RunFailure::ToolContextFull,
+        arany::RunFailure::WorkersUnverified,
+        arany::RunFailure::CriterionUnmet,
+        arany::RunFailure::RefusalLimit,
+    ];
+    assert_eq!(listed.len(), failures.len());
+    for failure in failures {
+        assert!(
+            listed.contains(&serde_json::to_value(failure).unwrap()),
+            "{failure:?}"
+        );
+    }
+}
+
+#[test]
 fn every_conformance_message_validates_against_the_schema() {
     let schema = protocol_schema();
     let validator = jsonschema::options()
@@ -210,6 +241,66 @@ fn every_conformance_message_validates_against_the_schema() {
                 .unwrap()
                 .is_valid(&completed),
             valid
+        );
+    }
+    for (stopped, valid) in [
+        (json!({"reason": "goalExhausted", "limit": "calls"}), true),
+        (json!({"reason": "goalExhausted", "limit": "runs"}), true),
+        (
+            json!({"reason": "goalExhausted", "limit": "activeTime"}),
+            true,
+        ),
+        (json!({"reason": "goalExhausted", "limit": "tokens"}), true),
+        (json!({"reason": "paused"}), true),
+        (json!({"reason": "cancelled"}), true),
+        (json!({"reason": "stoppedByHook"}), true),
+        (json!({"reason": "uncertain"}), true),
+        (json!({"reason": "interrupted"}), true),
+        (
+            json!({"reason": "notAdmitted", "refusal": "workspaceUnavailable"}),
+            true,
+        ),
+        (json!({"reason": "notAdmitted"}), false),
+        (
+            json!({"reason": "notAdmitted", "refusal": "Workspace input is unavailable"}),
+            false,
+        ),
+        (
+            json!({"reason": "failed", "failure": "provider_call"}),
+            true,
+        ),
+        (
+            json!({"reason": "failed", "failure": "refusal_limit"}),
+            true,
+        ),
+        (json!("Goal budget is exhausted"), false),
+        (json!({"reason": "goalExhausted"}), false),
+        (
+            json!({"reason": "goalExhausted", "limit": "wallClock"}),
+            false,
+        ),
+        (
+            json!({"reason": "failed", "failure": "providerCall"}),
+            false,
+        ),
+        (json!({"reason": "futureStop"}), false),
+    ] {
+        let mut completed = turn.clone();
+        completed["status"] = json!("completed");
+        completed["goal"] = json!({"status": "failed", "stopped": stopped});
+        assert_eq!(
+            serde_json::from_value::<Turn>(completed.clone()).is_ok(),
+            valid,
+            "{stopped}"
+        );
+        let mut part = schema.clone();
+        part["$ref"] = json!("#/$defs/Turn");
+        assert_eq!(
+            jsonschema::validator_for(&part)
+                .unwrap()
+                .is_valid(&completed),
+            valid,
+            "{stopped}"
         );
     }
     for (index, (name, params, result)) in [

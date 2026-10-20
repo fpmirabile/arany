@@ -311,8 +311,11 @@ pub struct RunControls {
 #[derive(Debug)]
 pub struct RunResult {
     pub run: RunOutcome,
-    /// Why an autonomous Goal admitted no further Run after `run` committed.
-    pub stopped: Option<EngineError>,
+    /// Why the submission's Goal stopped at its latest Run, as `SessionView::run_stop` projects
+    /// the reopened history. A Run that could not settle is returned without a terminal status.
+    pub stopped: Option<crate::session::RunStop>,
+    /// The refusal of the next autonomous Run before its MessageAccepted; it has no journaled fact.
+    pub continuation_error: Option<EngineError>,
 }
 
 pub type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<RunResult, EngineError>> + Send + 'a>>;
@@ -437,11 +440,6 @@ struct RunTurn {
 }
 
 impl RunTurn {
-    fn exhausted(&self) -> bool {
-        self.goal_status == GoalStatus::Failed
-            && self.outcome.run.status == crate::session::RunStatus::Finished
-    }
-
     fn continues(&self) -> bool {
         self.autonomous
             && self.goal_status == GoalStatus::Running
@@ -1029,13 +1027,8 @@ impl Engine {
             let result = self
                 .run_inner(&submission, request, run_cancellation, hints)
                 .await;
-            match &result {
-                Ok(RunResult {
-                    stopped: Some(reason),
-                    ..
-                }) => crate::diagnostics::engine_failure(reason),
-                Ok(_) => {}
-                Err(error) => crate::diagnostics::engine_failure(error),
+            if let Err(error) = &result {
+                crate::diagnostics::engine_failure(error);
             }
             result
         });
@@ -1074,6 +1067,7 @@ impl Engine {
             &mut leases,
         ))
         .await?;
+        let mut continuation_error = None;
         while turn.continues() && !cancellation.is_cancelled() {
             let next = RunRequest {
                 skill: None,
@@ -1097,23 +1091,57 @@ impl Engine {
             ))
             .await
             {
-                Ok(turn) => turn,
+                Ok(next) if next.outcome.run.status.is_outcome() => next,
+                // The earlier Finished Run keeps the answer; the projection below names the unsettled Run's stop.
+                Ok(_) => break,
                 // Cancellation before MessageAccepted admits no Run; the committed Finished Run keeps its outcome.
                 Err(EngineError::CancelledBeforeStart) => break,
-                // The earlier Finished Run stays committed; the caller gets it with the reason the loop stopped.
+                // A refusal before MessageAccepted keeps the committed Finished Run with the failure;
+                // after acceptance the error propagates, as for the first Run.
                 Err(error) => {
-                    return Ok(RunResult {
-                        run: turn.outcome,
-                        stopped: Some(error),
-                    });
+                    if self.run_stop(&turn.outcome).await?.0.id != turn.outcome.run.id {
+                        return Err(error);
+                    }
+                    crate::diagnostics::engine_failure(&error);
+                    continuation_error = Some(error);
+                    break;
                 }
             };
         }
-        let stopped = turn.exhausted().then_some(EngineError::GoalBudgetExhausted);
+        let (latest, stopped) = self.run_stop(&turn.outcome).await?;
+        let mut run = turn.outcome;
+        // An unsettled Run is returned as history reopens it.
+        if latest.id == run.run.id {
+            run.run = latest;
+        }
         Ok(RunResult {
-            run: turn.outcome,
+            run,
             stopped,
+            continuation_error,
         })
+    }
+
+    // Projected from the reopened history, so a live result and its replayed turn agree.
+    async fn run_stop(
+        &self,
+        outcome: &RunOutcome,
+    ) -> Result<(RunView, Option<crate::session::RunStop>), EngineError> {
+        let view = self
+            .journal
+            .store()
+            .load_view(outcome.session_id)
+            .await?
+            .ok_or(EngineError::InvalidHistory)?;
+        let goal = view
+            .goal(outcome.goal_id)
+            .ok_or(EngineError::InvalidHistory)?;
+        let latest = view
+            .runs
+            .iter()
+            .rev()
+            .find(|run| goal.run_ids.contains(&run.id))
+            .ok_or(EngineError::InvalidHistory)?;
+        Ok((latest.clone(), view.run_stop(latest)))
     }
 
     #[expect(
@@ -1851,7 +1879,8 @@ impl Engine {
             Self::release_goal_workspace(leases, goal.id, workspace_identity);
             goal_status = status;
         }
-        if !run.status.is_outcome() {
+        // Only an unsettled primary leaves its Run open here; the Goal stays open as after a crash.
+        if !run.status.is_outcome() && run.status != crate::session::RunStatus::Active {
             return Err(EngineError::InvalidHistory);
         }
         Ok(RunTurn {

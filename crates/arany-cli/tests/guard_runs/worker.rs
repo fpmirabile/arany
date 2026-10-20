@@ -668,7 +668,7 @@ pub(super) async fn worker_case(case: &'static str) {
             assert_eq!(run.hook_stop_reason(), Some(Some("halt")));
             return;
         }
-        assert!(result.stopped.is_none(), "{case}");
+        assert_eq!(result.stopped, bundle.view.run_stop(run), "{case}");
         assert!(worker.released.is_some(), "{case}");
         if matches!(
             case,

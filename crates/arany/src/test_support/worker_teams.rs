@@ -670,7 +670,6 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     }
     let result = result.unwrap_or_else(|e| panic!("{case}: team Run: {e:?}"));
     drop(handle);
-    assert!(result.stopped.is_none());
     if case == "primary_time" {
         tokio::time::resume();
     }
@@ -699,6 +698,11 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let (events, view) = replayed(&state, session).await;
     assert_action_bounds(&events, false, false);
     let run = &view.runs[0];
+    assert_eq!(
+        result.stopped,
+        view.run_stop(run),
+        "{case}: the live stop is the replayed projection"
+    );
     let failed = matches!(
         case,
         "failure"
@@ -1165,7 +1169,6 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
         provider.violations.lock().unwrap().is_empty(),
         "resume violated source context or isolation"
     );
-    assert!(result.stopped.is_none());
     engine.close().await.unwrap();
     let (events, view) = replayed(&state, original.session).await;
     assert_eq!(
@@ -1176,6 +1179,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
     assert_eq!(view.runs.len(), 2);
     let resumed = &view.runs[1];
     assert_eq!(resumed.status, RunStatus::Finished);
+    assert_eq!(result.stopped, view.run_stop(resumed));
     let worker = &resumed.agents[1];
     let assignment = worker.assignment.as_ref().unwrap();
     if checkpoint.is_none() {

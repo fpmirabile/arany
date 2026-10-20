@@ -1,0 +1,459 @@
+use super::{
+    GoalStatus, GoalUsage, GoalView, RunFailure, RunStatus, RunView, STORE_ACTION_OVERHEAD_MS,
+    SessionView,
+};
+use crate::tools::{CacheUpdate, ToolDisposition};
+
+/// The Goal budget dimension that admitted no next Run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GoalLimit {
+    Calls,
+    Runs,
+    ActiveTime,
+    Tokens,
+}
+
+/// Why a Run stopped short of completing its Goal, projected from committed facts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunStop {
+    GoalExhausted(GoalLimit),
+    /// The Goal waits at this Run for an explicit resume.
+    Paused,
+    Cancelled,
+    StoppedByHook,
+    /// The Run has no terminal receipt and committed an effect whose outcome is unknown.
+    Uncertain,
+    /// The Run has no terminal receipt and no open or unknown effect.
+    Interrupted,
+    Failed(RunFailure),
+}
+
+impl SessionView {
+    /// The one stop projection for live results and history; `None` while `run` is open or when
+    /// it finished without stopping its Goal.
+    #[must_use]
+    pub fn run_stop(&self, run: &RunView) -> Option<RunStop> {
+        let goal = self
+            .goals
+            .iter()
+            .find(|goal| goal.run_ids.contains(&run.id))?;
+        // An unaccepted link has no Run view, so the latest accepted Run is where the Goal stopped.
+        let latest = self
+            .runs
+            .iter()
+            .rev()
+            .find(|candidate| goal.run_ids.contains(&candidate.id))
+            .is_some_and(|candidate| candidate.id == run.id);
+        project(goal, run, latest, goal.resume_usage(self).runs)
+    }
+}
+
+fn project(goal: &GoalView, run: &RunView, latest: bool, accepted_runs: usize) -> Option<RunStop> {
+    match run.status {
+        RunStatus::Pending | RunStatus::Active => return None,
+        RunStatus::Interrupted if unknown_effect(run) => return Some(RunStop::Uncertain),
+        RunStatus::Interrupted
+        | RunStatus::Finished
+        | RunStatus::Failed
+        | RunStatus::Cancelled
+        | RunStatus::StoppedByHook => {}
+    }
+    // A Run left without a terminal receipt by a spent budget proves the exhaustion from its counts.
+    let spent = goal.effective_budget().spent(GoalUsage {
+        runs: accepted_runs,
+        provider_calls: goal.provider_calls,
+        active_ms: goal.active_ms,
+        known_tokens: goal.known_tokens,
+        token_usage_unknown: goal.token_usage_unknown,
+    });
+    if latest && (goal.budget_closed || (run.status == RunStatus::Interrupted && spent)) {
+        return Some(RunStop::GoalExhausted(exhausted_limit(goal)));
+    }
+    let paused = latest && matches!(goal.status, GoalStatus::Running | GoalStatus::Interrupted);
+    match run.status {
+        RunStatus::Pending | RunStatus::Active => None,
+        RunStatus::Interrupted => Some(RunStop::Interrupted),
+        RunStatus::Finished | RunStatus::Cancelled if paused => Some(RunStop::Paused),
+        RunStatus::Finished => None,
+        RunStatus::Cancelled => Some(RunStop::Cancelled),
+        RunStatus::StoppedByHook => Some(RunStop::StoppedByHook),
+        RunStatus::Failed => run.failure.map(RunStop::Failed),
+    }
+}
+
+// A started effect, Tool or hook, whose outcome is not journaled, or is journaled uncertain.
+fn unknown_effect(run: &RunView) -> bool {
+    run.tools
+        .iter()
+        .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+        .any(|tool| {
+            tool.observation.as_ref().is_none_or(|observation| {
+                observation.disposition == ToolDisposition::Uncertain
+                    || observation.cache_update == CacheUpdate::Uncertain
+            }) || tool.hooks.iter().any(hook_unknown)
+        })
+        || run.lifecycle_hooks.iter().any(hook_unknown)
+}
+
+fn hook_unknown(hook: &super::reducer::HookView) -> bool {
+    hook.outcome
+        .as_ref()
+        .is_none_or(|outcome| outcome.observation.disposition == ToolDisposition::Uncertain)
+}
+
+// Replay accepts `budget_closed` only on a spent budget, so the last dimension is the one left.
+fn exhausted_limit(goal: &GoalView) -> GoalLimit {
+    let budget = goal.effective_budget();
+    if budget
+        .max_tokens
+        .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens >= limit)
+    {
+        GoalLimit::Tokens
+    } else if budget
+        .max_provider_calls
+        .is_some_and(|limit| goal.provider_calls >= limit)
+    {
+        GoalLimit::Calls
+    } else if budget
+        .max_active_ms
+        .is_some_and(|limit| limit.saturating_sub(goal.active_ms) <= STORE_ACTION_OVERHEAD_MS)
+    {
+        GoalLimit::ActiveTime
+    } else {
+        GoalLimit::Runs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::tests::unanswered_run;
+    use crate::session::{GoalBudget, GoalId, GoalPhase, GoalSuccessState, WorkspaceIdentity};
+
+    fn goal(status: GoalStatus, budget_closed: bool) -> GoalView {
+        GoalView {
+            id: GoalId::new(),
+            objective: "Stop".into(),
+            workspace_identity: WorkspaceIdentity {
+                device: 1,
+                inode: 2,
+            },
+            budget: GoalBudget {
+                max_provider_calls: Some(4),
+                max_tokens: Some(100),
+                max_active_ms: Some(60_000),
+                max_runs: 2,
+            },
+            resource_settings: crate::tools::ToolResourceSettings::default(),
+            phase: GoalPhase::Implementation,
+            autonomous: true,
+            status,
+            run_ids: Vec::new(),
+            active_run: None,
+            plan_contract: None,
+            success_state: GoalSuccessState::NoContract,
+            success_criterion_satisfied: false,
+            awaiting_plan_contract: false,
+            active_ms: 0,
+            uncertain_active_ms: 0,
+            active_deadline: None,
+            active_ceiling_ms: 0,
+            provider_calls: 1,
+            unobserved_provider_calls: Vec::new(),
+            compaction_call_reserved: None,
+            uncertain_compaction_calls: 0,
+            known_tokens: 10,
+            known_cached_tokens: 0,
+            token_usage_unknown: false,
+            report: None,
+            started_sequence: 1,
+            finished_sequence: None,
+            continues: None,
+            budget_closed,
+        }
+    }
+
+    // A Read Tool with the given observation, `None` when only its intent is journaled.
+    fn tool(observed: Option<(ToolDisposition, CacheUpdate)>) -> crate::session::ToolView {
+        let intent = crate::tools::EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
+            id: uuid::Uuid::now_v7(),
+            run_id: crate::session::RunId::new(),
+            agent_run_id: crate::session::AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: crate::tools::ToolCall::Read {
+                path: "facts.txt".into(),
+                offset: None,
+                limit: Some(32),
+            },
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        crate::session::ToolView {
+            checkpoint: None,
+            permission_verdict: None,
+            hooks: Vec::new(),
+            hook_sequence: None,
+            intent: intent.clone(),
+            observation: observed.map(|(disposition, cache_update)| {
+                crate::tools::ToolObservation {
+                    enforcement_cause: None,
+                    limit_cause: None,
+                    intent,
+                    disposition,
+                    output: String::new(),
+                    attestation: None,
+                    cache_update,
+                }
+            }),
+            review_call_index: None,
+            finished_sequence: observed.map(|_| 2),
+        }
+    }
+
+    #[test]
+    fn committed_run_and_goal_facts_project_one_closed_stop() {
+        use GoalStatus::{Completed, Failed, Interrupted, Running};
+        let failure = |status| (status == RunStatus::Failed).then_some(RunFailure::ToolStopped);
+        // (Run status, Goal status, budget closed, latest accepted Run, expected stop)
+        let rows = [
+            (RunStatus::Active, Running, false, true, None),
+            (RunStatus::Pending, Running, false, true, None),
+            (RunStatus::Finished, Completed, false, true, None),
+            (RunStatus::Finished, Running, false, false, None),
+            (
+                RunStatus::Finished,
+                Running,
+                false,
+                true,
+                Some(RunStop::Paused),
+            ),
+            (
+                RunStatus::Finished,
+                Interrupted,
+                false,
+                true,
+                Some(RunStop::Paused),
+            ),
+            (
+                RunStatus::Cancelled,
+                Interrupted,
+                false,
+                true,
+                Some(RunStop::Paused),
+            ),
+            (
+                RunStatus::Cancelled,
+                Running,
+                false,
+                false,
+                Some(RunStop::Cancelled),
+            ),
+            (
+                RunStatus::Cancelled,
+                Failed,
+                false,
+                true,
+                Some(RunStop::Cancelled),
+            ),
+            (
+                RunStatus::StoppedByHook,
+                Interrupted,
+                false,
+                true,
+                Some(RunStop::StoppedByHook),
+            ),
+            // A crash before any effect is an ordinary interruption, never an unknown effect.
+            (
+                RunStatus::Interrupted,
+                Interrupted,
+                false,
+                true,
+                Some(RunStop::Interrupted),
+            ),
+            (
+                RunStatus::Interrupted,
+                Failed,
+                false,
+                false,
+                Some(RunStop::Interrupted),
+            ),
+            (
+                RunStatus::Failed,
+                Failed,
+                false,
+                true,
+                Some(RunStop::Failed(RunFailure::ToolStopped)),
+            ),
+            (
+                RunStatus::Failed,
+                Failed,
+                true,
+                true,
+                Some(RunStop::GoalExhausted(GoalLimit::Runs)),
+            ),
+            (
+                RunStatus::Finished,
+                Failed,
+                true,
+                true,
+                Some(RunStop::GoalExhausted(GoalLimit::Runs)),
+            ),
+            // A crash-left Run that a later resume closed for budget reports the Goal's exhaustion.
+            (
+                RunStatus::Interrupted,
+                Failed,
+                true,
+                true,
+                Some(RunStop::GoalExhausted(GoalLimit::Runs)),
+            ),
+            // Only the latest accepted Run carries the Goal's exhaustion.
+            (RunStatus::Finished, Failed, true, false, None),
+            (RunStatus::Active, Failed, true, true, None),
+        ];
+        for (status, goal_status, closed, latest, expected) in rows {
+            let mut run = unanswered_run(status);
+            run.failure = failure(status);
+            assert_eq!(
+                project(&goal(goal_status, closed), &run, latest, 0),
+                expected,
+                "{status:?} in a {goal_status:?} Goal, closed {closed}, latest {latest}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_committed_effect_evidence_makes_an_interrupted_run_uncertain() {
+        let open = goal(GoalStatus::Interrupted, false);
+        let mut spent = goal(GoalStatus::Interrupted, false);
+        spent.provider_calls = 4;
+        let known = Some((ToolDisposition::Succeeded, CacheUpdate::NotApplicable));
+        // (Tool evidence, Goal, expected stop of the latest interrupted Run)
+        let rows = [
+            (Vec::new(), &open, RunStop::Interrupted),
+            (vec![tool(known)], &open, RunStop::Interrupted),
+            (vec![tool(None)], &open, RunStop::Uncertain),
+            (
+                vec![
+                    tool(known),
+                    tool(Some((
+                        ToolDisposition::Uncertain,
+                        CacheUpdate::NotApplicable,
+                    ))),
+                ],
+                &open,
+                RunStop::Uncertain,
+            ),
+            (
+                vec![tool(Some((
+                    ToolDisposition::Succeeded,
+                    CacheUpdate::Uncertain,
+                )))],
+                &open,
+                RunStop::Uncertain,
+            ),
+            // A spent budget proves the exhaustion of a Run that could not settle.
+            (Vec::new(), &spent, RunStop::GoalExhausted(GoalLimit::Calls)),
+            (
+                vec![tool(known)],
+                &spent,
+                RunStop::GoalExhausted(GoalLimit::Calls),
+            ),
+            // An unknown effect outranks the exhaustion.
+            (vec![tool(None)], &spent, RunStop::Uncertain),
+        ];
+        for (index, (tools, goal, expected)) in rows.into_iter().enumerate() {
+            let mut run = unanswered_run(RunStatus::Interrupted);
+            run.tools = tools;
+            assert_eq!(project(goal, &run, true, 0), Some(expected), "row {index}");
+        }
+        let mut finished = unanswered_run(RunStatus::Failed);
+        finished.tools = vec![tool(None)];
+        assert_eq!(
+            project(&goal(GoalStatus::Failed, false), &finished, true, 0),
+            Some(RunStop::Failed(RunFailure::ProposalRefused)),
+            "a terminal receipt keeps its own outcome"
+        );
+    }
+
+    #[test]
+    fn exhaustion_names_tokens_then_calls_then_active_time_then_runs() {
+        let spent = |change: fn(&mut GoalView)| {
+            let mut goal = goal(GoalStatus::Failed, true);
+            change(&mut goal);
+            exhausted_limit(&goal)
+        };
+        type Change = fn(&mut GoalView);
+        let rows: [(Change, GoalLimit); 7] = [
+            (|_| {}, GoalLimit::Runs),
+            (|goal| goal.active_ms = 55_000, GoalLimit::ActiveTime),
+            (|goal| goal.provider_calls = 4, GoalLimit::Calls),
+            (|goal| goal.known_tokens = 100, GoalLimit::Tokens),
+            (|goal| goal.token_usage_unknown = true, GoalLimit::Tokens),
+            (
+                |goal| {
+                    goal.provider_calls = 4;
+                    goal.active_ms = 60_000;
+                },
+                GoalLimit::Calls,
+            ),
+            (
+                |goal| {
+                    goal.budget.max_tokens = None;
+                    goal.token_usage_unknown = true;
+                },
+                GoalLimit::Runs,
+            ),
+        ];
+        for (index, (change, expected)) in rows.into_iter().enumerate() {
+            assert_eq!(spent(change), expected, "row {index}");
+        }
+    }
+
+    #[test]
+    fn the_session_projection_judges_the_latest_accepted_run_of_the_runs_goal() {
+        let first = unanswered_run(RunStatus::Finished);
+        let mut second = unanswered_run(RunStatus::Interrupted);
+        second.tools = vec![tool(None)];
+        let mut open = goal(GoalStatus::Interrupted, false);
+        // The trailing link was never accepted, so the second Run is still the latest.
+        open.run_ids = vec![first.id, second.id, crate::session::RunId::new()];
+        let session = crate::session::SessionId::new();
+        let mut view = SessionView::replay(
+            session,
+            &[crate::session::EventEnvelope {
+                sequence: 1,
+                session_id: session,
+                run_id: None,
+                agent_run_id: None,
+                event: crate::session::Event::SessionStarted {
+                    title: "Stops".into(),
+                    workspace_identity: open.workspace_identity,
+                },
+                created_at_ms: 0,
+            }],
+        )
+        .expect("Session start")
+        .expect("Session view");
+        view.runs = vec![first.clone(), second.clone()];
+        view.goals = vec![open];
+        assert_eq!(view.run_stop(&first), None);
+        assert_eq!(view.run_stop(&second), Some(RunStop::Uncertain));
+        assert_eq!(view.run_stop(&unanswered_run(RunStatus::Failed)), None);
+        // The unaccepted link consumes no Run budget; unsettled time stays out of this projection.
+        view.goals[0].active_ceiling_ms = 60_000;
+        for (max_runs, expected) in [
+            (3, RunStop::Interrupted),
+            (2, RunStop::GoalExhausted(GoalLimit::Runs)),
+        ] {
+            view.goals[0].budget.max_runs = max_runs;
+            view.runs[1].tools.clear();
+            assert_eq!(view.run_stop(&view.runs[1]), Some(expected));
+            assert_eq!(view.goals[0].run_ids.len(), 3);
+        }
+    }
+}

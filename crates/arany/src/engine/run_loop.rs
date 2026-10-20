@@ -990,7 +990,8 @@ impl<'a> RunLoop<'a> {
     async fn settle_primary(&self, end: PrimaryEnd) -> Result<(), EngineError> {
         let (agent, run, failure, answer) = match stop::settle(end, &RunFacts::observe(self)?) {
             Settlement::Unknown => return Err(crate::tools::ToolError::Uncertain.into()),
-            Settlement::Unsettleable => return Err(EngineError::GoalBudgetExhausted),
+            // No terminal Event: the submission reports the stop its reopened Run projects.
+            Settlement::Unsettleable => return Ok(()),
             Settlement::Finish(answer) => (
                 AgentDisposition::Finished,
                 RunDisposition::Finished,

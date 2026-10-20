@@ -1,6 +1,6 @@
 use crate::{
     AdmittedProviders, Engine, EngineConfig, EngineError, Provider, RunControls, RunOutcome,
-    RunRequest, StateRoot,
+    RunRequest, RunStop, StateRoot,
 };
 use std::sync::Arc;
 
@@ -42,8 +42,23 @@ pub async fn run_routed(
     controls: RunControls,
 ) -> Result<RunOutcome, EngineError> {
     let result = engine.submit(providers, request, controls)?.await?;
-    if let Some(reason) = result.stopped {
-        panic!("the Goal stopped after a committed Run: {reason}");
+    // A Goal left open after a Finished Run is an ordinary outcome; exhaustion or an unknown later Run is not.
+    if let Some(error) = result.continuation_error {
+        panic!("the Goal stopped after a committed Run: {error}");
+    }
+    if result.run.run.status == crate::RunStatus::Finished
+        && let Some(
+            stop @ (RunStop::GoalExhausted(
+                crate::GoalLimit::Calls
+                | crate::GoalLimit::Runs
+                | crate::GoalLimit::ActiveTime
+                | crate::GoalLimit::Tokens,
+            )
+            | RunStop::Uncertain
+            | RunStop::Interrupted),
+        ) = result.stopped
+    {
+        panic!("the Goal stopped after a committed Run: {stop:?}");
     }
     Ok(result.run)
 }

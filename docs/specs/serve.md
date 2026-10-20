@@ -174,19 +174,36 @@ honored.
 | `turn/started` | `MessageAccepted`; `{threadId,turn:{id,goalId,status:"inProgress",items:[]}}`. Each subsequent Run of an autonomous Goal has a new turn ID and the same Goal ID. |
 | `item/started` | `MessageAccepted` or `ToolStarted`; `{threadId,turnId,item,startedAtMs}`. |
 | `item/completed` | `MessageAccepted`, `MessageCommitted` or `ToolFinished`; `{threadId,turnId,item,completedAtMs}`. User items start and complete together; final answer items complete without a started notification. |
-| `turn/completed` | `RunFinished` plus reduced Goal state; `{threadId,turn:{id,goalId,status,stopReason?,items:[],error?,goal:{status,stopped?}}}`. Status is `completed`, `interrupted` or `failed`. An autonomous submission can complete several turns before its final receipt. |
+| `turn/completed` | `RunFinished`, or the end of a settled submission whose last Run has no terminal receipt, plus reduced Goal state; `{threadId,turn:{id,goalId,status,stopReason?,items:[],error?,goal:{status,stopped?}}}`. Status is `completed`, `interrupted` or `failed`. An autonomous submission can complete several turns before its final receipt. |
 | `events/committed` | After a thread's final subscription page, `{threadId,event:EventLine}` for each later tapped Event in commit order. Events at or before the page head are suppressed. |
 | `events/resync` | A tap `Resync {missed}`; `{threadId,missed,lastSequence}`. Raw subscriptions receive one notice per subscribed thread with its last delivered sequence and are then disabled until `events/subscribe` is called again, so a later notice never reports a cursor beyond the first gap. The turn projection also emits `events/resync` for its active thread with its own `lastSequence`, so a subscriber can see two notices; `missed` counts the process-wide tap loss and may include other threads. Recover by paging `events/subscribe` from `lastSequence`, or reconstruct items with `thread/resume`. Live delivery is best effort: a lost append acknowledgment or a fork committed inside Store can leave a gap without Resync; paging supplies completeness. |
 
-`turn.stopReason` is a closed optional value, present only for the last Run of
-a Goal whose committed `GoalFinished.exhausted` is true. `tokenBudgetExhausted`
-means the effective finite token ceiling is reached or token usage is unknown;
-otherwise `actionBudgetExhausted` covers Provider/action, Run and active-time
-budget exhaustion. Token exhaustion takes precedence when dimensions coincide.
-A failure merely occurring on the last permitted call is not budget exhaustion.
-In-progress and intermediate autonomous turns omit the reason; historical turns
-use the same reduced facts. `goal.stopped` remains diagnostic text and must not
-be parsed to classify a budget stop.
+`goal.stopped` is the closed stop that one Engine projection
+(`SessionView::run_stop`) derives from committed Goal and Run facts; it equals
+the submission's `RunResult.stopped`, so a live turn and its `thread/resume`
+history agree. It is absent while the Run is open and when the Run finished
+without stopping its Goal. Otherwise it is one of:
+
+- `{reason:"goalExhausted",limit}`, where `limit` is `tokens`, `calls`,
+  `activeTime` or `runs`, following [Goal exhaustion projection](./goals.md#lifecycle-budgets-and-recovery).
+- `paused`: the Goal waits at this latest Finished or Cancelled Run for an
+  explicit resume.
+- `cancelled` or `stoppedByHook`.
+- For a Run with no terminal receipt: `uncertain`, `goalExhausted` or
+  `interrupted`, following [accepted outcomes](./execution.md#accepted-outcomes).
+- `{reason:"failed",failure}` with the journal's snake_case `RunFailure`. A
+  failure on the last permitted call is not budget exhaustion.
+
+When an autonomous submission's next Run is refused after a committed Run, the
+final live completion of that Run carries `{reason:"notAdmitted",refusal}` with
+the closed Engine `Reason` and the compiled message in `turn.error`; no Event
+records the refusal, so its history projects `paused`. A settled submission
+whose last Run has no terminal receipt also completes that Run once, with
+status `interrupted`; an Engine error keeps the fatal recovery path below.
+
+`turn.stopReason` is derived from it: `tokenBudgetExhausted` for the `tokens`
+limit and `actionBudgetExhausted` for the others. Intermediate autonomous turns
+omit both.
 
 Raw Event delivery and turn/item projection use separate subscriptions, so
 `events/committed` may precede or follow the matching `item/*` notification.
@@ -314,7 +331,7 @@ pre-beta; stored formats retain their existing no-migration contract.
 | Stable schema contract | Byte-identical pretty JSON and final newline; intentional golden changes only; canonical Supervisor verdicts validate in raw pages and notifications | [Protocol tests](../../crates/arany-cli/src/protocol/tests.rs), [schema golden](../../crates/arany-cli/tests/fixtures/serve/schema.json) |
 | Rewind preview and human confirmation | Tokens bind thread/head/observed states, expire and consume once; default drift refuses, keep restores only the others, overwrite needs separate human confirmation and saves current content; unknown effects block code, bounds refuse before mutation, conversation forks preserve source and budgets, partial receipts stay honest | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [protocol conformance and bounds](../../crates/arany-cli/src/protocol/tests.rs), [Guard rewind corpus](../../crates/arany-cli/tests/guard_runs/rewind.rs) |
 | Envelope conformance and bounds | Both version forms accepted; malformed, ambiguous and oversized lines rejected; exact 1 MiB boundary accepted | [Protocol codec table](../../crates/arany-cli/src/protocol/tests.rs) |
-| Typed conformance | Method, item, notification and reserved approval examples validate against registered schemas | [Protocol conformance corpus](../../crates/arany-cli/src/protocol/tests.rs) |
+| Typed conformance | Method, item, notification and reserved approval examples validate against registered schemas; every projected stop has one closed `goal.stopped` value and free text is refused | [Protocol conformance corpus](../../crates/arany-cli/src/protocol/tests.rs), [stop mapping](../../crates/arany-cli/src/cli/serve/items.rs), [projection table](../../crates/arany/src/session/stop.rs) |
 | CLI export and refusal | Fresh process output/file bytes and safe target replacement/refusal | [Schema process test](../../crates/arany-cli/tests/generate_schema.rs) |
 | Durable start and ordered completion | Exact canonical transcript, schema validation, reopened SessionStarted/MessageAccepted/MessageCommitted/RunFinished and reduced history; resume returns the same items | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [transcript](../../crates/arany-cli/tests/fixtures/serve/basic.jsonl), [Engine creation scenario](../../crates/arany/tests/engine_run.rs) |
 | Protocol state, capacity and transport recovery | Initialization refusals, 64-thread refusal without eviction, 64/256 queue backpressure, oversized/malformed duplex input recovery, tap-gap sequence and missed count | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |

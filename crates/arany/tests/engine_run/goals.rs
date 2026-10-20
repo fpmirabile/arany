@@ -2106,18 +2106,24 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
         },
         arany::GoalPhase::Implementation,
     );
-    let outcome = run_with(
-        &engine,
-        &provider,
-        input,
-        RunControls {
-            tools: ToolGrant::Configured,
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("terminal Run");
+    let result = engine
+        .submit(
+            AdmittedProviders::single(provider),
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .expect("idle Engine")
+        .await
+        .expect("terminal Run");
+    let outcome = result.run;
     assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert_eq!(
+        result.stopped,
+        Some(arany::RunStop::GoalExhausted(arany::GoalLimit::Runs))
+    );
     assert_eq!(
         requests.lock().expect("Provider requests").len(),
         4,
@@ -2126,6 +2132,11 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
     engine.close().await.expect("engine shutdown");
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(
+        view.runs.last().and_then(|run| view.run_stop(run)),
+        result.stopped,
+        "the historical turn projects the live stop"
+    );
     let goal = view.goal(outcome.goal_id).expect("Goal");
     assert!(
         goal.budget_closed,
@@ -3319,11 +3330,12 @@ async fn autonomous_goal_stopped_by_a_failed_admission_returns_the_committed_run
         )
         .expect("idle Engine")
         .await;
-    let (committed, reason) = match result {
+    let (committed, reason, error) = match result {
         Ok(RunResult {
             run,
             stopped: Some(reason),
-        }) => (run, reason),
+            continuation_error: Some(error),
+        }) => (run, reason, error),
         Err(error) => panic!("the committed Run must be returned with its stop reason: {error}"),
         Ok(_) => panic!("a failed continuation admission must stop the loop"),
     };
@@ -3333,16 +3345,82 @@ async fn autonomous_goal_stopped_by_a_failed_admission_returns_the_committed_run
         Some("first pass"),
         "the committed answer is the first Run's"
     );
-    assert!(!matches!(reason, EngineError::GoalBudgetExhausted));
+    assert_eq!(
+        reason,
+        arany::RunStop::Paused,
+        "history keeps the Goal open; it records no admission failure"
+    );
+    assert!(
+        !matches!(error, EngineError::GoalBudgetExhausted),
+        "the caller gets the actionable admission failure: {error}"
+    );
     engine.close().await.expect("engine shutdown");
 
     let (_, view) = replayed(&state_path, committed.session_id).await;
     assert_eq!(view.runs.last().map(|run| run.id), Some(committed.run.id));
+    assert_eq!(
+        view.runs.last().and_then(|run| view.run_stop(run)),
+        Some(reason),
+        "the historical turn projects the live stop"
+    );
     let goal = view.goal(committed.goal_id).expect("Goal");
     assert_eq!(
         goal.status,
         arany::GoalStatus::Interrupted,
         "a non-budget stop leaves the Goal open for explicit resume"
+    );
+}
+
+#[tokio::test]
+async fn autonomous_goal_failing_after_the_next_run_is_accepted_returns_the_error() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let session = engine
+        .create_session(workspace.clone(), None)
+        .await
+        .expect("Session");
+    // The first Run's last call arms a failure of the next RunStarted, after its MessageAccepted.
+    let provider = ScriptedProvider::new(vec![
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
+        finish_with("first pass"),
+    ])
+    .with_before_call(2, move || {
+        arany::FaultPlan::fail_goal_append(session, |event| {
+            matches!(event, Event::RunStarted { .. })
+        });
+    });
+    let mut input = autonomous_input(&workspace);
+    input.session_id = Some(session);
+    input.title = None;
+    let result = engine
+        .submit(
+            AdmittedProviders::single(Arc::new(provider)),
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .expect("idle Engine")
+        .await;
+    assert!(
+        matches!(result, Err(EngineError::Store(_))),
+        "an accepted Run's failure propagates, not a continuation stop: {:?}",
+        result.as_ref().map(|result| result.stopped)
+    );
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, session).await;
+    assert_eq!(view.runs.len(), 2);
+    assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(view.runs[1].status, RunStatus::Interrupted);
+    assert_eq!(
+        view.run_stop(&view.runs[1]),
+        Some(arany::RunStop::Interrupted),
+        "no effect started, so history reports an interruption"
     );
 }
 

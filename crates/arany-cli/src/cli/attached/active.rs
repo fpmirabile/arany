@@ -479,7 +479,7 @@ pub(super) async fn submit_objective(
             }
             step = async {
                 match result {
-                    Some(result) => RunStep::Completed(run::finish_run(result.await).map(Box::new)),
+                    Some(result) => RunStep::Completed(run::finish_run(result.await, !matches!(stop, ActiveStop::Running)).map(Box::new)),
                     None => match future.as_mut().await {
                         Ok(handle) => RunStep::Admitted(handle),
                         Err(error) => RunStep::Completed(Err(error)),
@@ -931,7 +931,7 @@ pub(super) async fn submit_objective(
             Some(handle) => handle,
             None => future.await?,
         };
-        run::finish_run(handle.await)
+        run::finish_run(handle.await, true)
     };
     match tokio::time::timeout(SHUTDOWN_GRACE, finish).await {
         Ok(Ok(outcome)) if restored.is_ok() => {

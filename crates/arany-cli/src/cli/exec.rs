@@ -3,8 +3,8 @@ use super::{CommandOutput, OutputArg};
 use crate::presentation::render_exec;
 use arany::{
     AdmittedProviders, CollaborationPolicy, Effort, Engine, EngineConfig, EngineError, GoalBudget,
-    GoalId, GoalPhase, GoalRequest, GoalStatus, Provider, RunCancellation, RunControls, RunRequest,
-    RunResult, RunStatus, SessionId, StateRoot, Store, Telemetry, ToolGrant,
+    GoalId, GoalLimit, GoalPhase, GoalRequest, GoalStatus, Provider, RunCancellation, RunControls,
+    RunRequest, RunResult, RunStatus, RunStop, SessionId, StateRoot, Store, Telemetry, ToolGrant,
     native_protection_supported,
 };
 use clap::{Args, ValueEnum};
@@ -349,12 +349,12 @@ async fn run_on_engine(
         interrupted,
         forced,
     } = end?;
-    let (outcome, stop) = match result {
-        // The committed answer is still printed; the stop error makes the exit nonzero.
-        Ok(RunResult { run, stopped }) => (
+    let (outcome, stopped, continuation_error) = match result {
+        Ok(RunResult {
             run,
-            stopped.map(|reason| format!("Goal stopped after a committed Run: {reason}")),
-        ),
+            stopped,
+            continuation_error,
+        }) => (run, stopped, continuation_error),
         Err(EngineError::CancelledBeforeStart) if interrupted => {
             return Err("interrupted before a Run started; no Run was recorded".into());
         }
@@ -376,9 +376,12 @@ async fn run_on_engine(
         .close()
         .await
         .map_err(|_| "store shutdown failed".to_owned())?;
+    // A later Run without a terminal receipt may follow the returned committed one.
     let run = view
         .runs
-        .last()
+        .iter()
+        .rev()
+        .find(|run| run.id == outcome.run.id)
         .filter(|run| **run == outcome.run)
         .ok_or("Run history unavailable or invalid")?;
     let paused = (interrupted || run.status == RunStatus::StoppedByHook)
@@ -386,8 +389,18 @@ async fn run_on_engine(
             matches!(goal.status, GoalStatus::Running | GoalStatus::Interrupted)
         });
     let success = run.status == RunStatus::Finished && !paused;
+    // The committed answer is still printed; the stop line makes the exit nonzero.
+    let stop = stop_after_answer(
+        run.status,
+        stopped,
+        continuation_error.as_ref(),
+        interrupted,
+    )
+    .map(|reason| format!("Goal stopped after a committed Run: {reason}"));
     if !run.status.is_outcome() {
-        return Err("Run did not reach a terminal state".into());
+        return Err(stopped
+            .map_or("Run did not reach a terminal state", stop_text)
+            .into());
     }
     let stdout = render_exec(run, &events, args.output.into(), new_session);
     let stderr = match args.output {
@@ -494,6 +507,48 @@ async fn run_on_engine(
         stderr,
         success: success && stop.is_none(),
     })
+}
+
+// Why an autonomous loop stopped after its committed answer: the failure that ended it, else its
+// projected stop. A pause the caller asked for is no stop.
+pub(in crate::cli) fn stop_after_answer(
+    status: RunStatus,
+    stop: Option<RunStop>,
+    continuation_error: Option<&EngineError>,
+    pause_requested: bool,
+) -> Option<String> {
+    if status != RunStatus::Finished {
+        return None;
+    }
+    if let Some(error) = continuation_error {
+        return Some(error.to_string());
+    }
+    match stop? {
+        RunStop::Paused if pause_requested => None,
+        stop @ (RunStop::GoalExhausted(
+            GoalLimit::Calls | GoalLimit::Runs | GoalLimit::ActiveTime | GoalLimit::Tokens,
+        )
+        | RunStop::Paused
+        | RunStop::Cancelled
+        | RunStop::StoppedByHook
+        | RunStop::Uncertain
+        | RunStop::Interrupted
+        | RunStop::Failed(_)) => Some(stop_text(stop).to_owned()),
+    }
+}
+
+pub(in crate::cli) fn stop_text(stop: RunStop) -> &'static str {
+    match stop {
+        RunStop::GoalExhausted(
+            GoalLimit::Calls | GoalLimit::Runs | GoalLimit::ActiveTime | GoalLimit::Tokens,
+        ) => "Goal budget is exhausted",
+        RunStop::Paused => "Goal paused before completion",
+        RunStop::Uncertain => "Tool effect completion is uncertain",
+        RunStop::Interrupted => "Run interrupted without a terminal receipt; check Session history",
+        RunStop::Cancelled => "Run cancelled",
+        RunStop::StoppedByHook => "Run stopped by hook",
+        RunStop::Failed(_) => "Run failed",
+    }
 }
 
 pub(in crate::cli) const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
@@ -763,6 +818,98 @@ mod tests {
         assert_eq!(
             stop_step(true, StopSignal::Hangup),
             StopStep::Force("terminated by SIGHUP")
+        );
+    }
+
+    #[test]
+    fn only_a_stop_after_a_committed_answer_writes_the_stop_line() {
+        let exhausted = RunStop::GoalExhausted(arany::GoalLimit::Tokens);
+        // (Run status, projected stop, pause requested, stop line)
+        let rows = [
+            (RunStatus::Finished, None, false, None),
+            (
+                RunStatus::Finished,
+                Some(exhausted),
+                false,
+                Some("Goal budget is exhausted"),
+            ),
+            (
+                RunStatus::Finished,
+                Some(exhausted),
+                true,
+                Some("Goal budget is exhausted"),
+            ),
+            (
+                RunStatus::Finished,
+                Some(RunStop::Paused),
+                false,
+                Some("Goal paused before completion"),
+            ),
+            (RunStatus::Finished, Some(RunStop::Paused), true, None),
+            (
+                RunStatus::Finished,
+                Some(RunStop::Uncertain),
+                true,
+                Some("Tool effect completion is uncertain"),
+            ),
+            (
+                RunStatus::Finished,
+                Some(RunStop::Interrupted),
+                false,
+                Some("Run interrupted without a terminal receipt; check Session history"),
+            ),
+            (
+                RunStatus::Interrupted,
+                Some(RunStop::Interrupted),
+                false,
+                None,
+            ),
+            (RunStatus::Failed, Some(exhausted), false, None),
+            (
+                RunStatus::Failed,
+                Some(RunStop::Failed(arany::RunFailure::ToolStopped)),
+                false,
+                None,
+            ),
+            (RunStatus::Cancelled, Some(RunStop::Paused), true, None),
+            (
+                RunStatus::StoppedByHook,
+                Some(RunStop::StoppedByHook),
+                false,
+                None,
+            ),
+        ];
+        for (status, stop, pause_requested, line) in rows {
+            assert_eq!(
+                stop_after_answer(status, stop, None, pause_requested).as_deref(),
+                line,
+                "{status:?} {stop:?} {pause_requested}"
+            );
+        }
+        // A refused next Run keeps its actionable error, never a pause.
+        let refused = EngineError::WorkspaceUnavailable;
+        assert_eq!(
+            stop_after_answer(
+                RunStatus::Finished,
+                Some(RunStop::Paused),
+                Some(&refused),
+                false
+            )
+            .as_deref(),
+            Some("Workspace input is unavailable")
+        );
+        assert_eq!(
+            stop_after_answer(
+                RunStatus::Failed,
+                Some(RunStop::Paused),
+                Some(&refused),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            stop_text(RunStop::Interrupted),
+            "Run interrupted without a terminal receipt; check Session history"
         );
     }
 

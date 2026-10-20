@@ -585,7 +585,42 @@ pub struct TurnError {
 pub struct GoalSummary {
     pub status: GoalStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stopped: Option<String>,
+    pub stopped: Option<GoalStop>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[serde(
+    tag = "reason",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum GoalStop {
+    GoalExhausted {
+        limit: GoalLimit,
+    },
+    Paused,
+    Cancelled,
+    StoppedByHook,
+    Uncertain,
+    Interrupted,
+    /// The next autonomous Run was refused after this one committed; `turn.error` has the message.
+    NotAdmitted {
+        refusal: super::rpc::Reason,
+    },
+    Failed {
+        #[schemars(schema_with = "run_failure_schema")]
+        failure: arany::RunFailure,
+    },
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum GoalLimit {
+    Calls,
+    Runs,
+    ActiveTime,
+    Tokens,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -1018,6 +1053,24 @@ fn optional_effort_schema(_: &mut SchemaGenerator) -> Schema {
 fn optional_disposition_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"enum": ["succeeded", "denied", "failed", "conflict", "limit", "cancelled", "uncertain", null]})
 }
+
+fn run_failure_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"enum": ["provider_call", "proposal_refused", "budget_exhausted", "tool_stopped", "definition_invalid", "plan_admission", "tool_context_full", "workers_unverified", "criterion_unmet", "refusal_limit"], "type": "string"})
+}
+
+// Keep this exhaustive match and the serialized-variant schema test in sync.
+const _: fn(arany::RunFailure) = |failure| match failure {
+    arany::RunFailure::ProviderCall
+    | arany::RunFailure::ProposalRefused
+    | arany::RunFailure::BudgetExhausted
+    | arany::RunFailure::ToolStopped
+    | arany::RunFailure::DefinitionInvalid
+    | arany::RunFailure::PlanAdmission
+    | arany::RunFailure::ToolContextFull
+    | arany::RunFailure::WorkersUnverified
+    | arany::RunFailure::CriterionUnmet
+    | arany::RunFailure::RefusalLimit => {}
+};
 
 // A new ToolDisposition variant fails this match until the schema enum above lists it.
 const _: fn(arany::ToolDisposition) = |disposition| match disposition {

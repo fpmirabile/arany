@@ -252,12 +252,14 @@ replay work is started; missing updates carry the same marker. If serve closes
 before a recovery reply, the committed completion still receives a prompt
 response with this marker. A new process never resumes or retries a Goal implicitly.
 
+The prompt result maps serve's closed `goal.stopped` projection:
+
 | Committed outcome | Prompt result |
 |---|---|
-| Run finished and Goal completed | `stopReason:"end_turn"` |
-| Client cancellation or process stop | `stopReason:"cancelled"`, including a teardown error after cancellation; `_meta["arany.uncertainEffects"]` reports observed uncertain Tools when nonzero |
-| Failed Run, uncertain effect or hook stop | `-32603` with compiled recovery guidance and `data.reason:"turnFailed"`, `"effectUncertain"` or `"stoppedByHook"` |
-| Budget stop | Serve `stopReason:actionBudgetExhausted` maps to `max_turn_requests`; `tokenBudgetExhausted` maps to `max_tokens`. Cancellation keeps `cancelled` and observed uncertain effects keep the failure path. An admission failure without a committed turn stays an RPC error. |
+| Run finished, Goal completed and no `goal.stopped` | `stopReason:"end_turn"` |
+| Client cancellation or process stop, or `goal.stopped` `paused` or `cancelled` | `stopReason:"cancelled"`, including a teardown error after cancellation; `_meta["arany.uncertainEffects"]` reports observed uncertain Tools when nonzero |
+| Failed Run (`goal.stopped` `failed`, `notAdmitted` or absent), uncertain effect (an observed uncertain Tool or `goal.stopped` `uncertain`), interruption without a terminal receipt (`interrupted`) or hook stop (`stoppedByHook`) | `-32603` with compiled recovery guidance and `data.reason:"turnFailed"`, `"effectUncertain"`, `"turnInterrupted"` or `"stoppedByHook"` |
+| Budget stop (`goal.stopped` `goalExhausted`) | `limit:"tokens"` maps to `max_tokens`; `calls`, `runs` and `activeTime` map to `max_turn_requests`. Cancellation keeps `cancelled` and observed uncertain effects keep the failure path. An admission failure without a committed turn stays an RPC error. |
 
 Failure is never `end_turn`; `refusal` is unused because journal context is
 retained. A submission without a committed terminal Run retains serve's fatal
@@ -332,7 +334,7 @@ State storage and all per-action resource limits remain unchanged.
 |---|---|---|
 | Core committed turn | Canonical transcript validates against pinned upstream v1 schema; update equals reopened MessageCommitted and precedes end_turn; durable RunFinished and reduced Session agree | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs), [golden](../../crates/arany-cli/tests/fixtures/acp/basic.jsonl) |
 | Negotiation and unavailable auth | Integer version negotiation, malformed versions, duplicate init, unknown auth method, unauthenticated prompt, unknown Session and unsupported method refusals | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
-| Optional surfaces | Closed action/token budget reasons map exactly, without treating ordinary failure at a budget boundary as exhaustion; bounded mission/criterion plans use committed facts, neutralize controls, suppress duplicate/foreign Events and precede the response; unadvertised controls refuse | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
+| Optional surfaces | Every closed `goal.stopped` value, including the action/token budget limits, maps exactly, without treating ordinary failure at a budget boundary as exhaustion; bounded mission/criterion plans use committed facts, neutralize controls, suppress duplicate/foreign Events and precede the response; unadvertised controls refuse | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Approval modes | New/load/resume selectors and both update notifications agree; either setter changes both surfaces; unsupported/oversized modes, boolean config and unknown Sessions refuse; mid-turn switch retains a pending permission, changes the next approval, and cannot widen settings Ask | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs), including its native Guard journey for automatic edits |
 | Session lifecycle | Close frees capacity after 64, keeps durable history and cancels a turn before replying; uncertain outcomes retain unknown metadata without retry; list paginates within bounds, refuses invalid/foreign cursors and exposes only Workspace metadata with escaped titles | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Cancellation and capacity | Busy refusal runs no second prompt; session and request cancellation, pre-accept latch, EOF and stalled output produce bounded interruption without invented success | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
