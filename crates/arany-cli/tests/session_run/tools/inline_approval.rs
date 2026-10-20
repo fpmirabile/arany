@@ -192,11 +192,21 @@ impl Driver {
         let mut input = input.lock().unwrap();
         crate::process::decline_workspace_consent(&mut *input, bytes, &mut self.declined);
         let text = String::from_utf8_lossy(bytes);
+        let frame_end: &[u8] = if case.starts_with("linear") {
+            b"empty Enter denies:\r\n"
+        } else {
+            b"\x1b[?25l"
+        };
+        // The question row can arrive before the rest of the approval frame.
+        let frame_bytes = bytes
+            .windows(frame_end.len())
+            .rposition(|part| part == frame_end)
+            .map_or(&[][..], |end| &bytes[..end + frame_end.len()]);
         let frame = if case.starts_with("linear") {
-            text.to_string()
+            String::from_utf8_lossy(frame_bytes).into_owned()
         } else {
             crate::session_picker::screen_rows(
-                bytes,
+                frame_bytes,
                 80,
                 if case == "unguarded-page-up" { 50 } else { 24 },
             )
