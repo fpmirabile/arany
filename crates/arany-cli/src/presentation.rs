@@ -574,7 +574,7 @@ impl ToolApprovalChoice {
             Self::ExactCommand => {
                 "Yes, and don't ask again for: this exact command in this project (unguarded)"
             }
-            Self::No => "No, and tell Arany what to do differently",
+            Self::No => "No",
         }
     }
 

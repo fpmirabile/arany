@@ -1,5 +1,6 @@
 use super::{
-    CursorQuery, INPUT_POLL_INTERVAL, MAX_DRAFT_BYTES, ReaderEvent, map_input, terminal_input,
+    CursorQuery, INPUT_POLL_INTERVAL, InputAdmission, MAX_DRAFT_BYTES, ReaderEvent, admit_input,
+    map_input, terminal_input,
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -29,20 +30,29 @@ pub(super) fn start(
     sender: mpsc::Sender<super::Observed<ReaderEvent>>,
     shutdown: Arc<AtomicBool>,
     cursor: CursorQuery,
-) -> io::Result<JoinHandle<()>> {
+) -> io::Result<(JoinHandle<()>, InputAdmission)> {
     let mut input = terminal_input()?;
     let mut poll = Poll::new()?;
     let fd = input.as_raw_fd();
     poll.registry()
         .register(&mut SourceFd(&fd), Token(0), Interest::READABLE)?;
-    std::thread::Builder::new()
+    let (admission, mut requests) = InputAdmission::new(&poll)?;
+    let thread = std::thread::Builder::new()
         .name("arany-terminal-input".into())
         .spawn(move || {
-            if let Err(error) = read(&mut poll, &mut input, &sender, &shutdown, &cursor) {
+            if let Err(error) = read(
+                &mut poll,
+                &mut input,
+                &sender,
+                &shutdown,
+                &cursor,
+                &mut requests,
+            ) {
                 let _ = sender.blocking_send((Instant::now(), Err(error)));
             }
             cursor.close();
-        })
+        })?;
+    Ok((thread, admission))
 }
 
 // A cursor reply must not wait behind a full event queue while the owner waits for that reply.
@@ -78,6 +88,7 @@ fn read(
     sender: &mpsc::Sender<super::Observed<ReaderEvent>>,
     shutdown: &AtomicBool,
     cursor: &CursorQuery,
+    requests: &mut mpsc::Receiver<tokio::sync::oneshot::Sender<Instant>>,
 ) -> io::Result<()> {
     let fd = input.as_raw_fd();
     let mut events = Events::with_capacity(4);
@@ -89,6 +100,7 @@ fn read(
     };
     let mut geometry = crossterm::terminal::size().ok();
     while !shutdown.load(Ordering::Acquire) {
+        admit_input(input, requests, || decoder = Decoder::default())?;
         if !outbox.flush() {
             return Ok(());
         }
@@ -122,6 +134,7 @@ fn read(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
+        admit_input(input, requests, || decoder = Decoder::default())?;
         let observed = Instant::now();
         match input.read(&mut bytes) {
             Ok(0) => {
@@ -579,4 +592,145 @@ fn mouse(button: u16, column: u16, row: u16, release: bool) -> Option<ReaderEven
         row: row.checked_sub(1)?,
         modifiers,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{
+        INPUT_QUEUE_CAPACITY, InputReader, LineEvent, LineReader, TerminalInput, TerminalReader,
+        read_lines,
+    };
+    use super::*;
+    use rustix::fs::OFlags;
+
+    #[tokio::test]
+    async fn approval_barrier_flushes_unread_os_bytes_with_a_full_event_queue() {
+        use std::io::Write;
+
+        for linear in [false, true] {
+            let (mut master, mut input) = arany::test_support::process::cloexec_pty(None);
+            let flags = rustix::fs::fcntl_getfl(&input).unwrap();
+            rustix::fs::fcntl_setfl(&input, flags | OFlags::NONBLOCK).unwrap();
+            let mut settings = rustix::termios::tcgetattr(&input).unwrap();
+            if !linear {
+                settings.make_raw();
+            }
+            settings
+                .local_modes
+                .remove(rustix::termios::LocalModes::ECHO);
+            rustix::termios::tcsetattr(&input, rustix::termios::OptionalActions::Now, &settings)
+                .unwrap();
+            let mut poll = Poll::new().unwrap();
+            let fd = input.as_raw_fd();
+            poll.registry()
+                .register(&mut SourceFd(&fd), Token(0), Interest::READABLE)
+                .unwrap();
+            let (admission, mut requests) = InputAdmission::new(&poll).unwrap();
+            let (start, ready) = std::sync::mpsc::sync_channel(1);
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let should_stop = shutdown.clone();
+            let old = Instant::now();
+            let mut reader = if linear {
+                let (sender, receiver) = mpsc::channel(4);
+                for _ in 0..4 {
+                    sender
+                        .try_send((old, Ok(LineEvent::Submitted(b"1".to_vec()))))
+                        .unwrap();
+                }
+                assert_eq!(sender.capacity(), 0);
+                master.write_all(b"1\n1\n").unwrap();
+                let thread = std::thread::spawn(move || {
+                    ready.recv().unwrap();
+                    read_lines(&mut poll, &mut input, &sender, &should_stop, &mut requests)
+                        .unwrap();
+                });
+                TerminalReader::Lines(LineReader {
+                    receiver,
+                    shutdown,
+                    thread: Some(thread),
+                    pending: VecDeque::from([TerminalInput::Character('1'), TerminalInput::Submit]),
+                    draft_bytes: 1,
+                    discard_before: None,
+                    admission,
+                })
+            } else {
+                let (sender, receiver) = mpsc::channel(INPUT_QUEUE_CAPACITY);
+                for _ in 0..INPUT_QUEUE_CAPACITY {
+                    sender
+                        .try_send((
+                            old,
+                            Ok(ReaderEvent::Event(Event::Key(KeyEvent::new(
+                                KeyCode::Enter,
+                                KeyModifiers::NONE,
+                            )))),
+                        ))
+                        .unwrap();
+                }
+                assert_eq!(sender.capacity(), 0);
+                master.write_all(&b"1\r".repeat(1024)).unwrap();
+                let cursor = CursorQuery::default();
+                let query = cursor.clone();
+                let thread = std::thread::spawn(move || {
+                    ready.recv().unwrap();
+                    read(
+                        &mut poll,
+                        &mut input,
+                        &sender,
+                        &should_stop,
+                        &query,
+                        &mut requests,
+                    )
+                    .unwrap();
+                });
+                TerminalReader::Keys(InputReader {
+                    receiver,
+                    shutdown,
+                    thread: Some(thread),
+                    paste: None,
+                    cursor,
+                    discard_before: None,
+                    admission,
+                })
+            };
+            let (admitted, ()) = tokio::join!(biased; reader.discard_typeahead(), async {
+                start.send(()).unwrap();
+            });
+            admitted.unwrap();
+            master
+                .write_all(if linear { b"no\n" } else { b"n" })
+                .unwrap();
+            let first = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let event = reader.recv().await.unwrap();
+                    if !matches!(event, TerminalInput::LineRejected | TerminalInput::Resize) {
+                        break event;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                first,
+                TerminalInput::Character('n'),
+                "linear={linear}: pre-frame bytes cannot choose or submit"
+            );
+            if linear {
+                assert_eq!(reader.recv().await.unwrap(), TerminalInput::Character('o'));
+                assert_eq!(reader.recv().await.unwrap(), TerminalInput::Submit);
+            }
+            master
+                .write_all(if linear { b"1\n" } else { b"1\r" })
+                .unwrap();
+            for expected in [TerminalInput::Character('1'), TerminalInput::Submit] {
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(2), reader.recv())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    expected
+                );
+            }
+            reader.stop();
+        }
+    }
 }

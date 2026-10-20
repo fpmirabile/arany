@@ -462,6 +462,7 @@ pub(super) async fn submit_objective(
         if std::mem::take(&mut approval_first_frame) {
             terminal
                 .discard_approval_typeahead()
+                .await
                 .map_err(|error| error.to_string())?;
         }
         let (result, mut events) = handle
@@ -608,7 +609,7 @@ pub(super) async fn submit_objective(
                         TerminalInput::Up if !approval_more => approval_choice = approval_choice.saturating_sub(1),
                         TerminalInput::Down if !approval_more => approval_choice = (approval_choice + 1).min(choices.len() - 1),
                         TerminalInput::Down | TerminalInput::PageDown if approval_more => { approval_page += 1; approval_review_notice = false; },
-                        TerminalInput::Up | TerminalInput::PageUp => { approval_page = approval_page.saturating_sub(1); approval_choice = 0; }
+                        TerminalInput::Up | TerminalInput::PageUp => { approval_page = approval_page.saturating_sub(1); }
                         TerminalInput::Resize => { approval_page = 0; approval_choice = if pending.as_ref().is_some_and(|approval| approval.unguarded.is_some()) { choices.len() - 1 } else { 0 }; approval_review_notice = false; }
                         TerminalInput::Suspend => {
                             terminal.suspend_and_resume(composer.text().len()).map_err(|error| error.to_string())?;

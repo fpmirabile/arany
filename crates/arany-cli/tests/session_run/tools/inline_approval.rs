@@ -24,6 +24,8 @@ fn numbered_tool_approval_dispatches_only_after_review_and_an_explicit_choice() 
         "linear-no",
         "cancel",
         "unguarded",
+        "unguarded-page-up",
+        "unguarded-pages",
     ] {
         run_case(case);
     }
@@ -80,8 +82,9 @@ fn run_case(case: &'static str) {
         .env("SSL_CERT_FILE", &tls.ca).env("OPENAI_API_KEY", "synthetic-native-key")
         .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE", &state).env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("ARANY_TEST_ROWS", if case == "unguarded-page-up" { "50" } else { "24" })
         .current_dir(&workspace)
-        .args(["-q", "-e", "-c", "stty rows 24 cols 80; exec \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --tools approval", "/dev/null"])
+        .args(["-q", "-e", "-c", "stty rows \"$ARANY_TEST_ROWS\" cols 80; exec \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --tools approval", "/dev/null"])
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = crate::loopback::ChildGuard::new(product.spawn().unwrap());
     let input = Arc::new(Mutex::new(child.child().stdin.take().unwrap()));
@@ -98,14 +101,16 @@ fn run_case(case: &'static str) {
             if case == "typeahead" && step == 0 {
                 peer_input.lock().unwrap().write_all(b"\r").unwrap();
             }
-            let command = if case == "unguarded" {
+            let command = if case == "unguarded-pages" {
+                format!("exit 42;#{}", "padding ".repeat(40))
+            } else if case.starts_with("unguarded") {
                 "exit 42".to_owned()
             } else if case == "early-digit" {
                 format!("printf approval-dispatched;#{}", "padding ".repeat(600))
             } else {
                 "printf approval-dispatched".into()
             };
-            let (name, arguments) = if case == "unguarded" && step == 1 {
+            let (name, arguments) = if case.starts_with("unguarded") && step == 1 {
                 (
                     "arany_command_unguarded",
                     json!({"program":"bash","args":["-c",command],"cwd":"","justification":"Run this exact failed command on the host"}),
@@ -116,7 +121,7 @@ fn run_case(case: &'static str) {
                     json!({"program":"bash","args":["-c",command],"cwd":""}),
                 )
             };
-            let output = if step >= if case == "unguarded" { 2 } else { 1 } {
+            let output = if step >= if case.starts_with("unguarded") { 2 } else { 1 } {
                 arany::semantic::responses_output(&json!("APPROVAL_FINAL"))
             } else {
                 json!([{"type":"function_call","id":format!("fc_{step}"),"call_id":format!("call_{step}"),"status":"completed","name":name,"arguments":arguments.to_string()}])
@@ -190,11 +195,19 @@ impl Driver {
         let frame = if case.starts_with("linear") {
             text.to_string()
         } else {
-            crate::session_picker::screen_rows(bytes, 80, 24).join("\n")
+            crate::session_picker::screen_rows(
+                bytes,
+                80,
+                if case == "unguarded-page-up" { 50 } else { 24 },
+            )
+            .join("\n")
         };
         if frame != self.last_frame && frame.contains("Do you want to proceed?") && !self.answered {
             self.last_frame = frame.clone();
-            if case == "unguarded" && !frame.contains("Run outside the Guard?") && !self.early {
+            if case.starts_with("unguarded")
+                && !frame.contains("Run outside the Guard?")
+                && !self.early
+            {
                 if frame.contains("more lines") {
                     input.write_all(b"\x1b[6~").unwrap();
                 } else {
@@ -217,8 +230,16 @@ impl Driver {
                 input.write_all(b"\x1b[6~").unwrap();
                 return;
             }
-            if case == "unguarded" {
+            if case.starts_with("unguarded") {
                 assert!(frame.contains("› 3. No"), "unguarded opens with No focused");
+            }
+            if case == "unguarded-page-up" {
+                assert_eq!(self.pages, 0, "PageUp is tested on page zero");
+            } else if case == "unguarded-pages" {
+                assert!(
+                    self.pages > 0,
+                    "backward and forward navigation requires multiple pages"
+                );
             }
             let answer: &[u8] = match case {
                 "escape" | "typeahead" => b"\x1b",
@@ -227,6 +248,8 @@ impl Driver {
                 "linear-no" => b"no\r",
                 "cancel" => b"\x03",
                 "unguarded" => b"2",
+                "unguarded-page-up" => b"\x1b[5~\r",
+                "unguarded-pages" => b"\x1b[5~\x1b[6~\r",
                 _ => unreachable!(),
             };
             input.write_all(answer).unwrap();
@@ -263,7 +286,10 @@ fn assert_replay(state: &std::path::Path, workspace: &std::path::Path, case: &st
             .unwrap()
             .unwrap();
         let run = &view.runs[0];
-        let denied = matches!(case, "escape" | "typeahead" | "linear-no");
+        let denied = matches!(
+            case,
+            "escape" | "typeahead" | "linear-no" | "unguarded-page-up" | "unguarded-pages"
+        );
         assert_eq!(
             run.status,
             if case == "cancel" {
@@ -278,7 +304,10 @@ fn assert_replay(state: &std::path::Path, workspace: &std::path::Path, case: &st
         let observation = run.tools.last().unwrap().observation.as_ref().unwrap();
         if denied || case == "cancel" {
             assert!(observation.attestation.is_none(), "{case}: no dispatch");
-        } else if case == "unguarded" {
+            if case.starts_with("unguarded") {
+                assert!(!state.join("unguarded-commands.json").exists());
+            }
+        } else if case.starts_with("unguarded") {
             assert!(matches!(
                 observation.attestation,
                 Some(arany::Attestation::Unguarded(_))

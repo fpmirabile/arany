@@ -544,16 +544,12 @@ impl AttachedTerminal {
         })?;
         Ok((progress.more, progress.page))
     }
-    pub fn discard_approval_typeahead(&mut self) -> Result<(), TerminalError> {
-        #[cfg(unix)]
-        if self.is_linear() {
-            tcflush(io::stdin(), QueueSelector::IFlush).map_err(io::Error::from)?;
-        }
+    pub async fn discard_approval_typeahead(&mut self) -> Result<(), TerminalError> {
         self.input
             .as_mut()
             .expect("active terminal input")
-            .discard_typeahead();
-        Ok(())
+            .discard_typeahead()
+            .await
     }
 
     pub fn draw_tool_approval(

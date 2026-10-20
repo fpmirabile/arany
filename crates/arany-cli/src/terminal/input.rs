@@ -27,6 +27,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
+#[cfg(unix)]
+use tokio::sync::oneshot;
 
 type Observed<T> = (Instant, io::Result<T>);
 
@@ -135,8 +137,20 @@ impl TerminalReader {
         }
     }
 
-    pub(super) fn discard_typeahead(&mut self) {
-        let cutoff = Instant::now();
+    pub(super) async fn discard_typeahead(&mut self) -> Result<(), TerminalError> {
+        #[cfg(not(unix))]
+        return Err(TerminalError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "terminal input admission unavailable",
+        )));
+        #[cfg(unix)]
+        let cutoff = match self {
+            Self::Keys(reader) => &reader.admission,
+            Self::Lines(reader) => &reader.admission,
+        }
+        .after_frame()
+        .await?;
+        #[cfg(unix)]
         match self {
             Self::Keys(reader) => {
                 reader.discard_before = Some(cutoff);
@@ -148,6 +162,8 @@ impl TerminalReader {
                 reader.discard_before = Some(cutoff);
             }
         }
+        #[cfg(unix)]
+        Ok(())
     }
 
     pub(super) fn reset_draft(&mut self) {
@@ -208,6 +224,8 @@ pub(super) struct LineReader {
     pending: VecDeque<TerminalInput>,
     draft_bytes: usize,
     discard_before: Option<Instant>,
+    #[cfg(unix)]
+    admission: InputAdmission,
 }
 
 #[cfg(unix)]
@@ -243,54 +261,16 @@ impl LineReader {
         poll.registry()
             .register(&mut SourceFd(&fd), Token(0), Interest::READABLE)?;
         let (sender, receiver) = mpsc::channel(4);
+        let (admission, mut requests) = InputAdmission::new(&poll)?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let should_stop = Arc::clone(&shutdown);
         let thread = std::thread::Builder::new()
             .name("arany-terminal-line-input".into())
             .spawn(move || {
-                let mut events = Events::with_capacity(4);
-                let mut bytes = [0; 8194];
-                while !should_stop.load(Ordering::Acquire) {
-                    match poll.poll(&mut events, Some(INPUT_POLL_INTERVAL)) {
-                        Ok(()) if events.is_empty() => continue,
-                        Ok(()) => {}
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(error) => {
-                            let _ = sender.blocking_send((Instant::now(), Err(error)));
-                            break;
-                        }
-                    }
-                    let observed = Instant::now();
-                    let event = match input.read(&mut bytes) {
-                        Ok(0) => LineEvent::EndOfInput,
-                        Ok(len) => decode_line(&bytes[..len]),
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if let Err(error) = poll.registry().reregister(
-                                &mut SourceFd(&fd),
-                                Token(0),
-                                Interest::READABLE,
-                            ) {
-                                let _ = sender.blocking_send((Instant::now(), Err(error)));
-                                break;
-                            }
-                            continue;
-                        }
-                        Err(error) => {
-                            let _ = sender.blocking_send((Instant::now(), Err(error)));
-                            break;
-                        }
-                    };
-                    if let Err(error) =
-                        poll.registry()
-                            .reregister(&mut SourceFd(&fd), Token(0), Interest::READABLE)
-                    {
-                        let _ = sender.blocking_send((Instant::now(), Err(error)));
-                        break;
-                    }
-                    if sender.blocking_send((observed, Ok(event))).is_err() {
-                        break;
-                    }
+                if let Err(error) =
+                    read_lines(&mut poll, &mut input, &sender, &should_stop, &mut requests)
+                {
+                    let _ = sender.blocking_send((Instant::now(), Err(error)));
                 }
             })?;
         Ok(Self {
@@ -300,6 +280,7 @@ impl LineReader {
             pending: VecDeque::new(),
             draft_bytes: 0,
             discard_before: None,
+            admission,
         })
     }
 
@@ -313,7 +294,7 @@ impl LineReader {
             .await
             .ok_or(TerminalError::InputClosed)?;
         let event = event.map_err(TerminalError::Io)?;
-        if self.discard_before.is_some_and(|cutoff| observed < cutoff)
+        if self.discard_before.is_some_and(|cutoff| observed <= cutoff)
             && !matches!(event, LineEvent::EndOfInput)
         {
             return Ok(TerminalInput::LineRejected);
@@ -371,6 +352,106 @@ impl Drop for LineReader {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+#[cfg(unix)]
+pub(super) struct InputAdmission {
+    sender: mpsc::Sender<oneshot::Sender<Instant>>,
+    wake: mio::Waker,
+}
+
+#[cfg(unix)]
+impl InputAdmission {
+    fn new(poll: &Poll) -> io::Result<(Self, mpsc::Receiver<oneshot::Sender<Instant>>)> {
+        let (sender, requests) = mpsc::channel(1);
+        let wake = mio::Waker::new(poll.registry(), Token(1))?;
+        Ok((Self { sender, wake }, requests))
+    }
+
+    async fn after_frame(&self) -> Result<Instant, TerminalError> {
+        let (reply, acknowledged) = oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            self.sender
+                .send(reply)
+                .await
+                .map_err(|_| TerminalError::InputClosed)?;
+            self.wake.wake()?;
+            acknowledged.await.map_err(|_| TerminalError::InputClosed)
+        })
+        .await
+        .map_err(|_| {
+            TerminalError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "terminal input admission timed out",
+            ))
+        })?
+    }
+}
+
+#[cfg(unix)]
+fn admit_input(
+    input: &File,
+    requests: &mut mpsc::Receiver<oneshot::Sender<Instant>>,
+    reset: impl FnOnce(),
+) -> io::Result<()> {
+    let Ok(reply) = requests.try_recv() else {
+        return Ok(());
+    };
+    reset();
+    rustix::termios::tcflush(input, rustix::termios::QueueSelector::IFlush)?;
+    let _ = reply.send(Instant::now());
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_lines(
+    poll: &mut Poll,
+    input: &mut File,
+    sender: &mpsc::Sender<Observed<LineEvent>>,
+    shutdown: &AtomicBool,
+    requests: &mut mpsc::Receiver<oneshot::Sender<Instant>>,
+) -> io::Result<()> {
+    let fd = input.as_raw_fd();
+    let mut events = Events::with_capacity(4);
+    let mut bytes = [0; 8194];
+    let mut pending = None;
+    while !shutdown.load(Ordering::Acquire) {
+        admit_input(input, requests, || pending = None)?;
+        if let Some(event) = pending.take() {
+            match sender.try_send(event) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(event)) => {
+                    pending = Some(event);
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+                Err(_) => return Ok(()),
+            }
+        }
+        match poll.poll(&mut events, Some(INPUT_POLL_INTERVAL)) {
+            Ok(()) if events.is_empty() => continue,
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+        admit_input(input, requests, || pending = None)?;
+        let observed = Instant::now();
+        let event = match input.read(&mut bytes) {
+            Ok(0) => LineEvent::EndOfInput,
+            Ok(len) => decode_line(&bytes[..len]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                poll.registry()
+                    .reregister(&mut SourceFd(&fd), Token(0), Interest::READABLE)?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        poll.registry()
+            .reregister(&mut SourceFd(&fd), Token(0), Interest::READABLE)?;
+        pending = Some((observed, Ok(event)));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -479,6 +560,8 @@ pub(super) struct InputReader {
     paste: Option<Result<String, &'static str>>,
     cursor: CursorQuery,
     discard_before: Option<Instant>,
+    #[cfg(unix)]
+    admission: InputAdmission,
 }
 
 impl InputReader {
@@ -488,7 +571,7 @@ impl InputReader {
         let should_stop = Arc::clone(&shutdown);
         let cursor = CursorQuery::default();
         #[cfg(unix)]
-        let thread = raw::start(sender, should_stop, cursor.clone())?;
+        let (thread, admission) = raw::start(sender, should_stop, cursor.clone())?;
         #[cfg(not(unix))]
         let thread = std::thread::Builder::new()
             .name("arany-terminal-input".into())
@@ -521,6 +604,8 @@ impl InputReader {
             paste: None,
             cursor,
             discard_before: None,
+            #[cfg(unix)]
+            admission,
         })
     }
 
@@ -542,7 +627,7 @@ impl InputReader {
                 .await
                 .ok_or(TerminalError::InputClosed)?;
             let event = event.map_err(TerminalError::Io)?;
-            let stale = self.discard_before.is_some_and(|cutoff| observed < cutoff);
+            let stale = self.discard_before.is_some_and(|cutoff| observed <= cutoff);
             match event {
                 ReaderEvent::Event(event) => {
                     if let Some(input) = map_input(event) {
@@ -679,9 +764,9 @@ mod tests {
             thread: None,
             paste: None,
             cursor: CursorQuery::default(),
-            discard_before: None,
+            discard_before: Some(Instant::now()),
+            admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
         });
-        reader.discard_typeahead();
         for code in [KeyCode::Enter, KeyCode::Char('1')] {
             sender
                 .send((
@@ -723,11 +808,11 @@ mod tests {
                 receiver,
                 shutdown: Arc::new(AtomicBool::new(false)),
                 thread: None,
-                pending: VecDeque::from([TerminalInput::Submit]),
-                draft_bytes: 1,
-                discard_before: None,
+                pending: VecDeque::new(),
+                draft_bytes: 0,
+                discard_before: Some(Instant::now()),
+                admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
             });
-            reader.discard_typeahead();
             sender
                 .send((old, Ok(LineEvent::Submitted(b"1".to_vec()))))
                 .await
@@ -777,6 +862,7 @@ mod tests {
             pending: VecDeque::new(),
             draft_bytes: 0,
             discard_before: None,
+            admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
         };
         for expected in [3000, 6000] {
             let first = reader.accept_segment(vec![b'x'; 3000], false).unwrap();

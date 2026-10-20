@@ -631,15 +631,15 @@ mod tests {
         for (choices, expected) in [
             (
                 vec![Yes, No],
-                "1. Yes\n2. No, and tell Arany what to do differently\nSelect 1-2, yes or no; empty Enter denies:\n",
+                "1. Yes\n2. No\nSelect 1-2, yes or no; empty Enter denies:\n",
             ),
             (
                 vec![Yes, AutoEdits, No],
-                "1. Yes\n2. Yes, and don't ask again for: file edits\n3. No, and tell Arany what to do differently\nSelect 1-3, yes or no; empty Enter denies:\n",
+                "1. Yes\n2. Yes, and don't ask again for: file edits\n3. No\nSelect 1-3, yes or no; empty Enter denies:\n",
             ),
             (
                 vec![Yes, ExactCommand, No],
-                "1. Yes\n2. Yes, and don't ask again for: this exact command in this project (unguarded)\n3. No, and tell Arany what to do differently\nSelect 1-3, yes or no; empty Enter denies:\n",
+                "1. Yes\n2. Yes, and don't ask again for: this exact command in this project (unguarded)\n3. No\nSelect 1-3, yes or no; empty Enter denies:\n",
             ),
         ] {
             let mut state = LinearState::new("linear");
