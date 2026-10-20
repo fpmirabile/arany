@@ -72,8 +72,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             workspace_inode: 2,
             call: ToolCall::Read {
                 path: format!("src/{index}-{}", "x".repeat(480)),
-                offset: 0,
-                limit: 4096,
+                offset: None,
+                limit: None,
             },
             limits: ToolLimits::default(),
             expires_at_ms: 1,
@@ -412,8 +412,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         workspace_inode: 2,
         call: ToolCall::Read {
             path: "src/report-failure".into(),
-            offset: 0,
-            limit: 4096,
+            offset: None,
+            limit: None,
         },
         limits: ToolLimits::default(),
         expires_at_ms: 1,
@@ -506,8 +506,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 workspace_inode: 2,
                 call: ToolCall::Read {
                     path: format!("src/{run_index}-{failure_index}"),
-                    offset: 0,
-                    limit: 4096,
+                    offset: None,
+                    limit: None,
                 },
                 limits: ToolLimits::default(),
                 expires_at_ms: 1,
@@ -638,8 +638,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
 fn read_evidence_names_the_site_that_attested_it() {
     let call = ToolCall::Read {
         path: "src/lib.rs".into(),
-        offset: 0,
-        limit: 4096,
+        offset: None,
+        limit: None,
     };
     assert_eq!(
         goal_report_evidence(

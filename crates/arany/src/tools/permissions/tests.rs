@@ -11,8 +11,8 @@ fn config(permissions: Value) -> PermissionConfig {
 fn read(path: &str) -> ToolCall {
     ToolCall::Read {
         path: path.into(),
-        offset: 0,
-        limit: 1,
+        offset: None,
+        limit: Some(1),
     }
 }
 
@@ -1188,19 +1188,19 @@ fn hook_output_parsing_copies_peer_exit_codes_and_json_precedence() {
         ),
         (
             Some(0),
-            specific(json!({"updatedInput": {"operation": "read", "path": "a", "offset": 0, "limit": 1}})),
+            specific(json!({"updatedInput": {"operation": "read", "path": "a", "offset": null, "limit": 1}})),
             "",
             HookResult::Narrowed { call: read("a") },
         ),
         (
             Some(0),
-            specific(json!({"updatedInput": {"operation": "read", "path": "../a", "offset": 0, "limit": 1}})),
+            specific(json!({"updatedInput": {"operation": "read", "path": "../a", "offset": null, "limit": 1}})),
             "",
             deny_with(Some("hook input update does not narrow")),
         ),
         (
             Some(0),
-            specific(json!({"permissionDecision": "ask", "updatedInput": {"operation": "read", "path": "a", "offset": 0, "limit": 1}})),
+            specific(json!({"permissionDecision": "ask", "updatedInput": {"operation": "read", "path": "a", "offset": null, "limit": 1}})),
             "",
             HookResult::Restricted {
                 decision: Decision::Ask,
@@ -1483,8 +1483,8 @@ fn post_tool_use_output_becomes_bounded_feedback_and_never_replaces_the_result()
 fn updated_input_accepts_only_provable_narrowing() {
     let window = |path: &str, offset, limit| ToolCall::Read {
         path: path.into(),
-        offset,
-        limit,
+        offset: Some(offset),
+        limit: Some(limit),
     };
     let list = |path: &str| ToolCall::List { path: path.into() };
     let search = |path: &str, query: &str| ToolCall::Search {
@@ -1513,7 +1513,15 @@ fn updated_input_accepts_only_provable_narrowing() {
         name: "n".into(),
         resource: resource.map(str::to_owned),
     };
+    let default = ToolCall::Read {
+        path: "a".into(),
+        offset: None,
+        limit: None,
+    };
     let cases = [
+        (default.clone(), window("a", 1, 2000), true),
+        (window("a", 1, 2000), default.clone(), true),
+        (window("a", 1, 32), default, false),
         (window("a", 10, 100), window("a", 10, 100), true),
         (window("a", 10, 100), window("a", 20, 50), true),
         (window("a", 10, 100), window("a", 10, 1), true),
@@ -1523,10 +1531,10 @@ fn updated_input_accepts_only_provable_narrowing() {
         (window("a", 10, 100), window("a", 110, 1), false),
         (window("a", 10, 100), window("a", u32::MAX, u32::MAX), false),
         (window("a", 10, 100), window("b", 10, 1), false),
-        (window("a/b", 0, 10), window("a", 0, 10), false),
-        (window("a", 0, 10), window("A", 0, 10), false),
-        (window("a", 0, 10), window("./a", 0, 10), false),
-        (window("a/b", 0, 10), window("a/../a/b", 0, 10), false),
+        (window("a/b", 1, 10), window("a", 1, 10), false),
+        (window("a", 1, 10), window("A", 1, 10), false),
+        (window("a", 1, 10), window("./a", 1, 10), false),
+        (window("a/b", 1, 10), window("a/../a/b", 1, 10), false),
         (list("src"), list("src"), true),
         (list("src"), list("src/deep/er"), true),
         (list("."), list("src"), true),

@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
-pub(crate) const MAX_READ_PAGE_BYTES: u32 = 64 * 1024;
+pub(crate) const MAX_READ_PAGE_LINES: u32 = 2000;
 // ToolObservation::valid checks every producer against this serialized bound.
 pub(crate) const MAX_TOOL_OBSERVATION_BYTES: usize =
     2 * MAX_TOOL_RESULT_BYTES + MAX_TOOL_ARGUMENT_BYTES;
@@ -175,8 +175,10 @@ pub enum ToolCall {
     },
     Read {
         path: String,
-        offset: u32,
-        limit: u32,
+        #[serde(deserialize_with = "Option::deserialize")]
+        offset: Option<u32>,
+        #[serde(deserialize_with = "Option::deserialize")]
+        limit: Option<u32>,
     },
     Search {
         path: String,
@@ -1349,8 +1351,8 @@ mod model_call_tests {
 
         let read = model_call(&ToolCall::Read {
             path: "src/main.rs".into(),
-            offset: 0,
-            limit: 32,
+            offset: None,
+            limit: Some(32),
         });
         assert_eq!(read["operation"], "read");
         assert_eq!(read["path"], "src/main.rs");
@@ -1747,8 +1749,8 @@ mod internal_call_tests {
         assert!(
             !ToolCall::Read {
                 path: "a".into(),
-                offset: 0,
-                limit: 1
+                offset: None,
+                limit: Some(1)
             }
             .is_internal()
         );

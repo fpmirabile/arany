@@ -45,8 +45,8 @@ fn hook_verdicts_carry_their_typed_stop_cause() {
         workspace_inode: 2,
         call: ToolCall::Read {
             path: "src/lib.rs".into(),
-            offset: 0,
-            limit: 1,
+            offset: None,
+            limit: Some(1),
         },
         limits: ToolLimits::default(),
         expires_at_ms: 1,

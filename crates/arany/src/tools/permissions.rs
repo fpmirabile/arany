@@ -331,10 +331,14 @@ pub(crate) fn narrows(original: &ToolCall, updated: &ToolCall) -> bool {
                 limit: new_limit,
             },
         ) => {
+            let offset = offset.unwrap_or(1);
+            let limit = limit.unwrap_or(super::types::MAX_READ_PAGE_LINES);
+            let new_offset = new_offset.unwrap_or(1);
+            let new_limit = new_limit.unwrap_or(super::types::MAX_READ_PAGE_LINES);
             path == new_path
                 && new_offset >= offset
-                && u64::from(*new_offset) + u64::from(*new_limit)
-                    <= u64::from(*offset) + u64::from(*limit)
+                && u64::from(new_offset) + u64::from(new_limit)
+                    <= u64::from(offset) + u64::from(limit)
         }
         (List { path }, List { path: new_path })
         | (GitStatus { path }, GitStatus { path: new_path }) => within(path, new_path),

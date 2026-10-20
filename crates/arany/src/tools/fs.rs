@@ -14,8 +14,14 @@ use std::path::Path;
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
         ToolCall::List { path } => valid_relative(path, true),
-        ToolCall::Read { path, limit, .. } => {
-            valid_relative(path, false) && (1..=MAX_READ_PAGE_BYTES).contains(limit)
+        ToolCall::Read {
+            path,
+            offset,
+            limit,
+        } => {
+            valid_relative(path, false)
+                && offset.is_none_or(|n| n >= 1)
+                && limit.is_none_or(|n| (1..=MAX_READ_PAGE_LINES).contains(&n))
         }
         ToolCall::Search { path, query } => {
             valid_relative(path, true) && !query.is_empty() && query.len() <= 512
@@ -56,11 +62,11 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             path,
             (
                 "offset",
-                json!({"type":"integer", "description":"Zero-based byte offset, 0 through 4294967295. Start at 0; page using the returned next offset."}),
+                json!({"type":["integer", "null"], "description":"1-based start line, 1 through 4294967295; null starts at line 1. Continue using next_line."}),
             ),
             (
                 "limit",
-                json!({"type":"integer", "description":"Number of UTF-8 bytes to read: integer 1 through 65536 inclusive. Use 65536 for a normal page; never request the whole file with a larger limit."}),
+                json!({"type":["integer", "null"], "description":"Number of lines, 1 through 2000; null reads up to 2000 lines. Lines are numbered and cut after 2000 characters; the rendered result budget may end the page earlier."}),
             ),
         ],
         "search" => vec![path, ("query", string())],
@@ -73,7 +79,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             ),
             (
                 "old",
-                json!({"type":"string", "description":"Non-empty exact literal text occurring once in the current file. To append, select a unique ending and include that ending plus the appended text in new."}),
+                json!({"type":"string", "description":"Non-empty exact literal text occurring once in the current file, excluding Read line-number prefixes. To append, select a unique ending and include that ending plus the appended text in new."}),
             ),
             (
                 "new",
@@ -942,40 +948,114 @@ pub(super) fn copy_seed() -> Result<(), ToolError> {
 }
 
 pub(super) fn read_page(
-    bytes: &[u8],
-    offset: u32,
-    limit: u32,
+    mut reader: impl Read,
+    offset: Option<u32>,
+    limit: Option<u32>,
     result_bytes: usize,
 ) -> Result<String, ToolError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| ToolError::Operation)?;
-    let start = offset as usize;
-    if start > text.len() || !text.is_char_boundary(start) {
-        return Err(ToolError::Path);
+    use sha2::{Digest, Sha256};
+
+    let start = offset.unwrap_or(1);
+    let limit = limit.unwrap_or(MAX_READ_PAGE_LINES);
+    if start == 0 || !(1..=MAX_READ_PAGE_LINES).contains(&limit) {
+        return Err(ToolError::Operation);
     }
-    let sha256 = hex_digest(bytes);
-    let page = |end: usize| {
-        json!({"sha256":sha256,"offset":start,"next_offset":end,"truncated":end<bytes.len(),"text":&text[start..end]}).to_string()
-    };
-    // The longest envelope: the largest next offset, `false` and no text.
-    let envelope = json!({"sha256":sha256,"offset":start,"next_offset":text.len(),"truncated":false,"text":""}).to_string().len();
+    let envelope = json!({"sha256":"0".repeat(64),"total_lines":MAX_SNAPSHOT_BYTES,
+        "start_line":start,"end_line":u32::MAX,"next_line":u32::MAX,
+        "truncated":false,"text":""})
+    .to_string()
+    .len();
     let budget = result_bytes.checked_sub(envelope).ok_or(ToolError::Limit)?;
-    let mut end = start;
+    let mut text = String::new();
     let mut escaped = 0;
-    for (index, character) in text[start..].char_indices() {
-        let next = index + character.len_utf8();
-        if next > limit as usize {
-            break;
+    let mut total_lines = 0u32;
+    let mut shown = 0u32;
+    let mut cut = false;
+    let mut full = false;
+    let mut finish_line = |line: &str, chars: usize, last_cr: bool| -> Result<(), ToolError> {
+        total_lines += 1;
+        if total_lines < start || full {
+            return Ok(());
         }
-        escaped += escaped_len(character);
-        if escaped > budget {
-            if end == start {
+        if shown == limit {
+            full = true;
+            return Ok(());
+        }
+        let chars = chars - usize::from(last_cr);
+        let mut row = format!("{total_lines}\t");
+        row.extend(line.chars().take(chars.min(2000)));
+        if chars > 2000 {
+            row.push_str("… [line truncated to 2000 chars]");
+        }
+        row.push('\n');
+        let size: usize = row.chars().map(escaped_len).sum();
+        if escaped + size > budget {
+            if shown == 0 {
                 return Err(ToolError::Limit);
             }
+            full = true;
+        } else {
+            text.push_str(&row);
+            escaped += size;
+            shown += 1;
+            cut |= chars > 2000;
+        }
+        Ok(())
+    };
+    let mut digest = Sha256::new();
+    let mut bytes = 0;
+    let mut chunk = [0u8; 8192];
+    let mut pending = Vec::with_capacity(chunk.len() + 3);
+    let mut line = String::new();
+    let mut chars = 0usize;
+    let mut last_cr = false;
+    loop {
+        let count = reader.read(&mut chunk).map_err(|_| ToolError::Operation)?;
+        if count == 0 {
             break;
         }
-        end = start + next;
+        bytes += count;
+        if bytes > MAX_SNAPSHOT_BYTES {
+            return Err(ToolError::Limit);
+        }
+        digest.update(&chunk[..count]);
+        pending.extend_from_slice(&chunk[..count]);
+        let valid = match std::str::from_utf8(&pending) {
+            Ok(_) => pending.len(),
+            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+            Err(_) => return Err(ToolError::Operation),
+        };
+        for character in std::str::from_utf8(&pending[..valid])
+            .map_err(|_| ToolError::Operation)?
+            .chars()
+        {
+            if character == '\n' {
+                finish_line(&line, chars, last_cr)?;
+                line.clear();
+                chars = 0;
+                last_cr = false;
+            } else {
+                chars += 1;
+                last_cr = character == '\r';
+                if chars <= 2001 {
+                    line.push(character);
+                }
+            }
+        }
+        pending.drain(..valid);
     }
-    let output = page(end);
+    if !pending.is_empty() {
+        return Err(ToolError::Operation);
+    }
+    if chars > 0 {
+        // A lone final CR is content; only CRLF is a line ending.
+        finish_line(&line, chars, false)?;
+    }
+    let end = start - 1 + shown;
+    let next = (shown > 0 && end < total_lines).then_some(end + 1);
+    let output = json!({"sha256":digest.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>(),"total_lines":total_lines,
+        "start_line":start,"end_line":end,"next_line":next,
+        "truncated":cut || next.is_some(),"text":text}).to_string();
     if output.len() > result_bytes {
         return Err(ToolError::Limit);
     }
@@ -994,8 +1074,22 @@ pub(super) fn inspect(
             offset,
             limit,
         } => {
-            let bytes = read_regular(open_file(root, path)?, MAX_FILE_BYTES)?;
-            read_page(&bytes, *offset, *limit, result_bytes)
+            let file = open_file(root, path)?;
+            let metadata = file.metadata().map_err(|_| ToolError::Operation)?;
+            if !metadata.is_file() {
+                return Err(ToolError::Path);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.nlink() != 1 {
+                    return Err(ToolError::Path);
+                }
+            }
+            if metadata.len() > MAX_SNAPSHOT_BYTES as u64 {
+                return Err(ToolError::Limit);
+            }
+            read_page(file, *offset, *limit, result_bytes)
         }
         ToolCall::List { path } | ToolCall::Search { path, .. } => {
             let path = if path == "." { "" } else { path.as_str() };
@@ -1807,6 +1901,110 @@ pub(super) fn rewind_file(root: &Dir, path: &str) -> Result<Option<FileVersion>,
             }
             let bytes = read_regular(file, MAX_FILE_BYTES)?;
             Ok(Some(FileVersion::from_bytes(&bytes, mode & 0o111 != 0)))
+        }
+    }
+}
+
+#[cfg(test)]
+mod read_page_tests {
+    use super::*;
+
+    fn page(bytes: &[u8], offset: Option<u32>, limit: Option<u32>) -> Value {
+        serde_json::from_str(&read_page(bytes, offset, limit, MAX_TOOL_RESULT_BYTES).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn line_pages_cover_defaults_continuations_endings_and_empty_files() {
+        let content = "hello\n".repeat(10_000);
+        let first = page(content.as_bytes(), None, None);
+        assert_eq!(first["start_line"], 1);
+        assert_eq!(first["end_line"], 2000);
+        assert_eq!(first["next_line"], 2001);
+        assert_eq!(first["total_lines"], 10_000);
+        assert_eq!(first["sha256"], hex_digest(content.as_bytes()));
+        assert!(first["text"].as_str().unwrap().starts_with("1\thello\n"));
+        let next = page(content.as_bytes(), Some(2001), None);
+        assert_eq!(next["end_line"], 4000);
+        assert_eq!(next["next_line"], 4001);
+        for (bytes, offset, text, total, end) in [
+            (
+                &b"a\r\nb\n\nlast"[..],
+                Some(2),
+                "2\tb\n3\t\n4\tlast\n",
+                4,
+                4,
+            ),
+            (&b"a\n"[..], Some(2), "", 1, 1),
+            (&b"a\n"[..], Some(99), "", 1, 98),
+            (&b""[..], None, "", 0, 0),
+            (&b"\n"[..], None, "1\t\n", 1, 1),
+            (&b"a\r"[..], None, "1\ta\r\n", 1, 1),
+        ] {
+            let result = page(bytes, offset, None);
+            assert_eq!(result["text"], text);
+            assert_eq!(result["total_lines"], total);
+            assert_eq!(result["end_line"], end);
+            assert_eq!(result["next_line"], Value::Null);
+            assert_eq!(result["truncated"], false);
+        }
+        let last = page(content.as_bytes(), Some(9999), Some(2));
+        assert_eq!(last["end_line"], 10_000);
+        assert_eq!(last["next_line"], Value::Null);
+        assert_eq!(last["truncated"], false);
+    }
+
+    #[test]
+    fn streamed_reads_bound_long_lines_input_and_rendered_output() {
+        for content in [
+            "é".repeat(2001),
+            "x".repeat(3 * 1024 * 1024),
+            format!("{}é", "a".repeat(8191)),
+        ] {
+            let result = page(content.as_bytes(), None, None);
+            assert_eq!(result["total_lines"], 1);
+            assert_eq!(result["next_line"], Value::Null);
+            assert_eq!(result["truncated"], true);
+            assert_eq!(result["sha256"], hex_digest(content.as_bytes()));
+            assert_eq!(
+                result["text"],
+                format!(
+                    "1\t{}… [line truncated to 2000 chars]\n",
+                    content.chars().take(2000).collect::<String>()
+                )
+            );
+        }
+        let crlf = format!("{}\r\n", "é".repeat(2000));
+        assert_eq!(page(crlf.as_bytes(), None, None)["truncated"], false);
+        let file = tempfile::tempfile().unwrap();
+        let content = "123456789\n".repeat(2 * 1024 * 1024);
+        (&file).write_all(content.as_bytes()).unwrap();
+        use std::io::{Seek, SeekFrom};
+        (&file).seek(SeekFrom::Start(0)).unwrap();
+        let result: Value =
+            serde_json::from_str(&read_page(file, None, None, MAX_TOOL_RESULT_BYTES).unwrap())
+                .unwrap();
+        assert_eq!(result["total_lines"], 2 * 1024 * 1024);
+        assert_eq!(result["sha256"], hex_digest(content.as_bytes()));
+        let escaped = "\"\\\t\0é\n".repeat(2000);
+        let output = read_page(escaped.as_bytes(), None, None, 512).unwrap();
+        assert!(output.len() <= 512);
+        let result: Value = serde_json::from_str(&output).unwrap();
+        assert!(result["next_line"].as_u64().unwrap() > 1);
+        assert!(matches!(
+            read_page(
+                std::io::repeat(b'x').take(MAX_SNAPSHOT_BYTES as u64 + 1),
+                None,
+                None,
+                MAX_TOOL_RESULT_BYTES
+            ),
+            Err(ToolError::Limit)
+        ));
+        for invalid in [vec![0xff], [b"ok\n".repeat(2000), vec![0xc3]].concat()] {
+            assert!(matches!(
+                read_page(invalid.as_slice(), None, None, MAX_TOOL_RESULT_BYTES),
+                Err(ToolError::Operation)
+            ));
         }
     }
 }

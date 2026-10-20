@@ -1141,8 +1141,8 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
         assert_eq!(
             root_config.allows(&ToolCall::Read {
                 path: path.into(),
-                offset: 0,
-                limit: 1
+                offset: None,
+                limit: Some(1)
             }),
             expected,
             "root grant: {path}"
@@ -1172,8 +1172,8 @@ fn tool_admission_corpus_is_closed_and_restrict_only() {
         assert_eq!(
             config.allows(&ToolCall::Read {
                 path: path.into(),
-                offset: 0,
-                limit: 1
+                offset: None,
+                limit: Some(1)
             }),
             expected,
             "path case"
@@ -1258,7 +1258,12 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         unknown["network"] = json!(true);
         assert!(serde_json::from_value::<ToolCall>(unknown).is_err());
     }
-    for (index, key) in [(4, "expected_digest"), (7, "resource")] {
+    for (index, key) in [
+        (1, "offset"),
+        (1, "limit"),
+        (4, "expected_digest"),
+        (7, "resource"),
+    ] {
         let mut missing = rows[index].clone();
         missing.as_object_mut().unwrap().remove(key);
         assert!(
@@ -1269,8 +1274,8 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     for call in [
         ToolCall::Read {
             path: "src/main.rs".into(),
-            offset: 0,
-            limit: 65537,
+            offset: None,
+            limit: Some(2001),
         },
         ToolCall::Search {
             path: "src".into(),
@@ -1723,8 +1728,8 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
 
     let read = ToolCall::Read {
         path: "src/main.rs".into(),
-        offset: 0,
-        limit: 1024,
+        offset: None,
+        limit: Some(1024),
     };
     let mut observation = make_observation(read, 0);
     super::guard::publish_cache_candidate(
@@ -2145,8 +2150,8 @@ fn child_research_excludes_git_reads() {
         ToolCall::List { path: ".".into() },
         ToolCall::Read {
             path: "a".into(),
-            offset: 0,
-            limit: 1,
+            offset: None,
+            limit: Some(1),
         },
         ToolCall::Search {
             path: ".".into(),
@@ -2348,8 +2353,8 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
     );
     let read = |path: &str| ToolCall::Read {
         path: path.into(),
-        offset: 0,
-        limit: MAX_READ_PAGE_BYTES,
+        offset: None,
+        limit: None,
     };
 
     let observation = run_in_process(&runtime, read("src/main.rs")).await;
@@ -2362,7 +2367,7 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
     ));
     assert_eq!(
         serde_json::from_str::<Value>(&observation.output).unwrap()["text"],
-        "fn main() {}\n"
+        "1\tfn main() {}\n"
     );
     assert_eq!(
         runtime.reservation_overhead(&read("src/main.rs")),
@@ -2505,13 +2510,13 @@ fn result_capacity_is_the_context_fit_formula_with_a_floor_and_the_general_ceili
     );
     runtime.context_limit_bytes = 1 << 20;
     let limit = runtime.context_limit_bytes();
-    let fitted = |overhead: usize| limit.saturating_sub(overhead + 512) / 6;
+    let fitted = |overhead: usize| limit.saturating_sub(overhead + 512);
     let ceiling = |overhead: usize| {
         runtime
             .result_capacity(overhead, 0)
             .map(|capacity| capacity.min(MAX_TOOL_RESULT_BYTES))
     };
-    let below_ceiling = limit - 512 - 6 * (MAX_TOOL_RESULT_BYTES / 2);
+    let below_ceiling = limit - 512 - (MAX_TOOL_RESULT_BYTES / 2);
     assert_eq!(
         runtime.result_capacity(below_ceiling, 0),
         Some(fitted(below_ceiling))
@@ -2522,7 +2527,7 @@ fn result_capacity_is_the_context_fit_formula_with_a_floor_and_the_general_ceili
         "the context fit exceeds the ceiling at zero overhead"
     );
     assert_eq!(ceiling(0), Some(MAX_TOOL_RESULT_BYTES));
-    let at_floor = limit - 512 - 6 * 128;
+    let at_floor = limit - 512 - 128;
     assert_eq!(runtime.result_capacity(at_floor, 0), Some(128));
     assert_eq!(runtime.result_capacity(at_floor + 1, 0), None);
 }
@@ -2544,8 +2549,8 @@ async fn in_process_results_fit_their_budget_before_serialization() {
             crate::session::AgentRunId::new(),
             ToolCall::Read {
                 path: "src/big.txt".into(),
-                offset: 0,
-                limit: MAX_READ_PAGE_BYTES,
+                offset: None,
+                limit: None,
             },
         );
         intent.limits.result_bytes = result_bytes;
@@ -2553,10 +2558,15 @@ async fn in_process_results_fit_their_budget_before_serialization() {
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
         assert!(observation.output.len() <= result_bytes as usize);
         let page: Value = serde_json::from_str(&observation.output).unwrap();
-        let next = page["next_offset"].as_u64().unwrap() as usize;
+        let next = page["next_line"].as_u64().unwrap() as usize;
         assert!(next > 0 && next < text.len());
         assert_eq!(page["truncated"], true);
-        assert_eq!(page["text"], text[..next]);
+        assert_eq!(
+            page["text"],
+            (1..next)
+                .map(|n| format!("{n}\t\"quoted\\line\"\n"))
+                .collect::<String>()
+        );
     }
     let mut intent = runtime.intent(
         crate::session::RunId::new(),
@@ -2578,8 +2588,8 @@ async fn in_process_results_fit_their_budget_before_serialization() {
         crate::session::AgentRunId::new(),
         ToolCall::Read {
             path: "src/big.txt".into(),
-            offset: 0,
-            limit: 1,
+            offset: None,
+            limit: Some(1),
         },
     );
     intent.limits.result_bytes = 128;
@@ -2590,8 +2600,9 @@ async fn in_process_results_fit_their_budget_before_serialization() {
 #[test]
 fn the_primary_prompt_states_the_read_page_limit() {
     assert!(
-        include_str!("../provider/prompts/primary.txt")
-            .contains(&format!("a limit from 1 to {MAX_READ_PAGE_BYTES}."))
+        include_str!("../provider/prompts/primary.txt").contains(&format!(
+            "a nullable line limit from 1 to {MAX_READ_PAGE_LINES},"
+        ))
     );
 }
 
@@ -2614,13 +2625,18 @@ async fn in_process_repeated_reads_all_succeed_on_a_large_file() {
             &runtime,
             ToolCall::Read {
                 path: "src/main.rs".into(),
-                offset: 0,
-                limit: MAX_READ_PAGE_BYTES,
+                offset: None,
+                limit: None,
             },
         )
         .await;
         *sample = start.elapsed();
         assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        let result: Value = serde_json::from_str(&observation.output).unwrap();
+        assert_eq!(result["start_line"], 1);
+        assert_eq!(result["end_line"], 2000);
+        assert_eq!(result["next_line"], 2001);
+        assert_eq!(result["text"].as_str().unwrap().lines().count(), 2000);
     }
     elapsed.sort_unstable();
     eprintln!(
@@ -2647,8 +2663,8 @@ async fn in_process_reads_are_refused_before_dispatch_when_every_slot_is_held() 
         &runtime,
         ToolCall::Read {
             path: "src/main.rs".into(),
-            offset: 0,
-            limit: 16,
+            offset: None,
+            limit: Some(16),
         },
     )
     .await;

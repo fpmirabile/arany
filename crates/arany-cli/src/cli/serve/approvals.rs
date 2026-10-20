@@ -333,8 +333,8 @@ mod tests {
     fn read() -> ToolCall {
         ToolCall::Read {
             path: "a".into(),
-            offset: 0,
-            limit: 1,
+            offset: None,
+            limit: Some(1),
         }
     }
 

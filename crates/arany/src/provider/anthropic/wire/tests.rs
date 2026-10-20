@@ -63,7 +63,7 @@ fn tool_use(id: &str, name: &str, input: Value) -> Value {
 }
 
 fn read_input() -> Value {
-    json!({"path": "src/main.rs", "offset": 0, "limit": 4096})
+    json!({"path": "src/main.rs", "offset": null, "limit": null})
 }
 
 fn tool_names(body: &Value) -> Vec<&str> {
@@ -218,13 +218,28 @@ fn inbound_tool_use_stop_yields_one_request_and_keeps_text_and_thinking_in_turn(
 
     assert_eq!(
         serde_json::to_value(&requests[0].call).unwrap(),
-        json!({"operation": "read", "path": "src/main.rs", "offset": 0, "limit": 4096})
+        json!({"operation": "read", "path": "src/main.rs", "offset": null, "limit": null})
     );
     assert_eq!(
         answer.turn.items("anthropic").unwrap(),
         content.as_array().unwrap().clone(),
         "text and thinking stay in the replayed turn"
     );
+    for (offset, limit, accepted) in [
+        (json!(null), json!(null), true),
+        (json!(1), json!(2000), true),
+        (json!(2001), json!(1), true),
+        (json!(0), json!(1), false),
+        (json!(1), json!(0), false),
+        (json!(1), json!(2001), false),
+    ] {
+        let input = json!({"path":"src/main.rs","offset":offset,"limit":limit});
+        let fixture = response(
+            "tool_use",
+            json!([tool_use("toolu_1", "arany_read", input.clone())]),
+        );
+        assert_eq!(decode(&request, &fixture).is_ok(), accepted, "{input}");
+    }
     assert_eq!(answer.response_id.as_deref(), Some("msg_example"));
     assert_eq!(answer.usage.input_tokens, Some(19));
 }
@@ -965,8 +980,8 @@ fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewe
     use crate::provider::ResponsePreview;
     let fragments = [
         "{\"path\":\"src/",
-        "main.rs\",\"offset\":0,",
-        "\"limit\":4096}",
+        "main.rs\",\"offset\":null,",
+        "\"limit\":null}",
     ];
     let mut events = vec![
         message_start(),
@@ -1010,7 +1025,7 @@ fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewe
         panic!("one Tool request");
     };
     assert!(
-        matches!(&requests[0].call, crate::tools::ToolCall::Read { path, limit: 4096, .. } if path == "src/main.rs")
+        matches!(&requests[0].call, crate::tools::ToolCall::Read { path, limit: None, .. } if path == "src/main.rs")
     );
     assert_eq!(accepted.turn.items("anthropic").unwrap().len(), 2);
     for invalid in [
@@ -1372,7 +1387,7 @@ fn a_quoted_preamble_before_tool_use_does_not_break_the_stream() {
         json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":preamble}}),
         json!({"type":"content_block_stop","index":0}),
         json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"arany_read","input":{}}}),
-        json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a\",\"offset\":0,\"limit\":10}"}}),
+        json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a\",\"offset\":null,\"limit\":10}"}}),
         json!({"type":"content_block_stop","index":1}),
         json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":8}}),
         json!({"type":"message_stop"}),

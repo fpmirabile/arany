@@ -2067,8 +2067,8 @@ fn restrict_catalog(
         ToolCall::List { path: ".".into() },
         ToolCall::Read {
             path: "file".into(),
-            offset: 0,
-            limit: 1,
+            offset: None,
+            limit: Some(1),
         },
         ToolCall::Search {
             path: ".".into(),

@@ -2795,8 +2795,8 @@ mod tests {
         let config = config(vec![node_grant(temp.path())]);
         let file = intent(ToolCall::Read {
             path: "selected.txt".into(),
-            offset: 0,
-            limit: 32,
+            offset: None,
+            limit: Some(32),
         });
         let process = intent(ToolCall::Command {
             program: "node".into(),
@@ -2833,8 +2833,8 @@ mod tests {
         }]);
         let file = intent(ToolCall::Read {
             path: "selected.txt".into(),
-            offset: 0,
-            limit: 32,
+            offset: None,
+            limit: Some(32),
         });
         let process = intent(ToolCall::Command {
             program: "node".into(),

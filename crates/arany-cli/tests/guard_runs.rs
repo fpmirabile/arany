@@ -1624,8 +1624,8 @@ async fn primary_tool_step_events_match_the_snapshot() {
     };
     let read = arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
-        offset: 0,
-        limit: 32,
+        offset: None,
+        limit: Some(32),
     };
     let git = arany::ToolCall::GitStatus {
         path: "notes".into(),
@@ -1709,11 +1709,11 @@ async fn primary_tool_step_events_match_the_snapshot() {
 }
 
 #[tokio::test]
-async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit() {
+async fn primary_and_researcher_reads_receive_the_general_rendered_ceiling() {
     let read = || arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
-        offset: 0,
-        limit: 32,
+        offset: None,
+        limit: Some(32),
     };
     let finish = || {
         ProviderOutcome::Answer(Answer {
@@ -1754,8 +1754,8 @@ async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit(
         READ_ONLY,
     )
     .await;
-    assert!(result_bytes(&child) > 16 * 1024);
-    assert!(result_bytes(&primary) > result_bytes(&child));
+    assert_eq!(result_bytes(&child), 64 * 1024);
+    assert_eq!(result_bytes(&primary), 64 * 1024);
 }
 
 #[tokio::test]
@@ -1770,8 +1770,8 @@ async fn researcher_tool_step_events_match_the_snapshot() {
             "in-process read",
             arany::ToolCall::Read {
                 path: "notes/facts.txt".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             },
             RESEARCHER_READ,
         ),
@@ -2858,8 +2858,8 @@ mod routing {
         );
         let mut first = ScriptedProvider::new(vec![tool_outcome(arany::ToolCall::Read {
             path: "notes/facts.txt".into(),
-            offset: 0,
-            limit: 4096,
+            offset: None,
+            limit: None,
         })])
         .with_profile("scripted", "spare-first");
         first
@@ -3270,8 +3270,8 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
             }),
             tool_outcome(arany::ToolCall::Read {
                 path: "notes/facts.txt".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             }),
             ProviderOutcome::Answer(Answer {
                 text: "Applied the Skill.".into(),

@@ -69,8 +69,8 @@ mod goal_success_tests {
     fn later_failed_receipt_invalidates_an_earlier_matching_call() {
         let call = ToolCall::Read {
             path: "src/main.rs".into(),
-            offset: 0,
-            limit: 1024,
+            offset: None,
+            limit: Some(1024),
         };
         let contract = criterion(GoalSuccessCriterion::ToolCallSucceeded {
             call: Box::new(call.clone()),
@@ -191,8 +191,8 @@ mod goal_success_tests {
             ToolCall::List { path: "src".into() },
             ToolCall::Read {
                 path: "src/main.rs".into(),
-                offset: 0,
-                limit: 1024,
+                offset: None,
+                limit: Some(1024),
             },
             ToolCall::Search {
                 path: "src".into(),
@@ -281,8 +281,8 @@ mod goal_success_tests {
             observation(
                 ToolCall::Read {
                     path: "src/main.rs".into(),
-                    offset: 0,
-                    limit: 1024,
+                    offset: None,
+                    limit: Some(1024),
                 },
                 ToolDisposition::Succeeded,
                 serde_json::json!({
@@ -1457,8 +1457,8 @@ mod payload_version_tests {
             workspace_inode: 2,
             call: crate::tools::ToolCall::Read {
                 path: "src/lib.rs".into(),
-                offset: 0,
-                limit: 16,
+                offset: None,
+                limit: Some(16),
             },
             limits: crate::tools::ToolLimits::default(),
             expires_at_ms: 1,
@@ -1550,9 +1550,9 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(17));
+        assert_eq!(payload_version("ToolFinished"), Some(18));
         assert_eq!(
-            Event::decode("ToolFinished", 17, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 18, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1560,7 +1560,7 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                17,
+                18,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1572,9 +1572,9 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 17, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", 18, &invalid, Some(run), Some(agent)).is_err());
         }
-        for previous in [16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
+        for previous in [17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1627,7 +1627,7 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(12));
+        assert_eq!(payload_version("ToolStarted"), Some(13));
         assert_eq!(payload_version("ToolPermissionDecided"), Some(4));
     }
 
@@ -1767,7 +1767,7 @@ mod payload_version_tests {
             let payload = event.payload().expect("payload");
             let version = match event {
                 Event::RunStarted { .. } => 16,
-                Event::ToolStarted { .. } => 12,
+                Event::ToolStarted { .. } => 13,
                 Event::RunFinished { .. } => 9,
                 _ => 7,
             };

@@ -48,8 +48,8 @@ impl TeamProvider {
     fn read(path: &str) -> ToolCall {
         ToolCall::Read {
             path: path.into(),
-            offset: 0,
-            limit: 128,
+            offset: None,
+            limit: Some(128),
         }
     }
 
