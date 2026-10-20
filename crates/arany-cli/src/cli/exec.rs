@@ -1207,6 +1207,7 @@ mod tests {
                 Some("ProviderCallRecorded") => 12,
                 Some("RunFinished") => 9,
                 Some("GoalProviderCallReserved") => 7,
+                Some("MessageAccepted") => 7,
                 _ => 6,
             };
             assert_eq!(line["event_version"], version);

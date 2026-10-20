@@ -1054,23 +1054,10 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         menu_at,
         b"> Cmd /resume",
     );
-    let completed_at = transcript.len();
-    input
-        .write_all(b"\r")
-        .expect("complete resume without executing");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        completed_at,
-        b"[session-id]",
-    );
-    assert!(!String::from_utf8_lossy(&transcript[completed_at..]).contains("Resume · 1"));
     let picker_at = transcript.len();
     input
         .write_all(b"\r")
-        .expect("execute resume without an argument");
+        .expect("Enter invokes the focused resume entry");
     wait_for_after(
         &mut output,
         &mut input,
