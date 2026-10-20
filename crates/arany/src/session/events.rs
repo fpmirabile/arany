@@ -7,8 +7,8 @@ use super::worker::*;
 
 use super::{
     MAX_ASSISTANT_MESSAGE_BYTES, MAX_COMPACTION_OUTPUT_TOKENS, MAX_COMPACTION_SUMMARY_BYTES,
-    MAX_CONTEXT_CONTENT_BYTES, MAX_HISTORY_RUNS, MAX_STEERING_NOTE_BYTES, MAX_USER_MESSAGE_BYTES,
-    compaction,
+    MAX_HISTORY_RUNS, MAX_STEERING_NOTE_BYTES, MAX_USER_MESSAGE_BYTES, MAX_WINDOW_CONTENT_BYTES,
+    compaction, content_ceiling,
 };
 
 pub use goal::{
@@ -166,7 +166,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         "HookStarted" => Some(3),
         "HookFinished" => Some(8),
         "ToolFinished" => Some(19),
-        "RunStarted" => Some(16),
+        "RunStarted" => Some(17),
         "RunFinished" => Some(9),
         "GoalProviderCallReserved" => Some(7),
         "GoalCompactionCallReserved" => Some(7),

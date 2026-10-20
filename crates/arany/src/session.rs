@@ -13,6 +13,14 @@ pub(crate) mod tests;
 pub mod worker;
 
 pub(crate) const MAX_CONTEXT_CONTENT_BYTES: usize = 376 * 1024;
+pub(crate) const MAX_WINDOW_CONTENT_BYTES: usize = 1024 * 1024;
+
+// 90% of the window at a conservative 3 bytes per token.
+pub(crate) fn content_ceiling(context_window_tokens: Option<u32>) -> usize {
+    context_window_tokens.map_or(MAX_CONTEXT_CONTENT_BYTES, |tokens| {
+        (tokens as usize * 27 / 10).min(MAX_WINDOW_CONTENT_BYTES)
+    })
+}
 pub(crate) const MAX_HISTORY_RUNS: usize = 32;
 pub(crate) const MAX_USER_MESSAGE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_STEERING_NOTE_BYTES: usize = 8 * 1024;

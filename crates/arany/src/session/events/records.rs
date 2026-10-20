@@ -104,7 +104,7 @@ impl ContextUsage {
 
     fn valid(&self) -> bool {
         self.budget_bytes > 0
-            && self.budget_bytes <= super::MAX_CONTEXT_CONTENT_BYTES as u32
+            && self.budget_bytes <= super::MAX_WINDOW_CONTENT_BYTES as u32
             && self.used_bytes <= self.budget_bytes
             && self.compactable_bytes <= self.used_bytes
             && self.tool_history_bytes <= self.compactable_bytes
@@ -135,6 +135,8 @@ pub struct RunConfig {
     #[serde(deserialize_with = "Option::deserialize")]
     pub chatgpt_provenance: Option<crate::provider::ChatGptProvenance>,
     pub output_token_bound: crate::provider::OutputTokenBound,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub context_window_tokens: Option<u32>,
     pub policy: CollaborationPolicy,
     pub output_token_cap: u32,
     pub provider_concurrency: u8,
@@ -162,6 +164,29 @@ impl RunConfig {
                 || usage.compactable_bytes as usize
                     >= super::compaction::AUTO_COMPACTION_HISTORY_BYTES
         }) || self.history_run_ids.len() + 1 >= super::MAX_HISTORY_RUNS * 3 / 4
+    }
+
+    // Only ChatGPT check evidence carries a window, and it only resizes within the hard ceilings.
+    fn context_window_valid(&self) -> bool {
+        let ceiling = super::content_ceiling(self.context_window_tokens);
+        self.context_window_tokens.is_none_or(|tokens| {
+            crate::provider::admitted_context_window(u64::from(tokens)).is_some()
+                && self.custom_profile_provenance.is_none()
+                && self.chatgpt_provenance.is_some()
+                && self.providers.as_ref().is_none_or(|providers| {
+                    providers
+                        .primary
+                        .iter()
+                        .all(|identity| identity.chatgpt_provenance().is_some())
+                })
+        }) && self
+            .context_usage
+            .as_ref()
+            .is_none_or(|usage| usage.budget_bytes as usize <= ceiling)
+            && self
+                .tool_policy
+                .as_ref()
+                .is_none_or(|policy| policy.max_context_bytes as usize <= ceiling)
     }
 
     pub(crate) fn identity(&self) -> Option<crate::provider::ProviderIdentity> {
@@ -280,6 +305,7 @@ impl RunConfig {
                 .context_usage
                 .as_ref()
                 .is_some_and(|usage| !usage.valid())
+            || !self.context_window_valid()
         {
             return Err(ReplayError::InvalidPayload);
         }

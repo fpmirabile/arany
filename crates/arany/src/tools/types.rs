@@ -452,7 +452,7 @@ impl ToolPolicyReceipt {
             && self.permissions_digest != Some([0; 32])
             && self.unguarded_rules_digest != Some([0; 32])
             && self.child_unguarded.narrows(self.unguarded)
-            && (MIN_TOOL_CONTEXT_BYTES as u32..=MAX_TOOL_CONTEXT_BYTES as u32)
+            && (MIN_TOOL_CONTEXT_BYTES as u32..=crate::session::MAX_WINDOW_CONTENT_BYTES as u32)
                 .contains(&self.max_context_bytes)
     }
 }

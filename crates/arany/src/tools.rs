@@ -471,7 +471,9 @@ impl ToolRuntime {
     }
 
     pub(crate) fn set_context_limit(&mut self, limit: usize) -> Result<(), ToolError> {
-        if !(types::MIN_TOOL_CONTEXT_BYTES..=types::MAX_TOOL_CONTEXT_BYTES).contains(&limit) {
+        if !(types::MIN_TOOL_CONTEXT_BYTES..=crate::session::MAX_WINDOW_CONTENT_BYTES)
+            .contains(&limit)
+        {
             return Err(ToolError::Limit);
         }
         self.context_limit_bytes = limit;

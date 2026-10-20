@@ -16,8 +16,15 @@ const MAX_REQUEST_BYTES: usize = crate::provider::MAX_PROVIDER_REQUEST_BYTES;
 const DELEGATED_OUTPUT: &str = "Arany recorded this call; its result follows in a later message.";
 
 pub(crate) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> {
+    encode_request_within(request, MAX_REQUEST_BYTES)
+}
+
+pub(crate) fn encode_request_within(
+    request: &Value,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ProviderError> {
     let body = serde_json::to_vec(request).map_err(|_| ProviderError::Rejected)?;
-    if body.len() > MAX_REQUEST_BYTES {
+    if body.len() > max_bytes {
         return Err(ProviderError::Rejected);
     }
     Ok(body)

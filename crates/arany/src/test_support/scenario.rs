@@ -42,6 +42,8 @@ pub struct ScriptedProvider {
     pub known_input_tokens: bool,
     pub cached_input_tokens: u32,
     pub usage_override: Option<crate::Usage>,
+    pub context_window_tokens: Option<u32>,
+    pub input_tokens_at: Vec<(usize, u32)>,
     pub requests: Arc<Mutex<Vec<ProviderRequest>>>,
     pub compact_responses: Mutex<VecDeque<Result<CompactionResponse, ProviderError>>>,
     pub compact_requests: Arc<Mutex<Vec<CompactionRequest>>>,
@@ -67,6 +69,8 @@ impl ScriptedProvider {
             known_input_tokens: false,
             cached_input_tokens: 0,
             usage_override: None,
+            context_window_tokens: None,
+            input_tokens_at: Vec::new(),
             requests: Arc::new(Mutex::new(Vec::new())),
             compact_responses: Mutex::new(VecDeque::new()),
             compact_requests: Arc::new(Mutex::new(Vec::new())),
@@ -92,6 +96,18 @@ impl ScriptedProvider {
     /// Reports known input usage (zero tokens) so a finite Goal token budget counts every call.
     pub fn with_reported_usage(mut self, usage: crate::Usage) -> Self {
         self.usage_override = Some(usage);
+        self
+    }
+
+    /// Reports the input window an authenticated catalog would have supplied.
+    pub fn with_context_window(mut self, tokens: u32) -> Self {
+        self.context_window_tokens = Some(tokens);
+        self
+    }
+
+    /// Reports `count` uncached input tokens for the zero-based provider call `index` only.
+    pub fn with_input_tokens_at(mut self, index: usize, count: u32) -> Self {
+        self.input_tokens_at.push((index, count));
         self
     }
 
@@ -158,6 +174,10 @@ impl Provider for ScriptedProvider {
         &self.identity
     }
 
+    fn context_window_tokens(&self) -> Option<u32> {
+        self.context_window_tokens
+    }
+
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         let phase = request.phase;
         let index = {
@@ -190,11 +210,20 @@ impl Provider for ScriptedProvider {
             assert!(cancellation.cancel(), "first completion-time cancellation");
         }
         let input = self.known_input_tokens.then_some(self.cached_input_tokens);
+        let reported = self
+            .input_tokens_at
+            .iter()
+            .find(|(target, _)| *target == index)
+            .map(|(_, count)| crate::Usage {
+                input_tokens: Some(*count),
+                output_tokens: Some(8),
+                ..Default::default()
+            });
         Ok(ProviderResponse {
             turn: crate::ProviderTurn::scripted(),
             outcome: outcome?,
             response_id: None,
-            usage: self.usage_override.unwrap_or(crate::Usage {
+            usage: reported.or(self.usage_override).unwrap_or(crate::Usage {
                 input_tokens: input,
                 cache_read_input_tokens: input,
                 output_tokens: Some(8),

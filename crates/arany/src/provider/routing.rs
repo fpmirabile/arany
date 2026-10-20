@@ -148,6 +148,15 @@ impl AdmittedProviders {
             .unwrap_or(1)
     }
 
+    // Every primary route must carry a window, so a fallback never receives a request above its own ceiling.
+    pub(crate) fn context_window_tokens(&self) -> Option<u32> {
+        self.primary
+            .iter()
+            .map(|provider| provider.context_window_tokens())
+            .min()
+            .flatten()
+    }
+
     pub(crate) fn identities(&self) -> ProviderRoutes {
         Providers {
             primary: identities(&self.primary),

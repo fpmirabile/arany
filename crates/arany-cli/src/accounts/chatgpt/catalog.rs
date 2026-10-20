@@ -14,6 +14,7 @@ const DEADLINE: Duration = Duration::from_secs(20);
 pub(crate) struct ChatGptModel {
     pub(crate) slug: String,
     pub(crate) display_name: String,
+    pub(crate) context_window_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -27,6 +28,8 @@ struct CatalogRow {
     slug: String,
     display_name: Option<String>,
     visibility: String,
+    // Codex's `models` reply shape; any value outside the admitted range is absent.
+    context_window: Option<serde_json::Number>,
 }
 
 pub(crate) async fn list_models(
@@ -125,6 +128,10 @@ fn parse_catalog(body: &[u8], access_token: &str) -> Result<Vec<ChatGptModel>, A
             visible.push(ChatGptModel {
                 slug: row.slug,
                 display_name: name,
+                context_window_tokens: row
+                    .context_window
+                    .and_then(|tokens| tokens.as_u64())
+                    .and_then(arany::admitted_context_window),
             });
         }
     }
@@ -385,6 +392,51 @@ mod tests {
             parse_catalog(rows.as_bytes(), token),
             Err(AuthorizationError::InvalidCatalog)
         ));
+    }
+
+    #[test]
+    fn catalog_window_is_present_only_within_the_admitted_range() {
+        let token = "synthetic-catalog-token";
+        let body = r#"{"models":[
+            {"slug":"present","display_name":"P","visibility":"list","context_window":272000},
+            {"slug":"absent","display_name":"A","visibility":"list"},
+            {"slug":"null","display_name":"N","visibility":"list","context_window":null},
+            {"slug":"small","display_name":"S","visibility":"list","context_window":32767},
+            {"slug":"floor","display_name":"F","visibility":"list","context_window":32768},
+            {"slug":"ceiling","display_name":"C","visibility":"list","context_window":2000000},
+            {"slug":"large","display_name":"L","visibility":"list","context_window":2000001},
+            {"slug":"negative","display_name":"M","visibility":"list","context_window":-272000},
+            {"slug":"fraction","display_name":"R","visibility":"list","context_window":272000.5}
+        ]}"#;
+        assert_eq!(
+            parse_catalog(body.as_bytes(), token)
+                .expect("catalog")
+                .into_iter()
+                .map(|model| (model.slug, model.context_window_tokens))
+                .collect::<Vec<_>>(),
+            [
+                ("present", Some(272_000)),
+                ("absent", None),
+                ("null", None),
+                ("small", None),
+                ("floor", Some(32_768)),
+                ("ceiling", Some(2_000_000)),
+                ("large", None),
+                ("negative", None),
+                ("fraction", None),
+            ]
+            .map(|(slug, window)| (slug.to_owned(), window))
+        );
+        for body in [
+            r#"{"models":[{"slug":"m","display_name":"M","visibility":"list","context_window":272000,"context_window":1}]}"#,
+            r#"{"models":[{"slug":"m","display_name":"M","visibility":"list","context_window":"272000"}]}"#,
+            r#"{"models":[{"slug":"m","display_name":"A","visibility":"list","context_window":272000},{"slug":"m","display_name":"B","visibility":"list","context_window":272000}]}"#,
+        ] {
+            assert!(matches!(
+                parse_catalog(body.as_bytes(), token),
+                Err(AuthorizationError::InvalidCatalog)
+            ));
+        }
     }
 
     #[tokio::test]

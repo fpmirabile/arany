@@ -94,9 +94,11 @@ pub(crate) async fn check_selected_model(
     account::clear_model_check(workspace.clone(), selected.clone(), model.clone(), effort).await?;
     let models =
         catalog::list_models(&selected.credentials, &selected.consent, selected.storage).await?;
-    if !models.iter().any(|row| row.slug == model) {
-        return Err(AuthorizationError::ModelUnavailable);
-    }
+    let context_window_tokens = models
+        .iter()
+        .find(|row| row.slug == model)
+        .ok_or(AuthorizationError::ModelUnavailable)?
+        .context_window_tokens;
     arany::probe_chatgpt_model(&selected.credentials.access_token, &model, effort)
         .await
         .map_err(|error| match error {
@@ -121,7 +123,7 @@ pub(crate) async fn check_selected_model(
             _ => AuthorizationError::ConformanceFailed,
         })?;
     let id = selected.id;
-    account::record_model_check(workspace, selected, model, effort).await?;
+    account::record_model_check(workspace, selected, model, effort, context_window_tokens).await?;
     Ok(id)
 }
 
@@ -166,6 +168,7 @@ struct AdmittedAccount {
     id: Uuid,
     access_token: String,
     evidence_fingerprint: [u8; 32],
+    context_window_tokens: Option<u32>,
 }
 
 async fn admitted_account_for_run(
@@ -175,12 +178,13 @@ async fn admitted_account_for_run(
     effort: Effort,
 ) -> Result<AdmittedAccount, AuthorizationError> {
     validate_native_model_id(&model).map_err(|_| AuthorizationError::InvalidSelection)?;
-    let (selected, evidence_fingerprint) =
+    let admitted =
         account::admitted_selected_for_run(workspace, expected_account_id, model, effort).await?;
     Ok(AdmittedAccount {
-        id: selected.id,
-        access_token: selected.credentials.access_token,
-        evidence_fingerprint,
+        id: admitted.selected.id,
+        access_token: admitted.selected.credentials.access_token,
+        evidence_fingerprint: admitted.fingerprint,
+        context_window_tokens: admitted.context_window_tokens,
     })
 }
 
@@ -202,6 +206,7 @@ pub(crate) async fn provider_for_run(
             admission: ChatGptAdmission::AccountConsent,
         },
     )
+    .map(|provider| provider.with_context_window(admitted.context_window_tokens))
     .map_err(|_| AuthorizationError::Unavailable)
 }
 

@@ -178,6 +178,7 @@ mod goal_replay_tests {
             saved_api_account_id: None,
             chatgpt_provenance: None,
             output_token_bound: OutputTokenBound::ProviderEnforced,
+            context_window_tokens: None,
             policy,
             output_token_cap: 4096,
             provider_concurrency: 1,

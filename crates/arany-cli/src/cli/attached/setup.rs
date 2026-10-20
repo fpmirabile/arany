@@ -1578,6 +1578,7 @@ mod tests {
         let mut models = vec![chatgpt::ChatGptModel {
             slug: "model-one".into(),
             display_name: "First visible model".into(),
+            context_window_tokens: None,
         }];
         let selected = catalog_chatgpt_defaults(account_id, account_id, &models)
             .expect("matching account catalog");
@@ -1592,6 +1593,7 @@ mod tests {
         models.push(chatgpt::ChatGptModel {
             slug: "gpt-5.6-luna".into(),
             display_name: "GPT-5.6 Luna".into(),
+            context_window_tokens: None,
         });
         let selected = catalog_chatgpt_defaults(account_id, account_id, &models).unwrap();
         assert_eq!(selected.model.as_deref(), Some("gpt-5.6-luna"));

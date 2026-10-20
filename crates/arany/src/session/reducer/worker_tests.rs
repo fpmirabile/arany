@@ -554,6 +554,7 @@ fn fixture_with_manifest(
         saved_api_account_id: None,
         chatgpt_provenance: None,
         output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
+        context_window_tokens: None,
         policy: CollaborationPolicy::Team {
             max_active_children: 8,
         },
@@ -1518,7 +1519,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         },
     });
     let expected = [
-        ("RunStarted", 16),
+        ("RunStarted", 17),
         ("AgentSpawned", 11),
         ("ProviderCallRecorded", 13),
         ("AgentFinished", 10),

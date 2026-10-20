@@ -405,10 +405,12 @@ mod tests {
                 chatgpt::ChatGptModel {
                     slug: "model-one".into(),
                     display_name: "First model".into(),
+                    context_window_tokens: None,
                 },
                 chatgpt::ChatGptModel {
                     slug: "model-two".into(),
                     display_name: "Second\u{1b}[2J model".into(),
+                    context_window_tokens: None,
                 },
             ],
         );

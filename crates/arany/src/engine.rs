@@ -1725,6 +1725,7 @@ impl Engine {
         )?
         .checked_add(feedback_reserved)
         .ok_or(EngineError::ContextTooLarge)?;
+        let context_window_tokens = submission.providers.context_window_tokens();
         let context = CompiledContext::compile(
             history.as_ref(),
             objective,
@@ -1735,6 +1736,7 @@ impl Engine {
                 .as_ref()
                 .map_or(0, |_| crate::tools::types::MIN_TOOL_CONTEXT_BYTES),
             goal_metadata_reserved,
+            context_window_tokens,
         )
         .map_err(|_| EngineError::ContextTooLarge)?;
         if let Some(runtime) = &mut tools {
@@ -1777,6 +1779,7 @@ impl Engine {
             saved_api_account_id: identity.saved_api_account_id(),
             chatgpt_provenance: identity.chatgpt_provenance().cloned(),
             output_token_bound: identity.limits.output_token_bound,
+            context_window_tokens,
             policy: request.policy,
             output_token_cap: identity.limits.max_output_tokens,
             provider_concurrency,

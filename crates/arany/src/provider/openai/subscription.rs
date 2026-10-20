@@ -32,6 +32,7 @@ pub struct ChatGptProvider {
     identity: ProviderIdentity,
     effort: Effort,
     access_token: String,
+    context_window_tokens: Option<u32>,
 }
 
 impl ChatGptProvider {
@@ -63,7 +64,16 @@ impl ChatGptProvider {
             identity,
             effort,
             access_token,
+            context_window_tokens: None,
         })
+    }
+
+    /// Pins the window the account's checked catalog reported; out-of-range values stay absent.
+    #[must_use]
+    pub fn with_context_window(mut self, tokens: Option<u32>) -> Self {
+        self.context_window_tokens =
+            tokens.and_then(|tokens| crate::provider::admitted_context_window(u64::from(tokens)));
+        self
     }
 }
 
@@ -73,6 +83,10 @@ impl Provider for ChatGptProvider {
         &self.identity
     }
 
+    fn context_window_tokens(&self) -> Option<u32> {
+        self.context_window_tokens
+    }
+
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         if request.model != self.identity.model {
@@ -80,12 +94,14 @@ impl Provider for ChatGptProvider {
         }
         timeout(
             DEADLINE,
-            invoke_at(
+            invoke_at_with_preview(
                 &self.client,
                 Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
                 &self.access_token,
                 &request,
                 self.effort,
+                crate::provider::request_ceiling(self.context_window_tokens),
+                None,
             ),
         )
         .await
@@ -115,6 +131,7 @@ impl Provider for ChatGptProvider {
                 &self.access_token,
                 &request,
                 self.effort,
+                crate::provider::request_ceiling(self.context_window_tokens),
                 Some(preview),
             ),
         )
@@ -252,7 +269,16 @@ async fn invoke_at(
     request: &ProviderRequest,
     effort: Effort,
 ) -> Result<ProviderResponse, ProviderError> {
-    invoke_at_with_preview(client, endpoint, access_token, request, effort, None).await
+    invoke_at_with_preview(
+        client,
+        endpoint,
+        access_token,
+        request,
+        effort,
+        crate::provider::MAX_PROVIDER_REQUEST_BYTES,
+        None,
+    )
+    .await
 }
 
 async fn invoke_at_with_preview(
@@ -261,13 +287,14 @@ async fn invoke_at_with_preview(
     access_token: &str,
     request: &ProviderRequest,
     effort: Effort,
+    max_request_bytes: usize,
     preview: Option<ResponsePreview>,
 ) -> Result<ProviderResponse, ProviderError> {
     if !(1..=crate::provider::DEFAULT_OUTPUT_TOKEN_CAP).contains(&request.max_output_tokens) {
         return Err(ProviderError::Rejected);
     }
     let conversation = render::conversation(request)?;
-    let body = subscription_body(request, &conversation, effort)?;
+    let body = subscription_body(request, &conversation, effort, max_request_bytes)?;
     let (completed, counts) = completed_at_with_preview(
         client,
         endpoint,
@@ -530,6 +557,7 @@ fn subscription_body(
     request: &ProviderRequest,
     conversation: &Conversation,
     effort: Effort,
+    max_request_bytes: usize,
 ) -> Result<Vec<u8>, ProviderError> {
     super::super::image::validate_images(request)?;
     let mut body = wire::run_body_with_effort(request, conversation, effort)?;
@@ -560,17 +588,20 @@ fn subscription_body(
             fields.remove("id");
         }
     }
-    streaming_body(body)
+    streaming_body(body, max_request_bytes)
 }
 
 fn subscription_compaction_body(
     request: &CompactionRequest,
     effort: Effort,
 ) -> Result<Vec<u8>, ProviderError> {
-    streaming_body(wire::compaction_body_with_effort(request, effort))
+    streaming_body(
+        wire::compaction_body_with_effort(request, effort),
+        crate::provider::MAX_PROVIDER_REQUEST_BYTES,
+    )
 }
 
-fn streaming_body(mut body: Value) -> Result<Vec<u8>, ProviderError> {
+fn streaming_body(mut body: Value, max_request_bytes: usize) -> Result<Vec<u8>, ProviderError> {
     let object = body.as_object_mut().ok_or(ProviderError::Rejected)?;
     let input = object.remove("input").ok_or(ProviderError::Rejected)?;
     object.remove("max_output_tokens");
@@ -582,7 +613,7 @@ fn streaming_body(mut body: Value) -> Result<Vec<u8>, ProviderError> {
     };
     object.insert("input".into(), input);
     object.insert("stream".into(), Value::Bool(true));
-    wire::encode_request(&body)
+    wire::encode_request_within(&body, max_request_bytes)
 }
 
 struct StreamDecoder<'a> {

@@ -1,7 +1,7 @@
 use super::input::WorkspaceInputs;
 use super::{
-    CollaborationPolicy, CompactionStatus, ContextUsage, MAX_CONTEXT_CONTENT_BYTES,
-    MAX_HISTORY_RUNS, RunId, RunStatus, SessionView,
+    CollaborationPolicy, CompactionStatus, ContextUsage, MAX_HISTORY_RUNS, RunId, RunStatus,
+    SessionView, content_ceiling,
 };
 use crate::provider::{
     HistoryTurn, ImageAttachment, ImageOrigin, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES, ProviderImage,
@@ -24,6 +24,10 @@ pub(crate) struct CompiledContext {
 }
 
 impl CompiledContext {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "compilation takes each pinned reservation and the route window explicitly"
+    )]
     pub(crate) fn compile(
         session: Option<&SessionView>,
         objective: &str,
@@ -32,10 +36,12 @@ impl CompiledContext {
         policy: CollaborationPolicy,
         tool_reserved: usize,
         goal_metadata_reserved: usize,
+        context_window_tokens: Option<u32>,
     ) -> Result<Self, ContextTooLarge> {
+        let ceiling = content_ceiling(context_window_tokens);
         let child_reserved = usize::from(policy.max_children()) * MAX_CHILD_CONTEXT_BYTES;
         let reserved = child_reserved;
-        let budget = MAX_CONTEXT_CONTENT_BYTES
+        let budget = ceiling
             .checked_sub(reserved)
             .and_then(|budget| budget.checked_sub(tool_reserved))
             .and_then(|budget| budget.checked_sub(goal_metadata_reserved))
@@ -185,7 +191,7 @@ impl CompiledContext {
         let tool_context_budget_bytes = if tool_reserved == 0 {
             0
         } else {
-            MAX_CONTEXT_CONTENT_BYTES
+            ceiling
                 .checked_sub(child_reserved)
                 .and_then(|budget| budget.checked_sub(used))
                 .and_then(|budget| budget.checked_sub(goal_metadata_reserved))
