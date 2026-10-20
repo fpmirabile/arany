@@ -1,16 +1,72 @@
 use super::hints::HintPublisher;
 use super::ledger::{Action, GoalLedger};
-use super::run_loop::{CallFailure, CallResult, invoke_bounded_with_preview};
+use super::run_loop::{CallResult, invoke_bounded_with_preview};
 use super::{EngineError, RunCancellation};
 use crate::journal::Journal;
 use crate::provider::{
-    AdmittedProviders, MAX_PROVIDER_SWITCHES, Provider, ProviderError, ProviderFallback,
-    ProviderIdentity, ProviderRequest, ProviderRole, ResponsePreview,
+    AdmittedProviders, MAX_PROVIDER_RETRIES, MAX_PROVIDER_RETRY_DELAY_MS, MAX_PROVIDER_SWITCHES,
+    Provider, ProviderError, ProviderFallback, ProviderIdentity, ProviderRequest, ProviderRetry,
+    ProviderRole, ResponsePreview, RetryCause,
 };
-use crate::session::{AgentRunId, Event, RunId, SessionId};
+use crate::session::{AgentRole, AgentRunId, Event, RunId, SessionId};
 use crate::store::StoreError;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::time::Instant;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Transient {
+    pub(super) cause: RetryCause,
+    pub(super) retry_after: Option<Duration>,
+}
+
+#[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AttemptDecision {
+    // The attempt's result is the call's outcome.
+    Accept,
+    // Same route, after a committed retry fact and the wait.
+    Retry { cause: RetryCause, delay: Duration },
+    // The next configured fallback route.
+    Switch,
+}
+
+// Facts about one failed attempt, read once from the ledger view and the attempt.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AttemptFacts {
+    pub(super) retries: u8,
+    // Before the action deadline, which already ends inside the Goal's active time.
+    pub(super) remaining: Duration,
+    pub(super) stopping: bool,
+    pub(super) displayed: bool,
+    pub(super) visible: bool,
+    pub(super) admitted: bool,
+}
+
+pub(super) fn decide_attempt(failure: Option<Transient>, facts: AttemptFacts) -> AttemptDecision {
+    let Some(Transient { cause, retry_after }) = failure else {
+        return AttemptDecision::Accept;
+    };
+    if facts.stopping || facts.displayed || !facts.admitted || facts.remaining.is_zero() {
+        return AttemptDecision::Accept;
+    }
+    if facts.retries < MAX_PROVIDER_RETRIES {
+        let backoff = ProviderRetry::backoff(facts.retries + 1);
+        let delay = retry_after.map_or(backoff, |after| after.max(backoff));
+        // A Retry-After that cannot fit is not waited out: the call fails now.
+        if delay < facts.remaining
+            && delay <= Duration::from_millis(u64::from(MAX_PROVIDER_RETRY_DELAY_MS))
+        {
+            return AttemptDecision::Retry { cause, delay };
+        }
+    }
+    match cause {
+        RetryCause::ServerError if !facts.visible => AttemptDecision::Switch,
+        RetryCause::ServerError | RetryCause::RateLimited | RetryCause::StreamCut => {
+            AttemptDecision::Accept
+        }
+    }
+}
 
 pub(super) struct CompactionOutcome {
     pub(super) response: Result<crate::provider::CompactionResponse, ProviderError>,
@@ -114,27 +170,22 @@ impl CallRouter<'_> {
         &self,
         mut request: ProviderRequest,
         deadline: Instant,
-        cancellation: RunCancellation,
+        mut cancellation: RunCancellation,
         preview: Option<ResponsePreview>,
     ) -> Result<CallResult, EngineError> {
         let role = ProviderRole::for_phase(request.phase);
-        if self.chain(role, request.agent_run_id)?.len() == 1 {
-            let provider = self.bind(
-                role,
-                request.agent_run_id,
-                &mut request.model,
-                &mut request.max_output_tokens,
-            )?;
-            return Ok(invoke_bounded_with_preview(
-                provider.as_ref(),
-                request,
-                deadline,
-                cancellation,
-                preview,
-            )
-            .await);
-        }
-        let preview = preview.unwrap_or_else(|| ResponsePreview::new().0);
+        let scope = CallScope {
+            session_id: request.session_id,
+            run_id: request.run_id,
+            agent_run_id: request.agent_run_id,
+        };
+        // A private observer guards a fallback chain against visible output.
+        let preview = match preview {
+            None if self.chain(role, request.agent_run_id)?.len() > 1 => {
+                Some(ResponsePreview::new().0)
+            }
+            preview => preview,
+        };
         loop {
             let provider = self.bind(
                 role,
@@ -147,30 +198,80 @@ impl CallRouter<'_> {
                 request.clone(),
                 deadline,
                 cancellation.clone(),
-                Some(preview.clone()),
+                preview.clone(),
             )
             .await;
-            let result = attempt.result;
-            if !attempt.eligible
-                || preview.has_output()
-                || cancellation.is_cancelled()
-                || Instant::now() >= deadline
-                || !self
-                    .switch(
-                        CallScope {
-                            session_id: request.session_id,
-                            run_id: request.run_id,
-                            agent_run_id: request.agent_run_id,
-                        },
-                        role,
-                        provider.identity(),
-                        Some(&request),
-                    )
-                    .await?
-            {
-                return Ok(result);
+            let facts = self.attempt_facts(
+                scope.agent_run_id,
+                deadline,
+                cancellation.is_cancelled(),
+                attempt.visible,
+            )?;
+            match decide_attempt(attempt.transient, facts) {
+                AttemptDecision::Accept => return Ok(attempt.result),
+                AttemptDecision::Retry { cause, delay } => {
+                    // Cleared before any await, so no stale text is journaled for the call.
+                    if let Some(preview) = &preview {
+                        preview.clear();
+                    }
+                    if !self.retry(scope, role, cause, delay, &request).await? {
+                        return Ok(attempt.result);
+                    }
+                    tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => return Ok(CallResult::Cancelled),
+                        () = tokio::time::sleep(delay) => {}
+                    }
+                }
+                AttemptDecision::Switch => {
+                    if !self
+                        .switch(scope, role, provider.identity(), Some(&request))
+                        .await?
+                    {
+                        return Ok(attempt.result);
+                    }
+                }
             }
         }
+    }
+
+    pub(super) fn attempt_facts(
+        &self,
+        actor: AgentRunId,
+        deadline: Instant,
+        stopping: bool,
+        visible: bool,
+    ) -> Result<AttemptFacts, EngineError> {
+        let (retries, displayed) = self.ledger.view(|view| {
+            let current = view.runs.last().and_then(|run| {
+                let agent = run.agents.iter().find(|agent| agent.id == actor)?;
+                let index = u32::try_from(agent.provider_calls.len()).ok()?;
+                let retries = run
+                    .provider_retries
+                    .iter()
+                    .filter(|(id, retry)| *id == actor && retry.call_index == index)
+                    .count();
+                let displayed = agent.role == AgentRole::Primary
+                    && run.display.iter().any(|chunk| chunk.call_index == index);
+                Some((u8::try_from(retries).unwrap_or(u8::MAX), displayed))
+            });
+            current.unwrap_or((MAX_PROVIDER_RETRIES, true))
+        })?;
+        let admitted = self.ledger.view(|view| view.active_goal().is_some())?
+            && self.ledger.can_start_provider_call()
+            && self.ledger.remaining_calls() != Some(0)
+            && self
+                .ledger
+                .effective_budget()
+                .is_ok_and(|budget| budget.max_tokens.is_none());
+        Ok(AttemptFacts {
+            retries,
+            remaining: deadline.saturating_duration_since(Instant::now()),
+            stopping,
+            displayed,
+            visible,
+            admitted,
+        })
     }
 
     pub(super) async fn compact(
@@ -247,9 +348,9 @@ impl CallRouter<'_> {
         request: Option<&ProviderRequest>,
     ) -> Result<bool, EngineError> {
         let CallScope {
-            session_id,
             run_id,
             agent_run_id,
+            ..
         } = scope;
         let Some(to) = self.next(role, agent_run_id, from)? else {
             return Ok(false);
@@ -299,6 +400,71 @@ impl CallRouter<'_> {
         let Some(fallback) = candidate else {
             return Ok(false);
         };
+        self.commit_attempt(
+            scope,
+            role,
+            request,
+            Event::ProviderFallbackUsed {
+                run_id,
+                agent_run_id,
+                fallback,
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn retry(
+        &self,
+        scope: CallScope,
+        role: ProviderRole,
+        cause: RetryCause,
+        delay: Duration,
+        request: &ProviderRequest,
+    ) -> Result<bool, EngineError> {
+        let retry = self.ledger.view(|view| {
+            let run = view.runs.last()?;
+            let agent = run
+                .agents
+                .iter()
+                .find(|agent| agent.id == scope.agent_run_id)?;
+            let call_index = u32::try_from(agent.provider_calls.len()).ok()?;
+            let earlier = run
+                .provider_retries
+                .iter()
+                .filter(|(id, retry)| *id == scope.agent_run_id && retry.call_index == call_index)
+                .count();
+            Some(ProviderRetry {
+                role,
+                call_index,
+                attempt: u8::try_from(earlier + 1).ok()?,
+                cause,
+                delay_ms: u32::try_from(delay.as_millis()).ok()?,
+            })
+        })?;
+        let Some(retry) = retry else {
+            return Ok(false);
+        };
+        self.commit_attempt(
+            scope,
+            role,
+            Some(request),
+            Event::ProviderRetryScheduled {
+                run_id: scope.run_id,
+                agent_run_id: scope.agent_run_id,
+                retry,
+            },
+        )
+        .await
+    }
+
+    // Charges the failed attempt and admits the next one before its fact commits; a refusal declines it.
+    async fn commit_attempt(
+        &self,
+        scope: CallScope,
+        role: ProviderRole,
+        request: Option<&ProviderRequest>,
+        fact: Event,
+    ) -> Result<bool, EngineError> {
         let running = self.ledger.view(|view| view.active_goal().is_some())?;
         let reservation = if running {
             Some(
@@ -330,11 +496,11 @@ impl CallRouter<'_> {
             ProviderRole::Review => Action::Review,
             ProviderRole::Compaction => Action::Compaction,
         };
-        // A refused admission declines the fallback, so the known failure settles as its own outcome.
+        // A refused admission declines the attempt, so the known failure settles as its own outcome.
         match self
             .journal
             .admit(
-                session_id,
+                scope.session_id,
                 action.max_events_for_admitted(&self.providers)
                     + self.ledger.verdicts(action)
                     + 1
@@ -352,15 +518,7 @@ impl CallRouter<'_> {
             Err(error) => return Err(error.into()),
         }
         self.ledger
-            .append(
-                self.journal,
-                session_id,
-                Event::ProviderFallbackUsed {
-                    run_id,
-                    agent_run_id,
-                    fallback,
-                },
-            )
+            .append(self.journal, scope.session_id, fact)
             .await?;
         if let Some(reservation) = reservation {
             reservation.commit()?;
@@ -371,7 +529,8 @@ impl CallRouter<'_> {
 
 pub(super) struct AttemptResult {
     pub(super) result: CallResult,
-    pub(super) eligible: bool,
+    pub(super) transient: Option<Transient>,
+    pub(super) visible: bool,
 }
 
 pub(super) async fn invoke_attempt(
@@ -381,21 +540,192 @@ pub(super) async fn invoke_attempt(
     cancellation: RunCancellation,
     preview: Option<ResponsePreview>,
 ) -> AttemptResult {
-    let result = invoke_bounded_with_preview(
-        provider,
-        request,
-        deadline,
-        cancellation.clone(),
-        preview.clone(),
-    )
-    .await;
+    let (result, transient) =
+        invoke_bounded_with_preview(provider, request, deadline, cancellation, preview.clone())
+            .await;
     AttemptResult {
-        eligible: matches!(
-            result,
-            CallResult::Failed(CallFailure::Unavailable { fallback: true, .. })
-        ) && preview.as_ref().is_none_or(|preview| !preview.has_output())
-            && !cancellation.is_cancelled()
-            && Instant::now() < deadline,
         result,
+        transient,
+        visible: preview.as_ref().is_some_and(ResponsePreview::has_output),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn facts() -> AttemptFacts {
+        AttemptFacts {
+            retries: 0,
+            remaining: Duration::from_secs(600),
+            stopping: false,
+            displayed: false,
+            visible: false,
+            admitted: true,
+        }
+    }
+
+    fn failure(cause: RetryCause, retry_after: Option<u64>) -> Option<Transient> {
+        Some(Transient {
+            cause,
+            retry_after: retry_after.map(Duration::from_secs),
+        })
+    }
+
+    #[test]
+    fn attempt_decision_retries_three_times_inside_the_deadline_then_switches_or_fails() {
+        use AttemptDecision::{Accept, Retry, Switch};
+        use RetryCause::{RateLimited, ServerError, StreamCut};
+        let retry = |cause, secs| Retry {
+            cause,
+            delay: Duration::from_secs(secs),
+        };
+        let cases: [(&str, Option<Transient>, AttemptFacts, AttemptDecision); 16] = [
+            ("no transient failure", None, facts(), Accept),
+            (
+                "first rate limit",
+                failure(RateLimited, None),
+                facts(),
+                retry(RateLimited, 2),
+            ),
+            (
+                "second gap doubles",
+                failure(StreamCut, None),
+                AttemptFacts {
+                    retries: 1,
+                    ..facts()
+                },
+                retry(StreamCut, 4),
+            ),
+            (
+                "third gap doubles",
+                failure(ServerError, None),
+                AttemptFacts {
+                    retries: 2,
+                    ..facts()
+                },
+                retry(ServerError, 8),
+            ),
+            (
+                "server error after the last retry",
+                failure(ServerError, None),
+                AttemptFacts {
+                    retries: 3,
+                    ..facts()
+                },
+                Switch,
+            ),
+            (
+                "rate limit after the last retry",
+                failure(RateLimited, None),
+                AttemptFacts {
+                    retries: 3,
+                    ..facts()
+                },
+                Accept,
+            ),
+            (
+                "cut after the last retry",
+                failure(StreamCut, None),
+                AttemptFacts {
+                    retries: 3,
+                    ..facts()
+                },
+                Accept,
+            ),
+            (
+                "longer Retry-After is honored",
+                failure(RateLimited, Some(30)),
+                facts(),
+                retry(RateLimited, 30),
+            ),
+            (
+                "shorter Retry-After keeps the backoff",
+                failure(RateLimited, Some(0)),
+                AttemptFacts {
+                    retries: 2,
+                    ..facts()
+                },
+                retry(RateLimited, 8),
+            ),
+            (
+                "hostile Retry-After past the deadline",
+                failure(RateLimited, Some(u64::from(u32::MAX))),
+                facts(),
+                Accept,
+            ),
+            (
+                "backoff past the deadline switches",
+                failure(ServerError, None),
+                AttemptFacts {
+                    remaining: Duration::from_secs(2),
+                    ..facts()
+                },
+                Switch,
+            ),
+            (
+                "cancelled or paused",
+                failure(RateLimited, None),
+                AttemptFacts {
+                    stopping: true,
+                    ..facts()
+                },
+                Accept,
+            ),
+            (
+                "committed display text",
+                failure(StreamCut, None),
+                AttemptFacts {
+                    displayed: true,
+                    ..facts()
+                },
+                Accept,
+            ),
+            (
+                "visible preview still retries",
+                failure(StreamCut, None),
+                AttemptFacts {
+                    visible: true,
+                    ..facts()
+                },
+                retry(StreamCut, 2),
+            ),
+            (
+                "visible preview never switches",
+                failure(ServerError, None),
+                AttemptFacts {
+                    retries: 3,
+                    visible: true,
+                    ..facts()
+                },
+                Accept,
+            ),
+            (
+                "call or token budget refuses",
+                failure(ServerError, None),
+                AttemptFacts {
+                    admitted: false,
+                    ..facts()
+                },
+                Accept,
+            ),
+        ];
+        for (case, failure, facts, expected) in cases {
+            assert_eq!(decide_attempt(failure, facts), expected, "{case}");
+        }
+        assert_eq!(
+            decide_attempt(
+                failure(ServerError, None),
+                AttemptFacts {
+                    remaining: Duration::ZERO,
+                    ..facts()
+                }
+            ),
+            Accept
+        );
+        assert_eq!(
+            (1..=8).map(ProviderRetry::backoff).collect::<Vec<_>>(),
+            [2, 4, 8, 10, 10, 10, 10, 10].map(Duration::from_secs)
+        );
     }
 }

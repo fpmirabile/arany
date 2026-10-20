@@ -366,7 +366,8 @@ pub(super) fn respond_after_catalog(
         ])
     );
     let rejected_body = format!("{FAILURE_BODY_CANARY} {ACCESS} {REFRESH}");
-    input.write_all(format!("HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{rejected_body}", rejected_body.len()).as_bytes()).expect("synthetic Run rejection");
+    // A Retry-After beyond the action deadline is never waited out, so the 429 fails the Run at once.
+    input.write_all(format!("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 86400\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{rejected_body}", rejected_body.len()).as_bytes()).expect("synthetic Run rejection");
     let completed = |model: &str, text: serde_json::Value| {
         format!(
             "data: {{\"type\":\"response.created\"}}\n\ndata: {}\n\n",
@@ -1154,6 +1155,10 @@ pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_js
     assert_eq!(failed.agents.len(), 1);
     assert_eq!(failed.agents[0].status, arany::AgentStatus::Failed);
     assert_eq!(failed.agents[0].provider_calls.len(), 1);
+    assert!(
+        failed.provider_retries.is_empty(),
+        "hostile Retry-After was waited out"
+    );
     let call = &failed.agents[0].provider_calls[0];
     assert_eq!(call.phase, arany::AgentPhase::RootPlan);
     assert_eq!(call.disposition, arany::ProviderCallDisposition::Rejected);

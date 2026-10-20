@@ -173,8 +173,92 @@ impl SessionView {
     }
 }
 
+fn attempt_role_fits(
+    run: &RunView,
+    agent: &AgentView,
+    role: crate::provider::ProviderRole,
+) -> bool {
+    use crate::provider::ProviderRole;
+    match role {
+        ProviderRole::Child => agent.role == AgentRole::Child,
+        ProviderRole::Review => {
+            let own_tool = match agent.role {
+                AgentRole::Child => agent.tools.last(),
+                AgentRole::Primary => run.tools.last(),
+            };
+            own_tool.is_some_and(|tool| tool.observation.is_none())
+        }
+        ProviderRole::Primary => {
+            agent.role == AgentRole::Primary
+                && run
+                    .tools
+                    .last()
+                    .is_none_or(|tool| tool.observation.is_some())
+        }
+        ProviderRole::Compaction => agent.role == AgentRole::Primary,
+    }
+}
+
 pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), ReplayError> {
     match event {
+        Event::ProviderRetryScheduled {
+            run_id,
+            agent_run_id,
+            retry,
+        } => {
+            let run = current
+                .runs
+                .last()
+                .filter(|run| run.id == *run_id && run.status == super::RunStatus::Active)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let goal = active_run_goal(current, *run_id)
+                .filter(|goal| goal.status == GoalStatus::Running)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let budget = goal.effective_budget();
+            let agent = run
+                .agents
+                .iter()
+                .find(|agent| agent.id == *agent_run_id)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let earlier = run
+                .provider_retries
+                .iter()
+                .filter(|(actor, prior)| {
+                    actor == agent_run_id && prior.call_index == retry.call_index
+                })
+                .count();
+            // Unknown failed-attempt usage cannot fit a finite token budget, as for a fallback.
+            if !goal.unobserved_provider_calls.contains(agent_run_id)
+                || budget.max_tokens.is_some()
+                || budget
+                    .max_provider_calls
+                    .is_some_and(|limit| goal.provider_calls >= limit)
+                || agent.status != AgentStatus::Active
+                || !attempt_role_fits(run, agent, retry.role)
+                || usize::try_from(retry.call_index).ok() != Some(agent.provider_calls.len())
+                || usize::from(retry.attempt) != earlier + 1
+                || agent.role == AgentRole::Primary
+                    && run
+                        .display
+                        .iter()
+                        .any(|chunk| chunk.call_index == retry.call_index)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let goal_id = goal.id;
+            current
+                .runs
+                .last_mut()
+                .ok_or(ReplayError::InvalidTransition)?
+                .provider_retries
+                .push((*agent_run_id, retry.clone()));
+            let goal = current_goal_mut(current, goal_id)?;
+            goal.provider_calls = goal
+                .provider_calls
+                .checked_add(1)
+                .ok_or(ReplayError::InvalidTransition)?;
+            goal.token_usage_unknown = true;
+        }
         Event::ProviderFallbackUsed {
             run_id,
             agent_run_id,
@@ -224,24 +308,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 .iter()
                 .find(|agent| agent.id == *agent_run_id)
                 .ok_or(ReplayError::InvalidTransition)?;
-            let valid_role = match fallback.role {
-                ProviderRole::Child => agent.role == AgentRole::Child,
-                ProviderRole::Review => {
-                    let own_tool = match agent.role {
-                        AgentRole::Child => agent.tools.last(),
-                        AgentRole::Primary => run.tools.last(),
-                    };
-                    own_tool.is_some_and(|tool| tool.observation.is_none())
-                }
-                ProviderRole::Primary => {
-                    agent.role == AgentRole::Primary
-                        && run
-                            .tools
-                            .last()
-                            .is_none_or(|tool| tool.observation.is_some())
-                }
-                ProviderRole::Compaction => agent.role == AgentRole::Primary,
-            };
+            let valid_role = attempt_role_fits(run, agent, fallback.role);
             let index = if compaction {
                 if active {
                     run.tools.len()

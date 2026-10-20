@@ -19,6 +19,7 @@ pub(super) enum TransportError {
     PartialTransport,
     Rejected,
     HttpServerUnavailable,
+    RateLimited(Option<std::time::Duration>),
     InvalidOutcome,
 }
 
@@ -139,7 +140,11 @@ impl CustomTransport {
             .send()
             .await
             .map_err(|_| TransportError::Unavailable)?;
-        streaming_admission(response.status(), response.url().as_str() == self.endpoint)?;
+        streaming_admission(
+            response.status(),
+            response.headers(),
+            response.url().as_str() == self.endpoint,
+        )?;
         crate::provider::openai::read_streamed_reply(&mut response, &self.key, model, preview)
             .await
             .map_err(|error| {
@@ -166,13 +171,7 @@ impl CustomTransport {
         if response.url().as_str() != self.endpoint {
             return Err(TransportError::InvalidOutcome);
         }
-        if !response.status().is_success() {
-            return Err(if response.status().is_server_error() {
-                TransportError::HttpServerUnavailable
-            } else {
-                TransportError::Rejected
-            });
-        }
+        streaming_admission(response.status(), response.headers(), true)?;
         let bytes = super::super::read_identity_body(&mut response, MAX_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
@@ -189,6 +188,7 @@ impl CustomTransport {
 
 pub(super) fn streaming_admission(
     status: reqwest::StatusCode,
+    headers: &header::HeaderMap,
     destination_matches: bool,
 ) -> Result<(), TransportError> {
     if !destination_matches {
@@ -199,10 +199,10 @@ pub(super) fn streaming_admission(
         });
     }
     if !status.is_success() {
-        return Err(if status.is_server_error() {
-            TransportError::HttpServerUnavailable
-        } else {
-            TransportError::Rejected
+        return Err(match crate::provider::http_failure(status, headers) {
+            ProviderError::HttpServerUnavailable => TransportError::HttpServerUnavailable,
+            ProviderError::RateLimited(after) => TransportError::RateLimited(after),
+            _ => TransportError::Rejected,
         });
     }
     Ok(())

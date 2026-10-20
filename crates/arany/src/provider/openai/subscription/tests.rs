@@ -1059,9 +1059,11 @@ async fn direct_route_http_failures_are_classified_without_exposing_body() {
         let actual = invoke_at(&client(), endpoint, TOKEN, &request(), Effort::Medium)
             .await
             .expect_err("non-success direct route");
-        assert!(
-            matches!(&actual, ProviderError::RemoteHttp(actual_status) if *actual_status == status)
-        );
+        assert!(match &actual {
+            ProviderError::RateLimited(None) => status == 429,
+            ProviderError::RemoteHttp(actual_status) => *actual_status == status && status != 429,
+            _ => false,
+        });
         assert_eq!(actual.failure_class(), expected, "HTTP {status}");
         assert_eq!(
             actual.to_string(),

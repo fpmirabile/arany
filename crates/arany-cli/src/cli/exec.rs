@@ -440,7 +440,7 @@ async fn run_on_engine(
             if unguarded > 0 {
                 receipt.push_str(&format!("unguarded effects: {unguarded}\n"));
             }
-            if let Some(notice) = crate::presentation::render_goal_provider_fallbacks(goal_runs) {
+            if let Some(notice) = crate::presentation::render_goal_provider_attempts(goal_runs) {
                 receipt.push_str(&notice);
                 receipt.push('\n');
             }

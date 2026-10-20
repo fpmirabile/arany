@@ -24,6 +24,17 @@ impl ResponsePreview {
         (Self { sender }, receiver)
     }
 
+    // A same-route retry withdraws the failed attempt's provisional text before it re-dispatches.
+    pub(crate) fn clear(&self) {
+        self.sender.send_if_modified(|text| {
+            let changed = **text != PreviewText::default();
+            if changed {
+                *text = Arc::new(PreviewText::default());
+            }
+            changed
+        });
+    }
+
     pub(crate) fn has_output(&self) -> bool {
         let text = self.sender.borrow();
         !text.answer.is_empty() || !text.commentary.is_empty() || text.commentary_limited

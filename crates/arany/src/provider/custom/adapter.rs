@@ -125,6 +125,7 @@ fn transport_error(error: TransportError) -> ProviderError {
         TransportError::PartialTransport => ProviderError::PartialTransport,
         TransportError::Rejected => ProviderError::Rejected,
         TransportError::HttpServerUnavailable => ProviderError::HttpServerUnavailable,
+        TransportError::RateLimited(after) => ProviderError::RateLimited(after),
         TransportError::InvalidOutcome => ProviderError::InvalidOutcome,
     }
 }
@@ -146,6 +147,7 @@ mod tests {
         ] {
             let error = super::super::transport::streaming_admission(
                 reqwest::StatusCode::from_u16(status).unwrap(),
+                &reqwest::header::HeaderMap::new(),
                 false,
             )
             .err()

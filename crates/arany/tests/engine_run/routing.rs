@@ -1,7 +1,16 @@
 use super::engine_support::run_routed;
 use super::*;
 use arany::test_support::routing::*;
-use arany::{ProviderRole, Providers};
+use arany::{MAX_PROVIDER_RETRIES, ProviderRole, Providers};
+
+// One failed attempt per call plus its three same-route retries.
+fn unavailable_attempts(calls: usize) -> Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>> {
+    Mutex::new(
+        (0..calls * (usize::from(MAX_PROVIDER_RETRIES) + 1))
+            .map(|_| Err(ProviderError::RemoteHttp(503)))
+            .collect(),
+    )
+}
 
 #[tokio::test]
 async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsistent_provenance() {
@@ -127,7 +136,7 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn fallback_chain_is_ordered_and_call_and_unknown_token_budgets_stop_it() {
     for budget in [None, Some(1), Some(2)] {
         let temp = tempfile::tempdir().unwrap();
@@ -135,7 +144,7 @@ async fn fallback_chain_is_ordered_and_call_and_unknown_token_budgets_stop_it() 
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
         let mut primary = ScriptedProvider::new(vec![]).with_profile("scripted", "first");
-        primary.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+        primary.responses = unavailable_attempts(1);
         let primary = route(primary);
         let mut second = ScriptedProvider::new(vec![]).with_profile("scripted", "second");
         second.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
@@ -173,13 +182,22 @@ async fn fallback_chain_is_ordered_and_call_and_unknown_token_budgets_stop_it() 
             view.runs[0].provider_fallbacks.len(),
             if allowed { 2 } else { 0 }
         );
-        assert_eq!(view.goals[0].provider_calls, if allowed { 3 } else { 1 });
+        // Retries come first and count once per semantic call, so the second route switches at once.
+        assert_eq!(
+            view.runs[0].provider_retries.len(),
+            if allowed { 3 } else { 0 }
+        );
+        assert_eq!(view.goals[0].provider_calls, if allowed { 6 } else { 1 });
+        assert_eq!(
+            primary.requests.lock().unwrap().len(),
+            if allowed { 4 } else { 1 }
+        );
         assert_eq!(second.requests.lock().unwrap().len(), usize::from(allowed));
         assert_eq!(third.requests.lock().unwrap().len(), usize::from(allowed));
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn child_and_compaction_fallbacks_keep_role_provenance() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -207,13 +225,7 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
         .with_profile("scripted", "primary"),
     );
     let mut child = ScriptedProvider::new(vec![]).with_profile("scripted", "child");
-    child.responses = Mutex::new(
-        vec![
-            Err(ProviderError::RemoteHttp(503)),
-            Err(ProviderError::RemoteHttp(503)),
-        ]
-        .into(),
-    );
+    child.responses = unavailable_attempts(2);
     let child = route(child);
     let fallback = route(
         ScriptedProvider::new(vec![finish("child fallback"), finish("child fallback")])
@@ -264,6 +276,14 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
             ProviderRole::Child,
             ProviderRole::Compaction
         ]
+    );
+    // Each child retries its own call; compaction keeps no same-route retry.
+    assert_eq!(view.runs[0].provider_retries.len(), 6);
+    assert!(
+        view.runs[0]
+            .provider_retries
+            .iter()
+            .all(|(_, retry)| retry.role == ProviderRole::Child)
     );
     assert_eq!(fallback.requests.lock().unwrap()[0].model, "child-fallback");
     assert_eq!(
@@ -451,15 +471,18 @@ async fn tool_enabled_fallback_between_models_of_one_chatgpt_account_is_admitted
     let workspace = arany::test_support::goals::facts_workspace(temp.path(), "v1");
     let state = temp.path().join("state");
     let account = Uuid::now_v7();
+    // The clock pauses for the backoff only; no Tool runs while it is paused.
     let mut first = ScriptedProvider::new(vec![])
         .with_profile("chatgpt", "model-a")
-        .with_chatgpt_account(account, [1; 32]);
-    first.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+        .with_chatgpt_account(account, [1; 32])
+        .with_before_call(0, tokio::time::pause);
+    first.responses = unavailable_attempts(1);
     let first = route(first);
     let second = route(
         ScriptedProvider::new(vec![finish("fallback answer")])
             .with_profile("chatgpt", "model-b")
-            .with_chatgpt_account(account, [2; 32]),
+            .with_chatgpt_account(account, [2; 32])
+            .with_before_call(0, tokio::time::resume),
     );
     let mut bindings = routes(&first);
     bindings.roles.primary = vec![first.clone(), second.clone()];
@@ -483,12 +506,22 @@ async fn fallback_after_a_tool_observation_never_redispatches_the_tool() {
         offset: 0,
         limit: 4096,
     };
-    let mut primary = ScriptedProvider::new(vec![]).with_profile("scripted", "primary");
-    primary.responses =
-        Mutex::new(vec![Ok(tool_outcome(read)), Err(ProviderError::RemoteHttp(503))].into());
+    // The clock pauses after the Tool result, for the backoff only.
+    let mut primary = ScriptedProvider::new(vec![])
+        .with_profile("scripted", "primary")
+        .with_before_call(1, tokio::time::pause);
+    primary.responses = unavailable_attempts(1);
+    primary
+        .responses
+        .get_mut()
+        .unwrap()
+        .push_front(Ok(tool_outcome(read)));
     let primary = route(primary);
-    let fallback =
-        route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "fallback"));
+    let fallback = route(
+        ScriptedProvider::new(vec![finish("done")])
+            .with_profile("scripted", "fallback")
+            .with_before_call(0, tokio::time::resume),
+    );
     let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
     let mut bindings = routes(&primary);
     bindings.roles.primary.push(fallback.clone());
@@ -568,14 +601,14 @@ async fn roster_disagreeing_with_role_chains_is_refused_before_any_call() {
     engine.close().await.unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_route() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let state = temp.path().join("state");
     let mut first = ScriptedProvider::new(vec![]).with_profile("scripted", "first");
-    first.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+    first.responses = unavailable_attempts(1);
     let first = route(first);
     let next = route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "next"));
     let mut bindings = routes(&first);
@@ -612,7 +645,9 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
     let crashed = SessionView::replay(outcome.session_id, &events)
         .unwrap()
         .unwrap();
-    assert_eq!(crashed.goals[0].provider_calls, 2);
+    // The reservation, three retries and the switch.
+    assert_eq!(crashed.goals[0].provider_calls, 5);
+    assert_eq!(crashed.runs[0].provider_retries.len(), 3);
     assert_eq!(crashed.goals[0].active_ceiling_ms, ceiling);
     assert_eq!(crashed.goals[0].unobserved_provider_calls.len(), 1);
     assert!(crashed.goals[0].token_usage_unknown);
@@ -625,7 +660,7 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
             .provider_calls
             .is_empty()
     );
-    assert_eq!(first.requests.lock().unwrap().len(), 1);
+    assert_eq!(first.requests.lock().unwrap().len(), 4);
     assert_eq!(next.requests.lock().unwrap().len(), 1);
 
     let recovered_state = temp.path().join("recovered");
@@ -699,32 +734,35 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
         }
         assert!(SessionView::replay(outcome.session_id, &forged).is_err());
     }
-    assert_eq!(view.goals[0].provider_calls, 3);
+    assert_eq!(view.goals[0].provider_calls, 6);
     assert_eq!(view.goals[0].uncertain_active_ms, ceiling);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn fallback_only_on_pre_output_call_failure_and_never_after_partial_output() {
-    for (error, partial, fallback_expected) in [
-        (ProviderError::RemoteHttp(503), false, true),
-        (ProviderError::Unavailable, false, false),
-        (ProviderError::RemoteHttp(400), false, false),
-        (ProviderError::RemoteHttp(401), false, false),
-        (ProviderError::RemoteHttp(413), false, false),
-        (ProviderError::RemoteHttp(529), false, true),
-        (ProviderError::RemoteHttp(429), false, false),
-        (ProviderError::PartialTransport, false, false),
-        (ProviderError::InvalidStream, false, false),
-        (ProviderError::InvalidOutcome, false, false),
-        (ProviderError::Rejected, false, false),
-        (ProviderError::RemoteHttp(503), true, false),
-    ] {
+    // (failure, visible partial output, same-route retries, fallback)
+    type Case = (fn() -> ProviderError, bool, u8, bool);
+    let cases: [Case; 12] = [
+        (|| ProviderError::RemoteHttp(503), false, 3, true),
+        (|| ProviderError::Unavailable, false, 0, false),
+        (|| ProviderError::RemoteHttp(400), false, 0, false),
+        (|| ProviderError::RemoteHttp(401), false, 0, false),
+        (|| ProviderError::RemoteHttp(413), false, 0, false),
+        (|| ProviderError::RemoteHttp(529), false, 3, true),
+        (|| ProviderError::RemoteHttp(429), false, 3, false),
+        (|| ProviderError::PartialTransport, false, 3, false),
+        (|| ProviderError::InvalidStream, false, 0, false),
+        (|| ProviderError::InvalidOutcome, false, 0, false),
+        (|| ProviderError::Rejected, false, 0, false),
+        (|| ProviderError::RemoteHttp(503), true, 3, false),
+    ];
+    for (error, partial, retries, fallback_expected) in cases {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
         let mut primary = ScriptedProvider::new(vec![]).with_profile("scripted", "primary-model");
-        primary.responses = Mutex::new(vec![Err(error)].into());
+        primary.responses = Mutex::new((0..=retries).map(|_| Err(error())).collect());
         if partial {
             primary.preview = Some(arany::PreviewText {
                 answer: "partial".into(),
@@ -768,9 +806,22 @@ async fn fallback_only_on_pre_output_call_failure_and_never_after_partial_output
             fallback.requests.lock().unwrap().len(),
             usize::from(fallback_expected)
         );
+        // A provisional preview is cleared before each retry, so visible output blocks only the switch.
+        assert_eq!(
+            view.runs[0]
+                .provider_retries
+                .iter()
+                .map(|(_, retry)| retry.attempt)
+                .collect::<Vec<_>>(),
+            (1..=retries).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            primary.requests.lock().unwrap().len(),
+            usize::from(retries) + 1
+        );
         assert_eq!(
             view.goals[0].provider_calls,
-            if fallback_expected { 2 } else { 1 }
+            1 + u32::from(retries) + u32::from(fallback_expected)
         );
         if fallback_expected {
             assert_eq!(switches[0].1.role, ProviderRole::Primary);
@@ -841,14 +892,7 @@ async fn assignment_profiles_keep_shared_first_routes_distinct_and_finish_in_ass
         .with_profile("scripted", "primary"),
     );
     let mut first = ScriptedProvider::new(vec![]).with_profile("scripted", "shared-first");
-    first.responses = Mutex::new(
-        vec![
-            Err(ProviderError::RemoteHttp(503)),
-            Err(ProviderError::RemoteHttp(503)),
-            Err(ProviderError::RemoteHttp(503)),
-        ]
-        .into(),
-    );
+    first.responses = unavailable_attempts(3);
     let first = route(first);
     let (started, mut starts) = mpsc::unbounded_channel();
     let fallback = |model: &str, cap| {
@@ -905,7 +949,9 @@ async fn assignment_profiles_keep_shared_first_routes_distinct_and_finish_in_ass
             }
         }
     };
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    // Real time: gated fallback calls hold Provider deadlines a paused clock would expire; the
+    // watchdog covers the three concurrent 2 + 4 + 8 s same-route backoffs.
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(60), async {
         tokio::join!(run, release)
     })
     .await
@@ -952,7 +998,7 @@ async fn assignment_profiles_keep_shared_first_routes_distinct_and_finish_in_ass
         ["A", "B", "C"]
     );
     let initial = first.requests.lock().unwrap();
-    assert_eq!(initial.len(), 3);
+    assert_eq!(initial.len(), 12);
     assert!(initial.iter().all(|call| call.model == "shared-first"
         && call.phase == AgentPhase::ChildWork
         && call.input.assignment_profiles.is_empty()));
@@ -1200,7 +1246,7 @@ impl Provider for PreviewGate {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn child_preview_follows_the_assigned_chain_not_the_default_child_chain() {
     for assigned_routes in [1, 2] {
         let temp = tempfile::tempdir().unwrap();
@@ -1242,6 +1288,11 @@ async fn child_preview_follows_the_assigned_chain_not_the_default_child_chain() 
             assert_eq!(result.run.status, RunStatus::Finished);
         } else {
             assert_eq!(result.run.status, RunStatus::Failed);
+            // Private visible output never blocks a same-route retry, only the switch after it.
+            assert_eq!(
+                result.run.provider_retries.len(),
+                usize::from(MAX_PROVIDER_RETRIES)
+            );
             assert!(result.run.provider_fallbacks.is_empty());
             assert!(fallback.requests.lock().unwrap().is_empty());
         }
@@ -1275,14 +1326,13 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
     .with_profile("scripted", "primary");
     primary.identity.limits.concurrency = 1;
     let primary = route(primary);
-    let mut first = ScriptedProvider::new(vec![]).with_profile("scripted", "shared-first");
-    first.responses = Mutex::new(
-        vec![
-            Err(ProviderError::RemoteHttp(503)),
-            Err(ProviderError::RemoteHttp(503)),
-        ]
-        .into(),
-    );
+    // One child at a time, so the clock pauses only for each child's backoff and resumes before
+    // its Guard Read: A's attempts are calls 0-3 and B's are calls 4-7.
+    let mut first = ScriptedProvider::new(vec![])
+        .with_profile("scripted", "shared-first")
+        .with_before_call(0, tokio::time::pause)
+        .with_before_call(4, tokio::time::pause);
+    first.responses = unavailable_attempts(2);
     let first = route(first);
     let fallback = |model| {
         route(
@@ -1294,7 +1344,8 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
                 }),
                 finish("read facts"),
             ])
-            .with_profile("scripted", model),
+            .with_profile("scripted", model)
+            .with_before_call(0, tokio::time::resume),
         )
     };
     let default = fallback("default-fallback");
@@ -1305,7 +1356,7 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
     let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
     let mut request = input(&workspace);
     request.policy = CollaborationPolicy::Team {
-        max_active_children: 2,
+        max_active_children: 1,
     };
     let result = run_routed(&engine, bindings, request, configured())
         .await
@@ -1313,7 +1364,8 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
     assert_eq!(result.run.status, RunStatus::Finished);
     engine.close().await.unwrap();
     let (_, view) = reopen(&state, result.session_id).await;
-    assert_eq!(first.requests.lock().unwrap().len(), 2);
+    assert_eq!(first.requests.lock().unwrap().len(), 8);
+    assert_eq!(view.runs[0].provider_retries.len(), 6);
     for provider in [&default, &spare] {
         let calls = provider.requests.lock().unwrap();
         assert_eq!(calls.len(), 2);
@@ -1343,6 +1395,236 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
         assert_eq!(
             child.tools[0].observation.as_ref().unwrap().disposition,
             arany::ToolDisposition::Succeeded
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_budget() {
+    use arany::{ProviderRetry, RetryCause, RunFailure};
+    let hostile = Duration::from_secs(u64::from(u32::MAX));
+    // (case, failed attempts, finite token budget, committed retry causes and delays in ms, success)
+    type Case = (
+        &'static str,
+        Vec<ProviderError>,
+        bool,
+        Vec<(RetryCause, u32)>,
+        bool,
+    );
+    let cases: [Case; 4] = [
+        (
+            "429 honoring Retry-After, then success",
+            vec![ProviderError::RateLimited(Some(Duration::from_secs(5)))],
+            false,
+            vec![(RetryCause::RateLimited, 5000)],
+            true,
+        ),
+        (
+            "hostile Retry-After past the action deadline",
+            vec![ProviderError::RateLimited(Some(hostile))],
+            false,
+            vec![],
+            false,
+        ),
+        (
+            "three stream cuts, then failure",
+            (0..=MAX_PROVIDER_RETRIES)
+                .map(|_| ProviderError::PartialTransport)
+                .collect(),
+            false,
+            vec![
+                (RetryCause::StreamCut, 2000),
+                (RetryCause::StreamCut, 4000),
+                (RetryCause::StreamCut, 8000),
+            ],
+            false,
+        ),
+        (
+            "finite token budget with unknown usage",
+            vec![ProviderError::RemoteHttp(503)],
+            true,
+            vec![],
+            false,
+        ),
+    ];
+    for (case, failures, tokens, retries, success) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = temp.path().join("state");
+        let mut primary =
+            ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary");
+        let responses = primary.responses.get_mut().unwrap();
+        for failure in failures.into_iter().rev() {
+            responses.push_front(Err(failure));
+        }
+        let primary = route(primary);
+        let mut request = input(&workspace);
+        if tokens {
+            request.goal.budget.as_mut().unwrap().max_tokens = Some(1000);
+        }
+        let engine = open(&state);
+        let started = tokio::time::Instant::now();
+        let result = run_routed(&engine, routes(&primary), request, RunControls::default())
+            .await
+            .unwrap();
+        let waited = started.elapsed();
+        engine.close().await.unwrap();
+        let (events, view) = reopen(&state, result.session_id).await;
+        let run = &view.runs[0];
+        let primary_id = run.agents[0].id;
+        assert_eq!(
+            run.provider_retries,
+            retries
+                .iter()
+                .zip(1..)
+                .map(|(&(cause, delay_ms), attempt)| (
+                    primary_id,
+                    ProviderRetry {
+                        role: ProviderRole::Primary,
+                        call_index: 0,
+                        attempt,
+                        cause,
+                        delay_ms,
+                    }
+                ))
+                .collect::<Vec<_>>(),
+            "{case}"
+        );
+        // Every retry waits inside the action deadline; a hostile Retry-After is never waited out.
+        let delays: u64 = retries.iter().map(|&(_, delay)| u64::from(delay)).sum();
+        assert!(
+            waited >= Duration::from_millis(delays) && waited < Duration::from_secs(60),
+            "{case}: {waited:?}"
+        );
+        // One charged call per dispatched attempt; replay never re-sends one.
+        let dispatched = retries.len() + 1;
+        assert_eq!(primary.requests.lock().unwrap().len(), dispatched, "{case}");
+        assert_eq!(view.goals[0].provider_calls as usize, dispatched, "{case}");
+        assert_eq!(run.agents[0].provider_calls.len(), 1, "{case}");
+        if success {
+            assert_eq!(result.run.status, RunStatus::Finished, "{case}");
+            assert!(view.goals[0].token_usage_unknown);
+            let at = |wanted: fn(&Event) -> bool| {
+                events
+                    .iter()
+                    .position(|event| wanted(&event.event))
+                    .unwrap()
+            };
+            let reserved = at(|event| matches!(event, Event::GoalProviderCallReserved { .. }));
+            let retried = at(|event| matches!(event, Event::ProviderRetryScheduled { .. }));
+            let recorded = at(|event| matches!(event, Event::ProviderCallRecorded { .. }));
+            assert!(
+                reserved < retried && retried < recorded,
+                "fact before re-dispatch"
+            );
+            let notice = run.provider_retries[0].1.notice();
+            assert!(notice.starts_with("Reconnecting\u{2026} 1/3 (primary, rate limited"));
+            assert!(
+                view.goals[0]
+                    .report
+                    .as_ref()
+                    .unwrap()
+                    .unresolved
+                    .contains(&notice)
+            );
+        } else {
+            assert_eq!(result.run.status, RunStatus::Failed, "{case}");
+            assert_eq!(run.failure, Some(RunFailure::ProviderCall), "{case}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn lost_retry_acknowledgement_and_cancellation_in_the_backoff_start_no_further_call() {
+    for lost in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = temp.path().join("state");
+        let mut primary =
+            ScriptedProvider::new(vec![finish("never")]).with_profile("scripted", "primary");
+        primary
+            .responses
+            .get_mut()
+            .unwrap()
+            .push_front(Err(ProviderError::RemoteHttp(503)));
+        let primary = route(primary);
+        let engine = open(&state);
+        let session = engine
+            .create_session(workspace.clone(), Some("Retry".into()))
+            .await
+            .unwrap();
+        let cancellation = RunCancellation::new();
+        let mut request = input(&workspace);
+        request.session_id = Some(session);
+        request.title = None;
+        let run = run_routed(
+            &engine,
+            routes(&primary),
+            request,
+            RunControls {
+                cancellation: cancellation.clone(),
+                ..RunControls::default()
+            },
+        );
+        let (entered, release) =
+            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                matches!(event, Event::ProviderRetryScheduled { .. })
+            });
+        let outcome = {
+            tokio::pin!(run);
+            tokio::select! {
+                result = &mut run => panic!("Run ended before the held retry acknowledgment: {}", result.is_ok()),
+                entered = entered => entered.unwrap(),
+            }
+            if lost {
+                drop(release);
+            } else {
+                assert!(cancellation.cancel());
+                release.send(()).unwrap();
+            }
+            run.await
+        };
+        let _ = engine.close().await;
+        assert_eq!(primary.requests.lock().unwrap().len(), 1, "lost {lost}");
+        let (events, view) = reopen(&state, session).await;
+        let run = &view.runs[0];
+        assert_eq!(run.provider_retries.len(), 1, "lost {lost}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .count(),
+            1,
+            "no reservation after the retry fact"
+        );
+        assert_eq!(view.goals[0].provider_calls, 2);
+        assert!(view.goals[0].token_usage_unknown);
+        if lost {
+            // A crash right after the fact: the prefix keeps the open reservation and charges it.
+            assert!(outcome.is_err());
+            assert_eq!(view.goals[0].unobserved_provider_calls, [run.agents[0].id]);
+            assert!(run.agents[0].provider_calls.is_empty());
+        } else {
+            assert_eq!(outcome.unwrap().run.status, RunStatus::Cancelled);
+            assert_eq!(
+                run.agents[0].provider_calls[0].disposition,
+                ProviderCallDisposition::Cancelled
+            );
+        }
+        let cold = arany::resume_session(
+            StateRoot::open_existing(&state).unwrap(),
+            workspace.clone(),
+            session,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cold.runs, view.runs, "lost {lost}");
+        assert_eq!(
+            primary.requests.lock().unwrap().len(),
+            1,
+            "replay never re-sends"
         );
     }
 }

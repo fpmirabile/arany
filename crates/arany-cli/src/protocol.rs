@@ -63,6 +63,7 @@ event_kinds!(
     RunStarted,
     AgentSpawned,
     ProviderFallbackUsed,
+    ProviderRetryScheduled,
     ProviderCallRecorded,
     GoalProviderCallReserved,
     GoalCompactionCallReserved,

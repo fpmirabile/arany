@@ -419,11 +419,12 @@ async fn completed_at_with_preview(
     }
     let status = response.status();
     if status != reqwest::StatusCode::OK {
-        return Err(failure(
-            Stage::HttpStatus,
-            ProviderError::RemoteHttp(status.as_u16()),
-            counts,
-        ));
+        let error = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            crate::provider::http_failure(status, response.headers())
+        } else {
+            ProviderError::RemoteHttp(status.as_u16())
+        };
+        return Err(failure(Stage::HttpStatus, error, counts));
     }
     if response
         .headers()

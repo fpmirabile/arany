@@ -124,6 +124,13 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     })));
                 }
                 responses.push_back(response);
+                // An uncancelled 5xx retries the same route three times before it settles.
+                let retried = case == "service unavailable" && !cancel;
+                if retried {
+                    for _ in 0..arany::MAX_PROVIDER_RETRIES {
+                        responses.push_back(Err(ProviderError::RemoteHttp(503)));
+                    }
+                }
                 if case == "invalid answer" && !cancel {
                     for _ in 0..2 {
                         responses.push_back(Ok(ProviderOutcome::Answer(Answer {
@@ -132,20 +139,27 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     }
                 }
                 provider.responses = Mutex::new(responses);
-                let outcome = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    run_with(
-                        &engine,
-                        &Arc::new(provider),
-                        input,
-                        RunControls {
-                            cancellation,
-                            ..RunControls::default()
-                        },
-                    ),
-                )
-                .await
-                .unwrap()
+                let provider = Arc::new(provider);
+                let run = run_with(
+                    &engine,
+                    &provider,
+                    input,
+                    RunControls {
+                        cancellation,
+                        ..RunControls::default()
+                    },
+                );
+                // Paused time skips the backoff; a paused watchdog would fire while the Store thread works.
+                let outcome = if retried {
+                    tokio::time::pause();
+                    let outcome = run.await;
+                    tokio::time::resume();
+                    outcome
+                } else {
+                    tokio::time::timeout(Duration::from_secs(5), run)
+                        .await
+                        .unwrap()
+                }
                 .unwrap();
                 engine.close().await.unwrap();
                 let (replay, events) = committed(root.path(), outcome.session_id).await;
@@ -240,11 +254,13 @@ async fn cancelled_preview_jsonl_includes_committed_checkpoints_and_commentary()
     assert!(export.contains("PUBLIC_COMMENTARY_CANARY"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn fallback_feedback_names_the_committed_replacement_model() {
     let (root, workspace, engine) = fixture();
     let primary = ScriptedProvider::new(vec![]).with_profile("scripted", "primary-model");
-    *primary.responses.lock().unwrap() = VecDeque::from([Err(ProviderError::RemoteHttp(503))]);
+    *primary.responses.lock().unwrap() = (0..=arany::MAX_PROVIDER_RETRIES)
+        .map(|_| Err(ProviderError::RemoteHttp(503)))
+        .collect();
     let fallback = Arc::new(
         ScriptedProvider::new(vec![finish("fallback answer")])
             .with_profile("scripted", "fallback-model"),
@@ -263,11 +279,14 @@ async fn fallback_feedback_names_the_committed_replacement_model() {
     .unwrap();
     engine.close().await.unwrap();
     let (view, _) = committed(root.path(), run.session_id).await;
-    assert!(
-        render_provider_fallbacks(&view.runs[0])
-            .unwrap()
-            .contains("fallback-model")
-    );
+    let notices = render_provider_attempts(&view.runs[0]).unwrap();
+    assert!(notices.contains("fallback-model"));
+    // Every same-route retry before the switch is visible, not hidden.
+    for attempt in 1..=arany::MAX_PROVIDER_RETRIES {
+        assert!(notices.contains(&format!(
+            "Reconnecting\u{2026} {attempt}/3 (primary, server error"
+        )));
+    }
 }
 
 #[tokio::test]

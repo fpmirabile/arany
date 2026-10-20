@@ -5084,6 +5084,14 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     };
                     responses.push_back(response);
                     let mut expected_phases = expected_phases;
+                    // An uncancelled 5xx retries the same route three times before it settles.
+                    let retried = case == "service unavailable" && !cancel;
+                    if retried {
+                        for _ in 0..arany::MAX_PROVIDER_RETRIES {
+                            responses.push_back(Err(ProviderError::RemoteHttp(503)));
+                            expected_phases.push(phase);
+                        }
+                    }
                     if case == "invalid answer" && !cancel {
                         for _ in 0..2 {
                             responses.push_back(Ok(ProviderOutcome::Answer(Answer { text: String::new() })));
@@ -5096,11 +5104,16 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     let engine = engine_support::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
                     .expect("Engine");
                     let mut tapped = engine.subscribe();
-                    let outcome = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        run_with(&engine, &provider, run_request, RunControls { cancellation, ..Default::default() }),
-                    )
-                    .await
+                    let run = run_with(&engine, &provider, run_request, RunControls { cancellation, ..Default::default() });
+                    // Paused time skips the backoff; a paused watchdog would fire while the Store thread works.
+                    let outcome = if retried {
+                        tokio::time::pause();
+                        let outcome = run.await;
+                        tokio::time::resume();
+                        Ok(outcome)
+                    } else {
+                        tokio::time::timeout(Duration::from_secs(5), run).await
+                    }
                     .unwrap_or_else(|_| {
                         let phase = format!("{phase:?}");
                         let cancellation = if cancel { "true" } else { "false" };

@@ -1,6 +1,7 @@
 use crate::session::{CollaborationPolicy, RunId, SessionId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::time::Duration;
 use uuid::{Uuid, Version};
 
 mod anthropic;
@@ -22,8 +23,9 @@ mod roster;
 pub use roster::{AdmittedRoster, NamedProviderRoutes, RosterSnapshot, valid_profile_name};
 mod routing;
 pub use routing::{
-    AdmittedProviders, MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_SWITCHES, ProviderFallback,
-    ProviderRole, ProviderRoutes, Providers,
+    AdmittedProviders, MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_RETRIES, MAX_PROVIDER_RETRY_DELAY_MS,
+    MAX_PROVIDER_SWITCHES, ProviderFallback, ProviderRetry, ProviderRole, ProviderRoutes,
+    Providers, RetryCause,
 };
 mod streaming;
 #[cfg(test)]
@@ -95,6 +97,32 @@ async fn read_identity_body(
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+pub(crate) fn http_failure(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+) -> ProviderError {
+    if status.is_server_error() {
+        ProviderError::HttpServerUnavailable
+    } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        ProviderError::RateLimited(retry_after(headers))
+    } else {
+        ProviderError::Rejected
+    }
+}
+
+// Only delta-seconds; an HTTP date or malformed value leaves the Engine's own backoff in place.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.as_bytes();
+    if value.is_empty() || value.len() > 10 || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(value)
+        .ok()?
+        .parse()
+        .ok()
+        .map(Duration::from_secs)
 }
 
 pub(crate) const MAX_REPORTED_INPUT_TOKENS: u32 = 1_000_000;
@@ -875,6 +903,9 @@ pub enum ProviderError {
     InvalidOutcomeContract,
     #[error("Provider reported output above Arany's local token limit")]
     LocalOutputLimit,
+    // HTTP 429 at status admission, with the server's bounded delta-seconds Retry-After.
+    #[error("Provider returned HTTP 429")]
+    RateLimited(Option<Duration>),
     // Only status-check failures, before any response body is admitted.
     #[error("Provider returned HTTP {0}")]
     RemoteHttp(u16),
@@ -915,6 +946,19 @@ impl ProviderError {
         )
     }
 
+    // Only failures before a decoded outcome qualify: a 429 or 5xx at status admission, or a cut body.
+    pub(crate) fn retry_cause(&self) -> Option<(RetryCause, Option<Duration>)> {
+        match self {
+            Self::RateLimited(after) => Some((RetryCause::RateLimited, *after)),
+            Self::RemoteHttp(429) => Some((RetryCause::RateLimited, None)),
+            Self::HttpServerUnavailable | Self::RemoteHttp(500..=599) => {
+                Some((RetryCause::ServerError, None))
+            }
+            Self::PartialTransport => Some((RetryCause::StreamCut, None)),
+            _ => None,
+        }
+    }
+
     pub(crate) fn failure_reason(&self) -> Option<ProviderFailureReason> {
         match self {
             Self::InvalidStream => Some(ProviderFailureReason::StreamProtocol),
@@ -922,7 +966,7 @@ impl ProviderError {
             Self::InvalidOutcomeContract => Some(ProviderFailureReason::OutcomeContract),
             Self::LocalOutputLimit => Some(ProviderFailureReason::LocalOutputLimit),
             Self::RemoteHttp(401 | 403) => Some(ProviderFailureReason::AccountAccess),
-            Self::RemoteHttp(429) => Some(ProviderFailureReason::UsageLimit),
+            Self::RateLimited(_) | Self::RemoteHttp(429) => Some(ProviderFailureReason::UsageLimit),
             Self::RemoteHttp(500..=599) => Some(ProviderFailureReason::ServiceUnavailable),
             Self::RemoteStreamCode(code)
                 if matches!(
@@ -950,9 +994,10 @@ impl ProviderError {
             {
                 ProviderFailureClass::Unavailable
             }
-            Self::Rejected | Self::RemoteHttp(400..=499) | Self::RemoteStreamCode(_) => {
-                ProviderFailureClass::Rejected
-            }
+            Self::Rejected
+            | Self::RateLimited(_)
+            | Self::RemoteHttp(400..=499)
+            | Self::RemoteStreamCode(_) => ProviderFailureClass::Rejected,
             Self::InvalidOutcome
             | Self::InvalidStream
             | Self::InvalidResponseContract
@@ -1124,13 +1169,16 @@ stop_bytes: 0,
 
     #[test]
     fn fallback_requires_a_server_failure_at_the_http_status_stage() {
-        let anthropic_rate_limit = anthropic::http_failure(reqwest::StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(
-            anthropic_rate_limit.failure_class(),
-            ProviderFailureClass::Unavailable
+        let rate_limit = http_failure(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            &reqwest::header::HeaderMap::new(),
         );
-        assert_eq!(anthropic_rate_limit.failure_reason(), None);
-        assert!(!anthropic_rate_limit.allows_fallback());
+        assert_eq!(rate_limit.failure_class(), ProviderFailureClass::Rejected);
+        assert_eq!(
+            rate_limit.failure_reason(),
+            Some(ProviderFailureReason::UsageLimit)
+        );
+        assert!(!rate_limit.allows_fallback());
         assert_eq!(
             ProviderError::HttpServerUnavailable.failure_class(),
             ProviderError::Unavailable.failure_class()
@@ -1149,6 +1197,7 @@ stop_bytes: 0,
             (ProviderError::RemoteHttp(402), false),
             (ProviderError::RemoteHttp(413), false),
             (ProviderError::RemoteHttp(429), false),
+            (ProviderError::RateLimited(None), false),
             (ProviderError::Unavailable, false),
             (ProviderError::PartialTransport, false),
             (ProviderError::CallTimedOut, false),
@@ -1159,6 +1208,80 @@ stop_bytes: 0,
             ),
         ] {
             assert_eq!(error.allows_fallback(), eligible, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn only_status_rejections_and_cut_bodies_before_an_outcome_retry() {
+        let headers = |value: &str| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::RETRY_AFTER,
+                reqwest::header::HeaderValue::from_str(value).unwrap(),
+            );
+            headers
+        };
+        let too_many = reqwest::StatusCode::TOO_MANY_REQUESTS;
+        for (value, after) in [
+            ("7", Some(Duration::from_secs(7))),
+            ("0", Some(Duration::ZERO)),
+            ("9999999999", Some(Duration::from_secs(9_999_999_999))),
+            ("99999999999", None),
+            ("-1", None),
+            ("1.5", None),
+            ("Wed, 21 Oct 2026 07:28:00 GMT", None),
+            ("", None),
+        ] {
+            assert!(
+                matches!(http_failure(too_many, &headers(value)), ProviderError::RateLimited(actual) if actual == after),
+                "{value}"
+            );
+        }
+        for (status, cause) in [
+            (503, Some(RetryCause::ServerError)),
+            (529, Some(RetryCause::ServerError)),
+            (429, Some(RetryCause::RateLimited)),
+            (400, None),
+            (401, None),
+        ] {
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            assert_eq!(
+                http_failure(status, &reqwest::header::HeaderMap::new())
+                    .retry_cause()
+                    .map(|(cause, _)| cause),
+                cause,
+                "{status}"
+            );
+        }
+        for (error, cause) in [
+            (
+                ProviderError::RemoteHttp(429),
+                Some(RetryCause::RateLimited),
+            ),
+            (
+                ProviderError::RemoteHttp(500),
+                Some(RetryCause::ServerError),
+            ),
+            (
+                ProviderError::HttpServerUnavailable,
+                Some(RetryCause::ServerError),
+            ),
+            (ProviderError::PartialTransport, Some(RetryCause::StreamCut)),
+            (ProviderError::Unavailable, None),
+            (ProviderError::CallTimedOut, None),
+            (ProviderError::InvalidStream, None),
+            (ProviderError::Rejected, None),
+            (ProviderError::RemoteHttp(403), None),
+            (
+                ProviderError::RemoteStreamCode("subscription_sharing_usage_unavailable".into()),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                error.retry_cause().map(|(cause, _)| cause),
+                cause,
+                "{error:?}"
+            );
         }
     }
 

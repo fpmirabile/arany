@@ -37,7 +37,7 @@ pub struct ScriptedProvider {
     pub responses: Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>>,
     pub cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
     pub cancel_at_compaction: Option<RunCancellation>,
-    pub before_call: Option<(usize, Box<dyn Fn() + Send + Sync>)>,
+    pub before_call: Vec<(usize, Box<dyn Fn() + Send + Sync>)>,
     pub clock_advance: Option<(usize, Duration)>,
     pub known_input_tokens: bool,
     pub cached_input_tokens: u32,
@@ -62,7 +62,7 @@ impl ScriptedProvider {
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
             cancel_at_compaction: None,
-            before_call: None,
+            before_call: Vec::new(),
             clock_advance: None,
             known_input_tokens: false,
             cached_input_tokens: 0,
@@ -79,7 +79,7 @@ impl ScriptedProvider {
         index: usize,
         hook: impl Fn() + Send + Sync + 'static,
     ) -> Self {
-        self.before_call = Some((index, Box::new(hook)));
+        self.before_call.push((index, Box::new(hook)));
         self
     }
 
@@ -165,8 +165,10 @@ impl Provider for ScriptedProvider {
             requests.push(request);
             requests.len() - 1
         };
-        if let Some((target, hook)) = &self.before_call
-            && *target == index
+        for (_, hook) in self
+            .before_call
+            .iter()
+            .filter(|(target, _)| *target == index)
         {
             hook();
         }
@@ -519,8 +521,11 @@ pub fn completion_boundary_cases() -> [CompletionBoundaryCase; 11] {
             Some(crate::ProviderFailureReason::AccountAccess),
         ),
         (
-            "usage limit",
-            Err(ProviderError::RemoteHttp(429)),
+            // A Retry-After past the action deadline is never waited out, so the 429 settles at once.
+            "usage limit with a hostile Retry-After",
+            Err(ProviderError::RateLimited(Some(Duration::from_secs(
+                u64::from(u32::MAX),
+            )))),
             ProviderCallDisposition::Rejected,
             Some(crate::ProviderFailureReason::UsageLimit),
         ),

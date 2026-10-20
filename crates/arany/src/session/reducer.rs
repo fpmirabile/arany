@@ -257,6 +257,7 @@ pub struct RunView {
     pub images: Vec<crate::provider::ImageAttachment>,
     pub config: Option<RunConfig>,
     pub provider_fallbacks: Vec<(AgentRunId, crate::provider::ProviderFallback)>,
+    pub provider_retries: Vec<(AgentRunId, crate::provider::ProviderRetry)>,
     pub agents: Vec<AgentView>,
     pub assistant_message: Option<String>,
     pub status: RunStatus,
@@ -1022,6 +1023,7 @@ impl SessionView {
                     | Event::GoalCompactionCallReserved { .. }
                     | Event::AgentSpawned { .. }
                     | Event::ProviderFallbackUsed { .. }
+                    | Event::ProviderRetryScheduled { .. }
             )
         {
             return Err(ReplayError::InvalidTransition);
@@ -1087,6 +1089,7 @@ impl SessionView {
             | Event::RunFinished { .. } => run::apply(current, &envelope.event, prior)?,
             Event::AgentSpawned { .. }
             | Event::ProviderFallbackUsed { .. }
+            | Event::ProviderRetryScheduled { .. }
             | Event::ProviderCallRecorded { .. }
             | Event::AgentFinished { .. } => agent::apply(current, &envelope.event)?,
             Event::WorkerDataChunk { .. }

@@ -566,10 +566,10 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         let mut first = super::scenario::ScriptedProvider::new(Vec::new())
             .with_profile("scripted", "first-child");
         first.identity.limits.concurrency = 8;
-        *first.responses.lock().unwrap() = std::collections::VecDeque::from([
-            Err(ProviderError::HttpServerUnavailable),
-            Err(ProviderError::HttpServerUnavailable),
-        ]);
+        // Each editor's first call and its three same-route retries, in real time beside the Guard.
+        *first.responses.lock().unwrap() = (0..2 * (usize::from(crate::MAX_PROVIDER_RETRIES) + 1))
+            .map(|_| Err(ProviderError::HttpServerUnavailable))
+            .collect();
         let first = Arc::new(first);
         bindings.roles.child = vec![first.clone(), provider.clone()];
         Some(first)
@@ -678,7 +678,10 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
         assert_eq!(provider.maximum.load(Ordering::SeqCst), 1);
     }
     if let Some(first) = fallback {
-        assert_eq!(first.requests.lock().unwrap().len(), 2);
+        assert_eq!(
+            first.requests.lock().unwrap().len(),
+            2 * (usize::from(crate::MAX_PROVIDER_RETRIES) + 1)
+        );
         assert!(first.responses.lock().unwrap().is_empty());
     }
     let session = result.run.session_id;

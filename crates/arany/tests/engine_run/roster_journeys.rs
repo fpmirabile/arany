@@ -4,7 +4,10 @@ use arany::test_support::routing::*;
 use arany::{AgentRole, FaultPlan};
 use tokio::sync::oneshot;
 
-const WATCHDOG: Duration = Duration::from_secs(20);
+// Real-time journeys include three same-route backoffs of 2 + 4 + 8 s before a switch.
+const WATCHDOG: Duration = Duration::from_secs(60);
+// The first attempt and its three same-route retries.
+const ATTEMPTS: usize = arany::MAX_PROVIDER_RETRIES as usize + 1;
 
 type Started = (String, oneshot::Sender<()>);
 
@@ -88,7 +91,7 @@ fn spawned_children(events: &[arany::EventEnvelope]) -> usize {
     })
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exhausted_assigned_chain_fails_its_child_and_starts_no_later_sibling() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -101,7 +104,7 @@ async fn exhausted_assigned_chain_fails_its_child_and_starts_no_later_sibling() 
         ])
         .with_profile("scripted", "primary"),
     );
-    let first = unavailable("spare-first", 1);
+    let first = unavailable("spare-first", ATTEMPTS);
     let last = unavailable("spare-last", 1);
     let default = answering("default", &["must not run"]);
     let mut bindings = routes(&primary);
@@ -134,17 +137,19 @@ async fn exhausted_assigned_chain_fails_its_child_and_starts_no_later_sibling() 
     assert_eq!(run.provider_fallbacks.len(), 1);
     assert_eq!(run.provider_fallbacks[0].1.from, first.identity);
     assert_eq!(run.provider_fallbacks[0].1.to, last.identity);
-    assert_eq!([count(&first), count(&last)], [1, 1]);
+    // Retries count once per semantic call, so the last route switches without retrying.
+    assert_eq!([count(&first), count(&last)], [ATTEMPTS, 1]);
+    assert_eq!(run.provider_retries.len(), ATTEMPTS - 1);
     assert_eq!(count(&default), 0);
     assert_eq!(count(&primary), 1);
-    assert_eq!(view.goals[0].provider_calls, 3);
+    assert_eq!(view.goals[0].provider_calls, 6);
     assert_eq!(
         events_of(&events, |event| matches!(event, Event::ToolStarted { .. })),
         0
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn call_and_token_budgets_refuse_a_selected_profile_switch() {
     for tokens in [false, true] {
         let temp = tempfile::tempdir().unwrap();
@@ -156,7 +161,7 @@ async fn call_and_token_budgets_refuse_a_selected_profile_switch() {
                 .with_profile("scripted", "primary")
                 .with_known_input_tokens(),
         );
-        let first = unavailable("spare-first", 1);
+        let first = unavailable("spare-first", ATTEMPTS);
         let second = unavailable("spare-second", 1);
         let last = answering("spare-last", &["never reached"]);
         let mut bindings = routes(&primary);
@@ -169,7 +174,8 @@ async fn call_and_token_budgets_refuse_a_selected_profile_switch() {
         if tokens {
             budget.max_tokens = Some(1000);
         } else {
-            budget.max_provider_calls = Some(3);
+            // The primary, the child's call, its three retries and one switch.
+            budget.max_provider_calls = Some(6);
         }
         let engine = open(&state);
         let result = run_routed(&engine, bindings, request, RunControls::default())
@@ -179,13 +185,18 @@ async fn call_and_token_budgets_refuse_a_selected_profile_switch() {
         engine.close().await.unwrap();
         let (_, view) = reopen(&state, result.session_id).await;
         let switches = usize::from(!tokens);
+        let retries = if tokens { 0 } else { ATTEMPTS - 1 };
         assert_eq!(view.runs[0].provider_fallbacks.len(), switches);
+        assert_eq!(view.runs[0].provider_retries.len(), retries);
         assert_eq!(
             [&first, &second, &last].map(count),
-            [1, switches, 0],
+            [retries + 1, switches, 0],
             "tokens {tokens}"
         );
-        assert_eq!(view.goals[0].provider_calls, 2 + switches as u32);
+        assert_eq!(
+            view.goals[0].provider_calls as usize,
+            2 + retries + switches
+        );
         assert!(view.goals[0].token_usage_unknown);
         assert_eq!(view.runs[0].agents[1].status, AgentStatus::Failed);
     }
@@ -220,7 +231,7 @@ async fn interruptions_around_spawn_and_switch_acknowledgements_start_no_further
             ])
             .with_profile("scripted", "primary"),
         );
-        let first = unavailable("spare-first", 1);
+        let first = unavailable("spare-first", ATTEMPTS);
         let last = answering("spare-last", &["spare answer"]);
         let default = answering("default", &["default answer"]);
         let mut bindings = routes(&primary);
@@ -314,7 +325,7 @@ async fn interruptions_around_spawn_and_switch_acknowledgements_start_no_further
                 assert!(outcome.is_err());
                 assert_eq!(
                     calls,
-                    [1, 0, 0],
+                    [ATTEMPTS, 0, 0],
                     "no call after the lost switch acknowledgment"
                 );
                 assert_eq!(count(&primary), 1);
@@ -322,7 +333,7 @@ async fn interruptions_around_spawn_and_switch_acknowledgements_start_no_further
             }
             Interruption::SwitchAcknowledgedThenCancelled => {
                 assert_eq!(outcome.unwrap().run.status, RunStatus::Cancelled);
-                assert_eq!(calls, [1, 0, 0], "no call after a cancelled switch");
+                assert_eq!(calls, [ATTEMPTS, 0, 0], "no call after a cancelled switch");
                 assert_eq!(run.provider_fallbacks.len(), 1);
                 assert_eq!(count(&primary), 1);
             }
@@ -451,7 +462,7 @@ async fn explicit_resume_continues_the_read_only_researcher_only_with_the_same_p
 
     let (started, mut starts) = mpsc::unbounded_channel();
     let primary = planner();
-    let first = unavailable("spare-first", 1);
+    let first = unavailable("spare-first", ATTEMPTS);
     let held = gated("spare-last", 3, &started);
     let bindings = researcher_bindings(&primary, vec![first.clone(), held.clone()]);
     let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
@@ -602,7 +613,7 @@ async fn preset_changes_after_a_run_cannot_move_its_pinned_compaction() {
     assert_eq!(view.compactions.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_committed_prefix_of_a_roster_team_run_replays_without_dispatch() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -615,7 +626,7 @@ async fn every_committed_prefix_of_a_roster_team_run_replays_without_dispatch() 
         ])
         .with_profile("scripted", "primary"),
     );
-    let first = unavailable("spare-first", 1);
+    let first = unavailable("spare-first", ATTEMPTS);
     let last = answering("spare-last", &["spare answer"]);
     let default = answering("default", &["default answer"]);
     let mut bindings = routes(&primary);
@@ -634,7 +645,7 @@ async fn every_committed_prefix_of_a_roster_team_run_replays_without_dispatch() 
     engine.close().await.unwrap();
     let (events, _) = reopen(&state, result.session_id).await;
     let calls = [&primary, &first, &last, &default].map(count);
-    assert_eq!(calls, [2, 1, 1, 1]);
+    assert_eq!(calls, [2, ATTEMPTS, 1, 1]);
     for end in 1..=events.len() {
         let view = SessionView::replay(result.session_id, &events[..end])
             .unwrap_or_else(|error| panic!("prefix {end} must replay: {error:?}"))
