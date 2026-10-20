@@ -120,7 +120,7 @@ struct ModelCheck {
     fingerprint: [u8; 32],
     checked_at_sec: u64,
     expires_at_sec: u64,
-    // Absent equals null: checks saved before this field have a stale fingerprint and never match.
+    // Optional in the current format: absent or null means no window.
     #[serde(default)]
     context_window_tokens: Option<u32>,
 }
