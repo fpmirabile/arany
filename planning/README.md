@@ -46,6 +46,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 |---|---|
 | [Tool protocol and failure visibility](./tools-protocol/README.md) | Seven slices: honest failure causes, fixable refusals, failed turns in history, optional plan Tool, text answers with `tool_choice: auto`, slash Skill invocation, peer-style Tool rows |
 | [Engine loop: decide, then apply](./engine-loop/README.md) | Nine slices after tools-protocol slice 5: closed stop causes, one primary settlement, child and worker decisions, the worker cause relabel, the child-loop split, the dispatch decision, a closed `RunStop` at the edges, the idiom sweep and bounded journaled Provider retries |
+| [Terminal parity: scroll, copy and inline dialogs](./terminal-parity/README.md) | Eight slices: Classic by default with native scroll and transcript dump, content-sized Classic viewport, inline numbered approval, inline selectors, gesture-only clipboard writer and `/copy`, Fullscreen capture with selection and copy, Fullscreen pager, Fullscreen by default |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
