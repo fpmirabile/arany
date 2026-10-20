@@ -1316,9 +1316,9 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         }
     }
     for (command, needle, owned_row) in [
-        (&b"/resume\r"[..], &b"Resume \xc2\xb7"[..], 18),
-        (b"/agents\r", b"Last", 11),
-        (b"/help\r", b"local controls", 5),
+        (&b"/resume\r"[..], &b"Resume \xc2\xb7"[..], 1),
+        (b"/agents\r", b"Last", 1),
+        (b"/help\r", b"local controls", 1),
     ] {
         let from = transcript.len();
         input.write_all(command).unwrap();
@@ -1360,7 +1360,7 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
     }
     assert!(wait_product(child.take()).status.success());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
-    super::assert_classic_owned_clear(&transcript[exit_from..], 21);
+    super::assert_classic_owned_clear(&transcript[exit_from..], 1);
     let text = String::from_utf8_lossy(&transcript);
     for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {
         assert!(

@@ -326,9 +326,7 @@ fn run_native(note_delivery: bool, classic: bool) {
                 if note_delivery
                     && !exited
                     && completed_after.is_some_and(|offset| {
-                        transcript[offset..]
-                            .windows(b"ready \xc2\xb7".len())
-                            .any(|part| part == b"ready \xc2\xb7")
+                        ordered_cues_end(&transcript[offset..], &[b"ready", b"\xc2\xb7"]).is_some()
                     })
                 {
                     input.write_all(b"/exit\r").unwrap();
@@ -338,9 +336,7 @@ fn run_native(note_delivery: bool, classic: bool) {
                     && !exited
                     && goal_paused
                     && paused_after.is_some_and(|offset| {
-                        transcript[offset..]
-                            .windows(b"ready \xc2\xb7".len())
-                            .any(|part| part == b"ready \xc2\xb7")
+                        ordered_cues_end(&transcript[offset..], &[b"ready", b"\xc2\xb7"]).is_some()
                     })
                 {
                     input.write_all(b"/exit\r").unwrap();

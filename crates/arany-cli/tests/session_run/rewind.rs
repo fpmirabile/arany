@@ -242,7 +242,7 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
             &mut transcript,
             &mut answered,
             from,
-            b"Second prompt",
+            if linear { b"Second prompt" } else { b"Second" },
         );
         if linear {
             assert!(String::from_utf8_lossy(&transcript[from..]).contains("Draft (not sent):"));

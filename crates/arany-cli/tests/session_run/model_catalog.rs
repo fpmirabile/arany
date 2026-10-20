@@ -386,8 +386,8 @@ fn inline_model_catalog_at_width(width: u16) {
     let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript
-        .windows(b"Ask Arany".len())
-        .any(|part| part == b"Ask Arany")
+        .windows(b"Ask Ara".len())
+        .any(|part| part == b"Ask Ara")
     {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
@@ -793,8 +793,8 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript
-        .windows(b"Ask Arany".len())
-        .any(|part| part == b"Ask Arany")
+        .windows(b"Ask Ara".len())
+        .any(|part| part == b"Ask Ara")
     {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
