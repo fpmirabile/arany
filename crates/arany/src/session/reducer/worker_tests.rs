@@ -3657,7 +3657,7 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
     use crate::tools::permissions::{
         HookEvent, HookInvocation, HookOutcome, HookResult, stop_subject,
     };
-    for result in ["passed", "blocked", "stopped", "unknown"] {
+    for result in ["passed", "blocked", "stopped", "stopped_unknown", "unknown"] {
         let mut f = fixture();
         f.call(
             f.child,
@@ -3711,7 +3711,7 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
                     reason: Some("verify".into()),
                 },
             ),
-            "stopped" => (
+            "stopped" | "stopped_unknown" => (
                 ToolDisposition::Succeeded,
                 r#"{"continue":false,"stopReason":"halt"}"#,
                 "",
@@ -3732,7 +3732,8 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
         };
         let observation = ToolObservation {
             intent: intent.clone(), disposition, output: serde_json::json!({"exit_code":exit,"stdout":stdout,"stderr":stderr,"changeset":{"files":[]}}).to_string(),
-            attestation: (result != "unknown").then(|| Attestation::Guard(receipt(&intent))), enforcement_cause: None, cache_update: CacheUpdate::NotApplicable,
+            attestation: (result != "unknown").then(|| Attestation::Guard(receipt(&intent))), enforcement_cause: None,
+            cache_update: if result == "stopped_unknown" { CacheUpdate::Uncertain } else { CacheUpdate::NotApplicable },
         };
         let finished = Event::HookFinished {
             run_id: f.run,
@@ -3746,12 +3747,52 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
         let sequence = view.last_sequence + 1;
         view.apply_committed(&f.envelope(finished, sequence))
             .unwrap();
-        assert_eq!(view.runs[0].hooks_settled(), result != "unknown");
+        let unknown = matches!(result, "unknown" | "stopped_unknown");
+        assert_eq!(view.runs[0].hooks_settled(), !unknown);
         assert_eq!(view.runs[0].stop_blocked(f.child), result == "blocked");
         assert_eq!(
             view.runs[0].actor_stopped_by_hook(f.child),
-            result == "stopped"
+            matches!(result, "stopped" | "stopped_unknown")
         );
+        if result == "stopped_unknown" {
+            // An editor whose own stop is journaled while hooks are unsettled cannot end stopped_by_hook.
+            let finished = |disposition, cause| Event::AgentFinished {
+                run_id: f.run,
+                agent_run_id: f.child,
+                disposition,
+                summary: None,
+                result: None,
+                worker: Some(WorkerOutcome {
+                    disposition: WorkerDisposition::Failed,
+                    cause,
+                    data: None,
+                    cleanup: Some(WorkerCleanupReceipt {
+                        assignment_id: f.child,
+                        base_digest: f.base.sha256,
+                        revision: 0,
+                        enforcement_digest: [7; 32],
+                        last_intent_digest: None,
+                    }),
+                }),
+            };
+            let sequence = view.last_sequence + 1;
+            for (disposition, cause) in [
+                (AgentDisposition::StoppedByHook, WorkerCause::StoppedByHook),
+                (AgentDisposition::Failed, WorkerCause::StoppedByHook),
+            ] {
+                assert!(
+                    view.clone()
+                        .apply_committed(&f.envelope(finished(disposition, cause), sequence))
+                        .is_err(),
+                    "{disposition:?} {cause:?}"
+                );
+            }
+            view.apply_committed(&f.envelope(
+                finished(AgentDisposition::Failed, WorkerCause::ToolFailed),
+                sequence,
+            ))
+            .unwrap();
+        }
     }
 }
 

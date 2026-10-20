@@ -30,8 +30,6 @@ pub(super) struct WorkerFacts {
     pub(super) worker_stop: bool,
     // A settled hook stop requested by this editor.
     pub(super) actor_hook_stop: bool,
-    // A hook stop by this editor is journaled, settled or not.
-    pub(super) actor_hook_journaled: bool,
     // The wave is torn down by an abort.
     pub(super) torn_down: bool,
     pub(super) cancel_requested: bool,
@@ -71,9 +69,6 @@ pub(super) fn decide_worker_terminal(failure: WorkerCause, facts: &WorkerFacts) 
         let cause = if facts.torn_down || facts.cancel_requested || facts.paused || facts.hook_stop
         {
             WorkerCause::Cancelled
-        } else if facts.actor_hook_journaled {
-            // The reducer pairs this cause with the agent's `stopped_by_hook` disposition.
-            WorkerCause::StoppedByHook
         } else if facts.criterion_unverified {
             WorkerCause::CriterionUnverified
         } else if facts.worker_stop {
@@ -96,8 +91,6 @@ pub(super) fn decide_worker_terminal(failure: WorkerCause, facts: &WorkerFacts) 
         AgentDisposition::Finished
     } else if worker == WorkerDisposition::Cancelled {
         AgentDisposition::Cancelled
-    } else if facts.actor_hook_journaled {
-        AgentDisposition::StoppedByHook
     } else {
         AgentDisposition::Failed
     };
@@ -968,9 +961,6 @@ impl RunLoop<'_> {
                 criterion_unverified,
                 worker_stop: stopped,
                 actor_hook_stop: self.actor_hook_requested_stop(id)?,
-                actor_hook_journaled: self
-                    .ledger()
-                    .view(|v| v.runs.last().is_some_and(|r| r.actor_stopped_by_hook(id)))?,
                 torn_down,
                 cancel_requested: self.controls.cancellation.is_cancelled(),
                 paused: self.pause_requested(),
@@ -1554,10 +1544,7 @@ mod terminal_tests {
             ),
             (
                 C::ToolFailed,
-                with(|f| {
-                    f.hook_stop = true;
-                    f.actor_hook_journaled = true;
-                }),
+                with(|f| f.hook_stop = true),
                 A::Cancelled,
                 W::Cancelled,
                 C::Cancelled,
@@ -1579,22 +1566,13 @@ mod terminal_tests {
                 W::Failed,
                 C::Budget,
             ),
+            // An own hook stop that is journaled but not settled is no `stopped_by_hook` fact.
             (
                 C::InvalidOutcome,
-                with(|f| f.actor_hook_journaled = true),
-                A::StoppedByHook,
+                WorkerFacts::default(),
+                A::Failed,
                 W::Failed,
-                C::StoppedByHook,
-            ),
-            (
-                C::TurnLimit,
-                with(|f| {
-                    f.actor_hook_journaled = true;
-                    f.worker_stop = true;
-                }),
-                A::StoppedByHook,
-                W::Failed,
-                C::StoppedByHook,
+                C::InvalidOutcome,
             ),
             (
                 C::ToolFailed,
@@ -1622,7 +1600,6 @@ mod terminal_tests {
                 with(|f| {
                     f.step_stop = Some(StopCause::HookStop);
                     f.actor_hook_stop = true;
-                    f.actor_hook_journaled = true;
                 }),
                 A::StoppedByHook,
                 W::Failed,
@@ -1715,7 +1692,6 @@ mod terminal_tests {
                 C::TurnLimit,
                 with(|f| {
                     f.actor_hook_stop = true;
-                    f.actor_hook_journaled = true;
                 }),
                 A::StoppedByHook,
                 W::Failed,
