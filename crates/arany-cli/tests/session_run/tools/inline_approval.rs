@@ -336,27 +336,30 @@ impl Driver {
         if !self.answered || self.closed {
             return;
         }
-        let Some(end) = [
+        const OUTCOMES: [&str; 3] = [
             "APPROVAL_FINAL",
             "Action denied or approval expired",
             "Run cancelled",
-        ]
-        .iter()
-        .filter_map(|marker| text.find(marker))
-        .min() else {
-            return;
-        };
+        ];
         // Ctrl+D does not end active work, so wait until the Run has returned to the idle composer.
         let idle = if case.starts_with("linear") {
-            text[end..].contains("Input:")
+            OUTCOMES
+                .iter()
+                .filter_map(|outcome| text.find(outcome))
+                .min()
+                .is_some_and(|end| text[end..].contains("Input:"))
         } else {
-            crate::session_picker::screen_rows(
+            // Diff rendering can split a row's bytes, so match the rendered screen.
+            let rows = crate::session_picker::screen_rows(
                 bytes,
                 80,
                 if case == "unguarded-page-up" { 50 } else { 24 },
-            )
-            .iter()
-            .any(|row| row.trim_start().starts_with("ready · "))
+            );
+            rows.iter()
+                .any(|row| OUTCOMES.iter().any(|outcome| row.contains(outcome)))
+                && rows
+                    .iter()
+                    .any(|row| row.trim_start().starts_with("ready · "))
         };
         if idle {
             input.write_all(b"\x04").unwrap();
