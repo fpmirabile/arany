@@ -314,7 +314,7 @@ pub struct RunResult {
     /// Why the submission's Goal stopped at its latest Run, as `SessionView::run_stop` projects
     /// the reopened history. A Run that could not settle is returned without a terminal status.
     pub stopped: Option<crate::session::RunStop>,
-    /// The failure that ended an autonomous loop after `run` committed; it has no journaled fact.
+    /// The refusal of the next autonomous Run before its MessageAccepted; it has no journaled fact.
     pub continuation_error: Option<EngineError>,
 }
 
@@ -1096,8 +1096,12 @@ impl Engine {
                 Ok(_) => break,
                 // Cancellation before MessageAccepted admits no Run; the committed Finished Run keeps its outcome.
                 Err(EngineError::CancelledBeforeStart) => break,
-                // The earlier Finished Run stays committed; the caller gets it with the failure.
+                // A refusal before MessageAccepted keeps the committed Finished Run with the failure;
+                // after acceptance the error propagates, as for the first Run.
                 Err(error) => {
+                    if self.run_stop(&turn.outcome).await?.0.id != turn.outcome.run.id {
+                        return Err(error);
+                    }
                     crate::diagnostics::engine_failure(&error);
                     continuation_error = Some(error);
                     break;

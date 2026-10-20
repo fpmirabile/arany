@@ -3,8 +3,8 @@ use super::{CommandOutput, OutputArg};
 use crate::presentation::render_exec;
 use arany::{
     AdmittedProviders, CollaborationPolicy, Effort, Engine, EngineConfig, EngineError, GoalBudget,
-    GoalId, GoalPhase, GoalRequest, GoalStatus, Provider, RunCancellation, RunControls, RunRequest,
-    RunResult, RunStatus, RunStop, SessionId, StateRoot, Store, Telemetry, ToolGrant,
+    GoalId, GoalLimit, GoalPhase, GoalRequest, GoalStatus, Provider, RunCancellation, RunControls,
+    RunRequest, RunResult, RunStatus, RunStop, SessionId, StateRoot, Store, Telemetry, ToolGrant,
     native_protection_supported,
 };
 use clap::{Args, ValueEnum};
@@ -525,13 +525,23 @@ pub(in crate::cli) fn stop_after_answer(
     }
     match stop? {
         RunStop::Paused if pause_requested => None,
-        stop => Some(stop_text(stop).to_owned()),
+        stop @ (RunStop::GoalExhausted(
+            GoalLimit::Calls | GoalLimit::Runs | GoalLimit::ActiveTime | GoalLimit::Tokens,
+        )
+        | RunStop::Paused
+        | RunStop::Cancelled
+        | RunStop::StoppedByHook
+        | RunStop::Uncertain
+        | RunStop::Interrupted
+        | RunStop::Failed(_)) => Some(stop_text(stop).to_owned()),
     }
 }
 
 pub(in crate::cli) fn stop_text(stop: RunStop) -> &'static str {
     match stop {
-        RunStop::GoalExhausted(_) => "Goal budget is exhausted",
+        RunStop::GoalExhausted(
+            GoalLimit::Calls | GoalLimit::Runs | GoalLimit::ActiveTime | GoalLimit::Tokens,
+        ) => "Goal budget is exhausted",
         RunStop::Paused => "Goal paused before completion",
         RunStop::Uncertain => "Tool effect completion is uncertain",
         RunStop::Interrupted => "Run interrupted without a terminal receipt; check Session history",

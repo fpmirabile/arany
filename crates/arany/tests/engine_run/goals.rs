@@ -3371,6 +3371,59 @@ async fn autonomous_goal_stopped_by_a_failed_admission_returns_the_committed_run
 }
 
 #[tokio::test]
+async fn autonomous_goal_failing_after_the_next_run_is_accepted_returns_the_error() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let session = engine
+        .create_session(workspace.clone(), None)
+        .await
+        .expect("Session");
+    // The first Run's last call arms a failure of the next RunStarted, after its MessageAccepted.
+    let provider = ScriptedProvider::new(vec![
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
+        finish_with("first pass"),
+    ])
+    .with_before_call(2, move || {
+        arany::FaultPlan::fail_goal_append(session, |event| {
+            matches!(event, Event::RunStarted { .. })
+        });
+    });
+    let mut input = autonomous_input(&workspace);
+    input.session_id = Some(session);
+    input.title = None;
+    let result = engine
+        .submit(
+            AdmittedProviders::single(Arc::new(provider)),
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .expect("idle Engine")
+        .await;
+    assert!(
+        matches!(result, Err(EngineError::Store(_))),
+        "an accepted Run's failure propagates, not a continuation stop: {:?}",
+        result.as_ref().map(|result| result.stopped)
+    );
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, session).await;
+    assert_eq!(view.runs.len(), 2);
+    assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(view.runs[1].status, RunStatus::Interrupted);
+    assert_eq!(
+        view.run_stop(&view.runs[1]),
+        Some(arany::RunStop::Interrupted),
+        "no effect started, so history reports an interruption"
+    );
+}
+
+#[tokio::test]
 async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_objective() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = temp.path().join("workspace");

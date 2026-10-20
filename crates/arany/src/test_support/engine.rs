@@ -47,8 +47,16 @@ pub async fn run_routed(
         panic!("the Goal stopped after a committed Run: {error}");
     }
     if result.run.run.status == crate::RunStatus::Finished
-        && let Some(stop @ (RunStop::GoalExhausted(_) | RunStop::Uncertain | RunStop::Interrupted)) =
-            result.stopped
+        && let Some(
+            stop @ (RunStop::GoalExhausted(
+                crate::GoalLimit::Calls
+                | crate::GoalLimit::Runs
+                | crate::GoalLimit::ActiveTime
+                | crate::GoalLimit::Tokens,
+            )
+            | RunStop::Uncertain
+            | RunStop::Interrupted),
+        ) = result.stopped
     {
         panic!("the Goal stopped after a committed Run: {stop:?}");
     }
