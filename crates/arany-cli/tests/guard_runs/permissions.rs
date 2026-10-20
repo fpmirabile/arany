@@ -3565,10 +3565,12 @@ mod lifecycle_hooks {
             let mut subjects = std::collections::HashSet::new();
             let mut starts = Vec::new();
             let mut finishes = Vec::new();
+            let mut clearings = Vec::new();
             let mut reservations = Vec::new();
             let mut compacted = 0;
             for (index, envelope) in events.iter().enumerate() {
                 match &envelope.event {
+                    Event::ToolResultsCleared { .. } => clearings.push(index),
                     Event::ProviderCallRecorded { .. } => calls += 1,
                     Event::HookStarted {
                         run_id,
@@ -3618,6 +3620,10 @@ mod lifecycle_hooks {
             assert_eq!(reservations.len(), compactions);
             assert_eq!(compacted, compactions);
             if !passed {
+                assert_eq!(clearings.len(), starts.len());
+                for (clearing, start) in clearings.iter().zip(&starts) {
+                    assert!(clearing < start);
+                }
                 let first = *hook_calls.first().unwrap();
                 assert!(first < reads, "must exercise later occurrences");
                 assert_eq!(
