@@ -60,6 +60,7 @@ struct Fixture {
     command_maximum: Option<u32>,
     max_children: u8,
     expected_unconsumed: usize,
+    include_paths: Vec<std::path::PathBuf>,
     settings: Option<Value>,
 }
 
@@ -111,6 +112,7 @@ impl Fixture {
             command_maximum: None,
             max_children: 1,
             expected_unconsumed: 0,
+            include_paths: Vec::new(),
             settings: settings.cloned(),
         }
     }
@@ -154,7 +156,7 @@ impl Fixture {
             ..Default::default()
         };
         let mut input = request(&self.workspace, "Inspect and complete the task");
-        input.include_paths.clear();
+        input.include_paths = self.include_paths.clone();
         input.policy = if team {
             CollaborationPolicy::Auto {
                 max_active_children: self.max_children,
@@ -2117,18 +2119,20 @@ async fn agent_definition_guard_active_time_too_short_for_parsing_fails_the_run_
 async fn agent_definition_guard_goal_compacts_tool_history_with_definitions_present() {
     let fixture = Fixture::new(None, false);
     agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
-    const READS: usize = 104;
+    const READS: usize = 8;
+    // Clearing one page must free less than the full 64 KiB result budget.
+    const PAGE_LINES: usize = 63;
     std::fs::write(
         fixture.workspace.join("notes/data.txt"),
-        format!("{}\n", "x".repeat(1023)).repeat(4 * READS),
+        format!("{}\n", "x".repeat(1023)).repeat(PAGE_LINES * READS),
     )
     .unwrap();
     let mut outcomes: Vec<_> = (0..READS)
         .map(|page| {
             tool_outcome(arany::ToolCall::Read {
                 path: "notes/data.txt".into(),
-                offset: Some(u32::try_from(page * 4 + 1).unwrap()),
-                limit: Some(4),
+                offset: Some(u32::try_from(page * PAGE_LINES + 1).unwrap()),
+                limit: Some(u32::try_from(PAGE_LINES).unwrap()),
             })
         })
         .collect();
@@ -3460,11 +3464,12 @@ mod lifecycle_hooks {
         use arany::permissions::{HookEvent, HookResult};
         use arany::test_support::{MAX_TOOL_CONTEXT_BYTES, tool_context_bytes};
 
-        const THRESHOLD: usize = (MAX_TOOL_CONTEXT_BYTES * 2).div_ceil(3);
+        const INCLUDE_BYTES: usize = 44 * 1024;
+        const THRESHOLD: usize = ((MAX_TOOL_CONTEXT_BYTES - 2 * INCLUDE_BYTES) * 2).div_ceil(3);
         const STOPPED_UNCONSUMED: usize = 3;
-        // Half-size pages leave room for shrinking result grants near the threshold.
-        let page = arany::ToolLimits::default().result_bytes / 2;
-        let reads = THRESHOLD.div_ceil(usize::try_from(page).unwrap()) + 2;
+        // Three recent pages reach pressure; clearing one older page cannot replace summarizing.
+        let page = arany::ToolLimits::default().result_bytes - 1024;
+        let reads = 5;
         let call_budget = u32::try_from(2 * reads + 1).unwrap();
 
         for (script, expected) in [
@@ -3485,6 +3490,10 @@ mod lifecycle_hooks {
             let settings =
                 json!({"hooks":{"PreCompact":[{"matcher":"auto","hooks":[shell_hook(script)]}]}});
             let mut fixture = Fixture::new(Some(&settings), false);
+            for name in ["big1.txt", "big2.txt"] {
+                std::fs::write(fixture.workspace.join(name), "b".repeat(INCLUDE_BYTES)).unwrap();
+                fixture.include_paths.push(name.into());
+            }
             // The stop lands at the first compaction pressure; every later scripted call stays unused.
             fixture.expected_unconsumed = if matches!(expected, HookResult::Stopped { .. }) {
                 STOPPED_UNCONSUMED
