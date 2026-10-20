@@ -315,8 +315,19 @@ impl CallRouter<'_> {
         stopping: bool,
         visible: bool,
     ) -> Result<AttemptFacts, EngineError> {
-        let (retries, displayed, running) = self.ledger.view(|view| {
+        let (retries, displayed, running, closed) = self.ledger.view(|view| {
             let running = view.active_goal().is_some();
+            // A worker stop, hook stop or run-stopping Tool admits no further attempt, as replay rules.
+            let closed = view.runs.last().is_some_and(|run| {
+                run.status == crate::session::RunStatus::Active
+                    && (run.workers.stop.is_some()
+                        || run.hook_stop_reason().is_some()
+                        || run.tools.iter().any(|tool| {
+                            tool.observation
+                                .as_ref()
+                                .is_some_and(crate::tools::ToolObservation::stops_run)
+                        }))
+            });
             let current = view.runs.last().and_then(|run| {
                 let agent = run.agents.iter().find(|agent| agent.id == actor)?;
                 let index = call_index(view, run, agent, role)?;
@@ -327,7 +338,7 @@ impl CallRouter<'_> {
                 Some((u8::try_from(retries).unwrap_or(u8::MAX), displayed))
             });
             let (retries, displayed) = current.unwrap_or((MAX_PROVIDER_RETRIES, true));
-            (retries, displayed, running)
+            (retries, displayed, running, closed)
         })?;
         // Without a running Goal only a between-Run compaction can retry, with nothing to charge.
         let admitted = if running {
@@ -343,7 +354,7 @@ impl CallRouter<'_> {
         Ok(AttemptFacts {
             retries,
             remaining: deadline.saturating_duration_since(Instant::now()),
-            stopping,
+            stopping: stopping || closed,
             displayed,
             visible,
             admitted,
