@@ -337,10 +337,14 @@ impl Driver {
         if !self.answered || self.closed {
             return;
         }
-        const OUTCOMES: [&str; 3] = [
+        // Every terminal Run notice: finish, denial, cancellation (which pauses the Goal) and failure.
+        // The replay assertions check which one each case reached.
+        const OUTCOMES: [&str; 5] = [
             "APPROVAL_FINAL",
             "Action denied or approval expired",
             "Run cancelled",
+            "Goal paused",
+            "Run failed",
         ];
         // Ctrl+D does not end active work, so wait until the Run has returned to the idle composer.
         let idle = if case.starts_with("linear") {
