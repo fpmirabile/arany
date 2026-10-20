@@ -1310,14 +1310,17 @@ impl RunLoop<'_> {
             self.clear_tool_queue();
         }
         // The primary re-reads active time after the ToolFinished it journals.
-        let active_time = match (&refusal.reason, approval_stage) {
-            (NotDispatched::HookDenied(HookDenial::ActiveTime) | NotDispatched::ActiveTime, _) => {
+        let exhausted = match (refusal.reason.active_time_effect(), site) {
+            (ActiveTimeEffect::Exhausted, DispatchSite::Primary | DispatchSite::Researcher) => {
                 Some(true)
             }
-            (_, true) => Some(false),
-            (_, false) => None,
-        }
-        .map(|exhausted| ActiveTime {
+            (ActiveTimeEffect::Recheck, DispatchSite::Primary) => Some(false),
+            (ActiveTimeEffect::Recheck, DispatchSite::Researcher)
+            | (ActiveTimeEffect::Untouched, DispatchSite::Primary | DispatchSite::Researcher) => {
+                None
+            }
+        };
+        let active_time = exhausted.map(|exhausted| ActiveTime {
             segment: None,
             exhausted,
         });
@@ -2019,7 +2022,43 @@ pub(super) enum NotDispatched {
     ApprovalRefused,
 }
 
+#[derive(Clone, Copy)]
+enum ActiveTimeEffect {
+    Untouched,
+    Recheck,
+    Exhausted,
+}
+
 impl NotDispatched {
+    fn active_time_effect(&self) -> ActiveTimeEffect {
+        match self {
+            Self::HookDenied(HookDenial::ActiveTime) | Self::ActiveTime => {
+                ActiveTimeEffect::Exhausted
+            }
+            Self::HookFailureAfterClassify
+            | Self::UnguardedNotOffered(_)
+            | Self::OutsidePlan
+            | Self::Paused
+            | Self::TokenBudget
+            | Self::UnsavedRule
+            | Self::UnguardedNeedsHuman
+            | Self::ApprovalRefused => ActiveTimeEffect::Recheck,
+            Self::TimeoutLimit { .. }
+            | Self::HookDenied(
+                HookDenial::DelegationDeadline
+                | HookDenial::Uncertain
+                | HookDenial::Requested
+                | HookDenial::Narrowed(_)
+                | HookDenial::Denied(_),
+            )
+            | Self::DelegationDeadline
+            | Self::DenyRule
+            | Self::OutsideGrant
+            | Self::ModeDenied
+            | Self::HumanOnlyUnavailable => ActiveTimeEffect::Untouched,
+        }
+    }
+
     // The primary decides these after its gates, where it clears the queue hint and re-reads active time.
     fn decided_at_approval(&self) -> bool {
         match self {
