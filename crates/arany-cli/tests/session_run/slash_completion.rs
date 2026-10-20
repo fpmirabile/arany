@@ -914,6 +914,9 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         clear_at,
         3,
     );
+    // Each 21-command menu frame is large; a fresh window keeps the capture under its bound.
+    transcript.clear();
+    answered = crate::session_picker::PtyResponses::default();
     let tabs_at = transcript.len();
     input.write_all(b"/").expect("open default Commands tab");
     wait_for_after(
@@ -1032,6 +1035,9 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         saved_ui_preferences("combined", "fullscreen"),
         "--classic must not leak into the saved chat view"
     );
+    // Each 21-command menu frame is large; a fresh window keeps the capture under its bound.
+    transcript.clear();
+    answered = crate::session_picker::PtyResponses::default();
     let menu_at = transcript.len();
     input.write_all(b"/resum").expect("single command prefix");
     wait_for_after(
