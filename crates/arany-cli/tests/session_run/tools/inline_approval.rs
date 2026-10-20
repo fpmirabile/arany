@@ -302,7 +302,8 @@ impl Driver {
         {
             self.last_frame = dialog.to_owned();
             // The guarded attempt is approved once its last page shows; later frames await the re-run.
-            if case.starts_with("unguarded") && !frame.contains("Run outside the Guard?") {
+            // Only the unguarded dialog offers a third choice, and its controls show on every page.
+            if case.starts_with("unguarded") && !frame.contains("3. No") {
                 if !self.early && frame.contains("more lines") {
                     input.write_all(b"\x1b[6~").unwrap();
                 } else if !self.early {
