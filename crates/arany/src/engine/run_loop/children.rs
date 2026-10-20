@@ -2117,9 +2117,10 @@ impl RunLoop<'_> {
         deadline: Instant,
     ) -> Result<bool, EngineError> {
         // Settled agents only grow, so a deferral ends once more agents settle than it saw.
-        let deferred = queue
-            .deferred
-            .is_some_and(|(_, at)| !self.settled_agents().is_ok_and(|n| n > at));
+        let deferred = match queue.deferred {
+            Some((_, at)) => self.settled_agents()? <= at,
+            None => false,
+        };
         if !queue.primary_pending
             && !deferred
             && queue.stop.is_none()
