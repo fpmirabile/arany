@@ -413,7 +413,7 @@ impl LinearState {
             )?;
             writeln!(
                 writer,
-                "Commands: /help lists local controls; type arguments literally; Tab and Ctrl+O are inline-only"
+                "Commands: /help lists local controls; type arguments literally; Tab and Ctrl+J are inline-only"
             )?;
             self.announced = true;
         }
@@ -748,7 +748,7 @@ mod tests {
             format!(
                 "Presentation: screen-reader\n\
                  Input: Enter submits; Ctrl+D after text continues; empty Ctrl+D exits\n\
-                 Commands: /help lists local controls; type arguments literally; Tab and Ctrl+O are inline-only\n\
+                 Commands: /help lists local controls; type arguments literally; Tab and Ctrl+J are inline-only\n\
                  Session: {}\n\
                  Title: bad\\u{{001b}}[31m\\u{{000a}}Session: forged\n\
                  State: ready\n\
@@ -870,7 +870,7 @@ mod tests {
                 "Command: /permissions; Folder trust and approval settings; during Run: available\n",
                 "Command: /cache clear [all]; Clear private build caches; during Run: locked\n",
                 "Command: /settings; Slash menu and chat view; during Run: locked\n",
-                "Command: /transcript; Show or hide transcript details; during Run: available\n",
+                "Command: /transcript; Write or toggle transcript details; during Run: available\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
             ).as_bytes()
         );

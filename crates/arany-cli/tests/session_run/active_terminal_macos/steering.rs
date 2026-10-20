@@ -82,6 +82,9 @@ fn run_native(note_delivery: bool, classic: bool) {
     let temp = tempfile::tempdir().expect("private native fixture");
     let workspace = temp.path().join("project");
     let state = temp.path().join("state");
+    if !classic {
+        crate::seed_fullscreen(&state);
+    }
     std::fs::create_dir(&workspace).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();

@@ -175,6 +175,62 @@ fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn seed_fullscreen(state: &std::path::Path) {
+    arany::StateRoot::admit(state)
+        .unwrap()
+        .record(arany::RecordKind::UiPreferences)
+        .replace(&saved_ui_preferences("tabs", "fullscreen"))
+        .unwrap();
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn seed_transcript_session(state: &std::path::Path, workspace: &std::path::Path) -> SessionId {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let engine =
+            engine_support::open(StateRoot::admit(state).unwrap(), Default::default()).unwrap();
+        let mut provider = arany::test_support::scenario::ScriptedProvider::new(
+            (0..17)
+                .map(|_| arany::test_support::goals::finish_with("Synthetic answer"))
+                .collect(),
+        )
+        .with_profile("openai", "gpt-5.4");
+        provider.preview = Some(arany::PreviewText {
+            commentary: vec!["DETAIL_CANARY \u{1b}]52;c;inert\u{7}".into()],
+            ..Default::default()
+        });
+        let provider = std::sync::Arc::new(provider);
+        let mut id = None;
+        for _ in 0..17 {
+            let mut request =
+                arany::test_support::scenario::request(workspace, "Synthetic objective");
+            request.include_paths.clear();
+            request.session_id = id;
+            request.title = None;
+            let result = engine_support::run_with(
+                &engine,
+                &provider,
+                request,
+                arany::RunControls {
+                    hints: Some(arany::RunHints::with_previews()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.run.status, RunStatus::Finished);
+            id = Some(result.session_id);
+        }
+        assert_eq!(provider.requests.lock().unwrap().len(), 17);
+        engine.close().await.unwrap();
+        id.unwrap()
+    })
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[path = "session_run/roster.rs"]
 mod roster;
 
@@ -280,7 +336,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             let mode = if case == "fullscreen" || case == "fullscreen-panic" {
                 TerminalMode::Fullscreen
             } else {
-                TerminalMode::Classic
+                TerminalMode::default()
             };
             let mut terminal =
                 AttachedTerminal::acquire_with_mode(linear && case != "cursor-timeout", mode)
@@ -367,9 +423,29 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     for character in "retained 🚀 draft".chars() {
                         draft.apply(TerminalInput::Character(character));
                     }
-                    terminal.toggle_transcript(&view).unwrap();
+                    assert!(
+                        terminal
+                            .handle_transcript_input(TerminalInput::HistoryFind, &view)
+                            .unwrap()
+                    );
+                    let mut details = view.clone();
+                    let mut run = view.runs[0].clone();
+                    run.display.push(arany::DisplayChunk {
+                        call_index: 0,
+                        phase: arany::AgentPhase::RootPlan,
+                        category: arany::DisplayCategory::Commentary,
+                        item: 0,
+                        offset: 0,
+                        text: "NATIVE_DETAIL \u{1b}]52;c;inert\u{7}".into(),
+                    });
+                    details.runs = vec![run; 17];
+                    assert!(
+                        terminal
+                            .handle_transcript_input(TerminalInput::Transcript, &details)
+                            .unwrap()
+                    );
                     terminal.draw(&view, &draft, None).unwrap();
-                    terminal.toggle_transcript(&view).unwrap();
+                    terminal.toggle_transcript(&details).unwrap();
                     terminal
                         .set_mode(TerminalMode::Fullscreen, draft.text().len())
                         .unwrap();
@@ -568,6 +644,19 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
         }
         if case == "inline-long" {
             let text = String::from_utf8_lossy(&output.stderr);
+            let before_fullscreen = text
+                .split_once("\x1b[?1049h")
+                .expect("explicit Fullscreen switch")
+                .0;
+            for word in ["terminal's", "find;", "Ctrl+T", "scrollback"] {
+                assert!(
+                    before_fullscreen.contains(word),
+                    "terminal find notice is missing {word}"
+                );
+            }
+            assert_eq!(before_fullscreen.matches("NATIVE_DETAIL").count(), 32);
+            assert_eq!(before_fullscreen.matches("reached;").count(), 2);
+            assert!(!before_fullscreen.contains("\x1b]52;"));
             let mut primary = String::new();
             let mut rest = text.as_ref();
             while let Some((before, alternate)) = rest.split_once("\x1b[?1049h") {

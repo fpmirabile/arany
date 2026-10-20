@@ -43,6 +43,7 @@ fn rewind_pty_classic_fullscreen_narrow_and_linear_restore_a_prompt_without_subm
         let workspace = root.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let state = root.path().join("state");
+        crate::seed_fullscreen(&state);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

@@ -1609,7 +1609,7 @@ mod tests {
             restore_settings(&admission).await.unwrap(),
             Preferences {
                 completion: CompletionLayout::Tabs,
-                view: TerminalMode::Fullscreen,
+                view: TerminalMode::Classic,
                 ..Preferences::default()
             }
         );
@@ -1617,7 +1617,14 @@ mod tests {
             !admission.state_dir.exists(),
             "reading defaults creates no State"
         );
-        for preferences in [combined_classic, Preferences::default()] {
+        for preferences in [
+            combined_classic,
+            Preferences {
+                view: TerminalMode::Fullscreen,
+                ..Preferences::default()
+            },
+            Preferences::default(),
+        ] {
             save_settings(&admission, preferences).await.unwrap();
             assert_eq!(restore_settings(&admission).await.unwrap(), preferences);
             assert_eq!(

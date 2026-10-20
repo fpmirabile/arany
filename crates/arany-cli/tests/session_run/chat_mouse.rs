@@ -91,6 +91,7 @@ fn fullscreen_chat_keeps_mouse_reporting_off_at_every_returned_checkpoint() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
+    crate::seed_fullscreen(&state);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("Session runtime");

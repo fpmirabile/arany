@@ -701,10 +701,16 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             .draw_notice(&view, &composer, notice.as_ref().map(Feedback::notice))
             .map_err(|error| error.to_string())?;
         notice = None;
-        let input = terminal
-            .next_input()
-            .await
-            .map_err(|error| error.to_string())?;
+        let input = loop {
+            let input = terminal
+                .next_input()
+                .await
+                .map_err(|error| error.to_string())?;
+            if !terminal.help_open() && terminal.ignores_page_key(input) {
+                continue;
+            }
+            break input;
+        };
         if terminal.help_open()
             && !matches!(input, TerminalInput::Suspend | TerminalInput::Shutdown(_))
         {
