@@ -670,7 +670,6 @@ impl ToolRuntime {
             fs::reject_overlap(Path::new(path), state.path())?;
             fs::reject_overlap(Path::new(path), &account)?;
         }
-        config.refresh_skill_visibility();
         #[cfg(target_os = "macos")]
         let system_programs = if config.commands.is_empty() && config.mcp.is_empty() {
             None
@@ -781,6 +780,13 @@ impl ToolRuntime {
             name: name.to_owned(),
             resource: None,
         })
+    }
+
+    pub(crate) fn hides_skill_from_model(&self, name: &str) -> bool {
+        self.config
+            .skills
+            .iter()
+            .any(|skill| skill.name == name && skill.disable_model_invocation)
     }
 
     fn skill_rows(&self) -> Vec<serde_json::Value> {

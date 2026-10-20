@@ -606,8 +606,10 @@ pub(super) fn handle_active_submission(
             return ActiveSubmission::OpenTranscript;
         }
         Ok(Submission::Objective(text)) => return ActiveSubmission::SteeringNote(text.to_owned()),
-        Ok(Submission::Skill { .. }) => {
-            return ActiveSubmission::Rejected("Run in progress... Ctrl+C cancels".into());
+        Ok(Submission::Skill { name, .. }) => {
+            return ActiveSubmission::Rejected(format!(
+                "/{name} starts a new turn and cannot join the running one; wait for it or press Ctrl+C to cancel"
+            ));
         }
         Ok(Submission::Command {
             command: InteractiveCommand::Goal,

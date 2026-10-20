@@ -3285,6 +3285,29 @@ fn slash_skill_enter_submits_the_admitted_name_and_task() {
             })
         );
     }
+    for (draft, objective) in [("/ask-matt", "/ask-matt"), ("/ask-matt do X", "do X")] {
+        composer.clear();
+        composer.insert_paste(draft).unwrap();
+        let Ok(Submission::Skill { name, task }) = composer.submission() else {
+            panic!("admitted Skill submission");
+        };
+        assert_eq!(
+            arany_cli::terminal::invoked_objective(name, task),
+            objective
+        );
+    }
+    let mut tabs = Composer::default();
+    tabs.set_runtime_skills(&["ask-matt".into()]);
+    tabs.set_completion_layout(CompletionLayout::Tabs);
+    tabs.insert_paste("/ask-m").unwrap();
+    assert_eq!(tabs.apply(TerminalInput::Submit), ComposerEdit::Unchanged);
+    assert_eq!(
+        tabs.submission(),
+        Ok(Submission::Skill {
+            name: "ask-matt",
+            task: ""
+        })
+    );
     composer.clear();
     composer.insert_paste("/ask-m").unwrap();
     assert_eq!(composer.apply(TerminalInput::Tab), ComposerEdit::Changed);

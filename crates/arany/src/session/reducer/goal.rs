@@ -630,12 +630,12 @@ pub(super) fn apply(
                 })
             {
                 super::definition_registry(run)?;
-                if let Some(name) = &run.skill
-                    && !run.tools.get(run.parse_count()).is_some_and(|tool| {
-                        matches!(&tool.intent.call, crate::tools::ToolCall::Skill { name: read_name, resource: None } if read_name == name)
-                            && tool.observation.as_ref().is_some_and(|observation| {
-                                observation.disposition == crate::tools::ToolDisposition::Succeeded && observation.attestation.is_some()
-                            })
+                if run.skill.is_some()
+                    && !run.invoked_skill_read().is_some_and(|tool| {
+                        tool.observation.as_ref().is_some_and(|observation| {
+                            observation.disposition == crate::tools::ToolDisposition::Succeeded
+                                && observation.attestation.is_some()
+                        })
                     })
                 {
                     return Err(ReplayError::InvalidTransition);

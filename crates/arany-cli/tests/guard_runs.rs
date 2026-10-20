@@ -393,6 +393,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let mut next = request(&workspace, "");
         next.title = None;
         next.session_id = Some(first.session_id);
+    next.title = None;
         next.images = vec![second_image.clone()];
         next.policy = CollaborationPolicy::Team { max_active_children: 1 };
         let third = run_to_end(&engine, &provider, next).await.expect("image-only team after reopen");
@@ -404,6 +405,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let mut next = request(&workspace, &realistic_objective[..64 * 1024]);
         next.title = None;
         next.session_id = Some(first.session_id);
+    next.title = None;
         next.images = vec![large_image.clone()];
         let fourth = run_to_end(&engine, &provider, next).await.expect("whole-history image clipping");
         assert!(fourth.run.config.as_ref().unwrap().history_run_ids.is_empty());
@@ -3231,7 +3233,7 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
     use std::os::unix::fs::PermissionsExt;
-    for mismatch in [false, true] {
+    for (mismatch, objective) in [(false, "do X"), (false, "/ask-matt"), (true, "do X")] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
@@ -3258,12 +3260,16 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
                 .collect::<String>()
         };
         let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
-            "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,"files":{"SKILL.md":hash}
+            "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,"files":{"SKILL.md":hash},"disable_model_invocation":true
         }]});
         let config_path = state_path.join("tools.json");
         std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
         std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let provider = Arc::new(ScriptedProvider::new(vec![
+            tool_outcome(arany::ToolCall::Skill {
+                name: "ask-matt".into(),
+                resource: None,
+            }),
             tool_outcome(arany::ToolCall::Read {
                 path: "notes/facts.txt".into(),
                 offset: 0,
@@ -3273,7 +3279,7 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
                 text: "Applied the Skill.".into(),
             }),
         ]));
-        let mut input = request(&workspace, "do X");
+        let mut input = request(&workspace, objective);
         input.skill = Some("ask-matt".into());
         let outcome = run_with(
             &engine,
@@ -3301,7 +3307,7 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
                 "{:?}",
                 outcome.run.failure
             );
-            assert_eq!(requests.len(), 2);
+            assert_eq!(requests.len(), 3, "the model-originated Skill load is refused");
             let tools = requests[0].input.tools.as_ref().unwrap();
             assert_eq!(
                 tools.invoked_skill.as_ref().unwrap().output.as_bytes(),
@@ -3317,6 +3323,11 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
         let events = store.load_session(outcome.session_id).await.unwrap();
         let view = store.load_view(outcome.session_id).await.unwrap().unwrap();
         assert_eq!(view.runs[0].skill.as_deref(), Some("ask-matt"));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::MessageAccepted { text, skill: Some(skill), .. }
+                if text == objective && skill == "ask-matt"
+        )));
         let started = events
             .iter()
             .position(|event| matches!(event.event, Event::ToolStarted { .. }))
@@ -3337,5 +3348,121 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
         }
         store.close().await.unwrap();
     }
+    });
+}
+
+#[test]
+#[cfg_attr(not(arany_ci), ignore = "native Skill Guard read on Linux and macOS")]
+fn invoked_skill_crash_window_resumes_without_rereading_or_rerunning() {
+    let _gate = process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("notes")).unwrap();
+    std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
+    let skill_dir = workspace.join(".agents/skills/ask-matt");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let body = b"---\nname: ask-matt\ndescription: Guide the task\n---\nPinned guidance.\n";
+    std::fs::write(skill_dir.join("SKILL.md"), body).unwrap();
+    let state_path = temp.path().join("state");
+    let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
+        "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,
+        "files":{"SKILL.md":Sha256::digest(body).iter().map(|byte| format!("{byte:02x}")).collect::<String>()}
+    }]});
+    let open = || {
+        engine_support::open(
+            StateRoot::admit(&state_path).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let engine = open();
+    let config_path = state_path.join("tools.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "Applied.".into(),
+    })]));
+    let mut input = request(&workspace, "do X");
+    input.skill = Some("ask-matt".into());
+    let first = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let events = store.load_session(first.session_id).await.unwrap();
+    store.close().await.unwrap();
+    let finished = events
+        .iter()
+        .find(|event| matches!(event.event, Event::ToolFinished { .. }))
+        .unwrap()
+        .sequence;
+    let connection = rusqlite::Connection::open(state_path.join("events.sqlite3")).unwrap();
+    connection
+        .execute("DELETE FROM events WHERE sequence > ?1", [i64::try_from(finished).unwrap()])
+        .unwrap();
+    drop(connection);
+
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let prefix = store.load_session(first.session_id).await.unwrap();
+    assert_eq!(prefix.last().unwrap().sequence, finished);
+    assert!(store.load_view(first.session_id).await.unwrap().is_some(), "the crash window prefix replays strictly");
+    store.close().await.unwrap();
+
+    let engine = open();
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "Next.".into(),
+    })]));
+    let mut next = request(&workspace, "next turn");
+    next.session_id = Some(first.session_id);
+    next.title = None;
+    let second = run_with(
+        &engine,
+        &provider,
+        next,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.run.status, RunStatus::Finished);
+    engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+    let events = store.load_session(first.session_id).await.unwrap();
+    let view = store.load_view(first.session_id).await.unwrap().unwrap();
+    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, Event::ToolStarted { .. }))
+            .count(),
+        1,
+        "resume must not re-read or re-run the Skill"
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert!(
+        provider.requests.lock().unwrap()[0]
+            .input
+            .tools
+            .as_ref()
+            .is_none_or(|tools| tools.invoked_skill.is_none())
+    );
+    store.close().await.unwrap();
     });
 }

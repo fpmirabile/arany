@@ -1018,6 +1018,14 @@ impl<'a> RunLoop<'a> {
         {
             return Err(NotOffered);
         }
+        if let crate::tools::ToolCall::Skill { name, .. } = call
+            && self
+                .controls
+                .tools
+                .is_some_and(|tools| tools.hides_skill_from_model(name))
+        {
+            return Err(NotOffered);
+        }
         if !serde_json::to_vec(call)
             .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
         {

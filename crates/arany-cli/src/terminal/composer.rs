@@ -188,12 +188,12 @@ impl Composer {
             ));
         }
         self.completion_menu().map(|(names, selected)| {
+            let commands = command_completions("/");
             (
                 names
                     .iter()
                     .map(|name| {
-                        if self.skills.contains(&name.to_string())
-                            && !command_completions("/").contains(name)
+                        if self.skills.iter().any(|skill| skill == name) && !commands.contains(name)
                         {
                             format!("Skill /{name}")
                         } else {
@@ -253,20 +253,9 @@ impl Composer {
                 Ok(Submission::Objective(text))
             }
             Err(error @ CommandParseError::Unknown { .. }) => {
-                let control = text.strip_prefix('/').ok_or(error)?;
-                let (name, task) = control
-                    .split_once(char::is_whitespace)
-                    .unwrap_or((control, ""));
-                if self.skills.iter().any(|skill| skill == name)
-                    && !command_completions("/").contains(&name)
-                {
-                    Ok(Submission::Skill {
-                        name,
-                        task: task.trim(),
-                    })
-                } else {
-                    Err(error)
-                }
+                super::commands::skill_invocation(text, &self.skills)
+                    .map(|(name, task)| Submission::Skill { name, task })
+                    .ok_or(error)
             }
             result => result,
         }
@@ -387,6 +376,14 @@ impl Composer {
         self.file_menu().is_some() || self.completion_menu().is_some()
     }
 
+    fn skill_matches<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        let commands = command_completions("/");
+        self.skills
+            .iter()
+            .map(String::as_str)
+            .filter(move |name| name.starts_with(prefix) && !commands.contains(name))
+    }
+
     pub(super) fn completion_menu(&self) -> Option<(Vec<&str>, usize)> {
         if self.completion_hidden || self.cursor != self.text.len() {
             return None;
@@ -403,15 +400,7 @@ impl Composer {
             names.clear();
         }
         if self.completion_layout == CompletionLayout::Combined || self.skills_tab {
-            names.extend(
-                self.skills
-                    .iter()
-                    .filter(|name| {
-                        name.starts_with(prefix)
-                            && !command_completions("/").contains(&name.as_str())
-                    })
-                    .map(String::as_str),
-            );
+            names.extend(self.skill_matches(prefix));
         }
         if names.is_empty() && self.completion_layout == CompletionLayout::Combined {
             return None;
@@ -492,7 +481,20 @@ impl Composer {
                         | TerminalInput::Down
                 )
             {
-                return if input == TerminalInput::Submit && !self.skills_tab && self.text != "/" {
+                let submit = input == TerminalInput::Submit && !self.skills_tab && self.text != "/";
+                if submit {
+                    let skill = self
+                        .skill_matches(&self.text[1..])
+                        .next()
+                        .map(str::to_owned);
+                    if let Some(name) = skill {
+                        self.text = format!("/{name}");
+                        self.cursor = self.text.len();
+                        self.completion_index = 0;
+                        self.completion_hidden = true;
+                    }
+                }
+                return if submit {
                     ComposerEdit::Unchanged
                 } else {
                     ComposerEdit::Changed

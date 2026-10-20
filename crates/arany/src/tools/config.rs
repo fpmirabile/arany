@@ -45,7 +45,7 @@ pub(crate) struct ProgramInput {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Skill {
-    #[serde(skip)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disable_model_invocation: bool,
     pub name: String,
     pub description: String,
@@ -199,19 +199,6 @@ impl Config {
             return Err(ToolError::Limit);
         }
         self.validate()
-    }
-
-    pub(super) fn refresh_skill_visibility(&mut self) {
-        for skill in &mut self.skills {
-            skill.disable_model_invocation =
-                super::fs::open_directory(std::path::Path::new(&skill.directory))
-                    .and_then(|root| super::fs::open_file(&root, "SKILL.md"))
-                    .and_then(|file| read_regular(file, MAX_TOOL_RESULT_BYTES))
-                    .map_or(true, |bytes| {
-                        skill.files.get("SKILL.md") != Some(&hex_digest(&bytes))
-                            || super::skills::disables_model_invocation(&bytes)
-                    });
-        }
     }
 
     pub(super) fn permits_project_skills(&self) -> bool {

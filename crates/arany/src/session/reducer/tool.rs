@@ -420,14 +420,10 @@ pub(super) fn apply(
                                 observation.disposition == crate::tools::ToolDisposition::Succeeded
                             })
                         })
-                } else if let crate::tools::ToolCall::Skill {
-                    name,
-                    resource: None,
-                } = &intent.call
+                } else if run.is_invoked_skill_call(&intent.call)
                     && primary.provider_calls.is_empty()
                 {
-                    run.skill.as_ref() == Some(name)
-                        && run.agents.len() == 1
+                    run.agents.len() == 1
                         && run.tools.len() == run.parse_count()
                         && super::definition_registry(run).is_ok()
                         && run.provider_sequences.is_empty()
