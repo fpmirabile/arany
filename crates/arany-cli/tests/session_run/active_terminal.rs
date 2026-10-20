@@ -1176,6 +1176,9 @@ mod panic;
 #[path = "active_terminal/steering.rs"]
 mod steering;
 
+#[path = "active_terminal/clipboard_copy.rs"]
+mod clipboard_copy;
+
 #[cfg(target_os = "linux")]
 #[path = "active_terminal/tmux.rs"]
 mod tmux;

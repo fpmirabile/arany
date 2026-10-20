@@ -1039,6 +1039,11 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                     Feedback::History(format!("Error: {error}; draft unchanged"))
                                 }
                             });
+                        } else if command == InteractiveCommand::Copy {
+                            notice = Some(match terminal.copy_latest_answer(&view).await {
+                                Ok(copied) => Feedback::Transient(copied),
+                                Err(error) => Feedback::History(error),
+                            });
                         } else if command == InteractiveCommand::Transcript {
                             terminal
                                 .toggle_transcript(&view)

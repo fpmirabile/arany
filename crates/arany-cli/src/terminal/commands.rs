@@ -12,6 +12,7 @@ pub enum InteractiveCommand {
     Settings,
     Transcript,
     Paste,
+    Copy,
     Status,
     New,
     Resume,
@@ -56,6 +57,7 @@ impl InteractiveCommand {
                 CommandAvailability::ViewOnly
             }
             Self::Setup
+            | Self::Copy
             | Self::Settings
             | Self::Cache
             | Self::New
@@ -115,10 +117,11 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 20] = [
+const COMMANDS: [CommandSpec; 21] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
+    spec("copy", InteractiveCommand::Copy, None, &[]),
     spec("status", InteractiveCommand::Status, None, &[]),
     spec("new", InteractiveCommand::New, None, &[]),
     spec("clear", InteractiveCommand::New, None, &[]),
@@ -187,6 +190,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Settings => "Slash menu and chat view",
         InteractiveCommand::Transcript => "Write or toggle transcript details",
         InteractiveCommand::Paste => "Paste clipboard into draft",
+        InteractiveCommand::Copy => "Copy the latest answer to the clipboard",
         InteractiveCommand::Status => "Session status",
         InteractiveCommand::New => "New Session",
         InteractiveCommand::Resume => "Resume Session",
@@ -689,7 +693,7 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 20);
+        assert_eq!(COMMANDS.len(), 21);
         assert_eq!(completion_suffix("/c", &CommandChoices::default()), None);
         assert_eq!(
             completion_suffix("/ca", &CommandChoices::default()),
@@ -932,6 +936,10 @@ mod tests {
         assert_eq!(
             InteractiveCommand::Paste.availability(true),
             CommandAvailability::ViewOnly
+        );
+        assert_eq!(
+            InteractiveCommand::Copy.availability(true),
+            CommandAvailability::Locked
         );
     }
 

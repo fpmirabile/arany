@@ -1246,3 +1246,100 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
     }
     restored(&input, &before);
 }
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native pbcopy gate; replaces the general pasteboard"
+)]
+fn native_copy_round_trips_non_ascii_answer_through_pbcopy() {
+    const ANSWER: &str = "Copia ✓ café 日本語\nsegunda línea";
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&workspace).unwrap();
+    let id = crate::seed_answer_session(&state, &workspace, ANSWER);
+    let geometry = nix::pty::Winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let (input, slave) = crate::process::cloexec_pty(Some(&geometry));
+    let before = crate::process::terminal_settings(&input);
+    let master = input.try_clone().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+    command
+        .env_clear()
+        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+        .env("TERM", "xterm")
+        .current_dir(&workspace)
+        .args(["--classic", "--no-color", "--state-dir"])
+        .arg(&state)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--resume")
+        .arg(id.to_string())
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(slave));
+    own_terminal(&mut command);
+    let (mut child, mut input, master) = (ChildGuard::new(command.spawn().unwrap()), input, master);
+    drop(command);
+    let mut queries = 0;
+    let mut declined = false;
+    let mut stage = 0;
+    let mut from = 0;
+    let mut copy_from = None;
+    let output = crate::process::capture_terminal(
+        child.child(),
+        master,
+        Duration::from_secs(20),
+        256 * 1024,
+        |bytes| {
+            assert!(bytes.windows(4).filter(|part| *part == b"\x1b[6n").count() <= 128);
+            super::reply_positioned_cursor_queries(&mut input, bytes, &mut queries);
+            crate::process::decline_workspace_consent(&mut input, bytes, &mut declined);
+            let tail = &bytes[from..];
+            let caret = tail
+                .windows(b"\x1b[?25h\x1b[22;3H".len())
+                .any(|part| part == b"\x1b[?25h\x1b[22;3H");
+            if stage < 2 && caret {
+                from = bytes.len();
+                input
+                    .write_all(if stage == 0 { b"/copy\r" } else { b"/exit\r" })
+                    .unwrap();
+                copy_from = copy_from.or((stage == 0).then_some(from));
+                stage += 1;
+            }
+        },
+    );
+    assert_eq!(stage, 2);
+    assert!(output.status.success());
+    restored(&input, &before);
+    let copied = &output.stderr[copy_from.expect("copy submitted")..];
+    for fallback in [b"\x1b]52".as_slice(), b"Copy unavailable"] {
+        assert!(
+            !copied.windows(fallback.len()).any(|part| part == fallback),
+            "pbcopy was not the destination: {}",
+            String::from_utf8_lossy(copied).escape_debug()
+        );
+    }
+    let mut paste = ChildGuard::new(
+        Command::new("/usr/bin/pbpaste")
+            .env_clear()
+            .env("LANG", "en_US.UTF-8")
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let pasted = crate::process::capture(paste.child(), Duration::from_secs(5), 64 * 1024);
+    assert!(pasted.status.success());
+    assert_eq!(String::from_utf8(pasted.stdout).unwrap(), ANSWER);
+}
