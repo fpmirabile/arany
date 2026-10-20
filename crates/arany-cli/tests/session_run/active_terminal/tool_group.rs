@@ -11,14 +11,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn tls_request(pipe: &mut impl Read) -> Vec<u8> {
+fn tls_request(pipe: &mut impl Read) -> Option<Vec<u8>> {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut bytes = Vec::new();
     loop {
-        assert!(Instant::now() < deadline, "Tool group request deadline");
+        if Instant::now() >= deadline {
+            return None;
+        }
         let mut chunk = [0; 4096];
         match pipe.read(&mut chunk) {
-            Ok(0) => panic!("Tool group peer ended"),
+            Ok(0) => return None,
             Ok(count) => {
                 assert!(bytes.len() + count <= 256 * 1024);
                 bytes.extend_from_slice(&chunk[..count]);
@@ -33,12 +35,12 @@ fn tls_request(pipe: &mut impl Read) -> Vec<u8> {
                         })
                         .expect("Content-Length");
                     if bytes.len() == end + 4 + length {
-                        return bytes;
+                        return Some(bytes);
                     }
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::yield_now(),
-            Err(error) => panic!("Tool group peer read: {error}"),
+            Err(_) => return None,
         }
     }
 }
@@ -95,7 +97,9 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
     let mut peer_in = server.child().stdin.take().unwrap();
     thread::spawn(move || {
         loop {
-            let bytes = tls_request(&mut peer_out);
+            let Some(bytes) = tls_request(&mut peer_out) else {
+                return;
+            };
             let end = bytes
                 .windows(4)
                 .position(|part| part == b"\r\n\r\n")
@@ -125,8 +129,9 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
             } else {
                 ("application/json", response.to_string())
             };
-            write!(peer_in, "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
-            peer_in.flush().unwrap();
+            if write!(peer_in, "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).is_err() || peer_in.flush().is_err() {
+                return;
+            }
         }
     });
 
