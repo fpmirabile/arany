@@ -4918,7 +4918,7 @@ mod goal_replay_tests {
             hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
             for (event, version) in [
                 (started(intent.digest(), &hook_intent), 3),
-                (finished(hook_observation.clone(), deny.clone()), 7),
+                (finished(hook_observation.clone(), deny.clone()), 8),
             ] {
                 assert_eq!(event.version(), version);
                 let payload = event.payload().unwrap();

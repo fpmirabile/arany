@@ -2368,10 +2368,19 @@ mod tests {
     #[tokio::test]
     async fn an_exhausted_runtime_is_a_limit_without_a_spawn() {
         let mut missing = Command::new("/nonexistent/arany-test-program");
-        assert!(matches!(
-            spawn_before(&mut missing, tokio::time::Instant::now()),
-            Err(ToolError::Limit)
-        ));
+        let expired = spawn_before(&mut missing, tokio::time::Instant::now());
+        assert!(matches!(&expired, Err(ToolError::Timeout(output)) if output.is_empty()));
+        let intent = intent(ToolCall::Command {
+            program: "/nonexistent/arany-test-program".into(),
+            args: Vec::new(),
+            cwd: String::new(),
+        });
+        let (disposition, output, enforcement_cause, limit_cause) =
+            super::super::dispatch::outcome(&intent, expired.map(|_| String::new()));
+        assert_eq!(disposition, ToolDisposition::Limit);
+        assert_eq!(limit_cause, Some(LimitCause::Timeout));
+        assert_eq!(output, "Tool runtime expired");
+        assert_eq!(enforcement_cause, None);
         assert!(matches!(
             spawn_before(
                 &mut missing,
