@@ -647,7 +647,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             result,
             worker: _,
         } => {
-            // Unknown usage blocks Tool and Delegate outcomes and Provider calls, not a Answer.
+            // Unknown usage blocks Tool and Delegate outcomes and Provider calls, not an Answer.
             let over_token_cap = match active_run_goal(current, *run_id) {
                 Some(goal) => goal
                     .effective_budget()
@@ -672,6 +672,11 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                     .skip(1)
                     .any(|agent| !super::worker::child_terminal(agent))
             {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if result.as_deref().is_some_and(|text| {
+                summary.as_deref() != Some(crate::session::answer_summary(text).as_str())
+            }) {
                 return Err(ReplayError::InvalidTransition);
             }
             if run.agents[index].role == AgentRole::Child

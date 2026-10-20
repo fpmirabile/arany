@@ -2649,18 +2649,13 @@ impl Provider for ApprovalJourney {
             outcome: if first {
                 crate::tool_outcome(self.call.clone())
             } else {
-                ProviderOutcome::Answer(Answer {
-                    text: if review {
-                        if self.review == "over-cap" {
-                            "approve"
-                        } else {
-                            self.review
-                        }
-                        .into()
-                    } else {
-                        "Action completed".into()
-                    },
-                })
+                match (review, self.review) {
+                    (true, "ask") => ProviderOutcome::Review(arany::ReviewVerdict::Ask),
+                    (true, _) => ProviderOutcome::Review(arany::ReviewVerdict::Approve),
+                    (false, _) => ProviderOutcome::Answer(Answer {
+                        text: "Action completed".into(),
+                    }),
+                }
             },
             response_id: None,
             usage: arany::Usage {

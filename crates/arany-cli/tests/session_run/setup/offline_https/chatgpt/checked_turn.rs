@@ -241,7 +241,7 @@ pub(super) fn respond_after_catalog(
             "resp_check_compact",
             "Synthetic conformance question",
             "arany_compaction",
-            serde_json::json!({"summary": "Condensed"}),
+            serde_json::json!(r#"{"summary":"Condensed"}"#),
         ),
         (
             "resp_offline_chatgpt",

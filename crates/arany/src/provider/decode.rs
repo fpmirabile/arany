@@ -1,4 +1,4 @@
-use super::{Answer, ChildAssignment, Delegate, ProviderError, ProviderOutcome, ToolUseId};
+use super::{ChildAssignment, Delegate, ProviderError, ProviderOutcome, ToolUseId};
 use crate::tools::types::MAX_TOOL_ARGUMENT_BYTES;
 use crate::tools::{ToolCall, ToolRequest};
 use serde::Deserialize;
@@ -129,25 +129,12 @@ pub(crate) fn tools_outcome(requests: Vec<ToolRequest>) -> Result<ProviderOutcom
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Review {
-    verdict: Verdict,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Verdict {
-    Approve,
-    Ask,
+    verdict: super::ReviewVerdict,
 }
 
 pub(crate) fn review_outcome(text: &str) -> Result<ProviderOutcome, ProviderError> {
     let review: Review = serde_json::from_str(text).map_err(|_| ProviderError::InvalidOutcome)?;
-    Ok(ProviderOutcome::Answer(Answer {
-        text: match review.verdict {
-            Verdict::Approve => "approve",
-            Verdict::Ask => "ask",
-        }
-        .into(),
-    }))
+    Ok(ProviderOutcome::Review(review.verdict))
 }
 
 pub(crate) fn review_schema() -> Value {

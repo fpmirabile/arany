@@ -273,6 +273,14 @@ fn plan(call: &arany::ToolCall) -> arany::GoalPlanContract {
     }
 }
 
+fn verdict(text: &str) -> ProviderOutcome {
+    ProviderOutcome::Review(match text {
+        "approve" => arany::ReviewVerdict::Approve,
+        "ask" => arany::ReviewVerdict::Ask,
+        other => panic!("unknown review verdict {other}"),
+    })
+}
+
 fn finish(result: &str) -> ProviderOutcome {
     ProviderOutcome::Answer(Answer {
         text: result.into(),
@@ -299,7 +307,7 @@ async fn permission_dispatch_modes_rules_command_mcp_and_edit() {
                     tool_outcome(call.clone()),
                 ];
                 if ai {
-                    outcomes.push(finish("approve"));
+                    outcomes.push(verdict("approve"));
                 }
                 outcomes.push(finish("answer"));
                 let (result, requests, humans) = fixture
@@ -442,7 +450,7 @@ async fn permission_dispatch_settings_and_terminal_modes_only_narrow() {
             tool_outcome(call.clone()),
         ];
         if ai {
-            outcomes.push(finish("approve"));
+            outcomes.push(verdict("approve"));
         }
         outcomes.push(finish("answer"));
         let (result, requests, humans) = fixture.run(outcomes, Some(terminal), false).await;
@@ -727,7 +735,7 @@ async fn permission_dispatch_missing_settings_preserves_existing_approval_flow()
             tool_outcome(call.clone()),
         ];
         if mode == Some(arany::ApprovalMode::Auto) {
-            outcomes.push(finish("approve"));
+            outcomes.push(verdict("approve"));
         }
         outcomes.push(finish("answer"));
         let (result, _, humans) = fixture.run(outcomes, mode, false).await;
@@ -797,7 +805,7 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
             tool_outcome(call(kind)),
         ];
         if ai {
-            outcomes.push(finish("approve"));
+            outcomes.push(verdict("approve"));
         }
         outcomes.extend([finish("report"), finish("answer")]);
         let (result, requests, humans) = fixture
@@ -857,7 +865,7 @@ async fn researcher_review_approval_dispatches_within_a_short_goal_budget() {
                     }],
                 }),
                 tool_outcome(call("catalog")),
-                finish("approve"),
+                verdict("approve"),
                 finish("report"),
                 finish("answer"),
             ],
@@ -925,7 +933,7 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
     review.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
     let review = route(review);
     let fallback = route(
-        ScriptedProvider::new(vec![finish("approve")]).with_profile("scripted", "review-fallback"),
+        ScriptedProvider::new(vec![verdict("approve")]).with_profile("scripted", "review-fallback"),
     );
     let mut bindings = routes(&primary);
     bindings.roles.child = vec![child.clone()];
@@ -1014,7 +1022,7 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
             tool_outcome(call.clone()),
         ];
         if let Some(review) = review {
-            outcomes.push(finish(review));
+            outcomes.push(verdict(review));
         }
         if approved {
             outcomes.push(finish("answer"));
@@ -2212,7 +2220,7 @@ async fn agent_definition_guard_modes_preserve_parent_asks_and_add_review() {
             tool_outcome(call(if review { "catalog" } else { "read" })),
         ];
         if review {
-            responses.push(finish("approve"));
+            responses.push(verdict("approve"));
         }
         responses.extend([finish("report"), finish("answer")]);
         let (result, requests, humans) = fixture

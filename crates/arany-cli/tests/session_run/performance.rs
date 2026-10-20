@@ -201,7 +201,7 @@ fn team_two_process_latency_on_named_host() {
                     1 => {
                         serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                     }
-                    _ => serde_json::json!({"summary":"synthetic summary"}),
+                    _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 }
             } else {
                 let phase = (index - 3) % 4;

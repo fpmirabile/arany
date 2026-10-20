@@ -752,12 +752,12 @@ impl RunLoop<'_> {
     pub(super) fn complete_worker<'a>(
         &'a self,
         child: &'a mut ChildWork,
-        finish: Option<crate::provider::Answer>,
+        answer: Option<crate::provider::Answer>,
         deadline: tokio::time::Instant,
         cancelled: bool,
         failure: WorkerCause,
     ) -> BoxedStep<'a, CompletedWorker> {
-        Box::pin(self.complete_worker_inner(child, finish, deadline, cancelled, failure))
+        Box::pin(self.complete_worker_inner(child, answer, deadline, cancelled, failure))
     }
 
     pub(super) fn criterion_unmet(&self, id: AgentRunId) -> Result<bool, EngineError> {
@@ -779,14 +779,14 @@ impl RunLoop<'_> {
     async fn complete_worker_inner(
         &self,
         child: &mut ChildWork,
-        finish: Option<crate::provider::Answer>,
+        answer: Option<crate::provider::Answer>,
         deadline: tokio::time::Instant,
         cancelled: bool,
         failure: WorkerCause,
     ) -> Result<CompletedWorker, EngineError> {
         let id = child.agent_run_id;
         let mut stopped = self.observe_worker_stop().await?;
-        let data = if finish.is_some() && !stopped {
+        let data = if answer.is_some() && !stopped {
             let allowance = self.worker_allowance(id)?;
             let call = ToolCall::PrepareWorker {
                 preparation: WorkerPreparation {
@@ -904,12 +904,14 @@ impl RunLoop<'_> {
                 AgentDisposition::Failed
             },
             summary: if success {
-                finish.as_ref().map(|f| super::answer_summary(&f.text))
+                answer
+                    .as_ref()
+                    .map(|f| crate::session::answer_summary(&f.text))
             } else {
                 None
             },
             result: if success {
-                finish.as_ref().map(|f| f.text.clone())
+                answer.as_ref().map(|f| f.text.clone())
             } else {
                 None
             },

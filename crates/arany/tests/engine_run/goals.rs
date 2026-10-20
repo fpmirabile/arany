@@ -5537,7 +5537,7 @@ async fn reviewed_write_run(
             expected_digest: None,
             content: "v2".into(),
         }),
-        finish_with("ask"),
+        ProviderOutcome::Review(arany::ReviewVerdict::Ask),
         finish_with("done"),
     ]));
     let engine = engine_support::open(
@@ -5646,7 +5646,7 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
                 expected_digest: None,
                 content: "v2".into(),
             }),
-            finish_with("approve"),
+            ProviderOutcome::Review(arany::ReviewVerdict::Approve),
             finish_with("never reached"),
         ])
         .with_before_call(3, move || assert!(pause.pause(), "first pause")),

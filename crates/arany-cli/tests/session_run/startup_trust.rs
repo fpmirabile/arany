@@ -107,7 +107,7 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
-                2 => serde_json::json!({"summary":"synthetic summary"}),
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 _ => {
                     serde_json::json!("verified answer")
                 }

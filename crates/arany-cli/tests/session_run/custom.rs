@@ -225,7 +225,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
-                2 => serde_json::json!({"summary":"synthetic summary"}),
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 3 => {
                     serde_json::json!("verified answer")
                 }
@@ -1006,7 +1006,7 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"read-only question","profile":null}]}})
                 }
-                2 => serde_json::json!({"summary":"synthetic summary"}),
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 _ => {
                     serde_json::json!("answer")
                 }

@@ -118,7 +118,7 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
             assert!(content["derived_context_summary"].is_null());
         }
         let outcome = match index {
-            3 | 8 => json!({"summary": "scoped compacted"}),
+            3 | 8 => json!(r#"{"summary":"scoped compacted"}"#),
             7 => {
                 json!({"outcome": {"type": "delegate", "children":[{"objective":"Explain two","profile":null}]}})
             }

@@ -151,7 +151,7 @@ fn resident_memory_two_includes_on_named_host() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                2 => serde_json::json!({"summary":"synthetic summary"}),
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 _ => {
                     assert_eq!(input["phase"], "root_plan");
                     assert_eq!(input["objective"], "Synthetic memory question");

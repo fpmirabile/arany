@@ -131,7 +131,7 @@ pub fn responses_output(value: &Value) -> Value {
             .remove("type");
         json!([{"type":"function_call", "id":"fc_delegate", "call_id":"call_delegate", "status":"completed", "name":"arany_delegate", "arguments":arguments.to_string()}])
     } else {
-        json!([{"type":"message", "role":"assistant", "status":"completed", "content":[{"type":"output_text", "text":value.as_str().map_or_else(|| value.to_string(), str::to_owned)}]}])
+        json!([{"type":"message", "role":"assistant", "status":"completed", "content":[{"type":"output_text", "text":value.as_str().expect("an answer is plain text or a delegate outcome")}]}])
     }
 }
 
@@ -141,7 +141,7 @@ pub fn messages_content(value: &Value) -> Value {
         input.as_object_mut().expect("delegation").remove("type");
         json!([{"type":"tool_use", "id":"toolu_delegate", "name":"arany_delegate", "input":input}])
     } else {
-        json!([{"type":"text", "text":value.as_str().map_or_else(|| value.to_string(), str::to_owned)}])
+        json!([{"type":"text", "text":value.as_str().expect("an answer is plain text or a delegate outcome")}])
     }
 }
 

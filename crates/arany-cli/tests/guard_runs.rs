@@ -1684,7 +1684,11 @@ async fn primary_tool_step_events_match_the_snapshot() {
         ),
         (
             "reviewed mutation",
-            vec![write(), finish("approve"), finish("answer")],
+            vec![
+                write(),
+                ProviderOutcome::Review(arany::ReviewVerdict::Approve),
+                finish("answer"),
+            ],
             granted(Some(arany::ApprovalMode::Auto)),
             PRIMARY_REVIEWED_WRITE,
         ),
@@ -2020,13 +2024,9 @@ mod goals {
                     3,
                     2,
                 ),
-                AgentPhase::ToolReview => (
-                    ProviderOutcome::Answer(Answer {
-                        text: "approve".into(),
-                    }),
-                    3,
-                    2,
-                ),
+                AgentPhase::ToolReview => {
+                    (ProviderOutcome::Review(arany::ReviewVerdict::Approve), 3, 2)
+                }
                 _ => return Err(ProviderError::InvalidOutcome),
             };
             Ok(ProviderResponse {
@@ -2338,7 +2338,7 @@ mod goals {
                 expected_digest: None,
                 content: "changed".into(),
             }),
-            ProviderOutcome::Answer(Answer { text: "ask".into() }),
+            ProviderOutcome::Review(arany::ReviewVerdict::Ask),
             finish_with("never reached"),
         ])
         // Zero-based call 2 is the Tool review that follows the proposed Tool.
@@ -2427,7 +2427,7 @@ mod goals {
                 expected_digest: None,
                 content: "x".into(),
             }),
-            finish_with("approve"),
+            ProviderOutcome::Review(arany::ReviewVerdict::Approve),
             finish_with("x"),
         ]);
         let provider = Arc::new(provider);
@@ -2768,7 +2768,7 @@ mod routing {
         review.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
         let review = route(review);
         let fallback = route(
-            ScriptedProvider::new(vec![finish("approve")])
+            ScriptedProvider::new(vec![ProviderOutcome::Review(arany::ReviewVerdict::Approve)])
                 .with_profile("scripted", "review-fallback"),
         );
         let engine = engine_support::open(

@@ -749,10 +749,18 @@ impl PlanRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewVerdict {
+    Approve,
+    Ask,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderOutcome {
     Plan(Box<PlanRequest>),
     Answer(Answer),
+    Review(ReviewVerdict),
     Delegate(Delegate),
     /// Non-empty, in model order; the Engine accepts exactly one per step.
     Tools(Vec<crate::tools::ToolRequest>),
@@ -800,6 +808,7 @@ impl ProviderResponse {
             || self.turn.reflects_secret(secret)
             || match &self.outcome {
                 ProviderOutcome::Answer(value) => value.text.contains(secret),
+                ProviderOutcome::Review(_) => false,
                 ProviderOutcome::Delegate(value) => {
                     value
                         .agent

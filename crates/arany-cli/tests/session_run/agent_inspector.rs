@@ -178,7 +178,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                2 => serde_json::json!({"summary":"synthetic summary"}),
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 3 => {
                     serde_json::json!("prior answer")
                 }

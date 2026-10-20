@@ -16,7 +16,7 @@ fn answer_check(stream: &mut std::net::TcpStream, index: usize) {
         1 => {
             serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
         }
-        _ => serde_json::json!({"summary":"synthetic summary"}),
+        _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
     };
     send_response(stream, index, outcome);
 }

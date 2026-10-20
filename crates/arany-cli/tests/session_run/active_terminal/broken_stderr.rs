@@ -113,7 +113,7 @@ fn run_broken_stderr_case(compaction: bool) {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                2 => serde_json::json!({"summary":"synthetic summary"}),
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 _ => {
                     serde_json::json!("committed answer")
                 }

@@ -770,7 +770,9 @@ impl RunLoop<'_> {
                         ProviderOutcome::Delegate(_) => {
                             crate::provider::ProviderFailureReason::WorkerDelegateRefused
                         }
-                        ProviderOutcome::Plan(_) | ProviderOutcome::Tools(_) => {
+                        ProviderOutcome::Plan(_)
+                        | ProviderOutcome::Tools(_)
+                        | ProviderOutcome::Review(_) => {
                             crate::provider::ProviderFailureReason::WorkerToolRefused
                         }
                     });
@@ -872,7 +874,9 @@ impl RunLoop<'_> {
                             ProviderOutcome::Delegate(_) => {
                                 "Delegate refused: workers are still active."
                             }
-                            ProviderOutcome::Plan(_) | ProviderOutcome::Tools(_) => {
+                            ProviderOutcome::Plan(_)
+                            | ProviderOutcome::Tools(_)
+                            | ProviderOutcome::Review(_) => {
                                 "Tool request refused: it was malformed or edits inside a live worker lease."
                             }
                         });
@@ -900,9 +904,9 @@ impl RunLoop<'_> {
             let valid_response = self.ledger().tokens_within_limit()
                 && match &result {
                     CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Answer(finish),
+                        outcome: ProviderOutcome::Answer(answer),
                         ..
-                    }) => valid_answer(finish, MAX_CHILD_RESULT_BYTES),
+                    }) => valid_answer(answer, MAX_CHILD_RESULT_BYTES),
                     CallResult::Response(ProviderResponse {
                         outcome: ProviderOutcome::Tools(requests),
                         ..
@@ -1004,7 +1008,7 @@ impl RunLoop<'_> {
                     ) => crate::worker::WorkerCause::InvalidOutcome,
                     _ => crate::worker::WorkerCause::ToolFailed,
                 };
-                let finish = match result {
+                let answer = match result {
                     CallResult::Response(ProviderResponse {
                         outcome: ProviderOutcome::Answer(f),
                         turn,
@@ -1085,7 +1089,7 @@ impl RunLoop<'_> {
                 let completed = self
                     .complete_worker(
                         &mut children[index],
-                        finish,
+                        answer,
                         deadline,
                         matches!(
                             abort_reason,
@@ -1197,7 +1201,7 @@ impl RunLoop<'_> {
         }
         let disposition = match result {
             CallResult::Response(ProviderResponse {
-                outcome: ProviderOutcome::Answer(finish),
+                outcome: ProviderOutcome::Answer(answer),
                 turn,
                 ..
             }) if valid_response => {
@@ -1206,7 +1210,7 @@ impl RunLoop<'_> {
                     && abort_reason.is_none()
                 {
                     match self
-                        .subagent_stop(child, &finish, turn, abort_reason, deadline)
+                        .subagent_stop(child, &answer, turn, abort_reason, deadline)
                         .await?
                     {
                         ChildStop::Proceed => {}
@@ -1217,7 +1221,7 @@ impl RunLoop<'_> {
                 self.finish_child(
                     agent_run_id,
                     AgentDisposition::Finished,
-                    Some(&finish),
+                    Some(&answer),
                     true,
                 )
                 .await?;
@@ -1288,25 +1292,25 @@ impl RunLoop<'_> {
     fn subagent_stop<'a>(
         &'a self,
         child: &'a mut ChildWork,
-        finish: &'a Answer,
+        answer: &'a Answer,
         turn: ProviderTurn,
         abort_reason: &'a mut Option<AbortReason>,
         deadline: Instant,
     ) -> super::step::BoxedStep<'a, ChildStop> {
-        Box::pin(self.subagent_stop_inner(child, finish, turn, abort_reason, deadline))
+        Box::pin(self.subagent_stop_inner(child, answer, turn, abort_reason, deadline))
     }
 
     async fn subagent_stop_inner(
         &self,
         child: &mut ChildWork,
-        finish: &Answer,
+        answer: &Answer,
         turn: ProviderTurn,
         abort_reason: &mut Option<AbortReason>,
         deadline: Instant,
     ) -> Result<ChildStop, EngineError> {
         let agent_run_id = child.agent_run_id;
         let stop = self
-            .run_subagent_stop(child, &finish.text, turn, deadline)
+            .run_subagent_stop(child, &answer.text, turn, deadline)
             .await;
         match stop {
             Ok(Some(())) => {}
@@ -1935,7 +1939,7 @@ impl RunLoop<'_> {
         &self,
         agent_run_id: AgentRunId,
         disposition: AgentDisposition,
-        finish: Option<&Answer>,
+        answer: Option<&Answer>,
         call_reserved: bool,
     ) -> Result<(), EngineError> {
         self.append(Event::AgentFinished {
@@ -1943,8 +1947,8 @@ impl RunLoop<'_> {
             run_id: self.run_id,
             agent_run_id,
             disposition,
-            summary: finish.map(|value| super::answer_summary(&value.text)),
-            result: finish.map(|value| value.text.clone()),
+            summary: answer.map(|value| crate::session::answer_summary(&value.text)),
+            result: answer.map(|value| value.text.clone()),
         })
         .await?;
         if call_reserved {

@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v21";
+const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v22";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -369,7 +369,7 @@ mod tests {
                 | ProbeReply::InputAtLimit
                 | ProbeReply::InputAboveLimit => {
                     let text = match index {
-                        0 if compaction => json!({"summary":"synthetic summary"}),
+                        0 if compaction => json!(r#"{"summary":"synthetic summary"}"#),
                         0 if matches!(reply, ProbeReply::EscapedCredential) => {
                             json!("test-key")
                         }
@@ -385,7 +385,7 @@ mod tests {
                         1 => {
                             json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                         }
-                        _ => json!({"summary":"synthetic summary"}),
+                        _ => json!(r#"{"summary":"synthetic summary"}"#),
                     };
                     let model = if matches!(reply, ProbeReply::WrongModel) {
                         "drifted-model"

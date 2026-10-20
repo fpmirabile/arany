@@ -655,7 +655,7 @@ impl crate::Provider for ForegroundWorkerProvider {
         let mut release_child = None;
         let outcome = match (request.phase, step) {
             (AgentPhase::ToolReview, _) if self.case == "command_review_denied" => {
-                finish_with("ask")
+                ProviderOutcome::Review(crate::ReviewVerdict::Ask)
             }
             (AgentPhase::ChildWork | AgentPhase::RootSynthesis, _)
                 if self.case.starts_with("command_") =>

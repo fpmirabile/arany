@@ -226,7 +226,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             run_id: run,
             agent_run_id: primary,
             disposition: AgentDisposition::Finished,
-            summary: Some("Past summary".into()),
+            summary: Some("Past result".into()),
             result: Some("Past result".into()),
         },
         Event::MessageCommitted {
@@ -1128,9 +1128,7 @@ pub(super) async fn native_command_changeset_corpus(
                 return Err(ProviderError::InvalidOutcome);
             }
             let outcome = if review {
-                ProviderOutcome::Answer(Answer {
-                    text: "approve".into(),
-                })
+                ProviderOutcome::Review(arany::ReviewVerdict::Approve)
             } else {
                 self.calls.get(step).cloned().map_or_else(
                     || {

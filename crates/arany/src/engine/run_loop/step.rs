@@ -1,7 +1,7 @@
 use super::children::ChildWork;
 use super::{
     ActivePause, ActiveSegment, CallResult, RunLoop, TOOL_CLEANUP_OVERHEAD, TOOL_REVIEW_DEADLINE,
-    call_record, valid_answer,
+    call_record,
 };
 use crate::engine::hints::HintPublisher;
 use crate::engine::ledger::{Action, duration_ms};
@@ -1919,7 +1919,13 @@ impl RunLoop<'_> {
             )
             .await?;
         self.settle_result(&result)?;
-        let valid = matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Answer(finish), .. }) if valid_answer(finish, 1024) && matches!(finish.text.as_str(), "approve" | "ask"));
+        let valid = matches!(
+            &result,
+            CallResult::Response(ProviderResponse {
+                outcome: ProviderOutcome::Review(_),
+                ..
+            })
+        );
         let valid = valid && self.ledger().tokens_within_limit();
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
@@ -1939,7 +1945,7 @@ impl RunLoop<'_> {
             return Ok(false);
         }
         Ok(
-            matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Answer(finish), .. }) if valid && finish.text == "approve"),
+            matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Review(crate::ReviewVerdict::Approve), .. }) if valid),
         )
     }
 }

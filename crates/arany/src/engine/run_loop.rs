@@ -25,7 +25,6 @@ mod worker;
 
 use step::Grant;
 
-const MAX_FINISH_SUMMARY_BYTES: usize = 2 * 1024;
 const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
 const TOOL_REVIEW_DEADLINE: Duration = Duration::from_secs(20);
 
@@ -454,7 +453,7 @@ impl<'a> RunLoop<'a> {
         enum Exit {
             Stopped,
             Cancelled,
-            Finished(Answer),
+            Answered(Answer),
             Failed(RunFailure),
             Budget,
             Settled,
@@ -525,13 +524,13 @@ impl<'a> RunLoop<'a> {
                     }
                 }
                 CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Answer(finish),
+                    outcome: ProviderOutcome::Answer(answer),
                     turn,
                     ..
                 }) if valid_response => {
-                    match self.stop_primary(root_request, &finish, turn).await {
+                    match self.stop_primary(root_request, &answer, turn).await {
                         Ok(true) => continue,
-                        Ok(false) => break Exit::Finished(finish),
+                        Ok(false) => break Exit::Answered(answer),
                         Err(EngineError::GoalBudgetExhausted) => {
                             break Exit::Stopped;
                         }
@@ -581,7 +580,7 @@ impl<'a> RunLoop<'a> {
         match exit {
             Exit::Stopped => self.settle_stopped_primary().await,
             Exit::Cancelled => self.cancel_primary().await,
-            Exit::Finished(finish) => self.finish_primary(finish).await,
+            Exit::Answered(answer) => self.finish_primary(answer).await,
             Exit::Failed(cause) => self.fail_primary(cause).await,
             Exit::Budget => self.fail_for_budget().await,
             Exit::Settled => Ok(()),
@@ -595,9 +594,9 @@ impl<'a> RunLoop<'a> {
     ) -> Result<(Result<(), ProposalRefusalCause>, bool), EngineError> {
         Ok(match first {
             CallResult::Response(ProviderResponse {
-                outcome: ProviderOutcome::Answer(finish),
+                outcome: ProviderOutcome::Answer(answer),
                 ..
-            }) => (self.well_formed_answer(finish, planning), true),
+            }) => (self.well_formed_answer(answer, planning), true),
             CallResult::Response(ProviderResponse {
                 outcome: ProviderOutcome::Delegate(delegation),
                 ..
@@ -686,7 +685,7 @@ impl<'a> RunLoop<'a> {
     async fn stop_primary(
         &self,
         root: &mut ProviderRequest,
-        finish: &Answer,
+        answer: &Answer,
         turn: crate::provider::ProviderTurn,
     ) -> Result<bool, EngineError> {
         let fits = self
@@ -701,7 +700,7 @@ impl<'a> RunLoop<'a> {
                 self.primary_id,
                 crate::tools::permissions::HookEvent::Stop,
                 "",
-                &finish.text,
+                &answer.text,
                 None,
                 fits,
             )
@@ -848,7 +847,7 @@ impl<'a> RunLoop<'a> {
             CallResult::Response(response)
                 if !text.answer.is_empty()
                     && !matches!(&response.outcome,
-                ProviderOutcome::Answer(finish) if finish.text.starts_with(&text.answer)) =>
+                ProviderOutcome::Answer(answer) if answer.text.starts_with(&text.answer)) =>
             {
                 CallResult::Failed(CallFailure::InvalidResponse(Some(
                     ProviderFailureReason::ResponseContract,
@@ -952,12 +951,12 @@ impl<'a> RunLoop<'a> {
 
     fn well_formed_answer(
         &self,
-        finish: &Answer,
+        answer: &Answer,
         planning: bool,
     ) -> Result<(), ProposalRefusalCause> {
         if planning && matches!(self.controls.policy, CollaborationPolicy::Team { .. }) {
             Err(ProposalRefusalCause::Phase)
-        } else if !valid_answer(finish, MAX_PRIMARY_RESULT_BYTES) {
+        } else if !valid_answer(answer, MAX_PRIMARY_RESULT_BYTES) {
             Err(ProposalRefusalCause::AnswerInvalid)
         } else {
             Ok(())
@@ -1111,7 +1110,7 @@ impl<'a> RunLoop<'a> {
         Ok(<[_; 1]>::try_from(requests).ok().map(|[request]| request))
     }
 
-    async fn finish_primary(&self, finish: Answer) -> Result<(), EngineError> {
+    async fn finish_primary(&self, answer: Answer) -> Result<(), EngineError> {
         if self.controls.cancellation.is_cancelled() {
             return self.cancel_primary().await;
         }
@@ -1141,13 +1140,13 @@ impl<'a> RunLoop<'a> {
             run_id: self.run_id,
             agent_run_id: self.primary_id,
             disposition: AgentDisposition::Finished,
-            summary: Some(answer_summary(&finish.text)),
-            result: Some(finish.text.clone()),
+            summary: Some(crate::session::answer_summary(&answer.text)),
+            result: Some(answer.text.clone()),
         })
         .await?;
         self.append(Event::MessageCommitted {
             run_id: self.run_id,
-            text: finish.text,
+            text: answer.text,
         })
         .await?;
         self.append(Event::RunFinished {
@@ -1389,6 +1388,7 @@ fn proposal_refusal(result: &CallResult, cause: ProposalRefusalCause) -> Option<
     let operation = match &response.outcome {
         ProviderOutcome::Plan(_) => "arany_plan".to_owned(),
         ProviderOutcome::Answer(_) => "answer".to_owned(),
+        ProviderOutcome::Review(_) => "review".to_owned(),
         ProviderOutcome::Delegate(_) => "delegate".to_owned(),
         ProviderOutcome::Tools(requests) => format!("arany_{}", requests.first()?.call.label()),
     };
@@ -1404,7 +1404,7 @@ fn call_record(
 ) -> ProviderCallRecord {
     let disposition = match result {
         CallResult::Response(ProviderResponse {
-            outcome: ProviderOutcome::Answer(_),
+            outcome: ProviderOutcome::Answer(_) | ProviderOutcome::Review(_),
             ..
         }) if valid_response => ProviderCallDisposition::Finished,
         CallResult::Response(ProviderResponse {
@@ -1514,22 +1514,10 @@ fn continuation_feedback(
         .filter(|feedback| feedback.after_step == steps)
 }
 
-fn answer_summary(text: &str) -> String {
-    let line = text
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default();
-    let mut end = line.len().min(MAX_FINISH_SUMMARY_BYTES);
-    while !line.is_char_boundary(end) {
-        end -= 1;
-    }
-    line[..end].to_owned()
-}
-
 fn valid_answer(answer: &Answer, result_limit: usize) -> bool {
     !answer.text.trim().is_empty()
         && answer.text.len() <= result_limit
-        && Event::finished_payload_size(&answer_summary(&answer.text), &answer.text)
+        && Event::finished_payload_size(&crate::session::answer_summary(&answer.text), &answer.text)
             .is_ok_and(|bytes| bytes <= crate::store::MAX_EVENT_BYTES)
 }
 
