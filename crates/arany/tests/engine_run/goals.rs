@@ -4934,14 +4934,14 @@ async fn step_facts_and_notes_are_written_before_render() {
 
 #[tokio::test]
 async fn restating_the_recorded_plan_contract_is_a_no_op_and_a_different_one_is_refused() {
-    for (restated_plan, expected) in [
-        (facts_plan(facts_digest("v1")), RunStatus::Finished),
+    for (restated_plan, differs) in [
+        (facts_plan(facts_digest("v1")), false),
         (
             arany::GoalPlanContract {
                 mission: "A different mission".into(),
                 ..facts_plan(facts_digest("v1"))
             },
-            RunStatus::Finished,
+            true,
         ),
     ] {
         let temp = tempfile::tempdir().expect("temporary root");
@@ -4967,14 +4967,19 @@ async fn restating_the_recorded_plan_contract_is_a_no_op_and_a_different_one_is_
         )
         .await
         .expect("Run");
-        assert_eq!(outcome.run.status, expected);
+        assert_eq!(outcome.run.status, RunStatus::Finished);
         engine.close().await.expect("engine shutdown");
-        let (events, _) = replayed(&state_path, outcome.session_id).await;
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
         let recorded = events
             .iter()
             .filter(|event| matches!(event.event, Event::GoalPlanContractRecorded { .. }))
             .count();
         assert_eq!(recorded, 1, "the contract is journaled once");
+        let refusal = view.runs[0].agents[0].provider_calls[1].refusal.as_ref();
+        assert_eq!(
+            refusal.map(|refusal| refusal.cause),
+            differs.then_some(arany::ProposalRefusalCause::PlanInvalid)
+        );
     }
 }
 
