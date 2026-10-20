@@ -280,8 +280,8 @@ pub(crate) fn event_failure(event: &crate::session::Event) {
         {
             let _ = writeln!(
                 record,
-                "provider phase={:?} disposition={:?} reason={:?}",
-                call.phase, call.disposition, call.failure_reason
+                "provider phase={:?} disposition={:?} reason={:?} refusal={:?}",
+                call.phase, call.disposition, call.failure_reason, call.refusal
             );
         }
         Event::ToolFinished { observation, .. }
@@ -296,8 +296,12 @@ pub(crate) fn event_failure(event: &crate::session::Event) {
                 observation.stops_run()
             );
         }
-        Event::RunFinished { disposition, .. } if *disposition != RunDisposition::Finished => {
-            let _ = writeln!(record, "run disposition={disposition:?}");
+        Event::RunFinished {
+            disposition,
+            failure,
+            ..
+        } if *disposition != RunDisposition::Finished => {
+            let _ = writeln!(record, "run disposition={disposition:?} cause={failure:?}");
         }
         Event::ContextCompacted {
             record: compaction, ..
@@ -553,7 +557,11 @@ mod tests {
                 input_tokens: None,
                 output_tokens: None,
                 wire_provenance: None,
-                failure_reason: Some(crate::provider::ProviderFailureReason::OutcomeContract),
+                refusal: Some(crate::session::ProposalRefusal {
+                    operation: "arany_write".into(),
+                    cause: crate::session::ProposalRefusalCause::PlanMissing,
+                }),
+                failure_reason: Some(crate::provider::ProviderFailureReason::ProposalRefused),
                 requested_tools: 0,
                 cache_read_input_tokens: None,
                 cache_creation_input_tokens: None,
@@ -588,6 +596,7 @@ mod tests {
         event_failure(&crate::session::Event::RunFinished {
             run_id: Default::default(),
             disposition: crate::session::RunDisposition::Failed,
+            failure: Some(crate::session::RunFailure::ProposalRefused),
             active_ms: 0,
         });
         for mut event in crate::session::worker_protocol_fixture().events {
@@ -613,9 +622,9 @@ mod tests {
             "engine cause=Store",
             "filesystem kind=Other",
             "guard stage=execution",
-            "provider phase=RootSynthesis disposition=InvalidResponse reason=Some(OutcomeContract)",
+            r#"provider phase=RootSynthesis disposition=InvalidResponse reason=Some(ProposalRefused) refusal=Some(ProposalRefusal { operation: "arany_write", cause: PlanMissing })"#,
             "tool operation=edit disposition=Uncertain receipt=false stops_run=true",
-            "run disposition=Failed",
+            "run disposition=Failed cause=Some(ProposalRefused)",
         ] {
             assert_eq!(
                 failure_log.contains(detail),

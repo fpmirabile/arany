@@ -1105,6 +1105,7 @@ async fn single_run_goal_with_an_unmet_plan_criterion_is_not_a_budget_close() {
     .await
     .expect("failed Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert_eq!(outcome.run.failure, Some(arany::RunFailure::CriterionUnmet));
     engine.close().await.expect("engine shutdown");
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
@@ -2948,6 +2949,7 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
     .await
     .expect("an unnarrowable plan is a Failed Run, not a Store error");
     assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert_eq!(outcome.run.failure, Some(arany::RunFailure::PlanAdmission));
     engine.close().await.expect("engine shutdown");
 
     let (events, view) = replayed(&state_path, outcome.session_id).await;
@@ -2970,6 +2972,86 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
         [ProviderCallDisposition::ToolRequested],
         "the plan-bearing call is refused at the plan contract, after its Tool was requested"
     );
+}
+
+#[tokio::test]
+async fn active_time_left_below_one_second_stops_the_tool_step_without_a_context_cause() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_active_ms: Some(6_000),
+        ..arany::GoalBudget::default()
+    };
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget = budget;
+    let provider = ScriptedProvider::new(vec![crate::tool_outcome(
+        facts_read(),
+        Some(Box::new(plan)),
+    )]);
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, AUTONOMOUS_OBJECTIVE);
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("budget-stopped Run");
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
+    assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+}
+
+#[tokio::test]
+async fn tool_context_overflow_fails_with_the_context_cause() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(37_768)).expect("instructions");
+    std::fs::write(workspace.join("notes/facts.txt"), "f".repeat(40 * 1024)).expect("facts");
+    std::fs::write(workspace.join("big1.txt"), "b".repeat(127 * 1024)).expect("include");
+    std::fs::write(workspace.join("big2.txt"), "c".repeat(127 * 1024)).expect("include");
+    let state_path = temp.path().join("state");
+    let budget = arany::GoalBudget {
+        max_provider_calls: Some(30),
+        ..arany::GoalBudget::default()
+    };
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget = budget;
+    let mut script = vec![crate::tool_outcome(facts_read(), Some(Box::new(plan)))];
+    script.extend((0..11).map(|_| crate::tool_outcome(facts_read(), None)));
+    script.push(finish_with("done"));
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, &"x".repeat(60 * 1024));
+    input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
+    input.goal = arany::GoalRequest::new(budget, arany::GoalPhase::Implementation);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("context-full Run");
+    engine.close().await.expect("engine shutdown");
+
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(run.failure, Some(arany::RunFailure::ToolContextFull));
 }
 
 #[tokio::test]
@@ -3445,6 +3527,55 @@ async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
     assert!(call_steering_notes(&calls[1]).is_empty());
     assert_eq!(calls[2].phase, AgentPhase::RootSynthesis);
     assert_eq!(call_steering_notes(&calls[2]), ["keep this for synthesis"]);
+}
+
+#[tokio::test]
+async fn two_child_research_delegation_admission_covers_its_spawns() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let assignment = |objective: &str| arany::ChildAssignment {
+        editor: None,
+        objective: objective.into(),
+        profile: None,
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            agent: None,
+            children: vec![assignment("Inspect facts"), assignment("Inspect notes")],
+        }),
+        finish_with("first child"),
+        finish_with("second child"),
+        finish_with("synthesized"),
+    ]));
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 2,
+    };
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let (events, _) = replayed(&state_path, outcome.session_id).await;
+    assert!(
+        arany::test_support::admissions::recorded(outcome.session_id)
+            .iter()
+            .any(|(_, slots, sealed_data)| *slots > 200 && !sealed_data),
+        "the research delegation admission exceeds 200 slots"
+    );
+    assert_action_bounds(&events, false, false);
 }
 
 #[tokio::test]

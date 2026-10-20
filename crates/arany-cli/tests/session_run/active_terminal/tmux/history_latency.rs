@@ -273,6 +273,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         input_tokens: None,
                         output_tokens: None,
                         wire_provenance: None,
+                        refusal: None,
                         failure_reason: None,
                         requested_tools: 0,
                         cache_read_input_tokens: None,
@@ -294,6 +295,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                 Event::RunFinished {
                     run_id,
                     disposition: RunDisposition::Finished,
+                    failure: None,
                     active_ms: 0,
                 },
             ] {

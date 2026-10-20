@@ -257,14 +257,17 @@ impl RunLoop<'_> {
 
     pub(super) async fn admit_worker_action(&self, chunks: usize) -> Result<(), EngineError> {
         let action = Action::Worker { chunks };
-        self.journal
-            .admit(
-                self.session_id,
-                action.max_events_for_admitted(&self.routing.providers)
-                    + self.ledger().verdicts(action),
-                action.tool_observations(),
-            )
-            .await?;
+        let slots = action.max_events_for_admitted(&self.routing.providers)
+            + self.ledger().verdicts(action);
+        if chunks > 0 {
+            self.journal
+                .admit_sealed_data(self.session_id, slots, action.tool_observations())
+                .await?;
+        } else {
+            self.journal
+                .admit(self.session_id, slots, action.tool_observations())
+                .await?;
+        }
         Ok(())
     }
 
@@ -579,7 +582,7 @@ impl RunLoop<'_> {
             };
             match self
                 .journal
-                .admit(
+                .admit_sealed_data(
                     self.session_id,
                     action.max_events_for_admitted(&self.routing.providers)
                         + self.ledger().verdicts(action),

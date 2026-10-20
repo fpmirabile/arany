@@ -67,9 +67,9 @@ pub use session::{
     GoalId, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus,
     GoalSuccessCriterion, GoalView, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS,
     MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS,
-    ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition, RunId,
-    RunStatus, RunView, SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView,
-    ToolView, WorkspaceIdentity,
+    ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord,
+    ReplayError, RunConfig, RunDisposition, RunFailure, RunId, RunStatus, RunView, SessionDefaults,
+    SessionId, SessionListItem, SessionPage, SessionView, ToolView, WorkspaceIdentity,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};

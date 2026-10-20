@@ -178,7 +178,7 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                         let document: serde_json::Value =
                             serde_json::from_str(line).expect("canonical JSONL");
-                        assert_eq!(document["event_version"], 9);
+                        assert_eq!(document["event_version"], 10);
                         assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                     }
                 }
@@ -264,4 +264,86 @@ async fn fallback_feedback_names_the_committed_replacement_model() {
             .unwrap()
             .contains("fallback-model")
     );
+}
+
+#[tokio::test]
+async fn refused_write_proposals_report_the_engine_cause_without_naming_the_provider() {
+    use arany::{GoalBudget, GoalPlanContract, GoalSuccessCriterion, ProposalRefusalCause};
+    use std::os::unix::fs::PermissionsExt;
+
+    for (plan_calls, cause, expected) in [
+        (
+            None,
+            ProposalRefusalCause::PlanMissing,
+            "Arany refused the operation because its required plan was missing.",
+        ),
+        (
+            Some(1),
+            ProposalRefusalCause::PlanBudgetSpent,
+            "Arany refused a plan budget already spent by this Run.",
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state_path = root.path().join("state");
+        let engine = open(
+            StateRoot::admit(&state_path).unwrap(),
+            EngineConfig {
+                guard_executable: Some(std::env::current_exe().unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let config = state_path.join("tools.json");
+        std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let plan = plan_calls.map(|calls| {
+            Box::new(GoalPlanContract {
+                mission: "write test.txt containing hello".into(),
+                resource_class: arany::ToolResourceClass::Default,
+                command_timeout_ms: None,
+                paths: vec!["test.txt".into()],
+                commands: Vec::new(),
+                skills: Vec::new(),
+                mcp_tools: Vec::new(),
+                success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                    path: "test.txt".into(),
+                    sha256: "0".repeat(64),
+                },
+                budget: GoalBudget {
+                    max_provider_calls: Some(calls),
+                    ..GoalBudget::default()
+                },
+            })
+        });
+        let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(
+            arany::ToolCall::Write {
+                path: "test.txt".into(),
+                content: "hello".into(),
+                expected_digest: None,
+            },
+            plan,
+        )]));
+        let mut input = request(&workspace, "write test.txt containing hello");
+        input.include_paths.clear();
+        let run = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: arany::ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        engine.close().await.unwrap();
+        let (replay, _) = committed(root.path(), run.session_id).await;
+        let call = &replay.runs[0].agents[0].provider_calls[0];
+        assert_eq!(call.refusal.as_ref().map(|r| r.cause), Some(cause));
+        let copy = run_feedback(&replay.runs[0]).unwrap();
+        assert!(copy.contains(expected), "{copy}");
+        assert!(!copy.contains("Provider"), "{copy}");
+    }
 }

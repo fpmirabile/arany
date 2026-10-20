@@ -319,6 +319,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         status: RunStatus::Active,
                         accepted_sequence: 1,
                         finished_sequence: None,
+                        failure: None,
                         tools: Vec::new(),
                         tool_compaction_summary: None,
                         tool_compaction_covered_count: 0,
@@ -2351,6 +2352,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                         input_tokens: Some(7),
                         output_tokens: Some(3),
                         wire_provenance: None,
+                        refusal: None,
                         failure_reason: None,
                         requested_tools: 0,
                         cache_read_input_tokens: None,
@@ -2483,6 +2485,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 7 => Event::RunFinished {
                     run_id: interrupted_run,
                     disposition: arany::RunDisposition::Finished,
+                    failure: None,
                     active_ms: 0,
                 },
                 _ => unreachable!("declared crash point"),

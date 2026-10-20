@@ -75,7 +75,8 @@ impl Grant<'_> {
 
 enum SizingRefusal {
     DelegationDeadline,
-    Unavailable,
+    ActiveTime,
+    ContextFull,
 }
 
 enum Verdict {
@@ -256,7 +257,12 @@ impl RunLoop<'_> {
                             .await?;
                         return Ok(false);
                     }
-                    Err(SizingRefusal::Unavailable) => return Ok(false),
+                    Err(SizingRefusal::ActiveTime) => {
+                        self.active_time_floor
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        return Ok(false);
+                    }
+                    Err(SizingRefusal::ContextFull) => return Self::context_overflow(&grant),
                 };
             let command = matches!(intent.call, ToolCall::Command { .. })
                 && matches!(intent.target, crate::worker::EffectTarget::Workspace);
@@ -296,10 +302,11 @@ impl RunLoop<'_> {
             let Some(changeset) = changeset.filter(|changeset| !changeset.files.is_empty()) else {
                 break;
             };
-            if self.controls.cancellation.is_cancelled()
-                || grant.context()?.reserved_len(&step, &[]) > runtime.context_limit_bytes()
-            {
+            if self.controls.cancellation.is_cancelled() {
                 return Ok(false);
+            }
+            if grant.context()?.reserved_len(&step, &[]) > runtime.context_limit_bytes() {
+                return Self::context_overflow(&grant);
             }
             call = ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::CommandReceipt {
@@ -356,8 +363,21 @@ impl RunLoop<'_> {
                 return Ok(false);
             }
         }
-        Ok(!self.hook_requested_stop()?
-            && grant.context()?.rendered_len() <= runtime.context_limit_bytes())
+        if self.hook_requested_stop()? {
+            return Ok(false);
+        }
+        if grant.context()?.rendered_len() > runtime.context_limit_bytes() {
+            return Self::context_overflow(&grant);
+        }
+        Ok(true)
+    }
+
+    fn context_overflow(grant: &Grant<'_>) -> Result<bool, EngineError> {
+        if matches!(grant, Grant::Primary { .. }) {
+            Err(EngineError::ContextTooLarge)
+        } else {
+            Ok(false)
+        }
     }
 
     fn sized_intent(
@@ -409,7 +429,7 @@ impl RunLoop<'_> {
             }
         };
         let Some(mut intent) = intent else {
-            return Ok(Err(SizingRefusal::Unavailable));
+            return Ok(Err(SizingRefusal::ActiveTime));
         };
         // The PreToolUse hooks run before dispatch, so the authorization outlives them.
         intent.expires_at_ms = intent
@@ -431,7 +451,7 @@ impl RunLoop<'_> {
             0
         } + self.feedback_reserve(runtime, post_call);
         let Some(capacity) = runtime.result_capacity(overhead, integration_capacity) else {
-            return Ok(Err(SizingRefusal::Unavailable));
+            return Ok(Err(SizingRefusal::ContextFull));
         };
         intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
             128
@@ -808,6 +828,7 @@ impl RunLoop<'_> {
                     Action::Tool
                         .remaining(1, &self.routing.providers)
                         .saturating_add(self.ledger().verdicts(Action::Tool))
+                        .saturating_add(self.ledger().drain_headroom())
                         .saturating_add(2 * (hook_events + narrowing))
                         .saturating_add(if narrowing > 0 { 3 } else { 0 }),
                     Action::Tool
@@ -828,10 +849,11 @@ impl RunLoop<'_> {
                 )
             }
         };
+        let mut sealed_data = false;
         let tail = if worker {
-            let action = Action::Worker {
-                chunks: self.worker_call_chunks(intent.agent_run_id, &intent.call)?,
-            };
+            let chunks = self.worker_call_chunks(intent.agent_run_id, &intent.call)?;
+            sealed_data = chunks > 0;
+            let action = Action::Worker { chunks };
             tail.max(
                 action
                     .max_events_for_admitted(&self.routing.providers)
@@ -841,55 +863,67 @@ impl RunLoop<'_> {
         } else {
             tail
         };
-        self.journal
-            .admit(self.session_id, tail, observations)
-            .await
-            .map_err(|error| match error {
-                crate::store::StoreError::StorageFull | crate::store::StoreError::ReplayLimit
-                    if worker =>
-                {
-                    EngineError::Tool(crate::tools::ToolError::Limit)
-                }
-                error => error.into(),
-            })?;
+        let admitted = if sealed_data {
+            self.journal
+                .admit_sealed_data(self.session_id, tail, observations)
+                .await
+        } else {
+            self.journal
+                .admit(self.session_id, tail, observations)
+                .await
+        };
+        admitted.map_err(|error| match error {
+            crate::store::StoreError::StorageFull | crate::store::StoreError::ReplayLimit
+                if worker =>
+            {
+                EngineError::Tool(crate::tools::ToolError::Limit)
+            }
+            error => error.into(),
+        })?;
         Ok(true)
     }
 
-    fn plan_allows(&self, call: &ToolCall) -> bool {
-        self.primary_lease_allows(call)
+    fn plan_allows(&self, call: &ToolCall) -> Result<bool, EngineError> {
+        Ok(self.primary_lease_allows(call)?.is_ok()
             && (matches!(
                 call,
                 ToolCall::ApplyChangeset {
                     source: crate::session::worker::ChangesetSource::WorkerHandover { .. }
                 }
-            ) || self.ledger().allows_tool(call))
+            ) || self.ledger().allows_tool(call)))
     }
 
-    pub(super) fn primary_lease_allows(&self, call: &ToolCall) -> bool {
-        self.ledger()
-            .view(|v| {
-                v.runs.last().is_some_and(|r| {
-                    let leases = r
-                        .agents
-                        .iter()
-                        .filter_map(|a| a.assignment.as_ref())
-                        .filter(|w| w.released.is_none())
-                        .flat_map(|w| &w.pins.request.lease)
-                        .collect::<Vec<_>>();
-                    match call {
-                        ToolCall::ApplyChangeset {
-                            source: crate::worker::ChangesetSource::WorkerHandover { .. },
-                        } => true,
-                        ToolCall::Write { path, .. }
-                        | ToolCall::Edit { path, .. }
-                        | ToolCall::Mkdir { path } => {
-                            !leases.iter().any(|l| crate::worker::overlaps(l, path))
-                        }
-                        _ => !call.is_process() || leases.is_empty(),
+    pub(super) fn primary_lease_allows(
+        &self,
+        call: &ToolCall,
+    ) -> Result<Result<(), super::ProposalRefusalCause>, EngineError> {
+        let allowed = self.ledger().view(|v| {
+            v.runs.last().is_some_and(|r| {
+                let leases = r
+                    .agents
+                    .iter()
+                    .filter_map(|a| a.assignment.as_ref())
+                    .filter(|w| w.released.is_none())
+                    .flat_map(|w| &w.pins.request.lease)
+                    .collect::<Vec<_>>();
+                match call {
+                    ToolCall::ApplyChangeset {
+                        source: crate::worker::ChangesetSource::WorkerHandover { .. },
+                    } => true,
+                    ToolCall::Write { path, .. }
+                    | ToolCall::Edit { path, .. }
+                    | ToolCall::Mkdir { path } => {
+                        !leases.iter().any(|l| crate::worker::overlaps(l, path))
                     }
-                })
+                    _ => !call.is_process() || leases.is_empty(),
+                }
             })
-            .unwrap_or(false)
+        })?;
+        Ok(if allowed {
+            Ok(())
+        } else {
+            Err(super::ProposalRefusalCause::LeaseOverlap)
+        })
     }
 
     fn review_will_run(
@@ -900,7 +934,7 @@ impl RunLoop<'_> {
         permission: Permission,
     ) -> Result<bool, EngineError> {
         Ok(self.ledger().command_timeout_limit(call)?.is_none()
-            && self.plan_allows(call)
+            && self.plan_allows(call)?
             && runtime.allows(call)
             && permission
                 .narrow_terminal(self.terminal_mode(), call)
@@ -1011,7 +1045,7 @@ impl RunLoop<'_> {
                     && permission.decision != Decision::Deny
                     && timeout_limit.is_none()
                     && match grant {
-                        Grant::Primary { .. } => self.plan_allows(&intent.call),
+                        Grant::Primary { .. } => self.plan_allows(&intent.call)?,
                         Grant::Researcher { .. } => self.ledger().allows_tool(&intent.call),
                     } =>
             {
@@ -1186,7 +1220,7 @@ impl RunLoop<'_> {
             }
         }
         let mut unsaved_rule = false;
-        let goal_allows = intent.call.is_internal() || self.plan_allows(&intent.call);
+        let goal_allows = intent.call.is_internal() || self.plan_allows(&intent.call)?;
         let mut approved = true;
         let mut active_time_exhausted = false;
         if goal_allows
@@ -1896,7 +1930,7 @@ impl RunLoop<'_> {
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id: intent.agent_run_id,
-            record: call_record(AgentPhase::ToolReview, &result, valid, None),
+            record: call_record(AgentPhase::ToolReview, &result, valid, None, None),
         })
         .await?;
         if let Some(active_segment) = active_segment {
@@ -2125,6 +2159,8 @@ impl RunLoop<'_> {
                 raw_digest: file.digest,
             };
             let Some(mut intent) = self.primary_intent(runtime, call)? else {
+                self.active_time_floor
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 return Ok(false);
             };
             intent.limits.result_bytes = MAX_TOOL_RESULT_BYTES as u32;

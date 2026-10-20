@@ -190,6 +190,7 @@ fn unanswered_turns_render_as_historical_untrusted_facts() {
         let expected = json!({
             "status": label,
             "fact": fact,
+            "failure": (status == RunStatus::Failed).then_some("proposal_refused"),
             "primary_model_tool_execution": "nothing dispatched",
             "last_call": null,
         })
@@ -369,6 +370,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
     use crate::session::{RunStatus, RunView, ToolView};
     let observed = observation(read("src/lib.rs"), "{\"text\":\"ok\"}");
     let run = RunView {
+        failure: None,
         supervisor: Default::default(),
         workers: Default::default(),
         id: RunId::new(),
@@ -467,6 +469,7 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
         )
     };
     let mut run = RunView {
+        failure: None,
         supervisor: Default::default(),
         workers: Default::default(),
         id: RunId::new(),

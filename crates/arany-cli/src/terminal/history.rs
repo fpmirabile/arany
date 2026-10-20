@@ -1051,6 +1051,7 @@ mod tests {
             status: RunStatus::Finished,
             accepted_sequence: 2,
             finished_sequence: Some(3),
+            failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
@@ -1906,6 +1907,7 @@ mod tests {
                     Event::RunFinished {
                         run_id,
                         disposition: RunDisposition::Finished,
+                        failure: None,
                         active_ms: 0,
                     },
                 ] {

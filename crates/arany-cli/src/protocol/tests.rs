@@ -520,6 +520,7 @@ fn event_kinds_const_matches_kind() {
         arany::Event::RunFinished {
             run_id,
             disposition: arany::RunDisposition::Finished,
+            failure: None,
             active_ms: 1,
         },
     ] {

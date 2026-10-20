@@ -33,9 +33,9 @@ pub use events::{
     GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus, GoalSuccessCriterion,
     MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
     MAX_DISPLAY_TEXT_BYTES, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS,
-    MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProviderCallDisposition,
-    ProviderCallRecord, ReplayError, RunConfig, RunDisposition, RunId, SessionDefaults, SessionId,
-    WorkspaceIdentity,
+    MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProposalRefusal,
+    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig,
+    RunDisposition, RunFailure, RunId, SessionDefaults, SessionId, WorkspaceIdentity,
 };
 pub(crate) use events::{
     GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,

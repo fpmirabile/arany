@@ -234,6 +234,7 @@ pub struct RunView {
     pub status: RunStatus,
     pub accepted_sequence: u64,
     pub finished_sequence: Option<u64>,
+    pub failure: Option<super::RunFailure>,
     pub tools: Vec<ToolView>,
     pub tool_compaction_summary: Option<String>,
     pub tool_compaction_covered_count: u32,

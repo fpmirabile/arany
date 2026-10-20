@@ -11,6 +11,7 @@ pub(crate) fn unanswered_run(status: RunStatus) -> RunView {
         agents: Vec::new(),
         assistant_message: None,
         status,
+        failure: (status == RunStatus::Failed).then_some(RunFailure::ProposalRefused),
         accepted_sequence: 2,
         finished_sequence: status.is_outcome().then_some(3),
         tools: Vec::new(),

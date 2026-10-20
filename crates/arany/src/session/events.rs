@@ -22,8 +22,8 @@ pub use records::{
     AgentDisposition, AgentRole, ChildGrant, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
     DisplayChunk, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
-    MAX_DISPLAY_TEXT_BYTES, ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition,
-    SessionDefaults,
+    MAX_DISPLAY_TEXT_BYTES, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition,
+    ProviderCallRecord, RunConfig, RunDisposition, RunFailure, SessionDefaults,
 };
 use validate::bounded;
 
@@ -146,7 +146,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "MessageCommitted" => Some(6),
         "AgentSpawned" => Some(11),
         "AgentFinished" => Some(10),
-        "ProviderCallRecorded" => Some(9),
+        "ProviderCallRecorded" => Some(10),
         "WorkerDataChunk"
         | "WorkerDataSealed"
         | "WorkerStopObserved"
@@ -163,7 +163,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         "HookFinished" => Some(6),
         "ToolFinished" => Some(16),
         "RunStarted" => Some(16),
-        "RunFinished" => Some(8),
+        "RunFinished" => Some(9),
         "GoalProviderCallReserved" => Some(7),
         "GoalCompactionCallReserved" => Some(7),
         "ToolStarted" => Some(12),
@@ -420,6 +420,7 @@ pub enum Event {
     RunFinished {
         run_id: RunId,
         disposition: RunDisposition,
+        failure: Option<RunFailure>,
         active_ms: u64,
     },
 }
@@ -598,6 +599,8 @@ struct AgentFinishedPayload {
 #[serde(deny_unknown_fields)]
 struct RunFinishedPayload {
     disposition: RunDisposition,
+    #[serde(deserialize_with = "Option::deserialize")]
+    failure: Option<RunFailure>,
     active_ms: u64,
 }
 #[derive(Serialize, Deserialize)]
@@ -981,11 +984,13 @@ impl Event {
             Self::WorkerVerificationRecorded { record, .. } => serialize(record),
             Self::WorkerStopObserved { record, .. } => serialize(record),
             Self::RunFinished {
+                failure,
                 disposition,
                 active_ms,
                 ..
             } => serialize(&RunFinishedPayload {
                 disposition: *disposition,
+                failure: *failure,
                 active_ms: *active_ms,
             }),
         }
@@ -1297,6 +1302,7 @@ impl Event {
                 Self::RunFinished {
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                     disposition: data.disposition,
+                    failure: data.failure,
                     active_ms: data.active_ms,
                 }
             }

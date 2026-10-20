@@ -81,6 +81,7 @@ pub(super) fn admit_operation(
     event_slots: usize,
     tool_observations: usize,
     run_start: bool,
+    sealed_data: bool,
 ) -> Result<(), StoreError> {
     let transaction = begin_write(connection, None)?;
     admit_in_transaction(
@@ -89,6 +90,7 @@ pub(super) fn admit_operation(
         event_slots,
         tool_observations,
         run_start,
+        sealed_data,
     )?;
     transaction.commit()?;
     Ok(())
@@ -100,6 +102,7 @@ fn admit_in_transaction(
     event_slots: usize,
     tool_observations: usize,
     run_start: bool,
+    sealed_data: bool,
 ) -> Result<(), StoreError> {
     let mut count = 0;
     resolve_open_view(transaction, session_id, &mut count)?;
@@ -127,6 +130,10 @@ fn admit_in_transaction(
     {
         return Err(StoreError::StorageFull);
     }
+    #[cfg(any(test, feature = "test-support"))]
+    crate::test_support::admissions::record(session_id, count, event_slots, sealed_data);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = sealed_data;
     Ok(())
 }
 
@@ -422,7 +429,7 @@ pub(super) fn prepare_fork(
 }
 
 fn validate_fork(transaction: &Transaction<'_>, boundary: ForkLineage) -> Result<(), StoreError> {
-    admit_in_transaction(transaction, boundary.source_session_id, 1, 0, false)?;
+    admit_in_transaction(transaction, boundary.source_session_id, 1, 0, false, false)?;
     let id = SessionId::new();
     let event = fork_event(boundary, "Forked Session".into());
     let envelope = EventEnvelope {

@@ -315,9 +315,61 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 || action.max_events(),
                 |providers| action.max_events_for(&providers),
             );
+        // A primary step also reserves the Events that draining each in-flight editor appends.
+        let bound = bound
+            + if matches!(action, Action::Tool | Action::ProviderCall { .. }) {
+                let held = events[..*index]
+                    .iter()
+                    .map(|event| match event.event {
+                        Event::AgentSpawned {
+                            assignment: Some(_),
+                            ..
+                        } => 1_i64,
+                        Event::WorkerLeaseReleased { .. } => -1,
+                        _ => 0,
+                    })
+                    .sum::<i64>();
+                // Each editor still holding its lease drains with four Events and one shadow verdict.
+                usize::try_from(held).unwrap_or(0) * (4 + usize::from(verdicts > 0))
+            } else {
+                0
+            };
         assert!(
             bound >= observed,
             "{action:?} at {index} bounds {bound} Events but appends {observed}",
+        );
+    }
+    // A sealed-data allowance budgets its own chunks, so it is not headroom for later Events.
+    let admissions: Vec<_> = super::admissions::recorded(events[0].session_id)
+        .into_iter()
+        .filter(|(_, _, sealed_data)| !sealed_data)
+        .map(|(count, slots, _)| (count, slots))
+        .collect();
+    assert!(!admissions.is_empty(), "the Store recorded no admissions");
+    let first = admissions.iter().map(|(count, _)| *count).min();
+    for (position, envelope) in events.iter().enumerate() {
+        let admitted_elsewhere = matches!(
+            envelope.event,
+            Event::GoalStarted { .. }
+                | Event::GoalResumed { .. }
+                | Event::GoalRunLinked { .. }
+                | Event::SessionStarted { .. }
+                | Event::MessageAccepted { .. }
+                | Event::RunStarted { .. }
+                | Event::AgentSpawned {
+                    role: crate::AgentRole::Primary,
+                    ..
+                }
+        );
+        if admitted_elsewhere || first.is_none_or(|first| position < first) {
+            continue;
+        }
+        assert!(
+            admissions
+                .iter()
+                .any(|(count, slots)| *count <= position && position < count + slots),
+            "{:?} at {position} is past every earlier Store admission",
+            envelope.event.kind(),
         );
     }
 }

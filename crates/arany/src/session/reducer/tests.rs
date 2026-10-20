@@ -63,6 +63,7 @@ mod goal_recovery_tests {
             last_sequence: 1,
             lineage: None,
             runs: vec![RunView {
+                failure: None,
                 supervisor: Default::default(),
                 workers: Default::default(),
                 id: run_id,
@@ -215,6 +216,7 @@ mod goal_replay_tests {
             input_tokens: tokens,
             output_tokens: tokens,
             wire_provenance: None,
+            refusal: None,
             failure_reason: None,
             requested_tools: u8::from(disposition == ProviderCallDisposition::ToolRequested),
             cache_read_input_tokens: None,
@@ -368,6 +370,7 @@ mod goal_replay_tests {
             Event::RunFinished {
                 run_id,
                 disposition: RunDisposition::Finished,
+                failure: None,
                 active_ms: 0,
             },
             Event::GoalFinished {
@@ -399,9 +402,74 @@ mod goal_replay_tests {
             Event::RunFinished {
                 run_id,
                 disposition: RunDisposition::Cancelled,
+                failure: None,
                 active_ms: 0,
             },
         ]
+    }
+
+    #[test]
+    fn run_failure_is_present_exactly_on_failed_terminal_events() {
+        use crate::session::RunFailure;
+        let session = SessionId::new();
+        let goal = GoalId::new();
+        let run = RunId::new();
+        let agent = AgentRunId::new();
+        for (disposition, failure, accepted) in [
+            (
+                RunDisposition::Failed,
+                Some(RunFailure::ProposalRefused),
+                true,
+            ),
+            (RunDisposition::Failed, None, false),
+            (RunDisposition::Cancelled, None, true),
+            (
+                RunDisposition::Cancelled,
+                Some(RunFailure::ProviderCall),
+                false,
+            ),
+            (
+                RunDisposition::Finished,
+                Some(RunFailure::ProviderCall),
+                false,
+            ),
+            (
+                RunDisposition::StoppedByHook,
+                Some(RunFailure::ProviderCall),
+                false,
+            ),
+        ] {
+            let mut events = vec![goal_started(goal, GoalBudget::default())];
+            events.extend(start_run(
+                goal,
+                run,
+                agent,
+                config(CollaborationPolicy::Single, false),
+            ));
+            events.push(Event::AgentFinished {
+                worker: None,
+                run_id: run,
+                agent_run_id: agent,
+                disposition: if disposition == RunDisposition::Failed {
+                    AgentDisposition::Failed
+                } else {
+                    AgentDisposition::Cancelled
+                },
+                summary: None,
+                result: None,
+            });
+            events.push(Event::RunFinished {
+                run_id: run,
+                disposition,
+                failure,
+                active_ms: 0,
+            });
+            let result = SessionView::replay(session, &session_with(session, events));
+            assert_eq!(result.is_ok(), accepted, "{disposition:?} {failure:?}");
+            if accepted {
+                assert_eq!(result.unwrap().unwrap().runs[0].failure, failure);
+            }
+        }
     }
 
     #[test]
@@ -1859,6 +1927,7 @@ mod goal_replay_tests {
             Event::RunFinished {
                 run_id,
                 disposition: RunDisposition::Finished,
+                failure: None,
                 active_ms: 0,
             },
             Event::GoalCompactionCallReserved {
@@ -2097,6 +2166,7 @@ mod goal_replay_tests {
             Event::RunFinished {
                 run_id,
                 disposition: RunDisposition::Finished,
+                failure: None,
                 active_ms: 0,
             },
         ]);
@@ -2299,6 +2369,7 @@ mod goal_replay_tests {
             events.push(Event::RunFinished {
                 run_id,
                 disposition: RunDisposition::Finished,
+                failure: None,
                 active_ms: settled,
             });
             let mut view = SessionView::replay_open(session_id, &journal(session_id, events))
@@ -2396,6 +2467,7 @@ mod goal_replay_tests {
         events.push(Event::RunFinished {
             run_id,
             disposition: RunDisposition::Failed,
+            failure: Some(crate::session::RunFailure::ProviderCall),
             active_ms: 0,
         });
         events.push(Event::GoalFinished {
@@ -2690,6 +2762,7 @@ mod goal_replay_tests {
             last_sequence: 1,
             lineage: None,
             runs: vec![RunView {
+                failure: None,
                 supervisor: Default::default(),
                 workers: Default::default(),
                 id: run_id,
@@ -3197,6 +3270,7 @@ mod goal_replay_tests {
                     worker: None,
                 },
                 Event::RunFinished {
+                    failure: failed.then_some(crate::session::RunFailure::ProviderCall),
                     run_id: run,
                     disposition: if failed {
                         RunDisposition::Failed
@@ -3716,6 +3790,7 @@ mod goal_replay_tests {
             last_sequence: 1,
             lineage: None,
             runs: vec![RunView {
+                failure: None,
                 supervisor: Default::default(),
                 workers: Default::default(),
                 id: run_id,
@@ -3883,6 +3958,7 @@ mod goal_replay_tests {
             lineage: None,
             runs: vec![
                 RunView {
+                    failure: None,
                     supervisor: Default::default(),
                     workers: Default::default(),
                     id: earlier_run_id,
@@ -3915,6 +3991,7 @@ mod goal_replay_tests {
                     provider_fallbacks: Vec::new(),
                 },
                 RunView {
+                    failure: None,
                     supervisor: Default::default(),
                     workers: Default::default(),
                     id: run_id,
@@ -5709,6 +5786,7 @@ mod goal_replay_tests {
                 Event::RunFinished {
                     run_id,
                     disposition: RunDisposition::Finished,
+                    failure: None,
                     active_ms: 0,
                 },
                 Event::GoalFinished {
@@ -6107,6 +6185,7 @@ mod goal_replay_tests {
                     Event::RunFinished {
                         run_id: run,
                         disposition: RunDisposition::Failed,
+                        failure: Some(crate::session::RunFailure::ProviderCall),
                         active_ms: 0,
                     }
                 ));
@@ -6125,6 +6204,7 @@ mod goal_replay_tests {
                         Event::RunFinished {
                             run_id: run,
                             disposition: RunDisposition::StoppedByHook,
+                            failure: None,
                             active_ms: 0,
                         }
                     ));
@@ -6144,6 +6224,7 @@ mod goal_replay_tests {
                     let terminal = Event::RunFinished {
                         run_id: run,
                         disposition: RunDisposition::StoppedByHook,
+                        failure: None,
                         active_ms: 0,
                     };
                     apply(&mut stopped_view, terminal).unwrap();

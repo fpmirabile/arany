@@ -10,8 +10,9 @@ use crate::provider::{
 use crate::session::{
     AgentDisposition, AgentRunId, CollaborationPolicy, DisplayCategory, DisplayChunk, Event,
     GoalPhase, MAX_ASSISTANT_MESSAGE_BYTES as MAX_PRIMARY_RESULT_BYTES, MAX_DISPLAY_CHUNK_BYTES,
-    MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES,
-    ProviderCallDisposition, ProviderCallRecord, RunDisposition, RunId, SessionId,
+    MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProposalRefusal,
+    ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord, RunDisposition, RunFailure,
+    RunId, SessionId,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,6 +120,7 @@ pub(super) struct RunLoop<'a> {
     definitions: std::sync::OnceLock<
         std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
     >,
+    active_time_floor: std::sync::atomic::AtomicBool,
 }
 
 pub(super) struct LoopControls<'a> {
@@ -159,6 +161,7 @@ impl<'a> RunLoop<'a> {
             worker: Default::default(),
             handover: Default::default(),
             definitions: std::sync::OnceLock::new(),
+            active_time_floor: std::sync::atomic::AtomicBool::new(false),
             journal,
             session_id: identity.session_id,
             run_id: identity.run_id,
@@ -284,7 +287,7 @@ impl<'a> RunLoop<'a> {
     // Journals `exhausted` only when settlement agrees the Goal admits no next Run.
     async fn fail_for_budget(&self) -> Result<(), EngineError> {
         self.ledger().mark_budget_stopped();
-        self.fail_primary().await
+        self.fail_primary(RunFailure::BudgetExhausted).await
     }
 
     fn reserve_active_segment(&self, action_bound: Duration) -> Result<ActiveSegment, EngineError> {
@@ -434,7 +437,9 @@ impl<'a> RunLoop<'a> {
         self.journal
             .admit(
                 self.session_id,
-                Action::Tool.remaining(0, &self.routing.providers),
+                Action::Tool
+                    .remaining(0, &self.routing.providers)
+                    .saturating_add(self.ledger().drain_headroom()),
                 Action::Tool.tool_observations(),
             )
             .await?;
@@ -475,7 +480,7 @@ impl<'a> RunLoop<'a> {
             Stopped,
             Cancelled,
             Finished(Finish),
-            Failed,
+            Failed(RunFailure),
             Budget,
             Settled,
         }
@@ -493,44 +498,52 @@ impl<'a> RunLoop<'a> {
                 }
                 Err(error) => return Err(error),
             };
-            let (well_formed, budget_admits) = match &first {
+            let (validation, budget_admits) = match &first {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
                     ..
-                }) => (
-                    (!planning
-                        || !matches!(self.controls.policy, CollaborationPolicy::Team { .. }))
-                        && valid_finish(finish, MAX_PRIMARY_RESULT_BYTES),
-                    true,
-                ),
+                }) => (self.well_formed_finish(finish, planning), true),
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Delegate(delegation),
                     ..
                 }) => (
-                    (planning || self.wave_settled()?)
-                        && self.well_formed_delegation(
+                    if !planning && !self.wave_settled()? {
+                        Err(ProposalRefusalCause::Phase)
+                    } else {
+                        self.well_formed_delegation(
                             &delegation.children,
                             delegation.agent.as_deref(),
-                        ),
+                        )
+                    },
                     self.ledger().can_start_provider_call(),
                 ),
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Tools(requests),
                     ..
                 }) => (
-                    self.well_formed_tools(requests)
-                        && requests.iter().all(|r| self.primary_lease_allows(&r.call)),
+                    self.well_formed_primary_tools(requests)?,
                     self.ledger().admits(Action::Tool),
                 ),
-                _ => (false, true),
+                _ => (Ok(()), true),
             };
+            let refusal = validation
+                .err()
+                .and_then(|cause| proposal_refusal(&first, cause));
+            let well_formed = validation.is_ok();
+            let refused = refusal.is_some();
             let tokens_ok = self.ledger().tokens_within_limit();
             let valid_response = tokens_ok && well_formed && budget_admits;
             let budget_refused = well_formed && !(tokens_ok && budget_admits);
             self.append(Event::ProviderCallRecorded {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
-                record: call_record(phase, &first, valid_response, self.default_child_profile()),
+                record: call_record(
+                    phase,
+                    &first,
+                    valid_response,
+                    self.default_child_profile(),
+                    refusal,
+                ),
             })
             .await?;
             self.settle_active_segment(active_segment)?;
@@ -555,7 +568,9 @@ impl<'a> RunLoop<'a> {
                         Err(EngineError::GoalBudgetExhausted) => {
                             break Exit::Stopped;
                         }
-                        Err(EngineError::ContextTooLarge) => break Exit::Failed,
+                        Err(EngineError::ContextTooLarge) => {
+                            break Exit::Failed(RunFailure::ToolContextFull);
+                        }
                         Err(error) => return Err(error),
                     }
                 }
@@ -590,7 +605,13 @@ impl<'a> RunLoop<'a> {
                 }
                 CallResult::Cancelled => break Exit::Cancelled,
                 CallResult::Response(_) if budget_refused => break Exit::Budget,
-                _ => break Exit::Failed,
+                _ => {
+                    break Exit::Failed(if refused {
+                        RunFailure::ProposalRefused
+                    } else {
+                        RunFailure::ProviderCall
+                    });
+                }
             }
         };
 
@@ -598,7 +619,7 @@ impl<'a> RunLoop<'a> {
             Exit::Stopped => self.settle_stopped_primary().await,
             Exit::Cancelled => self.cancel_primary().await,
             Exit::Finished(finish) => self.finish_primary(finish).await,
-            Exit::Failed => self.fail_primary().await,
+            Exit::Failed(cause) => self.fail_primary(cause).await,
             Exit::Budget => self.fail_for_budget().await,
             Exit::Settled => Ok(()),
         }
@@ -625,7 +646,10 @@ impl<'a> RunLoop<'a> {
             return self.settle_stopped_primary().await.map(|()| false);
         }
         let Some(request) = self.begin_tool_step(requests).await? else {
-            return self.fail_primary().await.map(|()| false);
+            return self
+                .fail_primary(RunFailure::PlanAdmission)
+                .await
+                .map(|()| false);
         };
         let grant = Grant::Primary {
             request: &mut *root_request,
@@ -639,9 +663,20 @@ impl<'a> RunLoop<'a> {
             Ok(false) if self.ledger().active_time_exhausted() => {
                 return self.settle_stopped_primary().await.map(|()| false);
             }
-            Ok(false) => return self.fail_primary().await.map(|()| false),
+            Ok(false) => {
+                return self
+                    .fail_primary(self.tool_stop_cause())
+                    .await
+                    .map(|()| false);
+            }
             Err(EngineError::GoalBudgetExhausted) => {
                 return self.settle_stopped_primary().await.map(|()| false);
+            }
+            Err(EngineError::ContextTooLarge) => {
+                return self
+                    .fail_primary(RunFailure::ToolContextFull)
+                    .await
+                    .map(|()| false);
             }
             Err(error) => return Err(error),
         }
@@ -895,65 +930,121 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
-    fn well_formed_tools(&self, requests: &[crate::tools::ToolRequest]) -> bool {
-        matches!(requests, [request] if self.well_formed_tool(&request.call, &request.plan_contract))
+    fn well_formed_finish(
+        &self,
+        finish: &Finish,
+        planning: bool,
+    ) -> Result<(), ProposalRefusalCause> {
+        if planning && matches!(self.controls.policy, CollaborationPolicy::Team { .. }) {
+            Err(ProposalRefusalCause::Phase)
+        } else if !valid_finish(finish, MAX_PRIMARY_RESULT_BYTES) {
+            Err(ProposalRefusalCause::FinishInvalid)
+        } else {
+            Ok(())
+        }
     }
 
-    fn well_formed_tool(
+    fn well_formed_primary_tools(
+        &self,
+        requests: &[crate::tools::ToolRequest],
+    ) -> Result<Result<(), ProposalRefusalCause>, EngineError> {
+        if let Err(cause) = self.well_formed_tools(requests)? {
+            return Ok(Err(cause));
+        }
+        for request in requests {
+            if let Err(cause) = self.primary_lease_allows(&request.call)? {
+                return Ok(Err(cause));
+            }
+        }
+        Ok(Ok(()))
+    }
+
+    fn well_formed_tools(
+        &self,
+        requests: &[crate::tools::ToolRequest],
+    ) -> Result<Result<(), ProposalRefusalCause>, EngineError> {
+        let [request] = requests else {
+            return Ok(Err(ProposalRefusalCause::InvalidArguments));
+        };
+        let existing = self.ledger().plan_contract()?;
+        let budget = self.ledger().effective_budget()?;
+        Ok(self.check_tool(&request.call, &request.plan_contract, existing, &budget))
+    }
+
+    fn check_tool(
         &self,
         call: &crate::tools::ToolCall,
         plan_contract: &Option<Box<crate::session::GoalPlanContract>>,
-    ) -> bool {
-        let (Ok(existing), Ok(budget)) = (
-            self.ledger().plan_contract(),
-            self.ledger().effective_budget(),
-        ) else {
-            return false;
+        existing: Option<crate::session::GoalPlanContract>,
+        budget: &crate::session::GoalBudget,
+    ) -> Result<(), ProposalRefusalCause> {
+        use ProposalRefusalCause::{
+            ArgumentBytes, InvalidArguments, NotOffered, Phase, PlanBudgetOutsideGoal,
+            PlanBudgetSpent, PlanInvalid, PlanMissing, PlanOutsideGrant, PlanScopeExcludesCall,
         };
+        if self.controls.tools.is_none()
+            || matches!(
+                call,
+                crate::tools::ToolCall::ApplyChangeset { .. }
+                    | crate::tools::ToolCall::ParseAgentDefinition { .. }
+                    | crate::tools::ToolCall::PrepareWorker { .. }
+            )
+        {
+            return Err(NotOffered);
+        }
+        if !serde_json::to_vec(call)
+            .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
+        {
+            return Err(ArgumentBytes);
+        }
+        if !call.valid() {
+            return Err(InvalidArguments);
+        }
+        if self.controls.goal_phase != GoalPhase::Implementation && !call.is_goal_plan_prelude() {
+            return Err(Phase);
+        }
         // Restating the recorded contract is a no-op; only a different one is a widening attempt.
         let plan_contract = if existing.as_ref() == plan_contract.as_deref() {
             &None
         } else {
             plan_contract
         };
-        let plan_and_call_fit = plan_contract.as_ref().is_none_or(|contract| {
-            serde_json::to_vec(&(call, contract))
+        if plan_contract.as_ref().is_some_and(|contract| {
+            !serde_json::to_vec(&(call, contract))
                 .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
-        });
-        let plan_valid = if let Some(existing) = &existing {
-            plan_contract.is_none()
-                && existing.allows_call(call)
-                && self
-                    .controls
-                    .tools
-                    .is_some_and(|tools| tools.allows_goal_contract(existing))
-        } else if let Some(contract) = plan_contract {
-            contract.budget.is_within(&budget)
-                && contract.validate().is_ok()
-                && contract.allows_call(call)
-                && self
-                    .controls
-                    .tools
-                    .is_some_and(|tools| tools.allows_goal_contract(contract))
-        } else {
-            call.is_goal_plan_prelude()
-        };
-        let contract_budget_available = plan_contract
-            .as_ref()
-            .is_none_or(|contract| self.ledger().can_narrow(contract));
-        self.controls.tools.is_some()
-            && call.valid()
-            && (self.controls.goal_phase == GoalPhase::Implementation
-                || call.is_goal_plan_prelude())
-            && plan_and_call_fit
-            && plan_valid
-            && contract_budget_available
-            && !matches!(
-                call,
-                crate::tools::ToolCall::ApplyChangeset { .. }
-                    | crate::tools::ToolCall::ParseAgentDefinition { .. }
-                    | crate::tools::ToolCall::PrepareWorker { .. }
-            )
+        }) {
+            return Err(ArgumentBytes);
+        }
+        if existing.is_some() && plan_contract.is_some() {
+            return Err(PlanInvalid);
+        }
+        let contract = existing.as_ref().or(plan_contract.as_deref());
+        if let Some(contract) = contract {
+            if existing.is_none() {
+                if !contract.budget.is_within(budget) {
+                    return Err(PlanBudgetOutsideGoal);
+                }
+                if contract.validate().is_err() {
+                    return Err(PlanInvalid);
+                }
+            }
+            if !contract.allows_call(call) {
+                return Err(PlanScopeExcludesCall);
+            }
+            if !self
+                .controls
+                .tools
+                .is_some_and(|tools| tools.allows_goal_contract(contract))
+            {
+                return Err(PlanOutsideGrant);
+            }
+            if plan_contract.is_some() && !self.ledger().can_narrow(contract) {
+                return Err(PlanBudgetSpent);
+            }
+        } else if !call.is_goal_plan_prelude() {
+            return Err(PlanMissing);
+        }
+        Ok(())
     }
 
     pub(super) async fn begin_tool_step(
@@ -988,15 +1079,14 @@ impl<'a> RunLoop<'a> {
             })
         })?;
         if !workers_verified {
-            return self.fail_primary().await;
+            return self.fail_primary(RunFailure::WorkersUnverified).await;
         }
         if !self.ledger().success_criterion_satisfied() && !self.ledger().allows_next_run() {
             // Only an autonomous Goal runs out of Runs; a single-Run Goal with an unmet plan simply fails.
-            return if self.ledger().autonomous() {
-                self.fail_for_budget().await
-            } else {
-                self.fail_primary().await
-            };
+            if self.ledger().autonomous() {
+                self.ledger().mark_budget_stopped();
+            }
+            return self.fail_primary(RunFailure::CriterionUnmet).await;
         }
         self.append(Event::AgentFinished {
             worker: None,
@@ -1015,6 +1105,7 @@ impl<'a> RunLoop<'a> {
         self.append(Event::RunFinished {
             run_id: self.run_id,
             disposition: RunDisposition::Finished,
+            failure: None,
             active_ms: self.ledger().run_active_ms()?,
         })
         .await?;
@@ -1042,11 +1133,31 @@ impl<'a> RunLoop<'a> {
         match definition_stop(stopped, !self.ledger().can_start_provider_call()) {
             DefinitionStop::Settle => self.settle_stopped_primary().await,
             DefinitionStop::Budget => self.fail_for_budget().await,
-            DefinitionStop::Fail => self.fail_primary().await,
+            DefinitionStop::Fail => {
+                let cause = if self.take_active_time_floor() {
+                    RunFailure::BudgetExhausted
+                } else {
+                    RunFailure::DefinitionInvalid
+                };
+                self.fail_primary(cause).await
+            }
         }
     }
 
-    async fn fail_primary(&self) -> Result<(), EngineError> {
+    fn take_active_time_floor(&self) -> bool {
+        self.active_time_floor
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn tool_stop_cause(&self) -> RunFailure {
+        if self.take_active_time_floor() {
+            RunFailure::BudgetExhausted
+        } else {
+            RunFailure::ToolStopped
+        }
+    }
+
+    async fn fail_primary(&self, cause: RunFailure) -> Result<(), EngineError> {
         if self.controls.cancellation.is_cancelled() {
             return self.cancel_primary().await;
         }
@@ -1065,6 +1176,7 @@ impl<'a> RunLoop<'a> {
         self.append(Event::RunFinished {
             run_id: self.run_id,
             disposition: RunDisposition::Failed,
+            failure: Some(cause),
             active_ms: self.ledger().run_active_ms()?,
         })
         .await?;
@@ -1121,6 +1233,7 @@ impl<'a> RunLoop<'a> {
         self.append(Event::RunFinished {
             run_id: self.run_id,
             disposition: RunDisposition::StoppedByHook,
+            failure: None,
             active_ms: self.ledger().run_active_ms()?,
         })
         .await?;
@@ -1140,6 +1253,7 @@ impl<'a> RunLoop<'a> {
         self.append(Event::RunFinished {
             run_id: self.run_id,
             disposition: RunDisposition::Cancelled,
+            failure: None,
             active_ms: self.ledger().run_active_ms()?,
         })
         .await?;
@@ -1180,21 +1294,21 @@ pub(super) async fn invoke_bounded_with_preview(
                     .is_some_and(|count| count > MAX_REPORTED_INPUT_TOKENS)
                     || !response.usage.cache_consistent() =>
             {
-                CallResult::Failed(CallFailure::InvalidResponse(None))
+                CallResult::Failed(CallFailure::InvalidResponse(Some(ProviderFailureReason::ResponseContract)))
             }
             Ok(Ok(response)) if response.usage.output_tokens.is_some_and(|count| count > output_cap) => {
                 CallResult::Failed(CallFailure::OutputLimit)
             }
             Ok(Ok(response)) if response.response_id.as_ref().is_some_and(|id| {
                 id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_graphic())
-            }) => CallResult::Failed(CallFailure::InvalidResponse(None)),
+            }) => CallResult::Failed(CallFailure::InvalidResponse(Some(ProviderFailureReason::ResponseContract))),
             Ok(Ok(response)) if response.wire_provenance.is_some_and(|provenance| {
                 !provenance.valid_for(
                     response.response_id.as_deref(),
                     response.usage.input_tokens,
                     response.usage.output_tokens,
                 )
-            }) => CallResult::Failed(CallFailure::InvalidResponse(None)),
+            }) => CallResult::Failed(CallFailure::InvalidResponse(Some(ProviderFailureReason::ResponseContract))),
             Ok(Ok(response)) => CallResult::Response(response),
             Ok(Err(error)) => match error.failure_class() {
                 ProviderFailureClass::Unavailable => CallResult::Failed(CallFailure::Unavailable {
@@ -1220,11 +1334,24 @@ fn call_usage(result: &CallResult) -> (Option<u32>, Option<u32>) {
     }
 }
 
+fn proposal_refusal(result: &CallResult, cause: ProposalRefusalCause) -> Option<ProposalRefusal> {
+    let CallResult::Response(response) = result else {
+        return None;
+    };
+    let operation = match &response.outcome {
+        ProviderOutcome::Finish(_) => "finish".to_owned(),
+        ProviderOutcome::Delegate(_) => "delegate".to_owned(),
+        ProviderOutcome::Tools(requests) => format!("arany_{}", requests.first()?.call.label()),
+    };
+    Some(ProposalRefusal { operation, cause })
+}
+
 fn call_record(
     phase: AgentPhase,
     result: &CallResult,
     valid_response: bool,
     default_profile: Option<String>,
+    refusal: Option<ProposalRefusal>,
 ) -> ProviderCallRecord {
     let disposition = match result {
         CallResult::Response(ProviderResponse {
@@ -1258,7 +1385,9 @@ fn call_record(
         ),
         CallResult::Failed(_) | CallResult::Cancelled => (None, Usage::default(), None),
     };
+    let refused = refusal.is_some();
     ProviderCallRecord {
+        refusal,
         delegation: if disposition == ProviderCallDisposition::Delegated {
             match result {
                 CallResult::Response(ProviderResponse {
@@ -1306,13 +1435,17 @@ fn call_record(
         cache_read_input_tokens: usage.cache_read_input_tokens,
         cache_creation_input_tokens: usage.cache_creation_input_tokens,
         wire_provenance,
-        failure_reason: match result {
-            CallResult::Failed(
-                CallFailure::Unavailable { reason, .. }
-                | CallFailure::Rejected(reason)
-                | CallFailure::InvalidResponse(reason),
-            ) => *reason,
-            _ => None,
+        failure_reason: if refused {
+            Some(ProviderFailureReason::ProposalRefused)
+        } else {
+            match result {
+                CallResult::Failed(
+                    CallFailure::Unavailable { reason, .. }
+                    | CallFailure::Rejected(reason)
+                    | CallFailure::InvalidResponse(reason),
+                ) => *reason,
+                _ => None,
+            }
         },
     }
 }

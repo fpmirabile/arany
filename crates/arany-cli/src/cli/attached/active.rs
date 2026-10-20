@@ -1409,6 +1409,7 @@ mod goal_request_tests {
             status: arany::RunStatus::Finished,
             accepted_sequence: 3,
             finished_sequence: Some(4),
+            failure: None,
             tools: Vec::new(),
             tool_compaction_summary: None,
             tool_compaction_covered_count: 0,
