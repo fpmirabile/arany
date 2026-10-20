@@ -1166,8 +1166,8 @@ mod tests {
     fn agent_definition_modes_and_tools_only_narrow_research_authority() {
         let read = ToolCall::Read {
             path: "file".into(),
-            offset: 0,
-            limit: 1,
+            offset: None,
+            limit: Some(1),
         };
         let write = ToolCall::Write {
             path: "file".into(),

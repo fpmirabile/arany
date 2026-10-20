@@ -20,8 +20,8 @@ mod goal_recovery_tests {
             workspace_inode: 2,
             call: ToolCall::Read {
                 path: "src/main.rs".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             },
             limits: crate::tools::ToolLimits::default(),
             expires_at_ms: 1,
@@ -1012,8 +1012,8 @@ mod goal_replay_tests {
             child,
             ToolCall::Read {
                 path: "src/lib.rs".into(),
-                offset: 0,
-                limit: 1024,
+                offset: None,
+                limit: Some(1024),
             },
         );
         apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
@@ -1030,8 +1030,8 @@ mod goal_replay_tests {
                 primary_agent,
                 ToolCall::Read {
                     path: "src/main.rs".into(),
-                    offset: 0,
-                    limit: 1024,
+                    offset: None,
+                    limit: Some(1024),
                 },
             ),
             observation: None,
@@ -1325,8 +1325,8 @@ mod goal_replay_tests {
             workspace_inode: 2,
             call: crate::tools::ToolCall::Read {
                 path: "src/main.rs".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             },
             limits: crate::tools::ToolLimits::default(),
             expires_at_ms: 1,
@@ -3356,8 +3356,8 @@ mod goal_replay_tests {
             child,
             ToolCall::Read {
                 path: "src/lib.rs".into(),
-                offset: 0,
-                limit: 1024,
+                offset: None,
+                limit: Some(1024),
             },
         );
         apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
@@ -3489,8 +3489,8 @@ mod goal_replay_tests {
                 child,
                 ToolCall::Read {
                     path: "src/lib.rs".into(),
-                    offset: 0,
-                    limit: 2,
+                    offset: None,
+                    limit: Some(2),
                 },
             ),
             ..observation_for(read.clone(), b"ok")
@@ -3538,8 +3538,8 @@ mod goal_replay_tests {
             child,
             ToolCall::Read {
                 path: "src/main.rs".into(),
-                offset: 0,
-                limit: 1024,
+                offset: None,
+                limit: Some(1024),
             },
         );
         apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
@@ -3597,8 +3597,8 @@ mod goal_replay_tests {
                 child,
                 ToolCall::Read {
                     path: "src/lib.rs".into(),
-                    offset: 0,
-                    limit: 1024,
+                    offset: None,
+                    limit: Some(1024),
                 },
             );
             apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
@@ -3648,8 +3648,8 @@ mod goal_replay_tests {
             child,
             ToolCall::Read {
                 path: "src/lib.rs".into(),
-                offset: 0,
-                limit: 1024,
+                offset: None,
+                limit: Some(1024),
             },
         );
         apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
@@ -3711,8 +3711,8 @@ mod goal_replay_tests {
         file_observation(
             ToolCall::Read {
                 path: path.into(),
-                offset: 0,
-                limit: 1024,
+                offset: None,
+                limit: Some(1024),
             },
             content,
         )
@@ -4402,8 +4402,8 @@ mod goal_replay_tests {
             agent,
             ToolCall::Read {
                 path: path.into(),
-                offset: 0,
-                limit: 1024,
+                offset: None,
+                limit: Some(1024),
             },
         )
     }
@@ -6246,8 +6246,8 @@ mod goal_replay_tests {
             actor,
             ToolCall::Read {
                 path: "notes/facts.txt".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             },
         );
         apply(&mut view, start(read.clone())).unwrap();

@@ -1,6 +1,6 @@
 [
   {"operation": "list", "path": "src"},
-  {"operation": "read", "path": "src/main.rs", "offset": 0, "limit": 4096},
+  {"operation": "read", "path": "src/main.rs", "offset": null, "limit": null},
   {"operation": "search", "path": "src", "query": "fn main"},
   {"operation": "mkdir", "path": "src/generated"},
   {"operation": "write", "path": "src/new.rs", "expected_digest": null, "content": "fn new() {}\n"},

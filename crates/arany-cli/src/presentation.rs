@@ -1919,8 +1919,8 @@ mod peer_row_tests {
             (
                 ToolCall::Read {
                     path: "src/界.rs".into(),
-                    offset: 0,
-                    limit: 1024,
+                    offset: None,
+                    limit: Some(1024),
                 },
                 r#"{"text":"one\ntwo\n","truncated":true}"#,
                 "⏺ Read(src/界.rs)\n  ⎿ 2 lines (truncated)",
@@ -1950,8 +1950,8 @@ mod peer_row_tests {
         let mut tool = tool_fixture(
             ToolCall::Read {
                 path: "bad\u{1b}[2J".into(),
-                offset: 0,
-                limit: 100,
+                offset: None,
+                limit: Some(100),
             },
             "blocked\u{1b}]52;forged\u{7}\nRun: forged",
         );

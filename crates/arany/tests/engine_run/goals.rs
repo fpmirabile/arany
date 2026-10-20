@@ -169,7 +169,6 @@ async fn prose_objective_at_the_limit_compacts_its_read_only_goal_prefix() {
     compact_read_only_goal_prefix(&prose[..64 * 1024]).await;
 }
 
-const PAGE_BYTES: usize = 4096;
 const READS: usize = 104;
 
 fn paged_read_workspace(root: &Path) -> std::path::PathBuf {
@@ -177,7 +176,7 @@ fn paged_read_workspace(root: &Path) -> std::path::PathBuf {
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(
         workspace.join("notes/data.txt"),
-        "x".repeat(PAGE_BYTES * READS),
+        format!("{}\n", "x".repeat(1023)).repeat(2 * READS),
     )
     .expect("bounded fixture file");
     workspace
@@ -188,8 +187,8 @@ fn paged_read_outcomes() -> Vec<ProviderOutcome> {
         .map(|page| {
             crate::tool_outcome(arany::ToolCall::Read {
                 path: "notes/data.txt".into(),
-                offset: u32::try_from(page * PAGE_BYTES).expect("bounded file offset"),
-                limit: u32::try_from(PAGE_BYTES).expect("bounded page size"),
+                offset: Some(u32::try_from(page * 2 + 1).expect("bounded line offset")),
+                limit: Some(2),
             })
         })
         .collect::<Vec<_>>();
@@ -1850,8 +1849,8 @@ fn facts_digest(text: &str) -> String {
 fn facts_read() -> arany::ToolCall {
     arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
-        offset: 0,
-        limit: 4096,
+        offset: None,
+        limit: None,
     }
 }
 
@@ -4391,8 +4390,8 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
         crate::tool_outcome(facts_read()),
         crate::tool_outcome(arany::ToolCall::Read {
             path: "notes/other.txt".into(),
-            offset: 0,
-            limit: 4096,
+            offset: None,
+            limit: None,
         }),
         finish_with("report"),
         finish_with("done"),
@@ -5137,13 +5136,12 @@ async fn a_recorded_plan_cannot_be_replaced_or_restated() {
 
 #[tokio::test]
 async fn plan_contract_recorded_mid_run_survives_compaction() {
-    const PAGE_BYTES: usize = 4096;
     const READS: usize = 104;
 
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-    let content = "x".repeat(PAGE_BYTES * READS);
+    let content = format!("{}\n", "x".repeat(1023)).repeat(4 * READS);
     std::fs::write(workspace.join("notes/data.txt"), &content).expect("bounded fixture file");
     let state_path = temp.path().join("state");
     let budget = arany::GoalBudget {
@@ -5170,8 +5168,8 @@ async fn plan_contract_recorded_mid_run_survives_compaction() {
         .map(|page| {
             crate::tool_outcome(arany::ToolCall::Read {
                 path: "notes/data.txt".into(),
-                offset: u32::try_from(page * PAGE_BYTES).expect("bounded file offset"),
-                limit: u32::try_from(PAGE_BYTES).expect("bounded page size"),
+                offset: Some(u32::try_from(page * 4 + 1).expect("bounded line offset")),
+                limit: Some(4),
             })
         })
         .collect();

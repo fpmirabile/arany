@@ -540,8 +540,8 @@ mod tests {
         let mut read = crate::presentation::tool_fixture(
             arany::ToolCall::Read {
                 path: "a".into(),
-                offset: 0,
-                limit: 100,
+                offset: None,
+                limit: Some(100),
             },
             r#"{"text":"a\nb\n"}"#,
         );
@@ -649,8 +649,8 @@ mod tests {
             );
             let read = arany::ToolCall::Read {
                 path: "src/lib.rs".into(),
-                offset: 0,
-                limit: 16,
+                offset: None,
+                limit: Some(16),
             };
             finished.tools[0].intent.call = read.clone();
             finished.tools[0].observation.as_mut().unwrap().intent.call = read;
@@ -729,8 +729,8 @@ mod tests {
             workspace_inode: 1,
             call: arany::ToolCall::Read {
                 path: "notes/facts.txt".into(),
-                offset: 0,
-                limit: 4096,
+                offset: None,
+                limit: None,
             },
             limits: Default::default(),
             expires_at_ms: 1,

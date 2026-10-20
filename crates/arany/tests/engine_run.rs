@@ -5902,3 +5902,107 @@ async fn invoked_skill_denial_is_journaled_before_any_provider_call() {
     );
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn line_paged_read_returns_all_eighty_lines_after_twenty_steps() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("agents")).unwrap();
+    let content = (1..=80)
+        .map(|n| format!("Testing rule {n}: {}\n", "x".repeat(125)))
+        .collect::<String>();
+    std::fs::write(workspace.join("agents/testing.md"), &content).unwrap();
+    std::fs::write(
+        workspace.join("earlier.txt"),
+        format!("{}\n", "x".repeat(999)).repeat(8),
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(std::env::current_exe().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let config = state.join("tools.json");
+    std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let read = |path: &str| {
+        tool_outcome(arany::ToolCall::Read {
+            path: path.into(),
+            offset: None,
+            limit: None,
+        })
+    };
+    let provider = Arc::new(ScriptedProvider::new(
+        (0..20)
+            .map(|_| read("earlier.txt"))
+            .chain([
+                read("agents/testing.md"),
+                arany::test_support::goals::finish_with("Read all 80 lines"),
+            ])
+            .collect(),
+    ));
+    let mut input = request(&workspace, "Inspect testing guidance after earlier steps");
+    input.include_paths.clear();
+    input.goal.budget = Some(arany::GoalBudget {
+        max_provider_calls: Some(32),
+        ..Default::default()
+    });
+    let result = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    assert!(provider.responses.lock().unwrap().is_empty());
+    let page = {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 22);
+        let observations = requests
+            .last()
+            .unwrap()
+            .input
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations();
+        let page = observations.last().unwrap().output.clone();
+        let output: serde_json::Value = serde_json::from_str(&page).unwrap();
+        assert_eq!(output["total_lines"], 80);
+        assert_eq!(output["end_line"], 80);
+        assert_eq!(output["next_line"], serde_json::Value::Null);
+        assert_eq!(output["truncated"], false);
+        assert_eq!(
+            output["text"],
+            content
+                .lines()
+                .enumerate()
+                .map(|(i, line)| format!("{}\t{line}\n", i + 1))
+                .collect::<String>()
+        );
+        page
+    };
+    engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    let events = store.load_session(result.session_id).await.unwrap();
+    let view = SessionView::replay(result.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.runs[0].tools.len(), 21);
+    assert_eq!(
+        view.runs[0].tools[20].observation.as_ref().unwrap().output,
+        page
+    );
+    store.close().await.unwrap();
+}

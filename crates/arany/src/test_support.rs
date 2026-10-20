@@ -660,16 +660,19 @@ pub async fn exercise_private_guard_target(
             actor.assignment(),
             ToolCall::Read {
                 path: "owned/a".into(),
-                offset: 0,
-                limit: text.len() as u32,
+                offset: None,
+                limit: None,
             },
         );
         read.target = actor.target();
         let read = actor.read(read);
         assert_eq!(read.disposition, ToolDisposition::Succeeded);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&read.output).unwrap()["text"],
-            text
+        let output: serde_json::Value = serde_json::from_str(&read.output).unwrap();
+        assert!(
+            output["text"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("1\t{text}"))
         );
     }
     assert!(
