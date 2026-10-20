@@ -480,7 +480,10 @@ fn screen_reader_entry(
     let mut transcript = Vec::new();
     let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript.windows(8).any(|part| part == b"Input:\r\n") {
+    while crate::process::pty_text_matches(&transcript, b"Input:\n")
+        .next()
+        .is_none()
+    {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,
@@ -501,9 +504,9 @@ fn screen_reader_entry(
             .expect("reject unsafe listing");
         let expected = b"Notice: Error: state directory unavailable or unsafe\r\nInput:\r\n";
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !transcript[rejected_at..]
-            .windows(expected.len())
-            .any(|part| part == expected)
+        while crate::process::pty_text_matches(&transcript[rejected_at..], expected)
+            .next()
+            .is_none()
         {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
             assert!(

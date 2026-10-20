@@ -580,6 +580,26 @@ pub fn terminal_wait_report(
     )
 }
 
+pub fn pty_text_matches<'a>(
+    transcript: &'a [u8],
+    needle: &'a [u8],
+) -> impl Iterator<Item = std::ops::Range<usize>> + 'a {
+    (0..=transcript.len()).filter_map(move |start| {
+        let mut after = &transcript[start..];
+        for line in needle.split_inclusive(|byte| *byte == b'\n') {
+            if let Some(line) = line.strip_suffix(b"\n") {
+                after = after.strip_prefix(line.strip_suffix(b"\r").unwrap_or(line))?;
+                // Darwin's ONLCR retry can emit more than one CR before LF.
+                let crs = after.iter().take_while(|byte| **byte == b'\r').count();
+                after = after[crs..].strip_prefix(b"\n")?;
+            } else {
+                after = after.strip_prefix(line)?;
+            }
+        }
+        Some(start..transcript.len() - after.len())
+    })
+}
+
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub fn decline_workspace_consent(
     input: &mut impl std::io::Write,
@@ -601,7 +621,9 @@ pub fn decline_workspace_consent(
             .rposition(|part| part == prompt)
         {
             let after = &transcript[start + prompt.len()..];
-            if (after.starts_with(b"\r\n") || after.starts_with(b"\n"))
+            if pty_text_matches(after, b"\n")
+                .next()
+                .is_some_and(|matched| matched.start == 0)
                 && !after.windows(b"Input:".len()).any(|part| part == b"Input:")
             {
                 input
@@ -643,6 +665,58 @@ pub fn decline_workspace_consent(
 mod tests {
     use super::attached_device;
     use std::path::Path;
+
+    #[test]
+    fn pty_text_matches_only_cr_runs_immediately_before_newlines() {
+        for (transcript, needle, expected) in [
+            (
+                "xPrompt:\r\r\nInput:\r\r\ny",
+                "Prompt:\r\nInput:\r\n",
+                Some(1..20),
+            ),
+            ("xPrompt:\n", "Prompt:\r\n", Some(1..9)),
+            ("Prompt:\r", "Prompt:\r\n", None),
+            ("Prompt: \r\n", "Prompt:\r\n", None),
+            ("Pro\rmpt:\n", "Prompt:\r\n", None),
+        ] {
+            assert_eq!(
+                super::pty_text_matches(transcript.as_bytes(), needle.as_bytes()).next(),
+                expected,
+                "transcript={transcript:?}"
+            );
+        }
+        assert_eq!(
+            super::pty_text_matches(b"Input:\r\r\nInput:\n", b"Input:\r\n").collect::<Vec<_>>(),
+            [0..9, 9..16]
+        );
+    }
+
+    #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+    #[test]
+    fn workspace_consent_waits_for_a_complete_pty_line() {
+        for (prompt, choice) in [
+            (super::READ_ONLY_CONSENT_PROMPT, b"read only\r".as_slice()),
+            (super::CONFIG_CONSENT_PROMPT, b"config\r".as_slice()),
+        ] {
+            for (ending, expected) in [
+                ("\r\r\n", true),
+                ("\r\n", true),
+                ("\n", true),
+                ("", false),
+                ("\r\r", false),
+                ("\r\r\nInput:", false),
+            ] {
+                let transcript = format!("{prompt}{ending}");
+                let mut input = Vec::new();
+                let mut declined = false;
+                super::decline_workspace_consent(&mut input, transcript.as_bytes(), &mut declined);
+                assert_eq!(declined, expected, "ending={ending:?}");
+                assert_eq!(input, if expected { choice } else { b"" });
+                super::decline_workspace_consent(&mut input, transcript.as_bytes(), &mut declined);
+                assert_eq!(input, if expected { choice } else { b"" });
+            }
+        }
+    }
 
     #[test]
     fn a_fixture_image_resolves_only_to_its_own_listed_device() {
