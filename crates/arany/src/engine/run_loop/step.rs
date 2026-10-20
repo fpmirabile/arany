@@ -1126,15 +1126,7 @@ impl RunLoop<'_> {
             (
                 Verdict::Deny(Answer {
                     checkpoint: None,
-                    observation: {
-                        let mut observation = not_dispatched(
-                            intent,
-                            ToolDisposition::Limit,
-                            crate::tools::types::command_timeout_limit_message(requested, maximum),
-                        );
-                        observation.limit_cause = Some(crate::tools::LimitCause::RequestedTime);
-                        observation
-                    },
+                    observation: command_timeout_limit_observation(intent, requested, maximum),
                     stop: None,
                     active_time: None,
                 }),
@@ -2124,6 +2116,20 @@ async fn execute_cancellable(
         }
         observation = &mut execution => observation,
     }
+}
+
+fn command_timeout_limit_observation(
+    intent: EffectIntent,
+    requested: u32,
+    maximum: u32,
+) -> ToolObservation {
+    let mut observation = not_dispatched(
+        intent,
+        ToolDisposition::Limit,
+        crate::tools::types::command_timeout_limit_message(requested, maximum),
+    );
+    observation.limit_cause = Some(crate::tools::LimitCause::RequestedTime);
+    observation
 }
 
 fn not_dispatched(
