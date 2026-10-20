@@ -669,8 +669,8 @@ impl CopyRequest {
         use crate::presentation::{escape_terminal, escaped_terminal_bytes};
         // Refuse before materializing an escaped copy larger than the limit.
         let escaped = answer
-            .split('\n')
-            .map(|line| escaped_terminal_bytes(line) + 1)
+            .split(['\n', '\t'])
+            .map(|part| escaped_terminal_bytes(part) + 1)
             .sum::<usize>()
             - 1;
         if escaped > MAX_COPY_BYTES {
@@ -679,7 +679,12 @@ impl CopyRequest {
         Self::from_display(
             answer
                 .split('\n')
-                .map(escape_terminal)
+                .map(|line| {
+                    line.split('\t')
+                        .map(escape_terminal)
+                        .collect::<Vec<_>>()
+                        .join("\t")
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
         )
@@ -1530,8 +1535,11 @@ mod copy_tests {
             CopyRequest::answer("tab\there\n\u{1b}]52;c;aGk=\u{7}\r\u{202e}x")
                 .unwrap()
                 .0,
-            "tab\\u{0009}here\n\\u{001b}]52;c;aGk=\\u{0007}\\u{000d}\\u{202e}x"
+            "tab\there\n\\u{001b}]52;c;aGk=\\u{0007}\\u{000d}\\u{202e}x"
         );
+        for answer in ["", "\t", "\n\t\t\n", "\tfirst\t\n\tlast\t"] {
+            assert_eq!(CopyRequest::answer(answer).unwrap().0, answer);
+        }
         assert_eq!(
             CopyRequest::from_display("a\u{1b}b\u{9b}c\u{7}\r\n\td\u{7f}".into())
                 .unwrap()
@@ -1550,6 +1558,8 @@ mod copy_tests {
             (format!("{}\u{1b}", x(MAX_COPY_BYTES - 7)), false),
             (format!("{}\n{}", x(50_000), x(49_999)), true),
             (format!("{}\n{}", x(50_000), x(50_000)), false),
+            (format!("{}\t{}", x(50_000), x(49_999)), true),
+            (format!("{}\t{}", x(50_000), x(50_000)), false),
         ] {
             let request = CopyRequest::answer(&answer);
             assert_eq!(request.is_ok(), accepted, "{} bytes", answer.len());
