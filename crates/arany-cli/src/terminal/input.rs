@@ -575,8 +575,8 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
             KeyCode::Char('k' | 'K') => Some(TerminalInput::QuickActions),
             KeyCode::Char('f' | 'F') => Some(TerminalInput::HistoryFind),
             KeyCode::Char('l' | 'L') => Some(TerminalInput::HistoryLive),
-            KeyCode::Char('t' | 'T') => Some(TerminalInput::Transcript),
-            KeyCode::Char('o' | 'O') => Some(TerminalInput::Newline),
+            KeyCode::Char('t' | 'T' | 'o' | 'O') => Some(TerminalInput::Transcript),
+            KeyCode::Char('j' | 'J') => Some(TerminalInput::Newline),
             KeyCode::Left => Some(TerminalInput::WordLeft),
             KeyCode::Right => Some(TerminalInput::WordRight),
             KeyCode::Char('w' | 'W') => Some(TerminalInput::BackspaceWord),
@@ -784,8 +784,12 @@ mod tests {
                 Some(TerminalInput::HistoryLive),
             ),
             (
-                Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+                Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
                 Some(TerminalInput::Newline),
+            ),
+            (
+                Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+                Some(TerminalInput::Transcript),
             ),
             (
                 Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
@@ -924,10 +928,12 @@ mod tests {
                     vec![TerminalInput::CycleApprovalMode; 2],
                 ),
                 (
-                    b"/\r\x0f\x03\x17".as_slice(),
+                    b"/\r\x0f\x14\n\x03\x17".as_slice(),
                     vec![
                         TerminalInput::Character('/'),
                         TerminalInput::Submit,
+                        TerminalInput::Transcript,
+                        TerminalInput::Transcript,
                         TerminalInput::Newline,
                         TerminalInput::Interrupt,
                         TerminalInput::BackspaceWord,

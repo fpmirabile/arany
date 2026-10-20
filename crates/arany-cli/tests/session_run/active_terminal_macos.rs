@@ -80,6 +80,7 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("project");
         let state = temp.path().join("state");
+        crate::seed_fullscreen(&state);
         std::fs::create_dir(&workspace).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -238,6 +239,7 @@ fn native_resume_picker_renderer_failure_restores_surviving_terminal() {
             let temp = tempfile::tempdir().unwrap();
             let workspace = temp.path().join("project");
             let state = temp.path().join("state");
+            crate::seed_fullscreen(&state);
             std::fs::create_dir(&workspace).unwrap();
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -629,6 +631,7 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
             let temp = tempfile::tempdir().unwrap();
             let workspace = temp.path().join("project");
             let state = temp.path().join("state");
+            crate::seed_fullscreen(&state);
             std::fs::create_dir(&workspace).unwrap();
             let geometry = nix::pty::Winsize {
                 ws_row: 24,
@@ -687,7 +690,7 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
                 assert_eq!(
                     transcript.windows(8).any(|part| part == b"\x1b[?1049h"),
                     !linear,
-                    "default chat view is fullscreen: {linear} {case}"
+                    "saved chat view is fullscreen: {linear} {case}"
                 );
                 let active = crate::process::terminal_settings(&input);
                 assert_eq!(
@@ -732,7 +735,10 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
             assert!(output.stdout.is_empty());
             assert!(!transcript.windows(4).any(|part| part == b"\x1b[6n"));
             restored(&input, &before);
-            assert!(!state.exists(), "no Session admission: {linear} {case}");
+            assert!(
+                !state.join("events.sqlite3").exists(),
+                "no Session admission: {linear} {case}"
+            );
             assert!(!transcript.windows(6).any(|part| part == b"Setup:"));
             assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
             for name in ["fixture-home", "fixture-state", "fixture-data"] {
@@ -771,6 +777,7 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
             let temp = tempfile::tempdir().unwrap();
             let workspace = temp.path().join("project");
             let state = temp.path().join("state");
+            crate::seed_fullscreen(&state);
             std::fs::create_dir(&workspace).unwrap();
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             write_profile(&state, listener.local_addr().unwrap().port());
@@ -1078,3 +1085,125 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
 
 #[path = "active_terminal_macos/steering.rs"]
 mod steering;
+
+#[test]
+fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&workspace).unwrap();
+    let id = crate::seed_transcript_session(&state, &workspace);
+    assert!(!state.join("ui-preferences.json").exists());
+    let geometry = nix::pty::Winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let (input, slave) = crate::process::cloexec_pty(Some(&geometry));
+    let before = crate::process::terminal_settings(&input);
+    let master = input.try_clone().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+    command
+        .env_clear()
+        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+        .env("TERM", "xterm")
+        .current_dir(&workspace)
+        .args(["--no-color", "--state-dir"])
+        .arg(&state)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--resume")
+        .arg(id.to_string())
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(slave));
+    own_terminal(&mut command);
+    let (mut child, mut input, master) = (ChildGuard::new(command.spawn().unwrap()), input, master);
+    drop(command);
+    let mut queries = 0;
+    let mut declined = false;
+    let mut stage = 0;
+    let mut from = 0;
+    let mut dump_from = 0;
+    let mut prelude = Vec::new();
+    let output = crate::process::capture_terminal(
+        child.child(),
+        master,
+        Duration::from_secs(20),
+        256 * 1024,
+        |bytes| {
+            let count = bytes.windows(4).filter(|part| *part == b"\x1b[6n").count();
+            assert!(count <= 16);
+            while queries < count {
+                input.write_all(b"\x1b[2;1R").unwrap();
+                queries += 1;
+            }
+            crate::process::decline_workspace_consent(&mut input, bytes, &mut declined);
+            if stage == 0
+                && bytes
+                    .windows(b"\x1b[?25h\x1b[22;3H".len())
+                    .any(|part| part == b"\x1b[?25h\x1b[22;3H")
+            {
+                from = bytes.len();
+                input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
+                stage = 1;
+            } else if (1..=3).contains(&stage)
+                && bytes[from..]
+                    .windows(b"reached;".len())
+                    .position(|part| part == b"reached;")
+                    .is_some_and(|end| {
+                        bytes[from + end + b"reached;".len()..]
+                            .windows(b"\x1b[?25h\x1b[22;3H".len())
+                            .any(|part| part == b"\x1b[?25h\x1b[22;3H")
+                    })
+            {
+                let dump = &bytes[from..];
+                let heading = dump
+                    .windows(b"Transcript".len())
+                    .position(|part| part == b"Transcript")
+                    .unwrap();
+                assert_eq!(
+                    dump.windows(b"DETAIL_CANARY".len())
+                        .filter(|part| *part == b"DETAIL_CANARY")
+                        .count(),
+                    16
+                );
+                if stage == 1 {
+                    prelude = dump[..heading].to_vec();
+                    dump_from = from;
+                }
+                if stage == 2 {
+                    assert_eq!(&dump[..heading], prelude, "page keys produce no output");
+                }
+                from = bytes.len();
+                input
+                    .write_all(match stage {
+                        1 => b"\x0f",
+                        2 => b"/transcript\r",
+                        _ => b"/exit\r",
+                    })
+                    .unwrap();
+                stage += 1;
+            }
+            assert!(
+                !bytes[dump_from..]
+                    .windows(5)
+                    .any(|part| part == b"\x1b]52;")
+            );
+        },
+    );
+    assert_eq!(stage, 4);
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stderr);
+    for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {
+        assert!(
+            !text.contains(&format!("\x1b[?{mode}h")),
+            "Classic enabled {mode}"
+        );
+    }
+    restored(&input, &before);
+}

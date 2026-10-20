@@ -890,7 +890,7 @@ pub(super) fn draw_frame_with_history(
             [
                 "Arany",
                 "Describe a task to begin.",
-                "/help commands · Ctrl+K actions · Ctrl+O newline",
+                "/help commands · Ctrl+K actions · Ctrl+J newline",
             ]
         };
         let top = history_top + history_height.saturating_sub(4);
@@ -1334,9 +1334,9 @@ fn draw_composer(
                 " Draft kept · Esc returns "
             }
         } else if model.draft_action == DraftAction::Retain && composer_area.width >= 40 {
-            " Enter keeps draft · Ctrl+O newline "
+            " Enter keeps draft · Ctrl+J newline "
         } else if model.draft_action == DraftAction::Retain && composer_area.width >= 24 {
-            " Enter keeps · Ctrl+O "
+            " Enter keeps · Ctrl+J "
         } else if model.draft_action == DraftAction::Retain && composer_area.width >= 16 {
             " Enter keeps "
         } else if menu_height > 0 && composer_area.width >= 40 {
@@ -1358,19 +1358,19 @@ fn draw_composer(
                 " Tab/Enter Esc "
             }
         } else if command && composer_area.width >= 40 {
-            " Enter command · Ctrl+O newline "
+            " Enter command · Ctrl+J newline "
         } else if command && composer_area.width >= 16 {
             " Enter command "
         } else if model.draft_action != DraftAction::Submit && composer_area.width >= 40 {
-            " Enter keeps draft · Ctrl+O newline "
+            " Enter keeps draft · Ctrl+J newline "
         } else if model.draft_action != DraftAction::Submit && composer_area.width >= 24 {
-            " Enter keeps · Ctrl+O "
+            " Enter keeps · Ctrl+J "
         } else if model.draft_action != DraftAction::Submit && composer_area.width >= 16 {
             " Enter keeps "
         } else if composer_area.width >= 40 {
-            " Enter sends · Ctrl+O newline "
+            " Enter sends · Ctrl+J newline "
         } else if composer_area.width >= 16 {
-            " Enter · Ctrl+O "
+            " Enter · Ctrl+J "
         } else {
             ""
         };

@@ -663,6 +663,12 @@ pub(super) async fn submit_objective(
                 {
                     break "terminal input cleanup failed".to_owned();
                 }
+                if terminal.mode() == crate::terminal::TerminalMode::Classic
+                    && !terminal.is_linear()
+                    && matches!(input, TerminalInput::PageUp | TerminalInput::PageDown)
+                {
+                    continue;
+                }
                 match terminal.handle_transcript_input(input, view) {
                     Ok(true) => {
                         if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {

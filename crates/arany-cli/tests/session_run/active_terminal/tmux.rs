@@ -554,7 +554,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         composer + 4 < rows.len()
             && rows[composer + 1] == format!("> {}", &draft[..38])
             && rows[composer + 2].trim_start() == &draft[38..]
-            && rows[composer + 3].contains("Ctrl+O newline")
+            && rows[composer + 3].contains("Ctrl+J newline")
             && rows[composer + 4].contains("ready")
             && rows[composer + 5..].iter().all(|row| row.trim().is_empty())
     };
@@ -673,7 +673,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 && rows[1].contains("Ask Arany")
                 && rows[5].trim() == &edited[56..]
                 && rows[1].contains("5/5")
-                && rows[6].contains("Ctrl+O")
+                && rows[6].contains("Ctrl+J")
             {
                 eprintln!("16x8 wrapped draft capture:\n{screen}");
                 break;
@@ -756,7 +756,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                     } else {
                         rows[5].contains(expected)
                     }
-                    && rows[6].contains("Ctrl+O")
+                    && rows[6].contains("Ctrl+J")
                     && !rows[7].trim().is_empty()
                     && position.status.success()
                     && position.stdout == cursor.as_bytes()
@@ -780,7 +780,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
     );
     assert!(
         server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-o"])
+            .run(&["send-keys", "-t", "arany-test:0.0", "C-j"])
             .status
             .success()
     );
@@ -1372,7 +1372,7 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     );
     assert!(
         server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-o"])
+            .run(&["send-keys", "-t", "arany-test:0.0", "C-j"])
             .status
             .success()
     );
@@ -1477,151 +1477,32 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
         assert!(Instant::now() < deadline, "quiet active status missing");
         thread::yield_now();
     }
+    let before_pages = capture_pane(&server).expect("Classic draft frame");
     assert!(
         server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-f"])
+            .run(&["send-keys", "-t", "arany-test:0.0", "PageUp", "PageDown"])
             .status
-            .success(),
-        "open wide history find"
+            .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server)
-            .is_some_and(|screen| String::from_utf8_lossy(&screen).contains("Find:"))
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "wide history find missing");
-        thread::yield_now();
-    }
+    // A subsequent draft edit acknowledges that both page keys were consumed without opening a panel.
     assert!(
         server
-            .run(&["send-keys", "-l", "-t", "arany-test:0.0", "first"])
+            .run(&["send-keys", "-t", "arany-test:0.0", "!"])
             .status
-            .success(),
-        "type wide history query"
+            .success()
     );
+    wait_screen(&server, "Classic page keys retained the draft", |screen| {
+        String::from_utf8_lossy(screen).contains("draft!")
+    });
     assert!(
         server
-            .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
+            .run(&["send-keys", "-t", "arany-test:0.0", "BSpace"])
             .status
-            .success(),
-        "find wide history"
+            .success()
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            String::from_utf8_lossy(&screen)
-                .lines()
-                .last()
-                .is_some_and(|status| {
-                    status.contains("History · Ctrl+L live")
-                        && status.contains("working · custom:local/model-1")
-                        && !status.contains("context ")
-                        && !status.contains("% of local limit")
-                })
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "wide history lost model or quiet status"
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-l"])
-            .status
-            .success(),
-        "return to live history before resize"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            String::from_utf8_lossy(&screen)
-                .lines()
-                .last()
-                .is_some_and(|status| status.starts_with("working · custom:local/model-1"))
-        }) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "wide live status did not return");
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["resize-window", "-x", "40", "-y", "8", "-t", "arany-test:0"])
-            .status
-            .success(),
-        "short active history pane"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let pane = server.run(&[
-            "display-message",
-            "-p",
-            "-t",
-            "arany-test:0.0",
-            "#{pane_height}",
-        ]);
-        if pane.status.success()
-            && pane.stdout == b"8\n"
-            && capture_pane(&server).is_some_and(|screen| {
-                let text = String::from_utf8_lossy(&screen);
-                text.contains("Ask Arany")
-                    && text.contains("pending")
-                    && text.contains("draft")
-                    && text.contains("working")
-            })
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "short active frame missing");
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-f"])
-            .status
-            .success(),
-        "open history find during the Run"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server)
-            .is_some_and(|screen| String::from_utf8_lossy(&screen).contains("Find:"))
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "active history find missing");
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "first", "Enter"])
-            .status
-            .success(),
-        "find earlier content during the Run"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("History")
-                && text.contains("first")
-                && text.contains("pending")
-                && text.contains("draft")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "active history and draft missing: {}",
-            redacted_tail(&capture_pane(&server).unwrap_or_default())
-        );
-        thread::yield_now();
-    }
+    wait_screen(&server, "Classic page keys kept the frame", |screen| {
+        screen == before_pages
+    });
     response_sender.send(()).expect("release Provider response");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1643,38 +1524,6 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     }
     assert!(
         server
-            .run(&["send-keys", "-t", "arany-test:0.0", "PageUp"])
-            .status
-            .success(),
-        "continue reading after the Run"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("New text")
-                && text.contains("first")
-                && text.contains("pending")
-                && text.contains("draft")
-                && !text.contains("done")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "new answer displaced the historical reading position"
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-l"])
-            .status
-            .success(),
-        "return to live history"
-    );
-    assert!(
-        server
             .run(&[
                 "resize-window",
                 "-x",
@@ -1688,379 +1537,21 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
             .success(),
         "restore full history pane"
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            let rows: Vec<_> = text.lines().collect();
-            rows.len() == 24
-                && rows[23].starts_with("ready")
-                && rows[23].split(" · ").any(|field| field.trim() == "ok")
-                && !rows[23].contains("New Session")
-                && text.contains("Arany:")
-                && text.contains("pending")
-                && text.contains("draft")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "live answer and draft missing:\n{}",
-            capture_pane(&server)
-                .map(|s| String::from_utf8_lossy(&s).into_owned())
-                .unwrap_or_default()
-        );
-        thread::yield_now();
-    }
-    let pane = capture_pane(&server).expect("visible history pane");
-    let pane = String::from_utf8(pane).expect("pane UTF-8");
-    assert!(pane.lines().next().expect("top row").trim().is_empty());
-    assert!(pane.lines().skip(1).any(|row| row.contains("› You:")));
-    assert_eq!(
-        pane.matches("You:").count(),
-        1,
-        "one committed user block in the owned viewport: {}",
-        redacted_tail(pane.as_bytes())
-    );
-    assert!(
-        pane.contains("Arany:"),
-        "committed answer in the owned viewport"
+    wait_screen(
+        &server,
+        "Classic retained draft after completion",
+        |screen| {
+            let text = String::from_utf8_lossy(screen);
+            text.contains("pending") && text.contains("draft") && text.contains("ready")
+        },
     );
     let scrollback = capture_scrollback(&server).expect("native tmux scrollback");
     let scrollback = String::from_utf8(scrollback).expect("scrollback UTF-8");
     assert!(
-        scrollback.contains("Arany:\n  done"),
+        scrollback.contains("Arany · Answer:\n  done"),
         "confirmed answer remains in native scrollback: {}",
         redacted_tail(scrollback.as_bytes())
     );
-    assert!(
-        server
-            .run(&["resize-window", "-x", "40", "-y", "8", "-t", "arany-test:0"])
-            .status
-            .success(),
-        "short history pane"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            let rows: Vec<_> = text.lines().collect();
-            rows.len() == 8
-                && text.contains("done")
-                && rows[3].contains("Ask Arany")
-                && rows[4].contains("pending")
-                && rows[5].contains("draft")
-                && rows[7].starts_with("ready")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "short idle history frame missing"
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "PageUp"])
-            .status
-            .success(),
-        "history page up"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("History") && text.contains("pending") && text.contains("draft")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "history did not retain the draft: {}",
-            redacted_tail(&capture_pane(&server).unwrap_or_default())
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-f"])
-            .status
-            .success(),
-        "open narrow history find"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server)
-            .is_some_and(|screen| String::from_utf8_lossy(&screen).contains("Find:"))
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "narrow history find missing");
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&[
-                "send-keys",
-                "-l",
-                "-t",
-                "arany-test:0.0",
-                "abcdefghijklmnopqrstuvwxyzXYZ"
-            ])
-            .status
-            .success(),
-        "type long history query"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.lines()
-                .last()
-                .is_some_and(|row| row.contains("…") && row.contains("XYZ Enter Esc"))
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "long narrow history query or actions missing"
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "Escape"])
-            .status
-            .success(),
-        "close long history find"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("Ask Arany")
-                && text.contains("pending")
-                && text
-                    .lines()
-                    .last()
-                    .is_some_and(|row| !row.starts_with("Find"))
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "history find did not close before reopening"
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-f", "first", "Enter"])
-            .status
-            .success(),
-        "find committed objective"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("You:") && text.contains("first") && text.contains("pending")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "history find did not preserve the draft"
-        );
-        thread::yield_now();
-    }
-    let before_selector = capture_pane(&server).expect("historical reading frame");
-    let before_text = String::from_utf8_lossy(&before_selector);
-    assert!(
-        before_text.contains("first")
-            && before_text.contains("pending")
-            && before_text.contains("draft")
-            && !before_text.contains("done"),
-        "older reading frame and draft"
-    );
-    assert!(
-        server
-            .run(&["resize-window", "-x", "24", "-y", "8", "-t", "arany-test:0"])
-            .status
-            .success(),
-        "narrow historical reading pane"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            screen != before_selector
-                && text.contains("History")
-                && text.contains("first")
-                && text.contains("pending")
-                && text.contains("draft")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "resize displaced historical reading or draft: {}",
-            redacted_tail(&capture_pane(&server).unwrap_or_default())
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["resize-window", "-x", "40", "-y", "8", "-t", "arany-test:0"])
-            .status
-            .success(),
-        "restore historical reading pane width"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| screen == before_selector) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "resize changed historical reading frame or draft: {}",
-            redacted_tail(&capture_pane(&server).unwrap_or_default())
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-k"])
-            .status
-            .success(),
-        "open quick actions while reading history"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("Quick actions") && text.contains("Esc")
-        }) {
-            break;
-        }
-        assert!(Instant::now() < deadline, "quick actions frame missing");
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "Down"])
-            .status
-            .success(),
-        "focus Agents quick action"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let focused_quick = loop {
-        if let Some(screen) = capture_pane(&server)
-            && String::from_utf8_lossy(&screen).contains("> Agents")
-        {
-            break screen;
-        }
-        assert!(Instant::now() < deadline, "Agents quick action not focused");
-        thread::yield_now();
-    };
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-z"])
-            .status
-            .success(),
-        "suspend with quick actions open"
-    );
-    wait_stopped(product_pid);
-    assert!(
-        capture_pane(&server)
-            .is_some_and(|screen| { !String::from_utf8_lossy(&screen).contains("Quick actions") }),
-        "quick selector cleared before terminal suspension"
-    );
-    kill_process(product_pid, Signal::CONT).expect("resume private Arany child in quick actions");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| screen == focused_quick) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "quick-action focus changed after resume: {}",
-            redacted_tail(&capture_pane(&server).unwrap_or_default())
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "Escape"])
-            .status
-            .success(),
-        "close quick actions without changing history"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| screen == before_selector) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "selector close displaced the reading frame or draft"
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-z"])
-            .status
-            .success(),
-        "suspend while reading older history"
-    );
-    wait_stopped(product_pid);
-    kill_process(product_pid, Signal::CONT).expect("resume private Arany child");
-    let reading_rows = before_selector
-        .split(|byte| *byte == b'\n')
-        .take(7)
-        .collect::<Vec<_>>();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            screen
-                .split(|byte| *byte == b'\n')
-                .take(7)
-                .eq(reading_rows.iter().copied())
-                && text.contains("Terminal resumed")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "resume displaced the older reading position or draft: {}",
-            redacted_tail(&capture_pane(&server).unwrap_or_default())
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-l"])
-            .status
-            .success(),
-        "return to live history"
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| {
-            let text = String::from_utf8_lossy(&screen);
-            text.contains("done") && text.contains("pending") && !text.contains("History")
-        }) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "history did not return to live tail"
-        );
-        thread::yield_now();
-    }
     assert!(
         server
             .run(&["send-keys", "-t", "arany-test:0.0", "C-c"])
@@ -2349,7 +1840,7 @@ enum ChatView {
 }
 
 impl ChatView {
-    // No flag selects the saved chat view, which defaults to Fullscreen for an empty State.
+    // No flag selects the saved chat view.
     fn launch_flag(self) -> &'static str {
         match self {
             Self::Classic => "--classic ",
@@ -2381,6 +1872,9 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
+    if view.alternate_screen() {
+        crate::seed_fullscreen(&state);
+    }
     let exit_path = temp.path().join("exit");
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback Provider");
     write_profile(
@@ -2545,7 +2039,7 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
     });
     // Positive controls while the pane is alive: the expected screen, the cursor and mouse reporting
     // are observable here, so the post-exit values below prove restoration rather than an unset flag.
-    // Fullscreen enables mouse capture on draw; Classic enables it only for pickers and the transcript.
+    // Ordinary chat leaves mouse reporting to the terminal; only pickers capture transiently.
     let alternate = view.alternate_screen();
     assert_eq!(
         pane_flag(&server, "#{alternate_on}"),
@@ -2554,7 +2048,7 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
     );
     assert_eq!(
         pane_flag(&server, "#{mouse_any_flag}"),
-        if alternate { "1" } else { "0" },
+        "0",
         "{view:?} chat view mouse reporting while idle"
     );
     assert_eq!(
