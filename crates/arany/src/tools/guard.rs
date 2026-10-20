@@ -318,6 +318,7 @@ pub(super) async fn publish_cache_candidate(
     if !observation.valid() {
         observation.cache_update = CacheUpdate::Uncertain;
         observation.disposition = ToolDisposition::Uncertain;
+        observation.limit_cause = None;
     }
     debug_assert!(observation.valid());
 }
@@ -1189,7 +1190,7 @@ pub(super) fn spawn_before(
     deadline: tokio::time::Instant,
 ) -> Result<Child, ToolError> {
     if tokio::time::Instant::now() >= deadline {
-        return Err(ToolError::Limit);
+        return Err(ToolError::Timeout(String::new()));
     }
     command.spawn().map_err(|_| ToolError::Operation)
 }
@@ -1216,7 +1217,7 @@ pub(super) async fn capture(
     let error = match result {
         Ok(Ok(value)) => return Ok(value),
         Ok(Err(error)) => error,
-        Err(_) => ToolError::Limit,
+        Err(_) => ToolError::Timeout(String::new()),
     };
     let _ = child.start_kill();
     let _ = tokio::time::timeout(PAYLOAD_KILL_WAIT, reap_owned_child(&mut child)).await;
@@ -1229,7 +1230,7 @@ pub(super) async fn capture_command(
     deadline: Duration,
 ) -> Result<
     (
-        std::process::ExitStatus,
+        Option<std::process::ExitStatus>,
         super::output::Window,
         super::output::Window,
     ),
@@ -1237,6 +1238,8 @@ pub(super) async fn capture_command(
 > {
     let out = child.stdout.take().ok_or(ToolError::Operation)?;
     let err = child.stderr.take().ok_or(ToolError::Operation)?;
+    let mut stdout = super::output::Window::new(cap);
+    let mut stderr = super::output::Window::new(cap);
     let result = tokio::time::timeout(deadline, async {
         tokio::try_join!(
             async {
@@ -1244,19 +1247,21 @@ pub(super) async fn capture_command(
                     .await
                     .map_err(|_| ToolError::Operation)
             },
-            super::output::read_window(out, cap),
-            super::output::read_window(err, cap)
+            super::output::read_window_into(out, &mut stdout),
+            super::output::read_window_into(err, &mut stderr)
         )
     })
     .await;
-    let error = match result {
-        Ok(Ok(value)) => return Ok(value),
-        Ok(Err(error)) => error,
-        Err(_) => ToolError::Limit,
-    };
+    if let Ok(Ok((status, (), ()))) = result {
+        return Ok((Some(status), stdout, stderr));
+    }
     let _ = child.start_kill();
     let _ = tokio::time::timeout(PAYLOAD_KILL_WAIT, reap_owned_child(&mut child)).await;
-    Err(error)
+    match result {
+        Err(_) => Ok((None, stdout, stderr)),
+        Ok(Err(error)) => Err(error),
+        Ok(Ok(_)) => unreachable!(),
+    }
 }
 
 fn task_cap(definition: bool) -> usize {
@@ -1557,7 +1562,8 @@ fn send_result(
     root: &Path,
     before: Option<&super::worker::Image>,
 ) -> Result<(), ToolError> {
-    let (disposition, output, enforcement_cause) = super::dispatch::outcome(&task.intent, result);
+    let (disposition, output, enforcement_cause, limit_cause) =
+        super::dispatch::outcome(&task.intent, result);
     let private_command =
         task.worker.is_some() && matches!(task.intent.call, ToolCall::Command { .. });
     let receipt = GuardReceipt {
@@ -1568,6 +1574,7 @@ fn send_result(
     };
     let mut observation = ToolObservation {
         enforcement_cause,
+        limit_cause,
         intent: task.intent,
         disposition,
         output,
@@ -1597,6 +1604,7 @@ fn send_result(
     if private_command && observation.output.len() > observation.intent.limits.result_bytes as usize
     {
         observation.disposition = ToolDisposition::Limit;
+        observation.limit_cause = Some(crate::tools::LimitCause::Resource);
         observation.enforcement_cause = None;
         observation.output = serde_json::to_string(&crate::session::worker::WorkerCommandResult {
             exit_code: None,
@@ -1610,6 +1618,7 @@ fn send_result(
     }
     if task.worker.is_none() && !observation.valid() {
         observation.disposition = ToolDisposition::Limit;
+        observation.limit_cause = Some(crate::tools::LimitCause::Resource);
         observation.enforcement_cause = None;
         observation.output = "Tool result exceeded its reserved serialized capacity".into();
     }
@@ -2439,6 +2448,7 @@ mod tests {
         };
         let observation = |attested: bool| ToolObservation {
             enforcement_cause: None,
+            limit_cause: Some(crate::tools::LimitCause::Resource),
             intent: intent.clone(),
             disposition: ToolDisposition::Limit,
             output: "Tool result or resource limit reached".into(),
@@ -2598,11 +2608,12 @@ mod tests {
             "changeset": {"files": []}
         })
         .to_string();
-        let (disposition, output, cause) =
+        let (disposition, output, cause, limit_cause) =
             super::super::dispatch::outcome(&observation.intent, Ok(output));
         assert_eq!(disposition, ToolDisposition::Failed);
         assert_eq!(cause, None, "program output cannot attest a Guard denial");
         observation.disposition = disposition;
+        observation.limit_cause = limit_cause;
         observation.output = output;
         assert!(
             model_observation(&observation)
@@ -2614,7 +2625,7 @@ mod tests {
             ToolError::Operation,
             ToolError::ProtectionUnavailable,
         ] {
-            let (_, _, cause) = super::super::dispatch::outcome(&observation.intent, Err(error));
+            let (_, _, cause, _) = super::super::dispatch::outcome(&observation.intent, Err(error));
             assert_eq!(cause, None, "opaque failures have no attributable cause");
         }
         for call in [
@@ -2630,7 +2641,7 @@ mod tests {
             },
         ] {
             let intent = intent(call);
-            let (_, _, cause) = super::super::dispatch::outcome(&intent, Ok(
+            let (_, _, cause, _) = super::super::dispatch::outcome(&intent, Ok(
                 r#"{"is_error":true,"enforcement_cause":"filesystem_denied","text":"sandbox deny"}"#.into()
             ));
             assert_eq!(cause, None, "MCP and Skill text are data");
@@ -2646,10 +2657,11 @@ mod tests {
         )
         .unwrap();
         let rejected = super::super::fs::command_changeset(workspace.path(), &snapshot);
-        let (disposition, output, cause) =
+        let (disposition, output, cause, limit_cause) =
             super::super::dispatch::outcome(&observation.intent, rejected.map(|_| String::new()));
         assert_eq!(cause, Some(EnforcementCause::FilesystemDenied));
         observation.disposition = disposition;
+        observation.limit_cause = limit_cause;
         observation.output = output;
         observation.enforcement_cause = cause;
         assert!(observation.valid());
@@ -2890,6 +2902,7 @@ mod tests {
         };
         ToolObservation {
             enforcement_cause: None,
+            limit_cause: None,
             intent,
             disposition: ToolDisposition::Succeeded,
             output: r#"{"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":5,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
@@ -3456,7 +3469,7 @@ mod command_output_tests {
                     .await
                     .unwrap();
             let output = super::super::process::fit_command(
-                status.code(),
+                status.and_then(|status| status.code()),
                 &out,
                 &err,
                 Default::default(),

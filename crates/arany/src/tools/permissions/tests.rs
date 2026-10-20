@@ -1280,6 +1280,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
         },
         disposition: crate::tools::ToolDisposition::Denied,
         enforcement_cause: None,
+        limit_cause: None,
         output: "x".into(),
         attestation: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
@@ -1287,6 +1288,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
     assert!(ignored(HookIgnoreReason::NotCompleted).valid_for(&observation));
     assert!(!HookResult::Passed.valid_for(&observation));
     observation.disposition = crate::tools::ToolDisposition::Limit;
+    observation.limit_cause = Some(crate::tools::LimitCause::Resource);
     let limited = deny_with(Some("hook limit reached"));
     assert!(limited.valid_for(&observation));
     assert!(!HookResult::Passed.valid_for(&observation));
@@ -1296,6 +1298,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
             .unwrap()
     };
     observation.disposition = crate::tools::ToolDisposition::Failed;
+    observation.limit_cause = None;
     observation.attestation = Some(crate::tools::Attestation::for_site(&observation.intent));
     observation.output = result(2, "");
     assert!(deny_with(Some("no")).valid_for(&observation));

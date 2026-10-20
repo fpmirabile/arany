@@ -86,6 +86,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     };
     let observation = arany::ToolObservation {
         enforcement_cause: None,
+        limit_cause: None,
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         output: serde_json::json!({
@@ -364,6 +365,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                     observation.intent.limits.cache_candidate_bytes = 0;
                     observation.intent.limits.cache_transfer_ms = 0;
                     observation.disposition = ToolDisposition::Limit;
+                    observation.limit_cause = Some(arany::LimitCause::RequestedTime);
                     observation.output = "Timeout 2000 ms exceeds pinned max 1000 ms. Lower request or change /settings; Goal remains pinned.".into();
                     observation.attestation = None;
                     observation.cache_update = arany::CacheUpdate::NotApplicable;
@@ -665,6 +667,8 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         agent_run_id: primary,
         observation: arany::ToolObservation {
             enforcement_cause: None,
+            limit_cause: (disposition == arany::ToolDisposition::Limit)
+                .then_some(arany::LimitCause::Resource),
             disposition,
             output,
             attestation: Some(arany::Attestation::Guard(arany::GuardReceipt {

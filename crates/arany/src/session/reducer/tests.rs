@@ -35,6 +35,8 @@ mod goal_recovery_tests {
             intent: intent.clone(),
             observation: disposition.map(|disposition| ToolObservation {
                 enforcement_cause: None,
+                limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
+                    .then_some(crate::tools::LimitCause::Resource),
                 intent,
                 disposition,
                 output: if disposition == ToolDisposition::Succeeded {
@@ -2233,6 +2235,8 @@ mod goal_replay_tests {
                     intent,
                     disposition,
                     enforcement_cause: None,
+                    limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
+                        .then_some(crate::tools::LimitCause::Resource),
                     output: String::new(),
                     attestation: None,
                     cache_update,
@@ -2263,6 +2267,7 @@ mod goal_replay_tests {
                 intent,
                 disposition: ToolDisposition::Uncertain,
                 enforcement_cause: None,
+                limit_cause: None,
                 output: String::new(),
                 attestation: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
@@ -2289,6 +2294,7 @@ mod goal_replay_tests {
                 intent,
                 disposition: ToolDisposition::Cancelled,
                 enforcement_cause: None,
+                limit_cause: None,
                 output: String::new(),
                 attestation: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
@@ -3720,6 +3726,7 @@ mod goal_replay_tests {
         ));
         let mismatched = ToolObservation {
             enforcement_cause: None,
+            limit_cause: None,
             intent: child_intent(
                 run,
                 child,
@@ -3767,6 +3774,64 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn tool_limits_require_a_cause_and_other_dispositions_forbid_one() {
+        use crate::tools::LimitCause;
+        let (mut view, goal, run, child) = research_session();
+        let intent = child_intent(
+            run,
+            child,
+            ToolCall::Read {
+                path: "src/lib.rs".into(),
+                offset: None,
+                limit: Some(16),
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, child)).unwrap();
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .unwrap();
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: intent.clone(),
+                active_ceiling_ms: 0,
+            },
+        )
+        .unwrap();
+        for disposition in [ToolDisposition::Limit, ToolDisposition::Succeeded] {
+            for cause in [
+                None,
+                Some(LimitCause::Timeout),
+                Some(LimitCause::OutputCeiling),
+                Some(LimitCause::ContextFull),
+                Some(LimitCause::ReadCapacity),
+                Some(LimitCause::RequestedTime),
+                Some(LimitCause::Resource),
+            ] {
+                let mut observation = observation_for(intent.clone(), b"ok");
+                observation.disposition = disposition;
+                observation.limit_cause = cause;
+                let event = Event::ToolFinished {
+                    checkpoint: None,
+                    run_id: run,
+                    agent_run_id: child,
+                    observation,
+                };
+                let expected = (disposition == ToolDisposition::Limit) == cause.is_some();
+                assert_eq!(
+                    apply(&mut view.clone(), event).is_ok(),
+                    expected,
+                    "{disposition:?} {cause:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn child_tool_outside_the_plan_replays_only_as_denied() {
         let (mut view, goal, run, child) = research_session();
         let outside = child_intent(
@@ -3811,6 +3876,7 @@ mod goal_replay_tests {
                 agent_run_id: child,
                 observation: ToolObservation {
                     enforcement_cause: None,
+                    limit_cause: None,
                     intent: outside,
                     disposition: ToolDisposition::Denied,
                     output:
@@ -3999,6 +4065,7 @@ mod goal_replay_tests {
         };
         ToolObservation {
             enforcement_cause: None,
+            limit_cause: None,
             attestation: Some(crate::tools::Attestation::for_site(&intent)),
             intent,
             disposition: ToolDisposition::Succeeded,
@@ -5371,6 +5438,8 @@ mod goal_replay_tests {
             let mut observation = observation_for(guarded, b"ok");
             observation.disposition = disposition;
             observation.enforcement_cause = cause;
+            observation.limit_cause = (disposition == ToolDisposition::Limit)
+                .then_some(crate::tools::LimitCause::Resource);
             observation.output =
                 r#"{"exit_code":7,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
             apply(
@@ -6096,6 +6165,8 @@ mod goal_replay_tests {
         ] {
             let mut invalid = observation.clone();
             invalid.disposition = disposition;
+            invalid.limit_cause = (disposition == ToolDisposition::Limit)
+                .then_some(crate::tools::LimitCause::Resource);
             assert!(
                 rejected(&view, finished(invalid)),
                 "unsupported cause on {disposition:?}"
@@ -6451,6 +6522,7 @@ mod goal_replay_tests {
             )),
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
+            limit_cause: None,
         };
         let finish = |observation| Event::ToolFinished {
             checkpoint: None,
@@ -6551,6 +6623,7 @@ mod goal_replay_tests {
             )),
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
+            limit_cause: None,
         };
         (view, goal, intent, observation)
     }

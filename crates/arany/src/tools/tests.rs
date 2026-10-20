@@ -1351,6 +1351,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     };
     let observation = ToolObservation {
         enforcement_cause: None,
+        limit_cause: None,
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         output: "observed".into(),
@@ -1395,6 +1396,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
     };
     let uncertain_cache = ToolObservation {
         enforcement_cause: None,
+        limit_cause: None,
         intent: command_intent,
         disposition: ToolDisposition::Uncertain,
         output: r#"{"exit_code":0,"stdout":"build complete","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":14,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
@@ -1710,6 +1712,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
         intent.limits.cache_candidate_bytes = 0;
         ToolObservation {
             enforcement_cause: None,
+            limit_cause: None,
             attestation: Some(Attestation::for_site(&intent)),
             intent,
             disposition: ToolDisposition::Succeeded,
@@ -2595,6 +2598,7 @@ async fn in_process_results_fit_their_budget_before_serialization() {
     intent.limits.result_bytes = 128;
     let observation = runtime.execute(intent, super::Cancellation::new()).await;
     assert_eq!(observation.disposition, ToolDisposition::Limit);
+    assert_eq!(observation.limit_cause, Some(super::LimitCause::Resource));
 }
 
 #[test]
@@ -2670,6 +2674,7 @@ async fn in_process_reads_are_refused_before_dispatch_when_every_slot_is_held() 
     .await;
     drop(held);
     assert_eq!(refused.disposition, ToolDisposition::Limit);
+    assert_eq!(refused.limit_cause, Some(super::LimitCause::ReadCapacity));
     assert!(refused.attestation.is_none());
     assert!(!refused.stops_run());
     assert!(!refused.output.contains("fn main"));

@@ -133,11 +133,16 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     let result = match tool.observation.as_ref() {
         None => "pending".into(),
         Some(observation) => match observation.disposition {
+            ToolDisposition::Limit => format!("limit: {}", limit_summary(observation)),
             ToolDisposition::Succeeded => match tool.intent.call {
                 ToolCall::Write { .. }
                 | ToolCall::Edit { .. }
                 | ToolCall::Mkdir { .. }
                 | ToolCall::ApplyChangeset { .. } => "applied".into(),
+                ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. } => {
+                    command_result_summary(observation)
+                        .unwrap_or_else(|| read_result_summary(std::slice::from_ref(tool)))
+                }
                 _ => read_result_summary(std::slice::from_ref(tool)),
             },
             disposition => {
@@ -228,6 +233,55 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         summary.push_str(" · hook failed (non-blocking)");
     }
     summary
+}
+
+fn limit_summary(observation: &arany::ToolObservation) -> String {
+    use arany::LimitCause;
+    match observation.limit_cause.unwrap_or(LimitCause::Resource) {
+        LimitCause::Timeout => format!(
+            "timed out after {} s; /settings raises it",
+            observation.intent.limits.runtime_ms / 1_000
+        ),
+        LimitCause::OutputCeiling => "output passed 1 GiB; stopped".into(),
+        LimitCause::ContextFull => "no room left in this Run's context".into(),
+        LimitCause::ReadCapacity => "too many reads at once; nothing was read".into(),
+        LimitCause::RequestedTime => "asked for more time than the pinned maximum".into(),
+        LimitCause::Resource => "resource limit reached".into(),
+    }
+}
+
+fn command_result_summary(observation: &arany::ToolObservation) -> Option<String> {
+    let result: serde_json::Value = serde_json::from_str(&observation.output).ok()?;
+    let exit = result.get("exit_code")?.as_i64()?;
+    let stdout: arany::OutputTotal =
+        serde_json::from_value(result.get("stdout_total")?.clone()).ok()?;
+    let stderr: arany::OutputTotal =
+        serde_json::from_value(result.get("stderr_total")?.clone()).ok()?;
+    let truncated = [(stdout, "stdout"), (stderr, "stderr")]
+        .into_iter()
+        .any(|(total, name)| {
+            result[name].as_str().is_some_and(|text| {
+                total.bytes > text.len() as u64
+                    || text.contains(&format!(
+                        " lines omitted; {} bytes, {} lines total]…\n",
+                        total.bytes, total.lines
+                    ))
+            })
+        });
+    let lines = stdout.lines.saturating_add(stderr.lines);
+    let digits = lines.to_string();
+    let mut count = String::new();
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            count.push(',');
+        }
+        count.push(character);
+    }
+    Some(format!(
+        "exit {exit} · {count} {}{}",
+        if lines == 1 { "line" } else { "lines" },
+        if truncated { " (truncated)" } else { "" }
+    ))
 }
 
 fn read_result_summary(tools: &[arany::ToolView]) -> String {
@@ -436,10 +490,10 @@ pub(crate) fn plain_tool_summary(summary: &str) -> String {
 fn cache_update_label(update: arany::CacheUpdate) -> Option<&'static str> {
     use arany::CacheUpdate;
     match update {
-        CacheUpdate::NotApplicable => None,
-        CacheUpdate::Discarded => Some("private cache discarded"),
-        CacheUpdate::NotAttempted => Some("cache not attempted"),
-        CacheUpdate::Published => Some("cache saved"),
+        CacheUpdate::NotApplicable
+        | CacheUpdate::Discarded
+        | CacheUpdate::NotAttempted
+        | CacheUpdate::Published => None,
         CacheUpdate::Rejected => Some("cache not saved (limit)"),
         CacheUpdate::Failed => Some("cache update failed"),
         CacheUpdate::Uncertain => Some("cache outcome uncertain"),
@@ -1900,6 +1954,7 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
             attestation: None,
             cache_update: arany::CacheUpdate::NotApplicable,
             enforcement_cause: None,
+            limit_cause: None,
         }),
         intent,
         review_call_index: None,
@@ -1914,6 +1969,99 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
 mod peer_row_tests {
     use super::*;
     use arany::{ToolCall, ToolDisposition};
+
+    #[test]
+    fn named_limit_rows_and_cache_problem_markers_have_the_same_linear_copy() {
+        use arany::{CacheUpdate, LimitCause};
+        let mut tool = tool_fixture(
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec![],
+                cwd: String::new(),
+            },
+            "untrusted timeout text\u{1b}[2J",
+        );
+        tool.intent.limits.runtime_ms = 120_000;
+        tool.observation.as_mut().unwrap().intent.limits.runtime_ms = 120_000;
+        for (cause, copy) in [
+            (
+                LimitCause::Timeout,
+                "timed out after 120 s; /settings raises it",
+            ),
+            (LimitCause::OutputCeiling, "output passed 1 GiB; stopped"),
+            (
+                LimitCause::ContextFull,
+                "no room left in this Run's context",
+            ),
+            (
+                LimitCause::ReadCapacity,
+                "too many reads at once; nothing was read",
+            ),
+            (
+                LimitCause::RequestedTime,
+                "asked for more time than the pinned maximum",
+            ),
+            (LimitCause::Resource, "resource limit reached"),
+        ] {
+            let observation = tool.observation.as_mut().unwrap();
+            observation.disposition = ToolDisposition::Limit;
+            observation.limit_cause = Some(cause);
+            for (cache, marker) in [
+                (CacheUpdate::NotApplicable, ""),
+                (CacheUpdate::NotAttempted, ""),
+                (CacheUpdate::Discarded, ""),
+                (CacheUpdate::Published, ""),
+                (CacheUpdate::Rejected, " · cache not saved (limit)"),
+                (CacheUpdate::Failed, " · cache update failed"),
+                (CacheUpdate::Uncertain, " · cache outcome uncertain"),
+            ] {
+                tool.observation.as_mut().unwrap().cache_update = cache;
+                let summary = tool_summary(&tool);
+                assert_eq!(
+                    summary,
+                    format!("⏺ Command(sh )\n  ⎿ limit: {copy}{marker}")
+                );
+                assert_eq!(
+                    plain_tool_summary(&summary),
+                    format!("Command(sh )\nResult: limit: {copy}{marker}")
+                );
+            }
+        }
+        let observation = tool.observation.as_mut().unwrap();
+        observation.disposition = ToolDisposition::Uncertain;
+        observation.limit_cause = None;
+        observation.output = "effects unknown; never replay".into();
+        assert_eq!(
+            tool_summary(&tool),
+            "⏺ Command(sh )\n  ⎿ uncertain: effects unknown; never replay · cache outcome uncertain"
+        );
+    }
+
+    #[test]
+    fn command_rows_use_typed_line_totals_and_mark_truncation() {
+        let output = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "head\n…[123398 bytes, 12338 lines omitted; 123408 bytes, 12340 lines total]…\ntail\n",
+            "stderr": "", "stdout_total": {"bytes":123408,"lines":12340},
+            "stderr_total": {"bytes":0,"lines":0}, "changeset":{"files":[]}
+        }).to_string();
+        let tool = tool_fixture(
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec![],
+                cwd: String::new(),
+            },
+            &output,
+        );
+        assert_eq!(
+            tool_summary(&tool),
+            "⏺ Command(sh )\n  ⎿ exit 0 · 12,340 lines (truncated)"
+        );
+        assert_eq!(
+            plain_tool_summary(&tool_summary(&tool)),
+            "Command(sh )\nResult: exit 0 · 12,340 lines (truncated)"
+        );
+    }
 
     #[test]
     fn tool_rows_show_bounded_results_and_inert_failures() {
@@ -1984,7 +2132,6 @@ mod peer_row_tests {
             (ToolDisposition::Denied, "denied"),
             (ToolDisposition::Failed, "Error"),
             (ToolDisposition::Conflict, "conflict"),
-            (ToolDisposition::Limit, "limit"),
             (ToolDisposition::Cancelled, "cancelled"),
             (ToolDisposition::Uncertain, "uncertain"),
         ] {
@@ -2091,6 +2238,7 @@ mod enforcement_tests {
                 attestation: None,
                 cache_update: arany::CacheUpdate::NotApplicable,
                 enforcement_cause: Some(arany::EnforcementCause::FilesystemDenied),
+                limit_cause: None,
             }),
             permission_verdict: None,
             hooks: Vec::new(),
@@ -2205,6 +2353,8 @@ mod unguarded_tests {
             checkpoint: None,
             observation: Some(ToolObservation {
                 enforcement_cause: None,
+                limit_cause: (disposition == arany::ToolDisposition::Limit)
+                    .then_some(arany::LimitCause::Resource),
                 attestation: attested.then(|| {
                     Attestation::Unguarded(arany::UnguardedReceipt {
                         contract_version: 1,

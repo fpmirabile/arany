@@ -2181,7 +2181,7 @@ mod tests {
         });
 
         let timeout_result = capture(child, 64 * 1024, Duration::from_millis(100)).await;
-        if !matches!(timeout_result.as_ref(), Err(ToolError::Limit)) {
+        if !matches!(timeout_result.as_ref(), Err(ToolError::Timeout(_))) {
             errors.push(format!(
                 "capture did not enforce the forced timeout: {timeout_result:?}"
             ));
@@ -2346,7 +2346,7 @@ mod tests {
                         .expect("production Bwrap prefix launch");
                     match capture(child, 64 * 1024, Duration::from_secs(30)).await {
                         Ok((status, _, stderr)) => break (status, stderr),
-                        Err(ToolError::Limit)
+                        Err(ToolError::Timeout(_))
                             if attempts < 3
                                 && !["ready", "result"]
                                     .iter()

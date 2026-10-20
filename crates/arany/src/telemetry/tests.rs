@@ -763,6 +763,8 @@ fn unguarded_counts_retain_only_pending_digests_and_approval_flags() {
                     intent,
                     disposition,
                     enforcement_cause: None,
+                    limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
+                        .then_some(crate::tools::LimitCause::Resource),
                     output: "tool-output-canary".repeat(1024),
                     cache_update: CacheUpdate::NotApplicable,
                 },

@@ -1027,7 +1027,7 @@ fn runaway_command_output_stops_at_the_drain_ceiling_and_publishes_nothing() {
             let observation = seen.outcome.run.tools[0].observation.as_ref().unwrap();
             assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
             assert!(
-                observation.output.contains("output_ceiling"),
+                observation.limit_cause == Some(arany::LimitCause::OutputCeiling),
                 "{}",
                 observation.output
             );

@@ -251,7 +251,7 @@ pub(super) async fn execute(
         if !is_error && let Some(output) = definition.get("outputSchema")
             && !structured.is_some_and(|value| compile_schema(output).is_ok_and(|validator| validator.is_valid(value))) { return Err(ToolError::Operation); }
         fit_result(json!({"server":name,"tool":tool,"schema_digest":definition["sha256"],"is_error":is_error,"content":normalized,"structured_content":structured}), result_bytes)
-    }).await.unwrap_or(Err(ToolError::Limit));
+    }).await.unwrap_or(Err(ToolError::Timeout(String::new())));
     let _ = connection.writer.shutdown().await;
     let _ = connection.child.start_kill();
     let teardown = tokio::time::Instant::now() + TEARDOWN_WAIT;

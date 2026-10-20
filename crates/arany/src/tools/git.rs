@@ -457,7 +457,7 @@ async fn spawn_git(
                 super::guard::reap_owned_child(&mut child),
             )
             .await;
-            Err(ToolError::Limit)
+            Err(ToolError::Timeout(String::new()))
         }
     }
 }
