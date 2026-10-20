@@ -143,7 +143,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
             disposition => {
                 let state = match disposition {
                     ToolDisposition::Denied => "denied",
-                    ToolDisposition::Failed => "failed",
+                    ToolDisposition::Failed => "Error",
                     ToolDisposition::Conflict => "conflict",
                     ToolDisposition::Limit => "limit",
                     ToolDisposition::Cancelled => "cancelled",
@@ -315,6 +315,69 @@ fn collapsible_read(tool: &arany::ToolView) -> bool {
             .is_none_or(|v| v.decision != arany::permissions::Decision::Deny)
 }
 
+fn group_label(tools: &[arany::ToolView]) -> String {
+    use arany::ToolCall;
+    type Kind = (
+        fn(&ToolCall) -> bool,
+        &'static str,
+        &'static str,
+        &'static str,
+    );
+    let kinds: [Kind; 6] = [
+        (
+            |c| matches!(c, ToolCall::Search { .. }),
+            "searched for",
+            "pattern",
+            "patterns",
+        ),
+        (
+            |c| matches!(c, ToolCall::Read { .. }),
+            "read",
+            "file",
+            "files",
+        ),
+        (
+            |c| matches!(c, ToolCall::List { .. }),
+            "listed",
+            "directory",
+            "directories",
+        ),
+        (
+            |c| {
+                matches!(
+                    c,
+                    ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. }
+                )
+            },
+            "inspected",
+            "Git query",
+            "Git queries",
+        ),
+        (
+            |c| matches!(c, ToolCall::Skill { .. }),
+            "loaded",
+            "Skill",
+            "Skills",
+        ),
+        (
+            |c| matches!(c, ToolCall::McpList { .. }),
+            "listed",
+            "MCP server",
+            "MCP servers",
+        ),
+    ];
+    let mut label = kinds
+        .iter()
+        .filter_map(|(matches, verb, one, many)| {
+            let count = tools.iter().filter(|t| matches(&t.intent.call)).count();
+            (count > 0).then(|| format!("{verb} {count} {}", if count == 1 { one } else { many }))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    label[..1].make_ascii_uppercase();
+    label
+}
+
 pub(crate) fn tool_groups(
     tools: &[arany::ToolView],
 ) -> impl Iterator<Item = (std::ops::Range<usize>, String)> + '_ {
@@ -334,7 +397,8 @@ pub(crate) fn tool_groups(
         let range = start..start + count;
         let summary = if count > 1 {
             format!(
-                "⏺ Read({count} operations)\n  ⎿ {}",
+                "⏺ {}\n  ⎿ {}",
+                group_label(&tools[range.clone()]),
                 read_result_summary(&tools[range.clone()])
             )
         } else {
@@ -1890,7 +1954,7 @@ mod peer_row_tests {
         );
         for (disposition, label) in [
             (ToolDisposition::Denied, "denied"),
-            (ToolDisposition::Failed, "failed"),
+            (ToolDisposition::Failed, "Error"),
             (ToolDisposition::Conflict, "conflict"),
             (ToolDisposition::Limit, "limit"),
             (ToolDisposition::Cancelled, "cancelled"),

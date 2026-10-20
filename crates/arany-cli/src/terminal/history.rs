@@ -1124,7 +1124,7 @@ mod tests {
                 .join("\n");
             assert_eq!(
                 text,
-                "You:\n  inspect\n\n⏺ Read(2 operations)\n  ⎿ 4 lines\n\n⏺ Read(a)\n  ⎿ denied: outside pinned grant\n\n⏺ Read(a)\n  ⎿ 2 lines\n\nArany:\n  done\n"
+                "You:\n  inspect\n\n⏺ Read 2 files\n  ⎿ 4 lines\n\n⏺ Read(a)\n  ⎿ denied: outside pinned grant\n\n⏺ Read(a)\n  ⎿ 2 lines\n\nArany:\n  done\n"
             );
             assert!(
                 rows.iter()

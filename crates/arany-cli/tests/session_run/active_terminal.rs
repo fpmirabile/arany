@@ -1160,6 +1160,9 @@ mod output_window;
 #[path = "active_terminal/broken_stderr.rs"]
 mod broken_stderr;
 
+#[path = "active_terminal/tool_group.rs"]
+mod tool_group;
+
 #[path = "active_terminal/acquisition.rs"]
 mod acquisition;
 pub(super) use acquisition::ProductGuard;

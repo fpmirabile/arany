@@ -553,7 +553,10 @@ mod tests {
             let rows = crate::presentation::tool_groups(&tools).collect::<Vec<_>>();
             assert_eq!(
                 rows,
-                vec![(0..2, "⏺ Read(2 operations)\n  ⎿ 2 entries, 2 lines".into())]
+                vec![(
+                    0..2,
+                    "⏺ Read 1 file, listed 1 directory\n  ⎿ 2 entries, 2 lines".into()
+                )]
             );
             assert!(
                 rows[0]

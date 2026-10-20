@@ -966,7 +966,7 @@ mod tests {
         let mut rows = Vec::new();
         linear.write_view(&mut rows, &view, None).unwrap();
         let rows = String::from_utf8(rows).unwrap();
-        assert!(rows.ends_with("Read(2 operations)\nResult: 4 lines\n"));
+        assert!(rows.ends_with("Read 2 files\nResult: 4 lines\n"));
         assert!(!rows.contains(['⏺', '⎿', '\r', '\u{1b}']));
         view.last_sequence += 1;
         let mut redraw = Vec::new();
@@ -1019,7 +1019,7 @@ mod tests {
         let mut rows = Vec::new();
         linear.write_view(&mut rows, &view, None).unwrap();
         let rows = String::from_utf8(rows).unwrap();
-        assert!(rows.ends_with("Read(2 operations)\nResult: 4 lines\n"));
+        assert!(rows.ends_with("Read 2 files\nResult: 4 lines\n"));
         assert!(!rows.contains(['⏺', '⎿', '\r', '\u{1b}']));
         view.last_sequence += 1;
         let mut redraw = Vec::new();
