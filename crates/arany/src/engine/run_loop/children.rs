@@ -716,6 +716,7 @@ impl RunLoop<'_> {
                             deadline,
                             stop != WaveStop::BUDGET,
                             WorkerCause::ToolFailed,
+                            None,
                         )
                         .await?;
                     self.settle_worker_handover(root_request, &children[index], completed)
@@ -1303,6 +1304,7 @@ impl RunLoop<'_> {
                         })?,
                 };
                 let facts = self.child_facts(child, deadline)?;
+                let mut step_stop = None;
                 let (answer, failure) =
                     match decide_child_call(result, valid_response, Some(gate), abort, &facts) {
                         ChildDecision::Reprompt(reason, turn) => {
@@ -1354,32 +1356,20 @@ impl RunLoop<'_> {
                         }
                         ChildDecision::ToolStep(mut requests, turn) => {
                             let child = &mut children[index];
-                            let continues = match Box::pin(self.execute_step(
+                            step_stop = match Box::pin(self.execute_step(
                                 Grant::Researcher { child, deadline },
                                 requests.pop().ok_or(EngineError::CoordinatorFailed)?,
                                 turn,
                             ))
                             .await
                             {
-                                Ok(StepEnd::Continue) => true,
-                                Ok(StepEnd::Stopped(
-                                    StopCause::Uncertain
-                                    | StopCause::Cancelled
-                                    | StopCause::HookStop
-                                    | StopCause::Paused
-                                    | StopCause::Budget
-                                    | StopCause::Capacity
-                                    | StopCause::ContextFull
-                                    | StopCause::DelegationDeadline
-                                    | StopCause::Refused(_)
-                                    | StopCause::ToolStopped
-                                    | StopCause::InvalidCommandResult,
-                                )) => false,
+                                Ok(StepEnd::Continue) => None,
                                 Ok(StepEnd::Stopped(StopCause::ActiveTime)) => {
                                     queue.stop.get_or_insert(StopCause::ActiveTime);
                                     self.observe_worker_stop().await?;
-                                    false
+                                    Some(StopCause::ActiveTime)
                                 }
+                                Ok(StepEnd::Stopped(cause)) => Some(cause),
                                 Err(error) => return Err(error),
                             };
                             child.tool_calls_remaining =
@@ -1396,7 +1386,7 @@ impl RunLoop<'_> {
                                             && !crate::session::private_failure(t)
                                     })
                             })?;
-                            if continues && can_continue {
+                            if step_stop.is_none() && can_continue {
                                 queue.pending.push_back(index);
                                 if let Err(error) = self
                                     .fill_slots(queue, children, root_request, segments, deadline)
@@ -1420,6 +1410,7 @@ impl RunLoop<'_> {
                         deadline,
                         matches!(abort, Some(WaveStop::Abort(_))),
                         failure,
+                        step_stop,
                     )
                     .await?;
                 if let Some(s) = segments.take() {

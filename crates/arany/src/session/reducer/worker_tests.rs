@@ -2961,6 +2961,88 @@ fn worker_protocol_known_private_failure_stops_only_its_actor() {
 }
 
 #[test]
+fn worker_protocol_pairs_each_engine_cause_with_its_dispositions() {
+    use AgentDisposition as A;
+    use WorkerCause as C;
+    use WorkerDisposition as W;
+    let mut f = fixture();
+    f.call(
+        f.child,
+        AgentPhase::ChildWork,
+        ProviderCallDisposition::ToolRequested,
+        None,
+    );
+    let intent = f.intent(
+        f.child,
+        ToolCall::Write {
+            path: "src/a".into(),
+            expected_digest: None,
+            content: "new".into(),
+        },
+        f.target(0),
+    );
+    f.started(&intent);
+    f.observed(
+        &intent,
+        ToolDisposition::Conflict,
+        None,
+        "private snapshot conflict",
+    );
+    let finished = |agent, disposition, cause| Event::AgentFinished {
+        run_id: f.run,
+        agent_run_id: f.child,
+        disposition: agent,
+        summary: None,
+        result: None,
+        worker: Some(WorkerOutcome {
+            disposition,
+            cause,
+            data: None,
+            cleanup: Some(WorkerCleanupReceipt {
+                assignment_id: f.child,
+                base_digest: f.base.sha256,
+                revision: 0,
+                enforcement_digest: intent.enforcement_digest,
+                last_intent_digest: Some(intent.digest()),
+            }),
+        }),
+    };
+    for (agent, disposition, cause) in [
+        (A::Failed, W::Failed, C::ToolFailed),
+        (A::Failed, W::Failed, C::InvalidOutcome),
+        (A::Failed, W::Failed, C::TurnLimit),
+        (A::Failed, W::Failed, C::Budget),
+        (A::Failed, W::Failed, C::CriterionUnverified),
+        (A::Cancelled, W::Cancelled, C::Cancelled),
+    ] {
+        let mut view = f.view();
+        let envelope = f.envelope(
+            finished(agent, disposition, cause),
+            f.events.len() as u64 + 1,
+        );
+        assert!(
+            view.apply_committed(&envelope).is_ok(),
+            "{agent:?} {disposition:?} {cause:?}"
+        );
+    }
+    for (agent, disposition, cause) in [
+        (A::Failed, W::Failed, C::Cancelled),
+        (A::Failed, W::Cancelled, C::Cancelled),
+        (A::Cancelled, W::Failed, C::ToolFailed),
+        (A::Cancelled, W::Cancelled, C::ToolFailed),
+        (A::Failed, W::Failed, C::StoppedByHook),
+        (A::StoppedByHook, W::Failed, C::InvalidOutcome),
+        (A::StoppedByHook, W::Failed, C::StoppedByHook),
+    ] {
+        refused(
+            &f,
+            finished(agent, disposition, cause),
+            &format!("{agent:?} {disposition:?} {cause:?}"),
+        );
+    }
+}
+
+#[test]
 fn worker_protocol_stop_blocks_an_otherwise_admitted_provider_fallback() {
     let mut f = fixture();
     let Event::RunStarted { config, .. } = f
