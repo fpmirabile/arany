@@ -4,7 +4,7 @@ use std::{
     io::Write,
     net::TcpListener,
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -89,6 +89,7 @@ fn run_case(case: &'static str) {
     let mut child = crate::loopback::ChildGuard::new(product.spawn().unwrap());
     let input = Arc::new(Mutex::new(child.child().stdin.take().unwrap()));
     let peer_input = input.clone();
+    let (typeahead_delivered, delivery) = mpsc::sync_channel(1);
     let peer = thread::spawn(move || {
         while let Some(request) = crate::active_terminal::tool_group::tls_request(&mut peer_out) {
             let end = request
@@ -100,12 +101,9 @@ fn run_case(case: &'static str) {
             let step = crate::semantic::tool_results(&body).len();
             if case == "typeahead" && step == 0 {
                 peer_input.lock().unwrap().write_all(b"\r").unwrap();
-                // The relay must take the Enter before the approval exists, so admission sees it.
-                let deadline = Instant::now() + Duration::from_secs(5);
-                while rustix::io::ioctl_fionread(&*peer_input.lock().unwrap()).unwrap() > 0 {
-                    assert!(Instant::now() < deadline, "typeahead relay");
-                    thread::yield_now();
-                }
+                delivery
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("product handled typeahead Enter before Provider response");
             }
             let command = if case == "unguarded-pages" {
                 format!("exit 42;#{}", "padding ".repeat(40))
@@ -147,6 +145,7 @@ fn run_case(case: &'static str) {
     let pipe: std::os::fd::OwnedFd = child.child().stdout.take().unwrap().into();
     let mut driver = Driver {
         wrapper_pid: child.child().id(),
+        typeahead_delivered: (case == "typeahead").then_some(typeahead_delivered),
         ..Default::default()
     };
     let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -175,6 +174,7 @@ fn run_case(case: &'static str) {
 #[derive(Default)]
 struct Driver {
     wrapper_pid: u32,
+    typeahead_delivered: Option<mpsc::SyncSender<()>>,
     product: Option<crate::active_terminal::ProductGuard>,
     declined: bool,
     answered: bool,
@@ -245,6 +245,14 @@ impl Driver {
         let mut input = input.lock().unwrap();
         crate::process::decline_workspace_consent(&mut *input, bytes, &mut self.declined);
         let text = String::from_utf8_lossy(bytes);
+        // This notice comes from handling empty Enter, proving delivery through the PTY relay.
+        if self.typeahead_delivered.is_some()
+            && crate::session_picker::screen_rows(bytes, 80, 24)
+                .iter()
+                .any(|row| row.contains("Run is active; Ctrl+C cancels"))
+        {
+            self.typeahead_delivered.take().unwrap().send(()).unwrap();
+        }
         let frame_end: &[u8] = if case.starts_with("linear") {
             b"empty Enter denies:\r\n"
         } else {
