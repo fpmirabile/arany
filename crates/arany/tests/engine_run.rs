@@ -5214,7 +5214,7 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                             .map(|call| call.phase)
                             .collect::<Vec<_>>(),
                         expected_phases,
-                        "no retry or extra call"
+                        "only the scripted calls and refusal retries"
                     );
                     let terminal = loop {
                         let event = next_committed(&mut tapped, "committed terminal Event").await;

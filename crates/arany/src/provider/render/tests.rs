@@ -625,7 +625,7 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
         DelegateInvalid,
     ] {
         for tools_enabled in [false, true] {
-            let mut request = request(Vec::new());
+            let mut request = request(vec![step("first", "src/lib.rs")]);
             if !tools_enabled {
                 request.input.tools = None;
                 request.input.role = PromptRole::ReadOnly;
@@ -637,6 +637,20 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
             });
             let rendered = conversation(&request).expect("refusal request");
             assert_eq!(rendered.system, before.system);
+            assert_eq!(
+                before.messages,
+                rendered.messages[..before.messages.len()],
+                "a refusal must preserve the earlier request prefix"
+            );
+            assert_eq!(rendered.messages.len(), before.messages.len() + 1);
+            let tail = rendered.messages.last().expect("refusal data");
+            assert_eq!(tail.role, Role::User);
+            assert_eq!(tail.blocks.len(), 1);
+            let Block::Text(text) = &tail.blocks[0] else {
+                panic!("refusal must be labelled data");
+            };
+            let value: Value = serde_json::from_str(text).expect("refusal data block");
+            assert_eq!(value["scope"], "worker_coordination");
             assert_eq!(
                 rendered
                     .tools
@@ -681,6 +695,12 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
             }
             assert!(notes[0].to_string().len() <= 512);
             assert!(!notes[0].to_string().contains("canary"));
+            request.input.last_answer_refused = None;
+            assert_eq!(
+                conversation(&request).expect("repaired request").messages,
+                before.messages,
+                "clearing a refusal must preserve the earlier request prefix"
+            );
         }
     }
     let mut request = request(Vec::new());
@@ -693,9 +713,16 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
         "[]".into(),
     ] {
         request.input.tools.as_mut().expect("Tools").catalog = catalog;
-        assert!(matches!(
-            conversation(&request),
-            Err(ProviderError::Rejected)
-        ));
+        assert!(conversation(&request).is_ok());
     }
+    request
+        .input
+        .last_answer_refused
+        .as_mut()
+        .expect("refusal")
+        .operation = "x".repeat(MAX_TOOL_CATALOG_BYTES);
+    assert!(matches!(
+        conversation(&request),
+        Err(ProviderError::Rejected)
+    ));
 }
