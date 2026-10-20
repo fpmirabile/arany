@@ -19,6 +19,83 @@ pub(super) struct CompletedWorker {
     bytes: Option<Vec<u8>>,
 }
 
+// Observations read once after an editor's handover capture and disposal.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct WorkerFacts {
+    pub(super) private_uncertain: bool,
+    // `Some(no_change)` once criterion-verified data was captured.
+    pub(super) handover: Option<bool>,
+    pub(super) criterion_unverified: bool,
+    pub(super) worker_stop: bool,
+    // A settled hook stop requested by this editor.
+    pub(super) actor_hook_stop: bool,
+    // A hook stop by this editor is journaled, settled or not.
+    pub(super) actor_hook_journaled: bool,
+    // The wave is torn down by an abort.
+    pub(super) torn_down: bool,
+    pub(super) cancel_requested: bool,
+    pub(super) paused: bool,
+    pub(super) hook_stop: bool,
+}
+
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WorkerTerminal {
+    pub(super) agent: AgentDisposition,
+    pub(super) worker: WorkerDisposition,
+    pub(super) cause: WorkerCause,
+}
+
+// `failure` is the cause the editor's own turn ended with; stronger facts replace it.
+pub(super) fn decide_worker_terminal(failure: WorkerCause, facts: &WorkerFacts) -> WorkerTerminal {
+    let (worker, cause) = if facts.private_uncertain {
+        (
+            WorkerDisposition::PrivateUncertain,
+            WorkerCause::PrivateUncertain,
+        )
+    } else if let Some(no_change) = facts.handover {
+        (
+            if no_change {
+                WorkerDisposition::NoChange
+            } else {
+                WorkerDisposition::Ready
+            },
+            WorkerCause::Finished,
+        )
+    } else if facts.actor_hook_stop {
+        (WorkerDisposition::Failed, WorkerCause::StoppedByHook)
+    } else if facts.torn_down || facts.cancel_requested || facts.paused || facts.hook_stop {
+        (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
+    } else {
+        (
+            WorkerDisposition::Failed,
+            if facts.criterion_unverified {
+                WorkerCause::CriterionUnverified
+            } else if facts.worker_stop {
+                WorkerCause::Budget
+            } else {
+                failure
+            },
+        )
+    };
+    let agent = if facts.actor_hook_stop {
+        AgentDisposition::StoppedByHook
+    } else if facts.handover.is_some() {
+        AgentDisposition::Finished
+    } else if worker == WorkerDisposition::Cancelled {
+        AgentDisposition::Cancelled
+    } else if facts.actor_hook_journaled {
+        AgentDisposition::StoppedByHook
+    } else {
+        AgentDisposition::Failed
+    };
+    WorkerTerminal {
+        agent,
+        worker,
+        cause,
+    }
+}
+
 impl RunLoop<'_> {
     pub(super) fn valid_editor_delegation(
         &self,
@@ -757,10 +834,10 @@ impl RunLoop<'_> {
         child: &'a mut ChildWork,
         answer: Option<crate::provider::Answer>,
         deadline: tokio::time::Instant,
-        cancelled: bool,
+        torn_down: bool,
         failure: WorkerCause,
     ) -> BoxedStep<'a, CompletedWorker> {
-        Box::pin(self.complete_worker_inner(child, answer, deadline, cancelled, failure))
+        Box::pin(self.complete_worker_inner(child, answer, deadline, torn_down, failure))
     }
 
     pub(super) fn criterion_unmet(&self, id: AgentRunId) -> Result<bool, EngineError> {
@@ -784,7 +861,7 @@ impl RunLoop<'_> {
         child: &mut ChildWork,
         answer: Option<crate::provider::Answer>,
         deadline: tokio::time::Instant,
-        cancelled: bool,
+        torn_down: bool,
         failure: WorkerCause,
     ) -> Result<CompletedWorker, EngineError> {
         let id = child.agent_run_id;
@@ -854,58 +931,28 @@ impl RunLoop<'_> {
         let criterion_unverified = data.is_some() && self.criterion_unmet(id)?;
         let data = data.filter(|_| !criterion_unverified);
         let success = data.is_some();
-        let hook_stopped = self.actor_hook_requested_stop(id)?;
-        let (disposition, cause) = if private_uncertain {
-            (
-                WorkerDisposition::PrivateUncertain,
-                WorkerCause::PrivateUncertain,
-            )
-        } else if success {
-            (
-                if no_change {
-                    WorkerDisposition::NoChange
-                } else {
-                    WorkerDisposition::Ready
-                },
-                WorkerCause::Finished,
-            )
-        } else if hook_stopped {
-            (WorkerDisposition::Failed, WorkerCause::StoppedByHook)
-        } else if cancelled
-            || self.controls.cancellation.is_cancelled()
-            || self.pause_requested()
-            || self.hook_requested_stop()?
-        {
-            (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
-        } else {
-            (
-                WorkerDisposition::Failed,
-                if criterion_unverified {
-                    WorkerCause::CriterionUnverified
-                } else if stopped {
-                    WorkerCause::Budget
-                } else {
-                    failure
-                },
-            )
-        };
+        let terminal = decide_worker_terminal(
+            failure,
+            &WorkerFacts {
+                private_uncertain,
+                handover: success.then_some(no_change),
+                criterion_unverified,
+                worker_stop: stopped,
+                actor_hook_stop: self.actor_hook_requested_stop(id)?,
+                actor_hook_journaled: self
+                    .ledger()
+                    .view(|v| v.runs.last().is_some_and(|r| r.actor_stopped_by_hook(id)))?,
+                torn_down,
+                cancel_requested: self.controls.cancellation.is_cancelled(),
+                paused: self.pause_requested(),
+                hook_stop: self.hook_requested_stop()?,
+            },
+        );
+        let disposition = terminal.worker;
         self.append(Event::AgentFinished {
             run_id: self.run_id,
             agent_run_id: id,
-            disposition: if hook_stopped {
-                AgentDisposition::StoppedByHook
-            } else if success {
-                AgentDisposition::Finished
-            } else if disposition == WorkerDisposition::Cancelled {
-                AgentDisposition::Cancelled
-            } else if self
-                .ledger()
-                .view(|v| v.runs.last().is_some_and(|r| r.actor_stopped_by_hook(id)))?
-            {
-                AgentDisposition::StoppedByHook
-            } else {
-                AgentDisposition::Failed
-            },
+            disposition: terminal.agent,
             summary: if success {
                 answer
                     .as_ref()
@@ -920,7 +967,7 @@ impl RunLoop<'_> {
             },
             worker: Some(WorkerOutcome {
                 disposition,
-                cause,
+                cause: terminal.cause,
                 data: data.clone(),
                 cleanup: Some(cleanup),
             }),
@@ -1377,4 +1424,149 @@ fn cleanup_base(loop_: &RunLoop<'_>, id: AgentRunId) -> Result<[u8; 32], EngineE
                 .map(|w| w.pins.base.sha256)
         })?
         .ok_or(EngineError::InvalidHistory)
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+
+    #[test]
+    fn worker_terminals_keep_their_fact_order() {
+        use AgentDisposition as A;
+        use WorkerCause as C;
+        use WorkerDisposition as W;
+        let with = |change: fn(&mut WorkerFacts)| {
+            let mut facts = WorkerFacts::default();
+            change(&mut facts);
+            facts
+        };
+        let ready = |facts: &mut WorkerFacts| facts.handover = Some(false);
+        // (fallback cause, facts, agent, worker, cause)
+        let rows = [
+            (
+                C::ToolFailed,
+                WorkerFacts::default(),
+                A::Failed,
+                W::Failed,
+                C::ToolFailed,
+            ),
+            (
+                C::TurnLimit,
+                WorkerFacts::default(),
+                A::Failed,
+                W::Failed,
+                C::TurnLimit,
+            ),
+            (
+                C::ToolFailed,
+                with(ready),
+                A::Finished,
+                W::Ready,
+                C::Finished,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.handover = Some(true)),
+                A::Finished,
+                W::NoChange,
+                C::Finished,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| {
+                    f.handover = Some(false);
+                    f.actor_hook_stop = true;
+                }),
+                A::StoppedByHook,
+                W::Ready,
+                C::Finished,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| {
+                    f.private_uncertain = true;
+                    f.torn_down = true;
+                }),
+                A::Failed,
+                W::PrivateUncertain,
+                C::PrivateUncertain,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| {
+                    f.actor_hook_stop = true;
+                    f.torn_down = true;
+                }),
+                A::StoppedByHook,
+                W::Failed,
+                C::StoppedByHook,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.torn_down = true),
+                A::Cancelled,
+                W::Cancelled,
+                C::Cancelled,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.cancel_requested = true),
+                A::Cancelled,
+                W::Cancelled,
+                C::Cancelled,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.paused = true),
+                A::Cancelled,
+                W::Cancelled,
+                C::Cancelled,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| {
+                    f.hook_stop = true;
+                    f.actor_hook_journaled = true;
+                }),
+                A::Cancelled,
+                W::Cancelled,
+                C::Cancelled,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| {
+                    f.criterion_unverified = true;
+                    f.worker_stop = true;
+                }),
+                A::Failed,
+                W::Failed,
+                C::CriterionUnverified,
+            ),
+            (
+                C::TurnLimit,
+                with(|f| f.worker_stop = true),
+                A::Failed,
+                W::Failed,
+                C::Budget,
+            ),
+            (
+                C::InvalidOutcome,
+                with(|f| f.actor_hook_journaled = true),
+                A::StoppedByHook,
+                W::Failed,
+                C::InvalidOutcome,
+            ),
+        ];
+        for (index, (failure, facts, agent, worker, cause)) in rows.into_iter().enumerate() {
+            assert_eq!(
+                decide_worker_terminal(failure, &facts),
+                WorkerTerminal {
+                    agent,
+                    worker,
+                    cause
+                },
+                "row {index}: {failure:?} {facts:?}"
+            );
+        }
+    }
 }
