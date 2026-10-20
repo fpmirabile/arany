@@ -25,7 +25,7 @@ mod tool_compaction;
 mod worker;
 
 use step::Grant;
-use stop::{StepEnd, StopCause};
+use stop::{PrimaryEnd, RunFacts, Settlement, StepEnd, StopCause};
 
 const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
 const TOOL_REVIEW_DEADLINE: Duration = Duration::from_secs(20);
@@ -200,98 +200,6 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
-    async fn settle_stopped_primary(&self) -> Result<(), EngineError> {
-        let active_reserved = self.ledger().active_reserved();
-        let (
-            goal_open,
-            has_uncertain_tool,
-            action_cancelled,
-            actions_acknowledged,
-            run_active,
-            primary_active,
-            other_agents_closed,
-        ) = self.ledger().view(|view| -> Result<_, EngineError> {
-            let goal = view.goal(self.goal()?).ok_or(EngineError::InvalidHistory)?;
-            let run = view
-                .runs
-                .iter()
-                .find(|run| run.id == self.run_id)
-                .ok_or(EngineError::InvalidHistory)?;
-            let primary_active = run.agents.iter().any(|agent| {
-                agent.id == self.primary_id && agent.status == crate::session::AgentStatus::Active
-            });
-            let other_agents_closed = run.agents.iter().all(|agent| {
-                agent.id == self.primary_id || agent.status != crate::session::AgentStatus::Active
-            });
-            let has_uncertain_tool = run.lifecycle_hooks.iter().any(|hook| {
-                hook.outcome.as_ref().is_some_and(|outcome| {
-                    outcome.observation.stops_run()
-                        && outcome.observation.disposition
-                            != crate::tools::ToolDisposition::Cancelled
-                })
-            }) || run.tools.iter().any(|tool| {
-                tool.observation
-                    .iter()
-                    .chain(tool.hooks.iter().filter_map(|hook| {
-                        hook.outcome.as_ref().map(|outcome| &outcome.observation)
-                    }))
-                    .any(|observation| {
-                        observation.disposition == crate::tools::ToolDisposition::Uncertain
-                    })
-            }) || self.uncertain_hook_in(run);
-            let action_cancelled = run.lifecycle_hooks.iter().any(|hook| {
-                hook.outcome.as_ref().is_some_and(|outcome| {
-                    outcome.observation.disposition == crate::tools::ToolDisposition::Cancelled
-                })
-            }) || run.tools.iter().any(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.disposition == crate::tools::ToolDisposition::Cancelled
-                })
-            });
-            let actions_acknowledged = run.tools.iter().all(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.disposition != crate::tools::ToolDisposition::Uncertain
-                })
-            });
-            let goal_open = goal.status == crate::session::GoalStatus::Running
-                && goal.active_run == Some(self.run_id)
-                && goal.unobserved_provider_calls.is_empty()
-                && goal.compaction_call_reserved.is_none();
-            Ok((
-                goal_open,
-                has_uncertain_tool,
-                action_cancelled,
-                actions_acknowledged,
-                run.status == crate::session::RunStatus::Active,
-                primary_active,
-                other_agents_closed,
-            ))
-        })??;
-        if has_uncertain_tool {
-            return Err(crate::tools::ToolError::Uncertain.into());
-        }
-        if !goal_open || active_reserved || !run_active || !primary_active || !other_agents_closed {
-            return Err(EngineError::GoalBudgetExhausted);
-        }
-        let cancelled = self.controls.cancellation.is_cancelled() || action_cancelled;
-        if !cancelled && !actions_acknowledged {
-            return Err(EngineError::GoalBudgetExhausted);
-        }
-        if cancelled {
-            self.cancel_primary().await
-        } else if self.hook_requested_stop()? {
-            self.finish_hook_stop().await
-        } else {
-            self.fail_for_budget().await
-        }
-    }
-
-    // Journals `exhausted` only when settlement agrees the Goal admits no next Run.
-    async fn fail_for_budget(&self) -> Result<(), EngineError> {
-        self.ledger().mark_budget_stopped();
-        self.fail_primary(RunFailure::BudgetExhausted).await
-    }
-
     fn reserve_active_segment(&self, action_bound: Duration) -> Result<ActiveSegment, EngineError> {
         let (started, reserved_ms) = self.ledger().reserve_active(duration_ms(action_bound))?;
         Ok(ActiveSegment {
@@ -433,19 +341,32 @@ impl<'a> RunLoop<'a> {
         &self,
         mut root_request: ProviderRequest,
     ) -> Result<(), EngineError> {
-        match self.initialize_definitions(&mut root_request).await {
-            Ok(true) => {}
-            Ok(false) => return self.settle_definition_stop().await,
-            Err(EngineError::GoalBudgetExhausted) => return self.settle_stopped_primary().await,
+        let end = match self.initialize_definitions(&mut root_request).await {
+            Ok(true) => None,
+            Ok(false) if self.pause_at_boundary() => Some(PrimaryEnd::Stopped(StopCause::Paused)),
+            Ok(false) if self.take_active_time_floor() => {
+                Some(PrimaryEnd::Stopped(StopCause::ActiveTime))
+            }
+            Ok(false) => Some(PrimaryEnd::Failed(RunFailure::DefinitionInvalid)),
+            Err(EngineError::GoalBudgetExhausted) => {
+                Some(PrimaryEnd::Stopped(StopCause::ActiveTime))
+            }
             Err(error) => return Err(error),
+        };
+        if let Some(end) = end {
+            return self.settle_primary(end).await;
         }
-        match self.initialize_skill(&mut root_request).await {
-            Ok(step::SkillInitialization::Ready) => self.drive_primary(&mut root_request).await,
-            Ok(step::SkillInitialization::Stopped) => self.settle_stopped_primary().await,
-            Ok(step::SkillInitialization::Failed(cause)) => self.fail_primary(cause).await,
-            Err(EngineError::GoalBudgetExhausted) => self.settle_stopped_primary().await,
-            Err(error) => Err(error),
-        }
+        let end = match self.initialize_skill(&mut root_request).await {
+            Ok(step::SkillInitialization::Ready) => {
+                return self.drive_primary(&mut root_request).await;
+            }
+            // A stopped read carries no cause: the observed facts decide, as for a refused reservation.
+            Ok(step::SkillInitialization::Stopped) => PrimaryEnd::Stopped(StopCause::Budget),
+            Ok(step::SkillInitialization::Failed(cause)) => PrimaryEnd::Failed(cause),
+            Err(EngineError::GoalBudgetExhausted) => PrimaryEnd::Stopped(StopCause::ActiveTime),
+            Err(error) => return Err(error),
+        };
+        self.settle_primary(end).await
     }
 
     pub(super) fn drive_primary<'b>(
@@ -459,177 +380,114 @@ impl<'a> RunLoop<'a> {
         &self,
         root_request: &mut ProviderRequest,
     ) -> Result<(), EngineError> {
-        enum Exit {
-            Stopped,
-            Cancelled,
-            Answered(Answer),
-            Failed(RunFailure),
-            Budget,
-            Settled,
-        }
-
-        let exit = loop {
+        let end = loop {
             let phase = root_request.phase;
-            let planning = phase == AgentPhase::RootPlan;
             if self.pause_at_boundary() {
-                break Exit::Stopped;
+                break PrimaryEnd::Stopped(StopCause::Paused);
             }
             let (first, active_segment) = match self.invoke_primary(root_request).await {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
-                    break Exit::Stopped;
+                    break PrimaryEnd::Stopped(StopCause::Budget);
                 }
                 Err(error) => return Err(error),
             };
             self.settle_active_segment(active_segment)?;
-            let (validation, budget_admits) = self.validate_primary_outcome(&first, planning)?;
-            let refusal = validation
-                .err()
-                .and_then(|cause| proposal_refusal(&first, cause));
-            let well_formed = validation.is_ok();
-            let refused = refusal.is_some();
-            let tokens_ok = self.ledger().tokens_within_limit();
-            let valid_response = tokens_ok && well_formed && budget_admits;
-            let budget_refused = well_formed && !(tokens_ok && budget_admits);
+            let validity = self.validate_primary_outcome(&first, phase == AgentPhase::RootPlan)?;
+            let facts = RunFacts::observe(self)?;
+            let record = call_record(
+                phase,
+                &first,
+                primary_admitted(PrimarySite::Loop, &first, validity, &facts),
+                self.default_child_profile(),
+                validity
+                    .err()
+                    .and_then(|cause| proposal_refusal(&first, cause)),
+            );
+            let decision = decide_primary_call(PrimarySite::Loop, first, validity, &facts);
             self.append(Event::ProviderCallRecorded {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
-                record: call_record(
-                    phase,
-                    &first,
-                    valid_response,
-                    self.default_child_profile(),
-                    refusal,
-                ),
+                record,
             })
             .await?;
-            if self.controls.cancellation.is_cancelled() {
-                break Exit::Stopped;
-            }
-            if matches!(&first, CallResult::Cancelled) {
-                break Exit::Cancelled;
-            }
-            if self.ledger().active_time_exhausted() {
-                break Exit::Stopped;
-            }
-            if refused {
-                if self.primary_refusal()?.1 {
-                    break Exit::Failed(RunFailure::RefusalLimit);
-                }
-                continue;
-            }
-            match first {
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Plan(plan),
-                    turn,
-                    ..
-                }) if valid_response => {
+            match decision {
+                PrimaryDecision::Plan(plan, turn) => {
                     match self.record_plan_step(root_request, *plan, turn).await {
-                        Ok(()) => continue,
+                        Ok(()) => {}
                         Err(EngineError::ContextTooLarge) => {
-                            break Exit::Failed(RunFailure::ToolContextFull);
+                            break PrimaryEnd::Stopped(StopCause::ContextFull);
                         }
                         Err(error) => return Err(error),
                     }
                 }
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Answer(answer),
-                    turn,
-                    ..
-                }) if valid_response => {
+                PrimaryDecision::Finish(answer, turn) => {
                     match self.stop_primary(root_request, &answer, turn).await {
-                        Ok(true) => continue,
-                        Ok(false) => break Exit::Answered(answer),
+                        Ok(true) => {}
+                        Ok(false) => break PrimaryEnd::Finished(answer),
                         Err(EngineError::GoalBudgetExhausted) => {
-                            break Exit::Stopped;
+                            break PrimaryEnd::Stopped(StopCause::ActiveTime);
                         }
                         Err(EngineError::ContextTooLarge) => {
-                            break Exit::Failed(RunFailure::ToolContextFull);
+                            break PrimaryEnd::Stopped(StopCause::ContextFull);
                         }
                         Err(error) => return Err(error),
                     }
                 }
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Delegate(delegation),
-                    turn,
-                    ..
-                }) if valid_response => {
+                PrimaryDecision::Delegate(delegation, turn) => {
                     if self.pause_at_boundary() {
-                        break Exit::Stopped;
+                        break PrimaryEnd::Stopped(StopCause::Paused);
                     }
-                    if self
+                    if !self
                         .run_children(root_request, delegation.children, delegation.agent, turn)
                         .await?
                     {
-                        continue;
+                        return Ok(());
                     }
-                    break Exit::Settled;
                 }
-                CallResult::Response(ProviderResponse {
-                    outcome: ProviderOutcome::Tools(requests),
-                    turn,
-                    ..
-                }) if valid_response => {
-                    if self
-                        .primary_tools(root_request, requests, turn, planning)
+                PrimaryDecision::ToolStep(requests, turn) => {
+                    if let Some(end) = self
+                        .primary_tools(root_request, requests, turn, phase == AgentPhase::RootPlan)
                         .await?
                     {
-                        continue;
+                        break end;
                     }
-                    break Exit::Settled;
                 }
-                CallResult::Cancelled => break Exit::Cancelled,
-                CallResult::Response(_) if budget_refused => break Exit::Budget,
-                _ => {
-                    break Exit::Failed(RunFailure::ProviderCall);
+                PrimaryDecision::Refused(cause) => {
+                    if self.primary_refusal()?.1 {
+                        break PrimaryEnd::Stopped(StopCause::Refused(cause));
+                    }
                 }
+                PrimaryDecision::Stop(cause) => break PrimaryEnd::Stopped(cause),
+                PrimaryDecision::Fail(failure) => break PrimaryEnd::Failed(failure),
+                PrimaryDecision::Defer => return Err(EngineError::CoordinatorFailed),
             }
         };
-
-        match exit {
-            Exit::Stopped => self.settle_stopped_primary().await,
-            Exit::Cancelled => self.cancel_primary().await,
-            Exit::Answered(answer) => self.finish_primary(answer).await,
-            Exit::Failed(cause) => self.fail_primary(cause).await,
-            Exit::Budget => self.fail_for_budget().await,
-            Exit::Settled => Ok(()),
-        }
+        self.settle_primary(end).await
     }
 
     fn validate_primary_outcome(
         &self,
         first: &CallResult,
         planning: bool,
-    ) -> Result<(Result<(), ProposalRefusalCause>, bool), EngineError> {
-        Ok(match first {
-            CallResult::Response(ProviderResponse {
-                outcome: ProviderOutcome::Answer(answer),
-                ..
-            }) => (self.well_formed_answer(answer, planning), true),
-            CallResult::Response(ProviderResponse {
-                outcome: ProviderOutcome::Delegate(delegation),
-                ..
-            }) => (
+    ) -> Result<Result<(), ProposalRefusalCause>, EngineError> {
+        let CallResult::Response(response) = first else {
+            return Ok(Ok(()));
+        };
+        match &response.outcome {
+            ProviderOutcome::Answer(answer) => Ok(self.well_formed_answer(answer, planning)),
+            ProviderOutcome::Delegate(delegation) => {
                 if !planning && !self.wave_settled()? {
-                    Err(ProposalRefusalCause::Phase)
+                    Ok(Err(ProposalRefusalCause::Phase))
                 } else {
-                    self.well_formed_delegation(&delegation.children, delegation.agent.as_deref())
-                },
-                self.ledger().can_start_provider_call(),
-            ),
-            CallResult::Response(ProviderResponse {
-                outcome: ProviderOutcome::Tools(requests),
-                ..
-            }) => (
-                self.well_formed_primary_tools(requests)?,
-                self.ledger().admits(Action::Tool),
-            ),
-            CallResult::Response(ProviderResponse {
-                outcome: ProviderOutcome::Plan(plan),
-                ..
-            }) => (self.check_plan(plan)?, true),
-            _ => (Ok(()), true),
-        })
+                    Ok(self
+                        .well_formed_delegation(&delegation.children, delegation.agent.as_deref()))
+                }
+            }
+            ProviderOutcome::Tools(requests) => self.well_formed_primary_tools(requests),
+            ProviderOutcome::Plan(plan) => self.check_plan(plan),
+            ProviderOutcome::Review(_) => Ok(Ok(())),
+        }
     }
 
     fn primary_tools<'b>(
@@ -638,7 +496,7 @@ impl<'a> RunLoop<'a> {
         requests: Vec<crate::ToolRequest>,
         turn: crate::provider::ProviderTurn,
         planning: bool,
-    ) -> step::BoxedStep<'b, bool> {
+    ) -> step::BoxedStep<'b, Option<PrimaryEnd>> {
         Box::pin(self.primary_tools_inner(root_request, requests, turn, planning))
     }
 
@@ -648,68 +506,23 @@ impl<'a> RunLoop<'a> {
         requests: Vec<crate::ToolRequest>,
         turn: crate::provider::ProviderTurn,
         planning: bool,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Option<PrimaryEnd>, EngineError> {
         if self.pause_at_boundary() {
-            return self.settle_stopped_primary().await.map(|()| false);
+            return Ok(Some(PrimaryEnd::Stopped(StopCause::Paused)));
         }
         let Some(request) = self.begin_tool_step(requests).await? else {
-            return self
-                .fail_primary(RunFailure::PlanAdmission)
-                .await
-                .map(|()| false);
+            return Ok(Some(PrimaryEnd::Failed(RunFailure::PlanAdmission)));
         };
         let grant = Grant::Primary {
             request: &mut *root_request,
             review_allowed: planning && self.ledger().admits(Action::Review),
         };
-        match Box::pin(self.execute_step(grant, request, turn)).await {
-            Ok(StepEnd::Continue) => {}
-            Ok(StepEnd::Stopped(cause))
-                if cause != StopCause::ContextFull && self.controls.cancellation.is_cancelled() =>
-            {
-                return self.settle_stopped_primary().await.map(|()| false);
-            }
-            Ok(StepEnd::Stopped(cause))
-                if cause != StopCause::ContextFull && self.ledger().active_time_exhausted() =>
-            {
-                return self.settle_stopped_primary().await.map(|()| false);
-            }
-            Ok(StepEnd::Stopped(StopCause::ActiveTime)) if !self.take_active_time_floor() => {
-                return self.settle_stopped_primary().await.map(|()| false);
-            }
-            Ok(StepEnd::Stopped(StopCause::ActiveTime)) => {
-                return self
-                    .fail_primary(RunFailure::BudgetExhausted)
-                    .await
-                    .map(|()| false);
-            }
-            Ok(StepEnd::Stopped(StopCause::ContextFull)) => {
-                return self
-                    .fail_primary(RunFailure::ToolContextFull)
-                    .await
-                    .map(|()| false);
-            }
-            Ok(StepEnd::Stopped(
-                StopCause::Uncertain
-                | StopCause::Cancelled
-                | StopCause::HookStop
-                | StopCause::Paused
-                | StopCause::Budget
-                | StopCause::Capacity
-                | StopCause::DelegationDeadline
-                | StopCause::Refused(_)
-                | StopCause::ToolStopped
-                | StopCause::InvalidCommandResult,
-            )) => {
-                return self
-                    .fail_primary(RunFailure::ToolStopped)
-                    .await
-                    .map(|()| false);
-            }
-            Err(error) => return Err(error),
+        match Box::pin(self.execute_step(grant, request, turn)).await? {
+            StepEnd::Continue => {}
+            StepEnd::Stopped(cause) => return Ok(Some(PrimaryEnd::Stopped(cause))),
         }
         Box::pin(self.verify_workers()).await?;
-        Ok(true)
+        Ok(None)
     }
 
     async fn stop_primary(
@@ -1160,116 +973,72 @@ impl<'a> RunLoop<'a> {
         Ok(<[_; 1]>::try_from(requests).ok().map(|[request]| request))
     }
 
-    async fn finish_primary(&self, answer: Answer) -> Result<(), EngineError> {
-        if self.controls.cancellation.is_cancelled() {
-            return self.cancel_primary().await;
-        }
-        if self.hook_requested_stop()? {
-            return self.finish_hook_stop().await;
-        }
-        let workers_verified = self.ledger().view(|v| {
-            v.runs.last().is_some_and(|r| {
-                r.agents
-                    .iter()
-                    .filter_map(|a| a.assignment.as_ref())
-                    .all(|w| w.settled())
-            })
-        })?;
-        if !workers_verified {
-            return self.fail_primary(RunFailure::WorkersUnverified).await;
-        }
-        if !self.ledger().success_criterion_satisfied() && !self.ledger().allows_next_run() {
-            // Only an autonomous Goal runs out of Runs; a single-Run Goal with an unmet plan simply fails.
-            if self.ledger().autonomous() {
-                self.ledger().mark_budget_stopped();
+    // The only primary terminal writer: AgentFinished, MessageCommitted for an answer, RunFinished.
+    async fn settle_primary(&self, end: PrimaryEnd) -> Result<(), EngineError> {
+        let (agent, run, failure, answer) = match stop::settle(end, &RunFacts::observe(self)?) {
+            Settlement::Unknown => return Err(crate::tools::ToolError::Uncertain.into()),
+            Settlement::Unsettleable => return Err(EngineError::GoalBudgetExhausted),
+            Settlement::Finish(answer) => (
+                AgentDisposition::Finished,
+                RunDisposition::Finished,
+                None,
+                Some(answer),
+            ),
+            Settlement::Fail { failure, exhausted } => {
+                if exhausted {
+                    self.ledger().mark_budget_stopped();
+                }
+                (
+                    AgentDisposition::Failed,
+                    RunDisposition::Failed,
+                    Some(failure),
+                    None,
+                )
             }
-            return self.fail_primary(RunFailure::CriterionUnmet).await;
-        }
+            Settlement::Cancel => (
+                AgentDisposition::Cancelled,
+                RunDisposition::Cancelled,
+                None,
+                None,
+            ),
+            Settlement::HookStop => (
+                AgentDisposition::StoppedByHook,
+                RunDisposition::StoppedByHook,
+                None,
+                None,
+            ),
+        };
         self.append(Event::AgentFinished {
             worker: None,
             run_id: self.run_id,
             agent_run_id: self.primary_id,
-            disposition: AgentDisposition::Finished,
-            summary: Some(crate::session::answer_summary(&answer.text)),
-            result: Some(answer.text.clone()),
+            disposition: agent,
+            summary: answer
+                .as_ref()
+                .map(|answer| crate::session::answer_summary(&answer.text)),
+            result: answer.as_ref().map(|answer| answer.text.clone()),
         })
         .await?;
-        self.append(Event::MessageCommitted {
-            run_id: self.run_id,
-            text: answer.text,
-        })
-        .await?;
+        if let Some(answer) = answer {
+            self.append(Event::MessageCommitted {
+                run_id: self.run_id,
+                text: answer.text,
+            })
+            .await?;
+        }
         self.append(Event::RunFinished {
             run_id: self.run_id,
-            disposition: RunDisposition::Finished,
-            failure: None,
+            disposition: run,
+            failure,
             active_ms: self.ledger().run_active_ms()?,
         })
         .await?;
         Ok(())
-    }
-
-    async fn settle_definition_stop(&self) -> Result<(), EngineError> {
-        let stopped = self.pause_at_boundary()
-            || self.controls.cancellation.is_cancelled()
-            || self.ledger().active_time_exhausted()
-            || self.ledger().view(|view| {
-                view.runs.iter().any(|run| {
-                    run.id == self.run_id
-                        && run.tools.iter().any(|tool| {
-                            tool.observation.as_ref().is_some_and(|observation| {
-                                matches!(
-                                    observation.disposition,
-                                    crate::tools::ToolDisposition::Uncertain
-                                        | crate::tools::ToolDisposition::Cancelled
-                                )
-                            })
-                        })
-                })
-            })?;
-        match definition_stop(stopped, !self.ledger().can_start_provider_call()) {
-            DefinitionStop::Settle => self.settle_stopped_primary().await,
-            DefinitionStop::Budget => self.fail_for_budget().await,
-            DefinitionStop::Fail => {
-                let cause = if self.take_active_time_floor() {
-                    RunFailure::BudgetExhausted
-                } else {
-                    RunFailure::DefinitionInvalid
-                };
-                self.fail_primary(cause).await
-            }
-        }
     }
 
     fn take_active_time_floor(&self) -> bool {
         self.active_time_floor
             .swap(false, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    async fn fail_primary(&self, cause: RunFailure) -> Result<(), EngineError> {
-        if self.controls.cancellation.is_cancelled() {
-            return self.cancel_primary().await;
-        }
-        if self.hook_requested_stop()? {
-            return self.finish_hook_stop().await;
-        }
-        self.append(Event::AgentFinished {
-            worker: None,
-            run_id: self.run_id,
-            agent_run_id: self.primary_id,
-            disposition: AgentDisposition::Failed,
-            summary: None,
-            result: None,
-        })
-        .await?;
-        self.append(Event::RunFinished {
-            run_id: self.run_id,
-            disposition: RunDisposition::Failed,
-            failure: Some(cause),
-            active_ms: self.ledger().run_active_ms()?,
-        })
-        .await?;
-        Ok(())
     }
 
     fn hook_requested_stop(&self) -> Result<bool, EngineError> {
@@ -1307,46 +1076,6 @@ impl<'a> RunLoop<'a> {
                 run.id == self.run_id && run.hooks_settled() && run.actor_stopped_by_hook(agent)
             })
         })
-    }
-
-    async fn finish_hook_stop(&self) -> Result<(), EngineError> {
-        self.append(Event::AgentFinished {
-            worker: None,
-            run_id: self.run_id,
-            agent_run_id: self.primary_id,
-            disposition: AgentDisposition::StoppedByHook,
-            summary: None,
-            result: None,
-        })
-        .await?;
-        self.append(Event::RunFinished {
-            run_id: self.run_id,
-            disposition: RunDisposition::StoppedByHook,
-            failure: None,
-            active_ms: self.ledger().run_active_ms()?,
-        })
-        .await?;
-        Ok(())
-    }
-
-    async fn cancel_primary(&self) -> Result<(), EngineError> {
-        self.append(Event::AgentFinished {
-            worker: None,
-            run_id: self.run_id,
-            agent_run_id: self.primary_id,
-            disposition: AgentDisposition::Cancelled,
-            summary: None,
-            result: None,
-        })
-        .await?;
-        self.append(Event::RunFinished {
-            run_id: self.run_id,
-            disposition: RunDisposition::Cancelled,
-            failure: None,
-            active_ms: self.ledger().run_active_ms()?,
-        })
-        .await?;
-        Ok(())
     }
 }
 
@@ -1563,33 +1292,446 @@ fn valid_answer(answer: &Answer, result_limit: usize) -> bool {
             .is_ok_and(|bytes| bytes <= crate::store::MAX_EVENT_BYTES)
 }
 
-#[derive(Debug, Eq, PartialEq)]
-enum DefinitionStop {
-    Settle,
-    Budget,
-    Fail,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrimarySite {
+    Loop,
+    // A primary call joined inside a worker wave; `queue_stopped` once the wave is ending.
+    Wave { queue_stopped: bool },
 }
 
-// Interruptions (cancel, pause, active time, Uncertain or Cancelled parse) settle honestly; only a plain refusal fails.
-fn definition_stop(interrupted: bool, provider_budget_closed: bool) -> DefinitionStop {
-    if interrupted {
-        DefinitionStop::Settle
-    } else if provider_budget_closed {
-        DefinitionStop::Budget
-    } else {
-        DefinitionStop::Fail
+#[must_use]
+#[derive(Debug)]
+enum PrimaryDecision {
+    Plan(
+        Box<crate::provider::PlanRequest>,
+        crate::provider::ProviderTurn,
+    ),
+    Finish(Answer, crate::provider::ProviderTurn),
+    Delegate(crate::provider::Delegate, crate::provider::ProviderTurn),
+    ToolStep(Vec<crate::ToolRequest>, crate::provider::ProviderTurn),
+    // The refusal is journaled; the loop continues unless the refusal streak is full.
+    Refused(ProposalRefusalCause),
+    // A wave proposal waits for the workers to settle.
+    Defer,
+    Stop(StopCause),
+    Fail(RunFailure),
+}
+
+// Whether the call is journaled as an accepted proposal.
+fn primary_admitted(
+    site: PrimarySite,
+    result: &CallResult,
+    validity: Result<(), ProposalRefusalCause>,
+    facts: &RunFacts,
+) -> bool {
+    let CallResult::Response(response) = result else {
+        return false;
+    };
+    validity.is_ok()
+        && facts.tokens_within_limit
+        && match site {
+            PrimarySite::Loop => match &response.outcome {
+                ProviderOutcome::Delegate(_) => facts.tokens_open,
+                ProviderOutcome::Tools(_) => facts.tool_admitted(),
+                ProviderOutcome::Plan(_)
+                | ProviderOutcome::Answer(_)
+                | ProviderOutcome::Review(_) => true,
+            },
+            PrimarySite::Wave { queue_stopped } => !queue_stopped,
+        }
+}
+
+fn decide_primary_call(
+    site: PrimarySite,
+    result: CallResult,
+    validity: Result<(), ProposalRefusalCause>,
+    facts: &RunFacts,
+) -> PrimaryDecision {
+    let admitted = primary_admitted(site, &result, validity, facts);
+    match site {
+        PrimarySite::Loop => {
+            if facts.cancel_requested || matches!(result, CallResult::Cancelled) {
+                return PrimaryDecision::Stop(StopCause::Cancelled);
+            }
+            if facts.active_time_exhausted {
+                return PrimaryDecision::Stop(StopCause::ActiveTime);
+            }
+            let CallResult::Response(ProviderResponse { outcome, turn, .. }) = result else {
+                return PrimaryDecision::Fail(RunFailure::ProviderCall);
+            };
+            match (validity, outcome) {
+                // An empty Tool list names no operation to refuse.
+                (Err(_), ProviderOutcome::Tools(requests)) if requests.is_empty() => {
+                    PrimaryDecision::Fail(RunFailure::ProviderCall)
+                }
+                (Err(cause), _) => PrimaryDecision::Refused(cause),
+                (Ok(()), _) if !admitted => PrimaryDecision::Stop(StopCause::Budget),
+                (Ok(()), ProviderOutcome::Plan(plan)) => PrimaryDecision::Plan(plan, turn),
+                (Ok(()), ProviderOutcome::Answer(answer)) => PrimaryDecision::Finish(answer, turn),
+                (Ok(()), ProviderOutcome::Delegate(delegation)) => {
+                    PrimaryDecision::Delegate(delegation, turn)
+                }
+                (Ok(()), ProviderOutcome::Tools(requests)) => {
+                    PrimaryDecision::ToolStep(requests, turn)
+                }
+                (Ok(()), ProviderOutcome::Review(_)) => {
+                    PrimaryDecision::Fail(RunFailure::ProviderCall)
+                }
+            }
+        }
+        PrimarySite::Wave { .. } => match result {
+            CallResult::Response(ProviderResponse {
+                outcome: ProviderOutcome::Tools(requests),
+                turn,
+                ..
+            }) if admitted => PrimaryDecision::ToolStep(requests, turn),
+            CallResult::Response(_) if facts.tokens_within_limit && !facts.cancel_requested => {
+                PrimaryDecision::Defer
+            }
+            CallResult::Response(_) | CallResult::Failed(_) | CallResult::Cancelled => {
+                PrimaryDecision::Stop(if facts.cancel_requested {
+                    StopCause::Cancelled
+                } else {
+                    StopCause::ToolStopped
+                })
+            }
+        },
     }
 }
 
 #[cfg(test)]
-mod definition_stop_tests {
+mod decision_tests {
     use super::*;
+    use crate::provider::ProviderTurn;
+
+    #[derive(Debug, PartialEq)]
+    enum Kind {
+        Plan,
+        Finish,
+        Delegate,
+        ToolStep,
+        Refused(ProposalRefusalCause),
+        Defer,
+        Stop(StopCause),
+        Fail(RunFailure),
+    }
+
+    // (site, call, validity, facts, decision, journaled as admitted)
+    type Row = (
+        PrimarySite,
+        CallResult,
+        Result<(), ProposalRefusalCause>,
+        RunFacts,
+        Kind,
+        bool,
+    );
+
+    fn kind(decision: &PrimaryDecision) -> Kind {
+        match decision {
+            PrimaryDecision::Plan(..) => Kind::Plan,
+            PrimaryDecision::Finish(..) => Kind::Finish,
+            PrimaryDecision::Delegate(..) => Kind::Delegate,
+            PrimaryDecision::ToolStep(..) => Kind::ToolStep,
+            PrimaryDecision::Refused(cause) => Kind::Refused(*cause),
+            PrimaryDecision::Defer => Kind::Defer,
+            PrimaryDecision::Stop(cause) => Kind::Stop(*cause),
+            PrimaryDecision::Fail(failure) => Kind::Fail(*failure),
+        }
+    }
+
+    fn response(outcome: ProviderOutcome) -> CallResult {
+        CallResult::Response(ProviderResponse {
+            outcome,
+            turn: ProviderTurn::new("test", "[{}]", "absent-secret", 4096).expect("minimal turn"),
+            response_id: None,
+            usage: Usage::default(),
+            wire_provenance: None,
+        })
+    }
+
+    fn answer() -> CallResult {
+        response(ProviderOutcome::Answer(Answer {
+            text: "done".into(),
+        }))
+    }
+
+    fn tools(count: usize) -> CallResult {
+        response(ProviderOutcome::Tools(
+            (0..count)
+                .map(|index| crate::ToolRequest {
+                    id: crate::provider::ToolUseId::new(format!("call-{index}")).expect("id"),
+                    call: crate::tools::ToolCall::List { path: ".".into() },
+                })
+                .collect(),
+        ))
+    }
+
+    fn plan() -> CallResult {
+        response(ProviderOutcome::Plan(Box::new(
+            crate::provider::PlanRequest {
+                id: crate::provider::ToolUseId::new("plan").expect("id"),
+                contract: crate::session::GoalPlanContract {
+                    mission: "m".into(),
+                    paths: vec![".".into()],
+                    commands: Vec::new(),
+                    resource_class: crate::tools::ToolResourceClass::Default,
+                    command_timeout_ms: None,
+                    skills: Vec::new(),
+                    mcp_tools: Vec::new(),
+                    success_criterion: crate::session::GoalSuccessCriterion::WorkspaceFileContent {
+                        path: "a".into(),
+                        content: "b".into(),
+                    },
+                    budget: crate::session::GoalBudget {
+                        max_provider_calls: None,
+                        max_tokens: None,
+                        max_active_ms: None,
+                        max_runs: 1,
+                    },
+                },
+            },
+        )))
+    }
 
     #[test]
-    fn parser_stops_settle_interruptions_and_fail_budget_or_refusal_distinctly() {
-        assert_eq!(definition_stop(true, true), DefinitionStop::Settle);
-        assert_eq!(definition_stop(true, false), DefinitionStop::Settle);
-        assert_eq!(definition_stop(false, true), DefinitionStop::Budget);
-        assert_eq!(definition_stop(false, false), DefinitionStop::Fail);
+    fn primary_calls_decide_by_site_outcome_and_facts() {
+        let open = RunFacts {
+            tokens_within_limit: true,
+            tokens_open: true,
+            calls_left: true,
+            ..RunFacts::default()
+        };
+        let with = |change: fn(&mut RunFacts)| {
+            let mut facts = open;
+            change(&mut facts);
+            facts
+        };
+        let cancel = with(|facts| facts.cancel_requested = true);
+        let lapsed = with(|facts| facts.active_time_exhausted = true);
+        let over_tokens = with(|facts| facts.tokens_within_limit = false);
+        let wave = PrimarySite::Wave {
+            queue_stopped: false,
+        };
+        let stopped_wave = PrimarySite::Wave {
+            queue_stopped: true,
+        };
+        let loop_ = PrimarySite::Loop;
+        let delegate = || {
+            response(ProviderOutcome::Delegate(crate::provider::Delegate {
+                agent: None,
+                children: Vec::new(),
+            }))
+        };
+        let review = || {
+            response(ProviderOutcome::Review(
+                crate::provider::ReviewVerdict::Approve,
+            ))
+        };
+        let timeout = || CallResult::Failed(CallFailure::Timeout);
+        let ok = Ok(());
+        let refused = Err(ProposalRefusalCause::AnswerInvalid);
+        let lease = Err(ProposalRefusalCause::LeaseOverlap);
+        let rows: Vec<Row> = vec![
+            (loop_, answer(), ok, open, Kind::Finish, true),
+            (
+                loop_,
+                answer(),
+                ok,
+                cancel,
+                Kind::Stop(StopCause::Cancelled),
+                true,
+            ),
+            (
+                loop_,
+                CallResult::Cancelled,
+                ok,
+                open,
+                Kind::Stop(StopCause::Cancelled),
+                false,
+            ),
+            (
+                loop_,
+                answer(),
+                ok,
+                lapsed,
+                Kind::Stop(StopCause::ActiveTime),
+                true,
+            ),
+            (
+                loop_,
+                answer(),
+                ok,
+                with(|facts| {
+                    facts.cancel_requested = true;
+                    facts.active_time_exhausted = true;
+                }),
+                Kind::Stop(StopCause::Cancelled),
+                true,
+            ),
+            (
+                loop_,
+                answer(),
+                refused,
+                open,
+                Kind::Refused(ProposalRefusalCause::AnswerInvalid),
+                false,
+            ),
+            (
+                loop_,
+                answer(),
+                refused,
+                lapsed,
+                Kind::Stop(StopCause::ActiveTime),
+                false,
+            ),
+            (
+                loop_,
+                answer(),
+                ok,
+                over_tokens,
+                Kind::Stop(StopCause::Budget),
+                false,
+            ),
+            (
+                loop_,
+                delegate(),
+                ok,
+                with(|facts| facts.tokens_open = false),
+                Kind::Stop(StopCause::Budget),
+                false,
+            ),
+            (
+                loop_,
+                delegate(),
+                ok,
+                with(|facts| facts.calls_left = false),
+                Kind::Delegate,
+                true,
+            ),
+            (
+                loop_,
+                tools(1),
+                ok,
+                with(|facts| facts.calls_left = false),
+                Kind::Stop(StopCause::Budget),
+                false,
+            ),
+            (loop_, tools(1), ok, open, Kind::ToolStep, true),
+            (
+                loop_,
+                tools(0),
+                Err(ProposalRefusalCause::InvalidArguments),
+                open,
+                Kind::Fail(RunFailure::ProviderCall),
+                false,
+            ),
+            (loop_, plan(), ok, open, Kind::Plan, true),
+            (
+                loop_,
+                review(),
+                ok,
+                open,
+                Kind::Fail(RunFailure::ProviderCall),
+                true,
+            ),
+            (
+                loop_,
+                review(),
+                ok,
+                over_tokens,
+                Kind::Stop(StopCause::Budget),
+                false,
+            ),
+            (
+                loop_,
+                timeout(),
+                ok,
+                open,
+                Kind::Fail(RunFailure::ProviderCall),
+                false,
+            ),
+            (
+                loop_,
+                timeout(),
+                ok,
+                lapsed,
+                Kind::Stop(StopCause::ActiveTime),
+                false,
+            ),
+            (wave, tools(1), ok, open, Kind::ToolStep, true),
+            (wave, tools(1), ok, lapsed, Kind::ToolStep, true),
+            (
+                wave,
+                tools(1),
+                ok,
+                with(|facts| facts.calls_left = false),
+                Kind::ToolStep,
+                true,
+            ),
+            (stopped_wave, tools(1), ok, open, Kind::Defer, false),
+            (wave, tools(1), lease, open, Kind::Defer, false),
+            (
+                wave,
+                answer(),
+                Err(ProposalRefusalCause::Phase),
+                open,
+                Kind::Defer,
+                false,
+            ),
+            (
+                wave,
+                answer(),
+                Err(ProposalRefusalCause::Phase),
+                cancel,
+                Kind::Stop(StopCause::Cancelled),
+                false,
+            ),
+            (
+                wave,
+                tools(1),
+                ok,
+                over_tokens,
+                Kind::Stop(StopCause::ToolStopped),
+                false,
+            ),
+            (
+                wave,
+                timeout(),
+                ok,
+                open,
+                Kind::Stop(StopCause::ToolStopped),
+                false,
+            ),
+            (
+                wave,
+                timeout(),
+                ok,
+                cancel,
+                Kind::Stop(StopCause::Cancelled),
+                false,
+            ),
+            (
+                wave,
+                CallResult::Cancelled,
+                ok,
+                open,
+                Kind::Stop(StopCause::ToolStopped),
+                false,
+            ),
+        ];
+        for (index, (site, result, validity, facts, expected, admitted)) in
+            rows.into_iter().enumerate()
+        {
+            assert_eq!(
+                primary_admitted(site, &result, validity, &facts),
+                admitted,
+                "row {index}: {site:?} {facts:?}"
+            );
+            assert_eq!(
+                kind(&decide_primary_call(site, result, validity, &facts)),
+                expected,
+                "row {index}: {site:?} {facts:?}"
+            );
+        }
     }
 }

@@ -1,6 +1,7 @@
-use super::stop::{StepEnd, StopCause};
+use super::stop::{PrimaryEnd, RunFacts, StepEnd, StopCause};
 use super::{
-    Action, ActiveSegment, CallFailure, CallResult, Grant, RunLoop, call_record, valid_answer,
+    Action, ActiveSegment, CallFailure, CallResult, Grant, PrimaryDecision, PrimarySite, RunLoop,
+    call_record, decide_primary_call, primary_admitted, valid_answer,
 };
 use crate::engine::routing::CallScope;
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
@@ -215,7 +216,10 @@ impl RunLoop<'_> {
             .spawn_children(count, objectives.iter().any(|a| a.editor.is_some()))
             .await?
         else {
-            return self.settle_stopped_primary().await.map(|()| false);
+            return self
+                .settle_primary(PrimaryEnd::Stopped(StopCause::Budget))
+                .await
+                .map(|()| false);
         };
         let deadline = active_segment
             .as_ref()
@@ -247,7 +251,10 @@ impl RunLoop<'_> {
                 )
                 .await?
         {
-            return self.settle_stopped_primary().await.map(|()| false);
+            return self
+                .settle_primary(PrimaryEnd::Stopped(StopCause::Cancelled))
+                .await
+                .map(|()| false);
         }
         if let Some(tools) = root_request.input.tools.as_mut() {
             tools.steps.push(ToolStep {
@@ -368,51 +375,25 @@ impl RunLoop<'_> {
                     .await?;
                 }
             }
-            if self.uncertain_hook()? {
-                return self.settle_stopped_primary().await.map(|()| false);
-            }
-            return match reason {
-                AbortReason::Failed(_) if self.ledger().active_time_exhausted() => {
-                    self.settle_stopped_primary().await
-                }
-                AbortReason::Failed(cause) => {
-                    let failure = match cause {
-                        StopCause::ActiveTime => super::RunFailure::BudgetExhausted,
-                        StopCause::Uncertain
-                        | StopCause::Cancelled
-                        | StopCause::HookStop
-                        | StopCause::Paused
-                        | StopCause::Budget
-                        | StopCause::Capacity
-                        | StopCause::ContextFull
-                        | StopCause::DelegationDeadline
-                        | StopCause::Refused(_)
-                        | StopCause::ToolStopped
-                        | StopCause::InvalidCommandResult => super::RunFailure::ToolStopped,
-                    };
-                    self.fail_primary(failure).await
-                }
-                AbortReason::PlanAdmission => {
-                    self.fail_primary(super::RunFailure::PlanAdmission).await
-                }
-                AbortReason::ToolContextFull => {
-                    self.fail_primary(super::RunFailure::ToolContextFull).await
-                }
-                AbortReason::Hook => self.finish_hook_stop().await,
-                AbortReason::Budget | AbortReason::Cancelled | AbortReason::Paused => {
-                    self.settle_stopped_primary().await
-                }
-            }
-            .map(|()| false);
+            let end = match reason {
+                AbortReason::Failed(cause) => PrimaryEnd::Stopped(cause),
+                AbortReason::PlanAdmission => PrimaryEnd::Failed(super::RunFailure::PlanAdmission),
+                AbortReason::ToolContextFull => PrimaryEnd::Stopped(StopCause::ContextFull),
+                AbortReason::Hook => PrimaryEnd::Stopped(StopCause::HookStop),
+                AbortReason::Budget => PrimaryEnd::Stopped(StopCause::Budget),
+                AbortReason::Cancelled => PrimaryEnd::Stopped(StopCause::Cancelled),
+                AbortReason::Paused => PrimaryEnd::Stopped(StopCause::Paused),
+            };
+            return self.settle_primary(end).await.map(|()| false);
         }
         if let Some((requests, turn)) = primary_step {
             let Some(request) = self.begin_tool_step(requests).await? else {
                 return self
-                    .fail_primary(super::RunFailure::PlanAdmission)
+                    .settle_primary(PrimaryEnd::Failed(super::RunFailure::PlanAdmission))
                     .await
                     .map(|()| false);
             };
-            let continues = Box::pin(self.execute_step(
+            let end = Box::pin(self.execute_step(
                 Grant::Primary {
                     request: root_request,
                     review_allowed: true,
@@ -420,36 +401,45 @@ impl RunLoop<'_> {
                 request,
                 turn,
             ))
-            .await;
-            match continues? {
+            .await?;
+            match end {
                 StepEnd::Continue => {}
                 StepEnd::Stopped(cause) => {
-                    let failure = match cause {
-                        StopCause::ContextFull => super::RunFailure::ToolContextFull,
-                        StopCause::ActiveTime => {
-                            if self.take_active_time_floor() {
-                                super::RunFailure::BudgetExhausted
-                            } else {
-                                return Err(EngineError::GoalBudgetExhausted);
-                            }
-                        }
-                        StopCause::Uncertain
-                        | StopCause::Cancelled
-                        | StopCause::HookStop
-                        | StopCause::Paused
-                        | StopCause::Budget
-                        | StopCause::Capacity
-                        | StopCause::DelegationDeadline
-                        | StopCause::Refused(_)
-                        | StopCause::ToolStopped
-                        | StopCause::InvalidCommandResult => super::RunFailure::ToolStopped,
-                    };
-                    return self.fail_primary(failure).await.map(|()| false);
+                    return self
+                        .settle_primary(PrimaryEnd::Stopped(cause))
+                        .await
+                        .map(|()| false);
                 }
             }
             self.verify_workers().await?;
         }
         self.begin_synthesis(root_request).await
+    }
+
+    // A wave admits only a well-formed Tool step, and only outside live worker leases unless it
+    // spawns a process, which waits for lease quiescence.
+    fn wave_validity(
+        &self,
+        result: &CallResult,
+    ) -> Result<Result<(), super::ProposalRefusalCause>, EngineError> {
+        let CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Tools(requests),
+            ..
+        }) = result
+        else {
+            return Ok(Err(super::ProposalRefusalCause::Phase));
+        };
+        if let Err(cause) = self.well_formed_tools(requests)? {
+            return Ok(Err(cause));
+        }
+        for request in requests {
+            if !request.call.is_process()
+                && let Err(cause) = self.primary_lease_allows(&request.call)?
+            {
+                return Ok(Err(cause));
+            }
+        }
+        Ok(Ok(()))
     }
 
     fn settled_agents(&self) -> Result<usize, EngineError> {
@@ -763,46 +753,40 @@ impl RunLoop<'_> {
             let result = result.result;
             self.settle_result(&result)?;
             if index.is_none() {
-                let valid = self.ledger().tokens_within_limit()
-                    && abort_reason.is_none()
-                    && !queue.budget_stopped
-                    && match &result {
-                        CallResult::Response(ProviderResponse {
-                            outcome: ProviderOutcome::Tools(requests),
-                            ..
-                        }) if self.well_formed_tools(requests)?.is_ok() => {
-                            let mut allowed = true;
-                            for request in requests {
-                                if !request.call.is_process()
-                                    && self.primary_lease_allows(&request.call)?.is_err()
-                                {
-                                    allowed = false;
-                                    break;
-                                }
-                            }
-                            allowed
-                        }
-                        _ => false,
-                    };
-                let mut record = call_record(AgentPhase::RootSynthesis, &result, valid, None, None);
-                if !valid
-                    && self.ledger().tokens_within_limit()
-                    && !self.controls.cancellation.is_cancelled()
-                    && let CallResult::Response(response) = &result
-                {
-                    record.failure_reason = Some(match &response.outcome {
-                        ProviderOutcome::Answer(_) => {
-                            crate::provider::ProviderFailureReason::WorkerAnswerDeferred
-                        }
-                        ProviderOutcome::Delegate(_) => {
-                            crate::provider::ProviderFailureReason::WorkerDelegateRefused
-                        }
+                let deferral = match &result {
+                    CallResult::Response(response) => Some(match response.outcome {
+                        ProviderOutcome::Answer(_) => (
+                            crate::provider::ProviderFailureReason::WorkerAnswerDeferred,
+                            "Answer deferred: workers are still active; answer again after they settle.",
+                        ),
+                        ProviderOutcome::Delegate(_) => (
+                            crate::provider::ProviderFailureReason::WorkerDelegateRefused,
+                            "Delegate refused: workers are still active.",
+                        ),
                         ProviderOutcome::Plan(_)
                         | ProviderOutcome::Tools(_)
-                        | ProviderOutcome::Review(_) => {
-                            crate::provider::ProviderFailureReason::WorkerToolRefused
-                        }
-                    });
+                        | ProviderOutcome::Review(_) => (
+                            crate::provider::ProviderFailureReason::WorkerToolRefused,
+                            "Tool request refused: it was malformed or edits inside a live worker lease.",
+                        ),
+                    }),
+                    CallResult::Failed(_) | CallResult::Cancelled => None,
+                };
+                let validity = self.wave_validity(&result)?;
+                let facts = RunFacts::observe(self)?;
+                let site = PrimarySite::Wave {
+                    queue_stopped: abort_reason.is_some() || queue.budget_stopped,
+                };
+                let mut record = call_record(
+                    AgentPhase::RootSynthesis,
+                    &result,
+                    primary_admitted(site, &result, validity, &facts),
+                    None,
+                    None,
+                );
+                let decision = decide_primary_call(site, result, validity, &facts);
+                if matches!(decision, PrimaryDecision::Defer) {
+                    record.failure_reason = deferral.map(|(reason, _)| reason);
                 }
                 self.append(Event::ProviderCallRecorded {
                     run_id: self.run_id,
@@ -810,12 +794,8 @@ impl RunLoop<'_> {
                     record,
                 })
                 .await?;
-                match result {
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Tools(requests),
-                        turn,
-                        ..
-                    }) if valid => {
+                match decision {
+                    PrimaryDecision::ToolStep(requests, turn) => {
                         let process = requests.iter().any(|r| r.call.is_process());
                         if process {
                             queue.primary_step = Some((requests, turn));
@@ -911,32 +891,33 @@ impl RunLoop<'_> {
                             queue.primary_pending = false;
                         }
                     }
-                    CallResult::Response(ProviderResponse { outcome, .. })
-                        if self.ledger().tokens_within_limit()
-                            && !self.controls.cancellation.is_cancelled() =>
-                    {
-                        queue.refusal = Some(match outcome {
-                            ProviderOutcome::Answer(_) => {
-                                "Answer deferred: workers are still active; answer again after they settle."
-                            }
-                            ProviderOutcome::Delegate(_) => {
-                                "Delegate refused: workers are still active."
-                            }
-                            ProviderOutcome::Plan(_)
-                            | ProviderOutcome::Tools(_)
-                            | ProviderOutcome::Review(_) => {
-                                "Tool request refused: it was malformed or edits inside a live worker lease."
-                            }
-                        });
+                    PrimaryDecision::Defer => {
+                        queue.refusal = deferral.map(|(_, text)| text);
                         queue.deferred_at = Some(self.settled_agents()?);
                         queue.primary_pending = false;
                     }
-                    _ => {
-                        abort_reason = Some(if self.controls.cancellation.is_cancelled() {
-                            AbortReason::Cancelled
-                        } else {
-                            AbortReason::Failed(StopCause::ToolStopped)
-                        })
+                    PrimaryDecision::Stop(StopCause::Cancelled) => {
+                        abort_reason = Some(AbortReason::Cancelled);
+                    }
+                    PrimaryDecision::Stop(
+                        cause @ (StopCause::Uncertain
+                        | StopCause::HookStop
+                        | StopCause::Paused
+                        | StopCause::ActiveTime
+                        | StopCause::Budget
+                        | StopCause::Capacity
+                        | StopCause::ContextFull
+                        | StopCause::DelegationDeadline
+                        | StopCause::Refused(_)
+                        | StopCause::ToolStopped
+                        | StopCause::InvalidCommandResult),
+                    ) => abort_reason = Some(AbortReason::Failed(cause)),
+                    PrimaryDecision::Plan(..)
+                    | PrimaryDecision::Finish(..)
+                    | PrimaryDecision::Delegate(..)
+                    | PrimaryDecision::Refused(_)
+                    | PrimaryDecision::Fail(_) => {
+                        return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
                     }
                 }
                 if abort_reason.is_some() {
@@ -1533,7 +1514,10 @@ impl RunLoop<'_> {
         root_request: &mut ProviderRequest,
     ) -> Result<bool, EngineError> {
         if !self.ledger().can_start_provider_call() {
-            return self.settle_stopped_primary().await.map(|()| false);
+            return self
+                .settle_primary(PrimaryEnd::Stopped(StopCause::Budget))
+                .await
+                .map(|()| false);
         }
         root_request.phase = AgentPhase::RootSynthesis;
         self.refresh_team_context(root_request)?;
