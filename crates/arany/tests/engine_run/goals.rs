@@ -5897,6 +5897,87 @@ async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
 }
 
 #[tokio::test]
+async fn a_pause_in_an_in_run_compaction_backoff_starts_no_further_compaction_call() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = paged_read_workspace(temp.path());
+    let state_path = temp.path().join("state");
+    let mut failing = ScriptedProvider::new(vec![]).with_profile("scripted", "compact-primary");
+    failing.compact_responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+    let failing = Arc::new(failing);
+    let primary =
+        Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("scripted", "primary"));
+    let mut bindings = AdmittedProviders::single(primary.clone());
+    bindings.roles.compaction = vec![failing.clone()];
+    let engine = facts_engine(
+        StateRoot::admit(&state_path).expect("private state"),
+        &state_path,
+    );
+    let session = engine
+        .create_session(workspace.clone(), Some("Pause".into()))
+        .await
+        .expect("session");
+    let (entered, release) = arany::FaultPlan::gate_retry_backoff(session);
+    let mut input = request(&workspace, "Inspect the bounded file in pages");
+    input.include_paths.clear();
+    input.session_id = Some(session);
+    input.title = None;
+    input.goal.budget = Some(arany::GoalBudget {
+        max_provider_calls: None,
+        max_tokens: None,
+        max_active_ms: Some(30 * 60 * 1000),
+        max_runs: 1,
+    });
+    let steering = RunSteering::new();
+    let run = super::engine_support::run_routed(
+        &engine,
+        bindings,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    );
+    let outcome = {
+        tokio::pin!(run);
+        tokio::select! {
+            result = &mut run => panic!("Run ended before the held compaction backoff: {}", result.is_ok()),
+            entered = entered => entered.expect("backoff entered"),
+        }
+        assert!(steering.pause());
+        run.await.expect("paused Run")
+    };
+    // The gate stays held: only the pause can end the wait.
+    drop(release);
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+    let (events, view) = replayed(&state_path, session).await;
+    let run = &view.runs[0];
+    assert!(run.provider_fallbacks.is_empty());
+    assert_eq!(
+        run.provider_retries
+            .iter()
+            .map(|(_, retry)| retry.role)
+            .collect::<Vec<_>>(),
+        [arany::ProviderRole::Compaction]
+    );
+    assert_eq!(failing.compact_requests.lock().expect("requests").len(), 1);
+    let record = events
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::GoalContextCompacted { record, .. } => Some(record),
+            _ => None,
+        })
+        .expect("compaction record");
+    assert!(matches!(
+        record.status,
+        arany::CompactionStatus::Failed {
+            reason: arany::CompactionFailure::Cancelled
+        }
+    ));
+}
+
+#[tokio::test]
 async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable_parent() {
     use arany::worker::{EditorAssignment, WorkerMode};
     for case in ["foreground", "background", "mixed", "wave"] {

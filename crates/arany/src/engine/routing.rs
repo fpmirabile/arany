@@ -380,8 +380,8 @@ impl CallRouter<'_> {
                     }
                 }
             };
-            // A failure under cancellation ends the compaction as cancelled, with no further attempt.
-            if response.is_err() && cancellation.is_cancelled() {
+            // A failure under cancellation or pause ends the compaction unsent, with no further attempt.
+            if response.is_err() && (cancellation.is_cancelled() || self.pause_requested()) {
                 return Ok(None);
             }
             let scope = CallScope {
@@ -398,7 +398,7 @@ impl CallRouter<'_> {
                 actor,
                 ProviderRole::Compaction,
                 deadline,
-                cancellation.is_cancelled(),
+                cancellation.is_cancelled() || self.pause_requested(),
                 false,
             )?;
             let continued = match decide_attempt(transient, facts) {
@@ -410,7 +410,14 @@ impl CallRouter<'_> {
                     {
                         false
                     } else {
-                        match back_off(scope.session_id, delay, &mut cancellation, None).await {
+                        match back_off(
+                            scope.session_id,
+                            delay,
+                            &mut cancellation,
+                            self.steering.as_ref(),
+                        )
+                        .await
+                        {
                             Backoff::Elapsed => true,
                             Backoff::Paused | Backoff::Cancelled => return Ok(None),
                         }

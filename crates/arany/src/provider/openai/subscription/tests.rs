@@ -1072,6 +1072,7 @@ async fn direct_route_http_failures_are_classified_without_exposing_body() {
         // The bounded 429 body names no quota, so it is a retryable rate limit.
         assert!(match &actual {
             ProviderError::RateLimited(None) => status == 429,
+            ProviderError::RemoteServerError(actual_status, None) => *actual_status == status,
             ProviderError::RemoteHttp(actual_status) => *actual_status == status && status != 429,
             _ => false,
         });

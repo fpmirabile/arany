@@ -1751,3 +1751,51 @@ async fn a_pause_in_the_retry_backoff_starts_no_further_reservation_or_dispatch(
         }
     }
 }
+
+#[tokio::test]
+async fn a_single_route_boundary_compaction_retries_a_transient_failure_then_saves() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let primary =
+        route(ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary"));
+    let compaction = route(
+        ScriptedProvider::new(vec![])
+            .with_profile("scripted", "compact")
+            .with_compactions(vec![
+                Err(ProviderError::RemoteHttp(503)),
+                summary_response(),
+            ]),
+    );
+    let mut bindings = routes(&primary);
+    bindings.roles.compaction = vec![compaction.clone()];
+    let engine = open(&state);
+    let result = run_routed(
+        &engine,
+        bindings.clone(),
+        input(&workspace),
+        RunControls::default(),
+    )
+    .await
+    .unwrap();
+    // The journaled retry delay stays; only the wait ends at once.
+    arany::FaultPlan::skip_retry_backoff(result.session_id);
+    let record = engine
+        .compact_session(&bindings, result.session_id, workspace)
+        .await
+        .unwrap();
+    assert!(matches!(record.status, CompactionStatus::Succeeded { .. }));
+    engine.close().await.unwrap();
+    let (_, view) = reopen(&state, result.session_id).await;
+    let run = &view.runs[0];
+    assert!(run.provider_fallbacks.is_empty());
+    assert_eq!(
+        run.provider_retries
+            .iter()
+            .map(|(_, retry)| (retry.role, retry.attempt, retry.cause))
+            .collect::<Vec<_>>(),
+        [(ProviderRole::Compaction, 1, arany::RetryCause::ServerError)]
+    );
+    assert_eq!(compaction.compact_requests.lock().unwrap().len(), 2);
+}

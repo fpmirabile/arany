@@ -150,16 +150,7 @@ impl CustomTransport {
         streaming_admission(response.status(), destination_matches)?;
         crate::provider::openai::read_streamed_reply(&mut response, &self.key, model, preview)
             .await
-            .map_err(|error| match error {
-                ProviderError::StreamEnded => TransportError::StreamEnded,
-                error
-                    if error.failure_class()
-                        == crate::provider::ProviderFailureClass::Unavailable =>
-                {
-                    TransportError::PartialTransport
-                }
-                _ => TransportError::InvalidOutcome,
-            })
+            .map_err(stream_failure)
     }
 
     async fn send(&self, request: Value) -> Result<Vec<u8>, TransportError> {
@@ -191,6 +182,18 @@ impl CustomTransport {
             return Err(TransportError::InvalidOutcome);
         }
         Ok(bytes)
+    }
+}
+
+// Only a cut or an early end retries; a temporary-usage event keeps its unavailable class.
+pub(super) fn stream_failure(error: ProviderError) -> TransportError {
+    match error {
+        ProviderError::PartialTransport => TransportError::PartialTransport,
+        ProviderError::StreamEnded => TransportError::StreamEnded,
+        error if error.failure_class() == crate::provider::ProviderFailureClass::Unavailable => {
+            TransportError::Unavailable
+        }
+        _ => TransportError::InvalidOutcome,
     }
 }
 

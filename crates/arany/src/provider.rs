@@ -121,6 +121,11 @@ pub(crate) async fn http_failure(response: &mut reqwest::Response) -> ProviderEr
     }
 }
 
+// Only delta-seconds of a status rejection; the subscription route keeps its numeric status.
+pub(crate) fn server_retry_after(response: &reqwest::Response) -> Option<Duration> {
+    retry_after(response.headers())
+}
+
 // The bounded 429 body only tells a quota from a rate limit; it is never kept or shown.
 pub(crate) async fn rate_limit_failure(response: &mut reqwest::Response) -> ProviderError {
     let after = retry_after(response.headers());
@@ -134,17 +139,27 @@ pub(crate) async fn rate_limit_failure(response: &mut reqwest::Response) -> Prov
     }
 }
 
-// OpenAI and ChatGPT error codes that a wait cannot clear; Anthropic 429s are rate limits only.
+// Error codes a wait cannot clear: exhausted credit, quota, plan or spending and usage limits,
+// as Codex classifies them. Anthropic 429s are rate limits only.
+const QUOTA_CODES: [&str; 7] = [
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "organization_spend_limit_exceeded",
+    "project_spend_limit_exceeded",
+    "organization_usage_limit_exceeded",
+    "usage_limit_reached",
+    "usage_not_included",
+];
+
 fn quota_exhausted(body: &[u8]) -> bool {
     let Ok(document) = serde_json::from_slice::<Value>(body) else {
         return false;
     };
     let error = &document["error"];
     [&error["code"], &error["type"]].into_iter().any(|field| {
-        matches!(
-            field.as_str(),
-            Some("insufficient_quota" | "usage_limit_reached" | "usage_not_included")
-        )
+        field
+            .as_str()
+            .is_some_and(|code| QUOTA_CODES.contains(&code))
     })
 }
 
@@ -924,6 +939,9 @@ pub enum ProviderError {
     // HTTP 5xx at status admission, with the server's bounded delta-seconds Retry-After.
     #[error("Provider server unavailable before response admission")]
     HttpServerUnavailable(Option<Duration>),
+    // A subscription route's 5xx keeps its status, its reason and the server's Retry-After.
+    #[error("Provider returned HTTP {0}")]
+    RemoteServerError(u16, Option<Duration>),
     // The request could not be sent or answered before any response; nothing was decoded.
     #[error("Provider connection failed before a response")]
     Transport,
@@ -1000,7 +1018,9 @@ impl ProviderError {
             Self::Transport => Some((RetryCause::Transport, None)),
             Self::RateLimited(after) => Some((RetryCause::RateLimited, *after)),
             Self::RemoteHttp(429) => Some((RetryCause::RateLimited, None)),
-            Self::HttpServerUnavailable(after) => Some((RetryCause::ServerError, *after)),
+            Self::HttpServerUnavailable(after) | Self::RemoteServerError(_, after) => {
+                Some((RetryCause::ServerError, *after))
+            }
             Self::RemoteHttp(500..=599) => Some((RetryCause::ServerError, None)),
             Self::PartialTransport | Self::StreamEnded => Some((RetryCause::StreamCut, None)),
             _ => None,
@@ -1018,7 +1038,9 @@ impl ProviderError {
             Self::RateLimited(_) | Self::RemoteHttp(429) => {
                 Some(ProviderFailureReason::RateLimited)
             }
-            Self::RemoteHttp(500..=599) => Some(ProviderFailureReason::ServiceUnavailable),
+            Self::RemoteHttp(500..=599) | Self::RemoteServerError(..) => {
+                Some(ProviderFailureReason::ServiceUnavailable)
+            }
             Self::RemoteStreamCode(code)
                 if matches!(
                     code.as_str(),
@@ -1036,6 +1058,7 @@ impl ProviderError {
         match self {
             Self::Unavailable
             | Self::HttpServerUnavailable(_)
+            | Self::RemoteServerError(..)
             | Self::Transport
             | Self::PartialTransport
             | Self::CallTimedOut
@@ -1300,6 +1323,23 @@ stop_bytes: 0,
             ),
             (br#"{"error":{"type":"usage_limit_reached"}}"#, true),
             (br#"{"error":{"code":"usage_not_included"}}"#, true),
+            (br#"{"error":{"code":"credit_balance_exhausted"}}"#, true),
+            (
+                br#"{"error":{"code":"organization_spend_limit_exceeded"}}"#,
+                true,
+            ),
+            (
+                br#"{"error":{"code":"project_spend_limit_exceeded"}}"#,
+                true,
+            ),
+            (
+                br#"{"error":{"code":"organization_usage_limit_exceeded"}}"#,
+                true,
+            ),
+            (
+                br#"{"error":{"type":"rate_limit_error","code":"slow_down"}}"#,
+                false,
+            ),
             (br#"{"error":{"code":"rate_limit_exceeded"}}"#, false),
             (
                 br#"{"type":"error","error":{"type":"rate_limit_error"}}"#,

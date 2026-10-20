@@ -421,6 +421,11 @@ async fn completed_at_with_preview(
     if status != reqwest::StatusCode::OK {
         let error = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             crate::provider::rate_limit_failure(&mut response).await
+        } else if status.is_server_error() {
+            ProviderError::RemoteServerError(
+                status.as_u16(),
+                crate::provider::server_retry_after(&response),
+            )
         } else {
             ProviderError::RemoteHttp(status.as_u16())
         };
