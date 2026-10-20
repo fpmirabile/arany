@@ -180,7 +180,14 @@ fn attempt_role_fits(
 ) -> bool {
     use crate::provider::ProviderRole;
     match role {
-        ProviderRole::Child => agent.role == AgentRole::Child,
+        // A child's own pending Tool makes its open call a review, never a child turn.
+        ProviderRole::Child => {
+            agent.role == AgentRole::Child
+                && agent
+                    .tools
+                    .last()
+                    .is_none_or(|tool| tool.observation.is_some())
+        }
         ProviderRole::Review => {
             let own_tool = match agent.role {
                 AgentRole::Child => agent.tools.last(),
@@ -260,15 +267,19 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             } else {
                 agent.provider_calls.len()
             };
+            // One bound per semantic call: compaction numbers its calls apart, every other role shares the actor's.
             let earlier: Vec<_> = run
                 .provider_retries
                 .iter()
                 .filter(|(actor, prior)| {
                     actor == agent_run_id
-                        && prior.role == retry.role
+                        && (prior.role == ProviderRole::Compaction) == compaction
                         && prior.call_index == retry.call_index
                 })
                 .collect();
+            if earlier.iter().any(|(_, prior)| prior.role != retry.role) {
+                return Err(ReplayError::InvalidTransition);
+            }
             // Every wait of the call fits the active time its reservation admitted.
             let waited = earlier
                 .iter()
@@ -283,6 +294,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 || active && agent.status != AgentStatus::Active
                 || usize::try_from(retry.call_index).ok() != Some(index)
                 || usize::from(retry.attempt) != earlier.len() + 1
+                || retry.attempt > crate::provider::MAX_PROVIDER_RETRIES
                 || waited > allowance
                 || retry.role == ProviderRole::Primary
                     && run
@@ -553,6 +565,12 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 })
                 .is_some_and(|(_, fallback)| {
                     fallback.role != crate::provider::ProviderRole::for_phase(record.phase)
+                })
+                || run.provider_retries.iter().any(|(actor, retry)| {
+                    *actor == *agent_run_id
+                        && retry.role != crate::provider::ProviderRole::Compaction
+                        && retry.call_index == call_index
+                        && retry.role != crate::provider::ProviderRole::for_phase(record.phase)
                 })
             {
                 return Err(ReplayError::InvalidTransition);

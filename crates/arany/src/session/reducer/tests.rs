@@ -1217,6 +1217,93 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn a_pending_child_review_admits_only_review_retries_within_one_bound() {
+        use crate::provider::{ProviderRetry, ProviderRole, RetryCause};
+        let (mut view, goal, run, child) = research_session();
+        view.goals[0]
+            .plan_contract
+            .as_mut()
+            .unwrap()
+            .budget
+            .max_tokens = None;
+        let read = child_intent(
+            run,
+            child,
+            ToolCall::Read {
+                path: "src/lib.rs".into(),
+                offset: None,
+                limit: Some(1024),
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, child)).expect("child call");
+        apply(
+            &mut view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested),
+        )
+        .expect("child Tool request");
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: child,
+                intent: read,
+                active_ceiling_ms: 0,
+            },
+        )
+        .expect("child Tool starts");
+        apply(
+            &mut view,
+            Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: child,
+                active_ceiling_ms: 60_000,
+            },
+        )
+        .expect("review reservation");
+        let retry = |role, attempt: u8| Event::ProviderRetryScheduled {
+            run_id: run,
+            agent_run_id: child,
+            retry: ProviderRetry {
+                role,
+                call_index: 1,
+                attempt,
+                cause: RetryCause::ServerError,
+                delay_ms: 1000 << attempt,
+            },
+        };
+        // The hostile prefix of three child-turn and three review retries on one reservation fails
+        // at its first child-turn retry, and no role mix extends the one bound of the call.
+        assert!(rejected(&view, retry(ProviderRole::Child, 1)));
+        for attempt in 1..=3 {
+            apply(&mut view, retry(ProviderRole::Review, attempt)).expect("review retry");
+        }
+        for (role, attempt) in [
+            (ProviderRole::Child, 1),
+            (ProviderRole::Child, 4),
+            (ProviderRole::Review, 4),
+        ] {
+            assert!(rejected(&view, retry(role, attempt)), "{role:?} {attempt}");
+        }
+        assert_eq!(view.runs[0].provider_retries.len(), 3);
+        let mut mixed = view.clone();
+        mixed.runs[0].provider_retries.clear();
+        for attempt in 1..=3 {
+            apply(&mut mixed, retry(ProviderRole::Review, attempt)).expect("review retry");
+        }
+        mixed.runs[0].provider_retries[0].1.role = ProviderRole::Child;
+        assert!(
+            rejected(&mixed, retry(ProviderRole::Review, 4)),
+            "a forged mix still shares the call's bound"
+        );
+        // The eventual call record must be the review the retries named.
+        assert!(rejected(
+            &view,
+            child_record(run, child, ProviderCallDisposition::ToolRequested)
+        ));
+    }
+
+    #[test]
     fn a_forks_boundary_compaction_is_refused_while_its_own_run_is_open() {
         use crate::session::events::{CompactionFailure, CompactionStatus};
         let (fork, source, source_run, run, agent) = (

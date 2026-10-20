@@ -658,7 +658,11 @@ fn earlier_retries(
 ) -> usize {
     run.provider_retries
         .iter()
-        .filter(|(id, retry)| *id == actor && retry.role == role && retry.call_index == call_index)
+        .filter(|(id, retry)| {
+            *id == actor
+                && (retry.role == ProviderRole::Compaction) == (role == ProviderRole::Compaction)
+                && retry.call_index == call_index
+        })
         .count()
 }
 
